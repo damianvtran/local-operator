@@ -56,7 +56,7 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
 #: of these is DAMAGED and refuses: re-running DDL is NOT repair — it
@@ -93,6 +93,18 @@ _V4_ADDED = frozenset({"screening_schedule"})
 
 #: A V2 (H2-era) store migrates ADDITIVELY: only the screening tables are
 #: created and the stamp advances; every existing row survives.
+_FLOORS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS text_floors (
+    owner_key TEXT NOT NULL,
+    hub TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    version TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, hub, kind)
+);
+"""
+
 _V2_ADDED = frozenset(
     {
         "screening_attempts",
@@ -370,8 +382,110 @@ def _turn_frame(turn: str) -> str:
 #: the row holds "proof:<canonical json>" (or the legacy packed fingerprint);
 #: after the ONE legal bind it holds "job:<canonical digest>"; a second bind
 #: must replay exactly.
+_PROOF_FIELDS = (
+    "owner",
+    "body",
+    "template",
+    "version",
+    "provider",
+    "model",
+    "approved",
+    "envelope",
+    "request",
+    "display",
+    "revision",
+    "epoch",
+    "message",
+    "tenant",
+    "logical",
+)
 _JOB_BOUND_PREFIX = "job:"
 _PROOF_PREFIX = "proof:"
+
+
+def _canonical_job_digest(job: Any) -> str:
+    """Independently derive the canonical full-job digest from its FIELDS.
+
+    R10/B: the caller's ``.digest`` attribute, the supplied fingerprint and
+    any wrapper are NOT the derivation — QA bound a job that delegated every
+    field but returned 64 zeros, and a digest-only check accepted it. The
+    encoding is the same stable order AdmissionJob documents; deriving it
+    here (metadata-only, no model imports) is what makes a forged digest
+    impossible to bind, dispatch or receipt.
+    """
+
+    payload = json.dumps(
+        [
+            getattr(job, "owner_generation", None),
+            getattr(job, "credential_id", None),
+            getattr(job, "account_id", None),
+            getattr(job, "tenant_id", None),
+            getattr(job, "endpoint_id", None),
+            getattr(job, "hub_url", None),
+            getattr(job, "message_id", None),
+            getattr(job, "attempt_id", None),
+            getattr(job, "body_sha256", None),
+            getattr(job, "template_sha256", None),
+            getattr(job, "template_version", None),
+            getattr(job, "provider", None),
+            getattr(job, "model", None),
+            list(getattr(job, "approved", ()) or ()),
+            getattr(job, "envelope_digest", None),
+            getattr(job, "request_digest", None),
+            getattr(job, "display_digest", None),
+            getattr(job, "revision", None),
+            getattr(job, "epoch", None),
+            getattr(job, "turn", None),
+        ],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
+    """Strictly decode ``job:<64hex>|proof:<json>``; anything else refuses.
+
+    R10/B: ONE closed decoder for the retained registration, reused at every
+    native boundary. Null/truncated/extra/typed-wrong proofs and the legacy
+    ``job:<digest>`` form (no retained registration) are typed refusals, not
+    keywords to be substring-matched.
+    """
+
+    if not isinstance(raw, str) or not raw.startswith(_JOB_BOUND_PREFIX):
+        raise StoreRefused("proof_corrupt", "attempt row is not in bound form")
+    body = raw[len(_JOB_BOUND_PREFIX) :]
+    if "|" not in body:
+        raise StoreRefused("unproved_attempt", "registration missing; reconcile only")
+    digest, _, proof_raw = body.partition("|")
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise StoreRefused("proof_corrupt", "bound digest is not a sha256 hex digest")
+    if not proof_raw.startswith(_PROOF_PREFIX):
+        raise StoreRefused("proof_corrupt", "registration marker missing")
+    try:
+        registered = json.loads(proof_raw[len(_PROOF_PREFIX) :])
+    except (TypeError, ValueError) as error:
+        raise StoreRefused("proof_corrupt", "registered input proof is unreadable") from error
+    if not isinstance(registered, dict):
+        raise StoreRefused("proof_corrupt", "registered input proof is not a mapping")
+    if set(registered) != set(_PROOF_FIELDS):
+        raise StoreRefused("proof_corrupt", "registered input proof has an unexpected field set")
+    for field in _PROOF_FIELDS:
+        value = registered[field]
+        if field == "approved":
+            if (
+                not isinstance(value, list)
+                or not value
+                or any(not isinstance(entry, str) or not entry for entry in value)
+            ):
+                raise StoreRefused("proof_corrupt", "approved map has an unsupported shape")
+            continue
+        if field == "epoch":
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise StoreRefused("proof_corrupt", "epoch has an unsupported shape")
+            continue
+        if not isinstance(value, str) or not value:
+            raise StoreRefused("proof_corrupt", f"{field} has an unsupported shape")
+    return digest, registered
 
 
 def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | None:
@@ -576,6 +690,7 @@ class Store:
                 )
             try:
                 conn.executescript(_SCHEMA)
+                conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
@@ -595,6 +710,7 @@ class Store:
                 raise StoreRefused("schema_damaged", f"v2 store missing {sorted(missing)}")
             try:
                 conn.executescript(_SCREENING_SCHEMA)
+                conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
@@ -619,6 +735,32 @@ class Store:
                     "owner_key TEXT PRIMARY KEY, last_sender TEXT, "
                     "lease_holder TEXT, lease_expires REAL)"
                 )
+                conn.executescript(_FLOORS_SCHEMA)
+            except sqlite3.Error as error:
+                raise StoreRefused("state_unreadable", str(error)) from error
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+            return
+
+        if version == "4":
+            # Known V4 (R10-era) layout: ADDITIVE upgrade only — the
+            # contentless accepted-text FLOORS table is created (IF NOT
+            # EXISTS, so a carrying store is untouched) and the stamp
+            # advances. Quotas, receipts, policies, attempts and the H2
+            # enrollment/claim/ACK history survive byte-for-byte.
+            missing = (_V3_TABLES | _V4_ADDED) - pre_existing
+            if missing:
+                raise StoreRefused("schema_damaged", f"stamped-v4 store missing {sorted(missing)}")
+            schedule_columns = {r[1] for r in conn.execute("PRAGMA table_info(screening_schedule)")}
+            if (
+                not {"owner_key", "last_sender", "lease_holder", "lease_expires"}
+                <= schedule_columns
+            ):
+                raise StoreRefused("schema_damaged", "screening_schedule lacks required columns")
+            try:
+                conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.execute(
@@ -628,7 +770,7 @@ class Store:
             return
 
         if version == str(SCHEMA_VERSION):
-            # Stamped V4: VERIFY, never re-create. Missing tables or missing
+            # Stamped V5: VERIFY, never re-create. Missing tables or missing
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
             if missing:
@@ -646,12 +788,60 @@ class Store:
                 <= schedule_columns
             ):
                 raise StoreRefused("schema_damaged", "screening_schedule lacks required columns")
+            floor_columns = {r[1] for r in conn.execute("PRAGMA table_info(text_floors)")}
+            if not {"owner_key", "hub", "kind", "version", "sha256", "updated_at"} <= floor_columns:
+                raise StoreRefused("schema_damaged", "text_floors lacks required columns")
             return
 
         raise StoreRefused(
             "schema_unsupported",
             f"state.sqlite3 schema {version!r} != {SCHEMA_VERSION}",
         )
+
+    def text_floor(self, owner: OwnerSnapshot, kind: str) -> tuple[str, str] | None:
+        """The contentless accepted floor for one served-text kind.
+
+        R10/C: the served guidance/consent texts are accepted through
+        monotonic version + immutable bytes, and that floor must SURVIVE
+        reads and restarts — a fresh in-memory accept set would forget it.
+        Only version + digest are stored; never the text. Missing floors
+        are None (the caller holds where no prior floor exists).
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT version, sha256 FROM text_floors "
+                "WHERE owner_key = ? AND hub = ? AND kind = ?",
+                (_owner_key(owner), owner.canonical_base_url, kind),
+            ).fetchone()
+            if row is None:
+                return None
+            return str(row["version"]), str(row["sha256"])
+
+    def set_text_floor(self, owner: OwnerSnapshot, kind: str, version: str, sha256: str) -> None:
+        """Advance the contentless floor (same-version identical bytes is a
+        no-op by construction). The database never sees served text."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            conn.execute(
+                "INSERT INTO text_floors (owner_key, hub, kind, version, sha256, updated_at) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(owner_key, hub, kind) DO UPDATE SET "
+                "version = excluded.version, sha256 = excluded.sha256, "
+                "updated_at = excluded.updated_at",
+                (
+                    _owner_key(owner),
+                    owner.canonical_base_url,
+                    kind,
+                    version,
+                    sha256,
+                    time.time(),
+                ),
+            )
 
     def owner_consent_receipt(self, owner: OwnerSnapshot) -> dict[str, str] | None:
         """The COMMITTED human consent receipt for the exact live owner.
@@ -1600,6 +1790,14 @@ class Store:
                     raise StoreRefused(
                         "proof_corrupt", "registered input proof is unreadable"
                     ) from error
+                derived = _canonical_job_digest(job)
+                if derived != fingerprint or derived != getattr(job, "digest", None):
+                    # The bind's digest argument must be the CANONICAL
+                    # derivation from the job's own fields (R10/B): a forged
+                    # nonempty/zero digest refuses here, before any I/O.
+                    raise StoreRefused(
+                        "attempt_mismatch", "fingerprint is not the canonical job digest"
+                    )
                 mismatched = _input_proof_mismatch(registered, fingerprint, job)
                 if mismatched is not None:
                     raise StoreRefused("attempt_mismatch", mismatched)
@@ -1619,12 +1817,18 @@ class Store:
             if isinstance(raw, str) and raw.startswith(_JOB_BOUND_PREFIX):
                 # BOUND ALREADY: one bind was legitimate; only the IDENTICAL
                 # digest may replay, and a changed pending bind refuses while
-                # the original binding stays on record.
-                if _bound_digest(raw) == fingerprint:
-                    return
-                raise StoreRefused(
-                    "write_once_conflict", "logical attempt already bound to another job"
-                )
+                # the original binding stays on record. The retained record
+                # itself must still decode (R10/B).
+                bound_digest, retained = _decode_bound_proof(raw)
+                if bound_digest != fingerprint:
+                    raise StoreRefused(
+                        "write_once_conflict", "logical attempt already bound to another job"
+                    )
+                if job is not None:
+                    mismatched = _input_proof_mismatch(retained, bound_digest, job)
+                    if mismatched is not None:
+                        raise StoreRefused("attempt_mismatch", mismatched)
+                return
             # FIRST bind only: the row still holds the packed logical
             # reservation fingerprint (or NULL for a legacy row); the bind
             # marker makes the state explicit so a second bind can tell
@@ -1683,11 +1887,19 @@ class Store:
             raw_logical = logical["fingerprint"] if logical is not None else None
             if logical is None or _bound_digest(raw_logical) != job.digest:
                 raise StoreRefused("unknown_attempt", "logical job binding missing")
-            if not (isinstance(raw_logical, str) and "|proof:" in raw_logical):
-                # Legacy/unproved rows may reconcile historical transport
-                # state, but they cannot certify a NEW dispatch (R9/Q3-5):
-                # no retained registration, no physical authority.
-                raise StoreRefused("unproved_attempt", "registration missing; reconcile only")
+            # Decode and COMPARE the retained registration (R10/B): a null,
+            # corrupt, altered or extra-field proof refuses BEFORE any
+            # physical charge, and the digest must be the canonical
+            # derivation from the job's fields — not a keyword.
+            bound_digest, registered = _decode_bound_proof(raw_logical)
+            derived = _canonical_job_digest(job)
+            if bound_digest != job.digest or derived != getattr(job, "digest", None):
+                raise StoreRefused(
+                    "attempt_mismatch", "bound digest is not the canonical job digest"
+                )
+            mismatched = _input_proof_mismatch(registered, job.digest, job)
+            if mismatched is not None:
+                raise StoreRefused("attempt_mismatch", mismatched)
             if logical["message_id"] != message_id:
                 raise StoreRefused("attempt_mismatch", "job message mismatch")
             schedule = conn.execute(
@@ -1910,6 +2122,31 @@ class Store:
                 # cannot commit another message or a differently-fingerprinted
                 # outcome.
                 raise StoreRefused("attempt_mismatch", attempt_id)
+            if isinstance(attempt["fingerprint"], str) and attempt["fingerprint"].startswith(
+                _JOB_BOUND_PREFIX
+            ):
+                # The retained registration must still DECODE and AGREE with
+                # the outcome being committed (R10/B): corruption injected
+                # after the POST refuses the receipt — the charged logical
+                # and physical counts stay exactly as spent, no refund, no
+                # reconstruction.
+                bound_digest, registered = _decode_bound_proof(attempt["fingerprint"])
+                if bound_digest != fingerprint:
+                    raise StoreRefused("attempt_mismatch", "bound digest changed before finish")
+                if registered.get("message") != message_id:
+                    raise StoreRefused("proof_corrupt", "retained proof names another message")
+                if receipt is not None and registered.get("body") != receipt.body_sha256:
+                    raise StoreRefused(
+                        "proof_corrupt", "retained proof body does not match the receipt"
+                    )
+                if (
+                    receipt is not None
+                    and envelope_digest is not None
+                    and registered.get("envelope") != envelope_digest
+                ):
+                    raise StoreRefused(
+                        "proof_corrupt", "retained proof envelope does not match the receipt"
+                    )
             policy_row = conn.execute(
                 "SELECT epoch FROM screening_policy WHERE owner_key = ?", (key,)
             ).fetchone()
