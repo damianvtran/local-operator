@@ -643,6 +643,15 @@ class TranscriptPage:
     reconciled: bool = False
     #: Anchored pages only: a row newer than the page's newest exists.
     has_newer: bool | None = None
+    #: Internal proof for source-order annotation, not a wire DTO field. Identity
+    #: comes from the descriptor that supplied these payloads and is retained
+    #: only if its inode/size/mtime did not change during the read. A raced page
+    #: remains a legacy read but cannot borrow authority from a newer index.
+    source_signature: tuple[int, int, float] | None = field(default=None, compare=False)
+
+
+def _page_source_signature(st: os.stat_result) -> tuple[int, int, float]:
+    return (st.st_ino, st.st_size, st.st_mtime)
 
 
 #: Backward read granularity, shared by the two readers below. One MiB is large
@@ -1051,6 +1060,7 @@ def _read_around_page(
     if after is None:
         after = max(0, limit - before - 1)
     with path.open("rb") as handle:
+        source = _page_source_signature(os.fstat(handle.fileno()))
         handle.seek(0, os.SEEK_END)
         end_of_file = handle.tell()
         located_end = _locate_cursor_row(handle, end_of_file, around_id)
@@ -1109,7 +1119,8 @@ def _read_around_page(
                 has_newer = True
                 break
         page = tuple(reversed(older[:before])) + (anchor,) + tuple(newer[:after])
-        return TranscriptPage(page, has_older, False, has_newer)
+        verified = source if _page_source_signature(os.fstat(handle.fileno())) == source else None
+        return TranscriptPage(page, has_older, False, has_newer, source_signature=verified)
 
 
 def read_transcript_page(
@@ -1237,6 +1248,7 @@ def read_transcript_page(
     # only ends the skip.
     skipping = before_id is not None or through_id is not None
     with path.open("rb") as handle:
+        source = _page_source_signature(os.fstat(handle.fileno()))
         handle.seek(0, os.SEEK_END)
         end_of_file = handle.tell()
         cursor_id = through_id if through_id is not None else before_id
@@ -1271,13 +1283,16 @@ def read_transcript_page(
                     break
             if len(retained) > limit:
                 break
+        verified = source if _page_source_signature(os.fstat(handle.fileno())) == source else None
     if through_id is not None and not found:
         return TranscriptPage((), False, True)
     if before_id is not None and not found:
         tail = read_transcript_page(directory, limit=limit)
-        return TranscriptPage(tail.entries, tail.has_more, True)
+        return TranscriptPage(
+            tail.entries, tail.has_more, True, source_signature=tail.source_signature
+        )
     rows = tuple(reversed(retained[:limit]))
-    return TranscriptPage(entries=rows, has_more=len(retained) > limit)
+    return TranscriptPage(entries=rows, has_more=len(retained) > limit, source_signature=verified)
 
 
 #: How far back from a needle hit the reader will look for that row's opening
