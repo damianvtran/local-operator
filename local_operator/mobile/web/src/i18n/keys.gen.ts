@@ -123,6 +123,17 @@ export type MessageParams = {
   "wire.errors.desktop.start_after_end": undefined;
   "wire.errors.desktop.unknown_command": undefined;
   "wire.errors.desktop.unknown_provider": undefined;
+  "wire.errors.files.audio_type": { "mime_type": string };
+  "wire.errors.files.heic_conversion": { "error": string };
+  "wire.errors.files.html_type": { "mime_type": string };
+  "wire.errors.files.html_utf8": undefined;
+  "wire.errors.files.image_type": { "mime_type": string };
+  "wire.errors.files.internal_error": { "error": string };
+  "wire.errors.files.sign_auth": undefined;
+  "wire.errors.files.sign_path": undefined;
+  "wire.errors.files.sign_route": { "routes": string };
+  "wire.errors.files.sign_ttl": { "maximum": string };
+  "wire.errors.files.video_type": { "mime_type": string };
   "wire.errors.media.media_refusal": { "error": string };
   "wire.errors.media.provider_model_pair": undefined;
   "wire.errors.media.radient_key_missing": undefined;
