@@ -95,6 +95,19 @@ def _shipped(relative: str, globs: list[str]) -> bool:
     return any(_glob_regex(glob).fullmatch(relative) for glob in globs)
 
 
+def test_i18n_types_have_explicit_nonrecursive_source_glob() -> None:
+    # The installed source tree runs tsc over tests too, so both the generated
+    # type map AND its compile-only importer must ship. Parent-directory `*`
+    # cannot cover this directory; future deeper directories still need review.
+    globs = _package_data_globs()
+    assert "mobile/web/src/i18n/*.ts" in globs
+    for name in ["keys.gen.ts", "keys.type-test.ts"]:
+        path = f"mobile/web/src/i18n/{name}"
+        assert (PACKAGE_DIR / path).is_file()
+        assert _shipped(path, globs)
+    assert not _shipped("mobile/web/src/i18n/deeper/keys.gen.ts", ["mobile/web/src/i18n/*.ts"])
+
+
 def _tree_files() -> list[str]:
     """Every file the wheel must carry from the web tree, package-relative."""
     ignored = tuple(_glob_regex(pattern) for pattern in NOT_SHIPPED)

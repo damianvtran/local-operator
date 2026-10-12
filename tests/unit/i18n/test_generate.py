@@ -36,6 +36,42 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     return root, emitted
 
 
+def test_ts_key_map_reuses_icu_argument_types(i18n_generate) -> None:
+    output = i18n_generate._render_ts_key_map(
+        {
+            "wire.demo": {
+                "wire.demo.plain": "Plain",
+                "wire.demo.string": "Hello {name}",
+                "wire.demo.count": "{count, plural, one {# file} other {# files}}",
+                "wire.demo.number": "{amount, number}",
+                "wire.demo.date": "{when, date, short}",
+                "wire.demo.time": "{when, time, short}",
+                "wire.demo.select": "{mode, select, one {First} other {Other}}",
+            }
+        }
+    )
+    assert '"wire.demo.plain": undefined;' in output
+    assert '"name": string' in output
+    assert '"count": number' in output
+    assert '"amount": number' in output
+    assert '"when": Date | number' in output
+    assert '"mode": string' in output
+    assert "<K extends WithParams>(key: K, params: MessageParams[K]): string;" in output
+    assert "(key: WithoutParams): string;" in output
+    assert "bundledEnglish" not in output
+
+
+def test_ts_plan_only_owns_wire_and_relay_types(generated, i18n_generate) -> None:
+    root, emitted = generated
+    for namespace in ["wire.demo", "relay.demo", "tui.demo"]:
+        (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
+    planned = i18n_generate._planned_files(emitted)
+    output = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts"]
+    assert "wire.demo.label" in output and "relay.demo.label" in output
+    assert "tui.demo.label" not in output
+    assert planned == i18n_generate._planned_files(emitted)
+
+
 def test_per_key_functions_are_emitted_with_typed_kwargs(generated, i18n_generate) -> None:
     root, emitted = generated
     (root / "en" / "demo.words.json").write_text(
