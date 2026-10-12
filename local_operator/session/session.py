@@ -238,6 +238,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session.attachment_hints import with_attachment_hints
 from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
     CHANNEL_SPEND_VERSION,
@@ -4600,6 +4601,25 @@ class Session:
             self._announce_frames_shed_once(shed)
         return rendered
 
+    def _render_for_request(self, messages: list[AgentMessage]) -> list[Message]:
+        """The request render: ``_render_history`` plus stored-attachment hints.
+
+        The composition every wire path shares — the turn loop goes through
+        THIS method (``convert_to_llm``), and ``_read_only_prompt`` (asides,
+        clearance, the compaction advisor) spells the same two calls inline,
+        through the same module symbols, because the pinned harness stub at
+        that seam mirrors those symbols only and routing it through this
+        method broke the aside-equals-turn equality test. The wiring suite
+        pins the two spellings byte-equal in production, which is what lets
+        the aside read the turn's provider cache. Deliberately NOT folded
+        into ``_render_history`` itself: that function also feeds the
+        compaction renders and the context counters, and a note that entered
+        the kept window a compaction commit seats would be persisted into the
+        transcript and paint as the user's own words
+        (``session/attachment_hints.py`` carries the whole argument).
+        """
+        return with_attachment_hints(self._render_history(messages))
+
     def _wire_bytes_budget(self) -> int:
         """The resolved hard byte ceiling, or 0 when there is none.
 
@@ -5882,7 +5902,17 @@ class Session:
         # message, which is precisely where the cached prefix ends. Applying
         # the same deterministic function to the same messages is what keeps
         # the two identical; the turn's own seam is ``harness/loop.py``.
-        return blocks, bound_replay_payloads(self._render_history([*history, *turns]))
+        # Same composition as the turn's request (``_render_for_request``),
+        # hints included: the aside reads the turn's provider cache only while
+        # the two renders agree at every position ahead of the divergence.
+        # The composition is spelled INLINE rather than calling
+        # ``self._render_for_request`` so it reads through the same module
+        # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
+        # session mirrors exactly those, and routing through an instance method
+        # it cannot know about broke the aside-equals-turn equality it pins.
+        return blocks, bound_replay_payloads(
+            with_attachment_hints(self._render_history([*history, *turns]))
+        )
 
     @property
     def model(self) -> ModelSpec:
@@ -14744,7 +14774,11 @@ class Session:
                 # so a subagent's calls cannot contaminate this session's hint;
                 # see ``LoopConfig.get_context_tokens_hint``.
                 get_context_tokens_hint=lambda: self._context_tokens_hint,
-                convert_to_llm=self._render_history,
+                # The request render, not the bare one: the stored-location
+                # hints for the turn's images ride the wire from HERE and from
+                # ``_read_only_prompt`` — the same function, so the aside
+                # prefix cannot diverge (see ``_render_for_request``).
+                convert_to_llm=self._render_for_request,
                 stream_fn=marking_stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),

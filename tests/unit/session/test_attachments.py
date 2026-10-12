@@ -106,6 +106,49 @@ def test_put_rejects_undecodable_input(tmp_path):
     assert store.put("!!!not-base64!!!", "image/png") is None or True  # b64decode is lenient
 
 
+def test_locate_finds_stored_bytes_without_writing(tmp_path):
+    """``locate`` is the read-only sibling of ``put``: a hit reports the
+    reference of bytes already stored, and a miss stays a miss — nothing is
+    written — so request-side callers can name a file without churning the
+    store on paths meant to be pure functions of the conversation."""
+    store = AttachmentStore(tmp_path)
+    ref = store.put(PNG_B64, "image/png")
+    assert ref is not None
+
+    assert store.locate(PNG_B64, "image/png") == ref
+
+    fresh = base64.b64encode(b"never stored").decode("ascii")
+    assert store.locate(fresh, "image/png") is None
+    assert len(list(tmp_path.glob("*.bin"))) == 1
+
+
+def test_locate_misses_an_empty_or_undecodable_payload(tmp_path):
+    store = AttachmentStore(tmp_path)
+    assert store.locate("", "image/png") is None
+
+
+def test_locate_degrades_when_the_file_is_bit_rotted(tmp_path):
+    """The same digest verification ``get`` performs decides the miss: a file
+    whose bytes no longer hash to its name is not returned as a location."""
+    store = AttachmentStore(tmp_path)
+    ref = store.put(PNG_B64, "image/png")
+    assert ref is not None
+    (tmp_path / f"{ref.digest}.bin").write_bytes(b"partial")
+
+    assert store.locate(PNG_B64, "image/png") is None
+
+
+def test_path_for_is_the_stores_own_naming_rule(tmp_path):
+    store = AttachmentStore(tmp_path)
+    ref = store.put(PNG_B64, "image/png")
+    assert ref is not None
+
+    assert store.path_for(ref.digest) == tmp_path / f"{ref.digest}.bin"
+    # Does not check existence — callers that need the file read it and
+    # degrade (``get``); this names where it would live.
+    assert not store.path_for("0" * 32).exists()
+
+
 @pytest.mark.asyncio
 async def test_transcript_externalizes_on_append_and_resolves_on_replay(tmp_path):
     """The end-to-end contract: the row on disk carries a reference, replay
