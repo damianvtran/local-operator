@@ -831,9 +831,7 @@ def fold_transcript_entries(
             # touched, and a malformed stamp is still a claim on the row
             # (review round 3, R3-1 acceptance). An id-correlated typed fact
             # would vouch for the row in its own entry above.
-            parent_message = (
-                None if hub_receipt_stamped(payload) else extract_parent_message(text)
-            )
+            parent_message = None if hub_receipt_stamped(payload) else extract_parent_message(text)
             if parent_message is not None:
                 # A persisted hub steer: model-facing XML around the parent's
                 # own words. The human-facing fact row supersedes it — by id

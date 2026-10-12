@@ -4115,6 +4115,119 @@ class QuietGroupTracker:
                 self._restate(candidate, open=candidate.group.open)
                 return
 
+    def reconcile_source_change(self, changed: TranscriptBlock) -> None:
+        """An ORDERED source change (a replaced row) re-plans its stretch.
+
+        ``TranscriptView.replace_block`` swaps a row at its own index: the new
+        row is the same source position with new provenance, not a tail
+        append. Feeding it through ``note_append`` advanced the fold as if it
+        arrived last, so a boundary the OLD row caused (a human splitter that
+        split a run) could never be undone; and ``reset``/``resync`` -- which
+        re-derive the trailing state but deliberately never form a missing
+        bar -- cannot form the run either. This entry point is the missing
+        third operation, built from the SAME parts the incremental fold uses:
+        from the rows actually on hand it resolves the affected maximal
+        source stretch with the existing boundary vocabulary, re-plans it
+        with ``quiet_group_of_segment``, forms through the same ``_form``
+        seam, restores reader-open intent by overlapping source-member
+        identities, and resyncs the tracker to the ACTUAL tail so the next
+        real append joins the right state. Only bars whose members intersect
+        the changed stretch move; untouched bars and their frozen arithmetic
+        are left alone, and descriptive correction stays ``restate_member``'s
+        job (review round 4, R4-1/Q-R5-2).
+        """
+        source: list[TranscriptBlock] = []
+        owners: list[QuietGroupBlock | None] = []
+        for block in self._view.blocks():
+            if getattr(block, "SPACING_TRANSIENT", False):
+                continue
+            if isinstance(block, QuietGroupBlock):
+                # A bar is synthetic: its hidden ACTUAL rows are the source,
+                # each contributing once, in original order.
+                for member in block._members:
+                    source.append(member)
+                    owners.append(block)
+            else:
+                source.append(block)
+                owners.append(None)
+        try:
+            position = source.index(changed)
+        except ValueError:
+            # The row is not on hand (already removed): nothing to re-plan.
+            self.resync(head_cut=self._head_cut)
+            return
+        records = _records_of_blocks(source)
+        # The affected maximal stretch: the segment between the nearest real
+        # splitters around the changed row, by the one boundary vocabulary
+        # the incremental fold already speaks.
+        start = 0
+        for index in range(position - 1, -1, -1):
+            if group_splitter_of(records[index]):
+                start = index + 1
+                break
+        end = len(source)
+        for index in range(position + 1, len(source)):
+            if group_splitter_of(records[index]):
+                end = index
+                break
+        span = source[start:end]
+        span_records = records[start:end]
+        if _last_splitter_index(span_records) >= 0:
+            # A member re-reads as a splitter (belt breach): never fold
+            # across a row the reader must see; re-derive from the tail.
+            self.resync(head_cut=self._head_cut)
+            return
+        first_index = self._view_index(span[0])
+        if first_index is None or not self._span_head_bounded(first_index):
+            # The span's top edge is not a boundary (a page fragment or an
+            # on-hand in-span row above): the planner refuses the same
+            # sub-span, so keep the rows as they are.
+            self.resync(head_cut=self._head_cut)
+            return
+        partial = self._span_head_partial(first_index)
+        touched: list[QuietGroupBlock] = []
+        for owner in owners[start:end]:
+            if owner is not None and owner not in touched:
+                touched.append(owner)
+        # The reader's open intent travels on overlapping STABLE identities:
+        # the member block objects persist across the re-plan (visibility is
+        # the fold's switch, never a remount), and the bar's own flag is
+        # carried forward below.
+        reader_open = any(bar._expanded for bar in touched)
+        for bar in touched:
+            for member in bar._members:
+                member.display = True
+            self._view.remove_block(bar)
+        group = quiet_group_of_segment(
+            span_records,
+            (0, len(span_records) - 1),
+            span_head_loaded=not partial,
+            open=end >= len(source),
+        )
+        if group is not None:
+            self._form(span, group, partial)
+            bar = self._open
+            if bar is not None and reader_open and not bar._expanded:
+                bar.toggle_expanded()
+            # The tail state must be what an incremental formation would have
+            # left: `_last_record` is the true last source row's record (so
+            # the next append is judged from the ACTUAL tail, never from the
+            # obsolete pre-change chain), and the bar stays open ONLY when the
+            # re-formed run really is the tail. A real boundary after the run
+            # means a CLOSED historical group: it must latch, exactly as the
+            # increment's `_close` would have left it. `resync` cannot be used
+            # here — it reads a tail BAR as a record of its own, which would
+            # make every later real append read as a fresh splitter.
+            self._last_record = records[-1]
+            if end < len(source):
+                self._open = None
+                self._trailing = None
+            return
+        # The planner produced no group (fewer than two triggers, or a
+        # refusal): the rows stay ordinary cards and the tracker re-derives
+        # from the actual tail.
+        self.resync(head_cut=self._head_cut)
+
     def _close(self) -> None:
         """A splitter landed: the latch. Facts from here on are frozen.
 
@@ -6514,7 +6627,11 @@ class TranscriptView(ScrollableContainer):
         self.mount(new, before=next_block if next_block in self._blocks else None)
         self.call_after_refresh(self._settle_gap, new)
         self._remeasure_empty_state()
-        self.note_quiet_append(new)
+        # An ordered source change, not an append (review round 4, R4-1):
+        # the fold re-plans the affected stretch instead of being offered the
+        # newcomer as a tail row, which could never undo a boundary the old
+        # row caused.
+        self._quiet_groups.reconcile_source_change(new)
         return True
 
     def blocks(self) -> list[TranscriptBlock]:

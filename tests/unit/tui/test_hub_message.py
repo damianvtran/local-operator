@@ -198,7 +198,7 @@ async def test_marked_row_adopts_a_picture_that_arrives_on_a_later_same_id_pass(
         assert not [block for block in view.blocks() if isinstance(block, ImageBlock)]
 
         picture = Message.user(message.text, id=message.id)
-        picture.provider_payload = dict(message.provider_payload)
+        picture.provider_payload = dict(message.provider_payload or {})
         picture.content.append(ImageContent(data="QUJD", mime_type="image/png"))
         app._project_settled_rows([picture])
         await pilot.pause()
@@ -232,6 +232,53 @@ async def test_a_stamped_but_invalid_marker_keeps_the_row_human() -> None:
 
 
 @pytest.mark.asyncio
+async def test_progressive_pictures_own_distinct_source_parts() -> None:
+    """R3-3 / Q-R5-1 direct acceptance (review round 4): the receipt body owns
+    logical part 0, picture one part 1 and picture two part 2 — across
+    progressive adoption passes — a replay re-carrying both adds nothing, and
+    labels re-read from the FULL source sequence so progressive adoption
+    converges on the full-initial labels (not only the same count)."""
+    from local_operator.harness.types import ImageContent
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        base = _marked_steer()
+
+        def with_pictures(count: int) -> Message:
+            message = Message.user(base.text, id=base.id)
+            message.provider_payload = dict(base.provider_payload or {})
+            for _ in range(count):
+                message.content.append(ImageContent(data="QUJD", mime_type="image/png"))
+            return message
+
+        view = app.query_one(TranscriptView)
+        app._project_settled_rows([with_pictures(0)])
+        await pilot.pause()
+        app._project_settled_rows([with_pictures(1)])
+        await pilot.pause()
+        app._project_settled_rows([with_pictures(2)])
+        await pilot.pause()
+        receipt = next(block for block in view.blocks() if isinstance(block, HubMessageBlock))
+        assert (receipt.navigation_anchor_id, receipt.navigation_anchor_part) == (base.id, 0)
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        assert [(b.navigation_anchor_id, b.navigation_anchor_part) for b in images] == [
+            (base.id, 1),
+            (base.id, 2),
+        ]
+        assert [b._label for b in images] == ["#1", "#2"]
+
+        app._project_settled_rows([with_pictures(2)])
+        await pilot.pause()
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        assert [(b.navigation_anchor_id, b.navigation_anchor_part) for b in images] == [
+            (base.id, 1),
+            (base.id, 2),
+        ]
+        assert [b._label for b in images] == ["#1", "#2"]
+
+
+@pytest.mark.asyncio
 async def test_marked_image_row_keeps_its_picture_and_never_doubles() -> None:
     """R3-3 (review round 3): the marker reclassifies the ROW, never its
     attachments — a marked row carrying an image keeps its ImageBlock beside
@@ -250,3 +297,77 @@ async def test_marked_image_row_keeps_its_picture_and_never_doubles() -> None:
         blocks = app.query_one(TranscriptView).blocks()
         assert len([block for block in blocks if isinstance(block, HubMessageBlock)]) == 1
         assert len([block for block in blocks if isinstance(block, ImageBlock)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_ordered_same_id_repair_groups_like_the_first_paint_control() -> None:
+    """R4-1 / Q-R5-2 direct acceptance: the same final rows reached by a late
+    in-place upgrade group EXACTLY like the control painted with the valid hub
+    row from the start — one bar, same members in source order, same counts —
+    and a following user boundary stays visible with later appends joining a
+    new stretch, never the closed bar."""
+
+    def tool(label: str) -> ToolCard:
+        card = ToolCard(label, "read", {"path": "synthetic.txt"})
+        card.mark_done()
+        return card
+
+    async def painted(
+        marked_first: bool, trailing_user: bool = False
+    ) -> tuple[int, int, list[tuple[str, str]], int, int]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            steer = _marked_steer()
+            app._append_block(tool("tool-a"))
+            if marked_first:
+                app._project_settled_rows([steer])
+            else:
+                plain = Message.user(steer.text, id=steer.id)
+                app._project_settled_rows([plain])
+            app._append_block(tool("tool-b"))
+            app._append_block(tool("tool-c"))
+            if trailing_user:
+                app._append_block(UserBlock("audit the ingest path", fold_width=0))
+            await pilot.pause()
+            if not marked_first:
+                app._project_settled_rows([steer])
+                await pilot.pause()
+            view = app.query_one(TranscriptView)
+            bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+            assert len(bars) == 1
+            bar = bars[0]
+            members = [
+                (str(type(member).__name__), member.navigation_anchor_id) for member in bar._members
+            ]
+            visible_users = [
+                block for block in view.blocks() if isinstance(block, UserBlock) and block.display
+            ]
+            actions_before = bar.group.actions
+            # A later real append joins the actual tail.
+            app._append_block(tool("tool-d"))
+            await pilot.pause()
+            after = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+            actions_after = after[0].group.actions if after else 0
+            return (
+                bar.group.count,
+                actions_before,
+                members,
+                len(visible_users),
+                actions_after,
+            )
+
+    control = await painted(marked_first=True)
+    repaired = await painted(marked_first=False)
+    assert control[:4] == repaired[:4]
+    assert control[0] == 1
+    assert control[1] == 3
+    # The next real append extends the tail in BOTH histories, identically.
+    assert control[4] == repaired[4] == 4
+
+    closed = await painted(marked_first=False, trailing_user=True)
+    # The user boundary stays visible and the closed bar keeps its arithmetic
+    # when a later append lands outside it.
+    assert closed[2] and all(name != "UserBlock" for name, _ in closed[2])
+    assert closed[3] == 1
+    assert closed[4] == 3

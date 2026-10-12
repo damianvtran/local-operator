@@ -36,8 +36,35 @@ def _en(key: str, **params: object) -> str:
     return runtime.render_message(GOLDEN[key], params, "en")
 
 
+#: The seven keys the group/hub slice ADDED after the pre-slice snapshot was
+#: taken. The golden stays the extraction-time record; this map is its
+#: successor half, so the test pins BOTH sides exactly — the old ten bytes and
+#: the new seven — instead of a superset check that would let any later draft
+#: through (review round 4, R4-3; QA Q-R5-3).
+GROUP_SLICE_KEYS: dict[str, str] = {
+    "tui.transcript.group.actions": (
+        "{count, plural, one {{label} actions} other {{label} actions}}"
+    ),
+    "tui.transcript.group.messages": "messages · {count}",
+    "tui.transcript.group.reply_requested": (
+        "{count, plural, one {{label} reply requested} other {{label} reply requested}}"
+    ),
+    "tui.transcript.group.steered": (
+        "{count, plural, one {{label} steered} other {{label} steered}}"
+    ),
+    "tui.transcript.hub.from": "From {identity}",
+    "tui.transcript.hub.reply_requested": "Reply requested",
+    "tui.transcript.hub.steered": "Steered",
+}
+
+
 def test_catalogue_matches_the_pre_slice_golden() -> None:
-    assert catalogues.load_catalogue("en", "tui.transcript") == GOLDEN
+    live = catalogues.load_catalogue("en", "tui.transcript")
+    assert set(live) == set(GOLDEN) | set(GROUP_SLICE_KEYS)
+    for key, value in GOLDEN.items():
+        assert live[key] == value, key
+    for key, value in GROUP_SLICE_KEYS.items():
+        assert live[key] == value, key
 
 
 def test_the_queued_markers_are_the_golden_lines() -> None:
