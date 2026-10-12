@@ -2845,3 +2845,60 @@ cycles). Tools/supplements retain their owning message/call and their own entry
 ordinal separately; row identity owns attachments, sender and payload. Metadata
 updates must change order even when payload bytes did not change, and omitted
 metadata on a live update cannot clear a known coordinate.
+
+
+## Proposed complete peer-source contract (not advertised)
+
+This is a contract-first prototype, not shipped capability support. Existing
+remote `journal_order` alone must remain byte-compatible unsupported when this
+work is integrated. Local ordering and local mobile partial negotiation remain
+unchanged. The proposed `peer-journal-source-v1` capability and explicit
+`peer_journal_source` query/declaration require complete runtime/receiver support
+and authenticated owner acknowledgment; neither is currently advertised here.
+Every new field must be omitted for legacy viewers on live and replay paths.
+
+The authority bootstrap uses the existing session GET but applies only source
+metadata via `applyJournalOrderMetadata`: install the equality-only order domain
+under session/view/read witnesses, never incidentally adopt page bodies, causal
+call owners, tail/cursor coverage or frontend state. Explicit verified page/body
+acceptance is a DIFFERENT typed path. Lookup coordinates do not reattest a loaded
+old body or release a provisional/local user. Fresh body plus coordinates must
+be admitted atomically; stale-domain loaded bodies remain payload-owed.
+`JournalOrderRead` remains `{revision, demand}`; generation is separate. A raced
+same-domain wake keeps its new reference-identity debt without blanket rejection
+of still-valid old facts. Per-ID body-owed revisions fence body acceptance.
+
+Proposed purposes on the existing view-authorized stored-history RPC:
+
+| Purpose | Authority and bounds |
+| --- | --- |
+| page | Verified bounded page; explicit page acceptance only |
+| metadata | Requested raw-ID facts only; no body/cursor/frontend effects |
+| payload | Expected accepted generation REQUIRED; fresh projected bodies and same-read coordinates together |
+| availability | One bounded deferred index refresh/join signal; no rows or generation authority |
+
+Requested IDs plus explicit dependency IDs are bounded at 512. Missing means
+proven absent, unavailable means present but unsafe/unprojectable, remaining
+means budget-deferred; these are not interchangeable. Exact encoded response
+limits include every metadata map. Raw-ID lookup demand unions canonical,
+quarantined and loaded-body-owed IDs BEFORE the no-debt/no-generation guard.
+No alias, clock, wire sequence or receiver disk supplies source authority.
+
+Proof prerequisites before DTO extension or capability advertisement:
+
+* Extend the SAME index with validated raw-ID byte ranges, retaining no bodies;
+  FD-before/after, path identity and index source must agree for bounded reads.
+* Prove actual settled projection equivalence including prune/injection/media
+  dependencies. If closure cannot be bounded, report unavailable, not missing;
+  a raw row converter is not a universal settled replay projector.
+* Availability must defer at the dispatcher, not return None from an inline
+  handler (which yields an empty ACK), and must not occupy the shared four slow
+  workers or stall reader/prompt/live traffic. Recheck link/grant/session before
+  one final answer. Cancellation cleanup must state actual protocol bounds.
+
+The index witness inherits the existing inode/size/mtime assumption, not
+cryptographic detection of externally preserved-stat rewrites. No new cache,
+service, domain, payload queue, runtime lease, permission or view-grant expansion
+is authorized. Complete-core review/QA precedes separate UI adoption. The UI
+continuity amendment must separate metadata facts from rank/body/causal-owner
+admission and retain later source demand while admitting valid earlier facts.
