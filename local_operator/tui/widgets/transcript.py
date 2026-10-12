@@ -6725,6 +6725,18 @@ class TranscriptView(ScrollableContainer):
         """Refresh corrected receipt facts without appending a second member."""
         self._quiet_groups.restate_member(block)
 
+    def note_quiet_source_part(self, block: TranscriptBlock) -> None:
+        """Tell the fold about a source row INSERTED at its original seat.
+
+        Seating a row mid-transcript (`_insert_after`) is an ORDERED SOURCE
+        change, not a tail append: `insert_blocks` alone leaves the row out of
+        its owner bar's membership, so a collapsed bar hides the receipt while
+        its picture stays on screen (review round 6, R6-1 / QA Q-R7-1). The row
+        is re-planned through the same reconciliation the replacement path
+        uses, which keeps the seat, the open/latch state and the original owner.
+        """
+        self._quiet_groups.reconcile_source_change(block)
+
     def set_quiet_head_cut(self, cut: bool) -> None:
         """State whether this view's head may continue beyond its first row.
 

@@ -37642,6 +37642,12 @@ class OperatorApp(App[None]):
             transcript.append_block(block)
             return
         transcript.insert_blocks(blocks.index(anchor) + 1, [block])
+        # The fold must learn about the row as a SOURCE-PART change at its own
+        # seat, not as a tail append: `insert_blocks` alone left a seated
+        # picture outside its owner bar's membership, so a collapsed bar hid
+        # the receipt while its picture stayed on screen (review round 6,
+        # R6-1 / QA Q-R7-1).
+        transcript.note_quiet_source_part(block)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
