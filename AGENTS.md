@@ -5,6 +5,9 @@ things that are easy to get wrong here and expensive to discover later. For
 what the rewrite set out to do see `docs/REWRITE.md`; for the evidence behind
 each round see `docs/VERIFICATION.md`.
 
+For bounded allocation, costly-evidence preflight and review convergence, read
+`guide://delivery` (packaged at `local_operator/guides/delivery/GUIDE.md`).
+
 ## Environment
 
 ```sh

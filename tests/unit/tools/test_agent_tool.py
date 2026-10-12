@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.agent_profiles import load_seed, resolve_profile
+from local_operator.agent_profiles import load_seed, load_seed_version, resolve_profile
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.harness.types import ToolContext
@@ -1455,15 +1455,16 @@ def move_seed(seeds_dir: Path, name: str, *, version: str, body: str) -> None:
 async def test_sync_updates_an_untouched_starter_and_echoes_the_replaced_text(
     context, registry, scratch_seeds
 ) -> None:
+    installed_version = load_seed_version("reviewer")
     await call(context, op="install", name="reviewer")
     row = registry.get_agent_by_name("reviewer")
     move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
 
     body = await call(context, op="sync", name="reviewer")
 
-    # The left side is the version stamped at install; reviewer moved to 1.3.0
-    # in the 2026-10-09 delivery-rule revision (was 1.2.0).
-    assert "reviewer: updated to the packaged starter (1.3.0 -> 2.0.0)" in body
+    # Pin the before-move stamp, not a release-specific starter version: this
+    # test exercises sync's recoverable echo, not the evolving seed catalog.
+    assert f"reviewer: updated to the packaged starter ({installed_version} -> 2.0.0)" in body
     # The echo, indented under the line and copy-pasteable — recoverability is
     # why the clean arm may overwrite without an approval prompt.
     assert "your instructions were:" in body

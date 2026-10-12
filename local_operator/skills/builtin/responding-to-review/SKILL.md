@@ -21,7 +21,11 @@ Review feedback is input, not instruction. Verify before implementing; answer pe
 
 - Collect all accepted fixes into ONE remediation pass. Do not commit-and-reply per finding.
 - Group by stream where the project does (code, tests, docs); keep it one round.
-- Where several reviewers ran, answer each report's items in one combined response pass.
+- Where several reviewers ran, wait for all initial reports before ONE remediation
+  commit and answer their items together. Proven provenance-only metadata fixes
+  are addenda, not suite resets; unchanged evidence needs compatibility proof.
+  Rebased content still needs convergence, and real majors still need fixes.
+  See `guide://delivery` for the shared bounds.
 
 ## The reply format
 
