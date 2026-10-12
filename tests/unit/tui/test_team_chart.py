@@ -16,8 +16,10 @@ screen where a horizontal scrollbar is a bug).
 
 from __future__ import annotations
 
+import builtins
 import tempfile
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
@@ -82,6 +84,108 @@ async def _type(pilot, text: str) -> None:
         await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
     await pilot.pause()
     await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_chart_import_failure_precedes_mutation_and_retry(monkeypatch) -> None:
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.text = "keep this draft"
+        editor.focus()
+        transcript = app._transcript_view()
+        before = (
+            app.focused,
+            app._org_chart_focus_restore,
+            transcript.display,
+            set(app.screen.classes),
+            editor.read_only,
+        )
+        original_import = builtins.__import__
+        failure = ImportError("org-chart-first-use-probe")
+        registry_calls = []
+        original_registry = app._team_registry
+
+        def registry():
+            registry_calls.append(True)
+            return original_registry()
+
+        def broken_import(name, *args, **kwargs):
+            if name == "local_operator.tui.widgets.org_chart_view":
+                raise failure
+            return original_import(name, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(builtins, "__import__", broken_import)
+            patch.setattr(app, "_team_registry", registry)
+            with pytest.raises(ImportError) as caught:
+                app._open_org_chart_view("org")
+            assert caught.value is failure
+            assert registry_calls == []
+        assert app._org_chart_view is None
+        assert before == (
+            app.focused,
+            app._org_chart_focus_restore,
+            transcript.display,
+            set(app.screen.classes),
+            editor.read_only,
+        )
+        assert editor.text == "keep this draft"
+        app._open_org_chart_view("org")
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        assert view._root is not None
+        assert app._close_org_chart_view()
+        await pilot.pause()
+        assert transcript.display
+        assert not editor.read_only
+        assert editor.text == "keep this draft"
+        assert app.focused is editor
+
+
+@pytest.mark.asyncio
+async def test_chart_canonical_constructor_and_dismissal_message(monkeypatch) -> None:
+    from local_operator.tui.widgets import org_chart_view
+    from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
+
+    assert org_chart_view.OrgChartViewDismissed is OrgChartViewDismissed
+    assert OrgChartViewDismissed().handler_name == "on_org_chart_view_dismissed"
+    assert (
+        get_type_hints(OperatorApp.on_org_chart_view_dismissed)["message"] is OrgChartViewDismissed
+    )
+    assert get_type_hints(org_chart_view.OrgChartView.show)["root"] is org_chart_view.OrgNode
+    assert get_type_hints(org_chart_view.OrgChartView.__init__)["team_name"] is str
+    constructor = org_chart_view.OrgChartView
+    constructed = []
+
+    def create(team_name):
+        view = constructor(team_name)
+        constructed.append(view)
+        return view
+
+    monkeypatch.setattr(org_chart_view, "OrgChartView", create)
+    session = FakeSession()
+    session.team_registry = _nested_registry()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/team chart org")
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        assert constructed == [view]
+        view.post_message(OrgChartViewDismissed())
+        await pilot.pause()
+        assert app._org_chart_view is None
+        assert app._transcript_view().display
+        assert (
+            get_type_hints(OperatorApp.on_org_chart_view_dismissed)["message"]
+            is OrgChartViewDismissed
+        )
 
 
 # -- routing dispatch table -------------------------------------------------

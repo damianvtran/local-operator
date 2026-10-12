@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.i18n import catalogues
+from local_operator.i18n import catalogues, runtime
 
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
@@ -33,8 +33,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # Waves 1-2: es/fr then ru/vi trees ship with their waves.
-    assert catalogues.locales() == ("en", "es", "fr", "ru", "vi")
+    # The held Chinese candidate lives on a separate remote ref, not in the
+    # releasable package. Pin the whole set so partial restoration cannot
+    # accidentally admit nine passed groups without its failed slash audit.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",
@@ -97,6 +99,33 @@ def test_exact_wire_namespace_contract_rejects_mutations(
         else:
             with pytest.raises(AssertionError):
                 test_shipped_wire_namespaces_exist()
+
+
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+    # Pin only the original ten Hindi groups. Analytics/desktop backfill is
+    # explicitly unfinished; mechanical parity is not full-surface coverage.
+    locale = "hi"
+    namespaces = (
+        "tui.status",
+        "tui.transcript",
+        "tui.welcome",
+        "wire.errors",
+        "wire.errors.settings",
+        "wire.exec",
+        "wire.incidents",
+        "wire.notices",
+        "wire.settings",
+        "wire.slash",
+    )
+    assert catalogues.namespaces(locale) == namespaces
+    for namespace in namespaces:
+        source = catalogues.load_catalogue("en", namespace)
+        translated = catalogues.load_catalogue(locale, namespace)
+        assert translated.keys() == source.keys(), (locale, namespace)
+        for key in source:
+            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
+                source[key]
+            ), (locale, namespace, key)
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

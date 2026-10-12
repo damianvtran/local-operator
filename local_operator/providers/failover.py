@@ -54,6 +54,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.effort import (
     EFFORT_ORDER,
+    FALLBACK_EFFORTS,
     SUPPORTED_EFFORTS,
     resolve_effort_in,
 )
@@ -2346,9 +2347,11 @@ DEFAULT_CHAIN_KEY = "default"
 #: ``settings_io`` validates a chain hop's effort at config-write time and
 #: must not pull this module's module-level ``httpx`` import onto the TUI
 #: startup path to do it (F9 — ``test_import_graph.py`` pins that path).
-#: Every caller in THIS module still reads it as ``SUPPORTED_EFFORTS``.
+#: Fixed depths use ``SUPPORTED_EFFORTS``; chain parsers/validators instead
+#: use ``FALLBACK_EFFORTS`` so explicit reset sentinels stay distinct.
 
-#: The same vocabulary as an ordinal ladder, for anything a person READS.
+#: The fixed depth vocabulary as an ordinal ladder, for anything a person READS.
+#: ``auto`` is appended separately in chain diagnostics, never ranked here.
 #: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``
 #: next to it - the two opposite ends of the scale, adjacent - which reads as
 #: noise to someone who already knows the ladder from ``/effort`` (design round
@@ -2377,9 +2380,10 @@ class FallbackTarget:
     """One resolved cascade entry.
 
     ``selector`` keeps routing compatible with the existing
-    ``provider/model`` chain format. ``effort`` is optional because many
-    providers either do not expose reasoning levels or should use their model
-    default.
+    ``provider/model`` chain format. An absent ``effort`` carries/clamps the
+    primary's choice; explicit ``auto`` instead resets it to the target's own
+    default. Preserve the sentinel on the route, even when that default is a
+    fixed level, so display, snapshots and subsequent turns retain the intent.
     """
 
     selector: str
@@ -2449,7 +2453,7 @@ def _fallback_target(entry: Any) -> FallbackTarget | None:
         raw_effort = entry.get("effort")
         if raw_effort is not None:
             effort = str(raw_effort).strip().lower()
-            if effort not in SUPPORTED_EFFORTS:
+            if effort not in FALLBACK_EFFORTS:
                 return None
     else:
         return None
@@ -2795,7 +2799,7 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
             raw_effort = entry.get("effort")
             if raw_effort is None:
                 return f"{provider}/{model}"
-            if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
+            if str(raw_effort).strip().lower() not in FALLBACK_EFFORTS:
                 logger.warning(
                     "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not accepted in"
                     " a fallback chain hop; expected one of %s",
@@ -2803,7 +2807,7 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
                     provider,
                     model,
                     raw_effort,
-                    ", ".join(CHAIN_EFFORT_LADDER),
+                    ", ".join((*CHAIN_EFFORT_LADDER, "auto")),
                 )
             return {"provider": provider, "model": model, "effort": raw_effort}
     return None
@@ -3541,7 +3545,8 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     a 400 on the request that was supposed to rescue the turn. But dropping it
     is not right either: a cascade entry that names no effort should not cost
     the user the level they asked for wherever the fallback accepts it. So an
-    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort_in`
+    explicit ``target.effort`` wins (``auto`` means the TARGET's own default,
+    not an inherited primary override), and otherwise :func:`resolve_effort_in`
     keeps the chosen level when the fallback accepts it and falls back to that
     model's own default when it does not — clamped against the target spec's
     OWN ladder, which is what keeps this from disagreeing with the model the
@@ -3581,6 +3586,10 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
 
     provider, model_id = parse_selector(target.selector)
     target_spec = build_model_spec(provider, model_id)
+    # Resolve the reset before wire validation: direct providers may not accept
+    # literal "auto", while routers may default to it. Keep the route sentinel
+    # for identity/snapshot/display; only the request spec gets the resolved dial.
+    explicit_effort = target_spec.reasoning_effort if target.effort == "auto" else target.effort
     # `target_spec` already carries its own family's policy from
     # `build_model_spec`, so the sampling knobs are simply left alone here --
     # they are named explicitly rather than omitted so the next reader sees the
@@ -3590,7 +3599,7 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
             "temperature": target_spec.temperature,
             "top_p": target_spec.top_p,
             "reasoning_effort": (
-                target.effort
+                explicit_effort
                 if target.effort is not None
                 # Clamped to the nearest rung rather than dropped or defaulted: see
                 # `resolve_effort` for why "the model's default" silently inverts
