@@ -369,6 +369,60 @@ def test_the_sidebars_arithmetic_cannot_receive_an_epoch_class_value(claim: obje
     assert produced.created_at <= 0
 
 
+def _parsed_peer_row_with_last_user(claim: object = _NO_KEY) -> PeerRow:
+    """A REAL ``PeerRow`` carrying a ``last_user_at`` claim — or the absent key.
+
+    Through ``PeerRow.from_json``, like :func:`_parsed_peer_row` and for the same
+    reason: production never hands a consumer a raw claim, so a double would
+    pin a rule two layers away from where the shapes are decided.
+    """
+    fields: dict[str, object] = {
+        "session_id": "s_1",
+        "conversation_name": "Some conversation",
+    }
+    if claim is not _NO_KEY:
+        fields["last_user_at"] = claim
+    return PeerRow.from_json(fields, device_id="d_aa", device_name="pixel")
+
+
+@pytest.mark.parametrize(
+    "claim, expected",
+    [
+        pytest.param(1789400111.5, 1789400111.5, id="epoch-float"),
+        pytest.param("1789400111.5", 1789400111.5, id="numeric-string"),
+        pytest.param(True, None, id="bool"),
+        pytest.param(0.0, None, id="claimed-zero"),
+        pytest.param(-5.0, None, id="negative"),
+        pytest.param(float("nan"), None, id="nan"),
+        pytest.param("garbage", None, id="garbage-string"),
+        pytest.param(None, None, id="null"),
+        pytest.param(_NO_KEY, None, id="absent"),
+    ],
+)
+def test_the_last_user_claim_reaches_the_row_through_the_real_parse_path(
+    claim: object, expected: float | None
+) -> None:
+    """``PeerRow.from_json`` → the session-row producer, for the ordering clock.
+
+    The desktop sidebar orders RUNNING rows by the person's last send
+    (``last_user_at``), falling back to ``created_at`` on anything it cannot
+    read; the producer must hand the row the claim the origin made — a number,
+    or the numeric-string spelling a mixed fleet can send — and NO claim
+    (``None``) for every unusable shape, so the fallback chain is what runs.
+    The same boundary rule as ``started``, on the same real path: a bool must
+    not become ``1.0``, and a claimed zero is no claim.
+    """
+    produced = peer_session_rows(
+        catalog=_Catalog(
+            [_Facts("d_aa", "radiant-m4", reachable=True)],
+            [_parsed_peer_row_with_last_user(claim)],
+        )
+    )[0]
+    assert (
+        produced.last_user_at == expected
+    ), f"{claim!r} reached the row as {produced.last_user_at!r}, not {expected!r}"
+
+
 def test_the_membership_name_rides_the_row_for_the_tooltips_device_clause(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
