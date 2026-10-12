@@ -52,6 +52,8 @@ class ToolCallItem:
     id: str
     name: str
     args: Mapping[str, str]
+    #: Exact current-turn HTML, never classifier evidence or a path reread.
+    prepared_html: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,7 +118,13 @@ def _text_head(message: Any, limit: int) -> str:
     return "".join(parts)
 
 
-def snapshot_message(message: Any, *, text_budget: int = ITEM_TEXT_MAX_CHARS) -> TurnItem:
+def snapshot_message(
+    message: Any,
+    *,
+    text_budget: int = ITEM_TEXT_MAX_CHARS,
+    prepared_budget: int = 0,
+    successful_calls: frozenset[str] = frozenset(),
+) -> TurnItem:
     """Reduce one harness message to a :class:`TurnItem` (duck-typed, never raises)."""
     calls: list[ToolCallItem] = []
     for call in getattr(message, "tool_calls", None) or ():
@@ -130,11 +138,27 @@ def snapshot_message(message: Any, *, text_budget: int = ITEM_TEXT_MAX_CHARS) ->
             if isinstance(arguments, Mapping)
             else {}
         )
+        prepared = ""
+        if (
+            prepared_budget > 0
+            and str(getattr(call, "id", "")) in successful_calls
+            and getattr(call, "name", "") == "write"
+            and kept.get("path", "").casefold().endswith((".html", ".htm"))
+            and isinstance(arguments, Mapping)
+            and isinstance(arguments.get("content"), str)
+        ):
+            content = arguments["content"]
+            size = len(content.encode("utf-8"))
+            if size <= 48 * 1024 and len(content) <= text_budget:
+                prepared = content
+                prepared_budget -= 1
+                text_budget -= len(content)
         calls.append(
             ToolCallItem(
                 id=str(getattr(call, "id", "") or ""),
                 name=str(getattr(call, "name", "") or ""),
                 args=kept,
+                prepared_html=prepared,
             )
         )
     return TurnItem(
@@ -155,23 +179,37 @@ TURN_TEXT_BUDGET: Final = 2_000_000
 
 
 def snapshot_messages(
-    messages: Iterable[Any], *, text_budget: int = TURN_TEXT_BUDGET
+    messages: Iterable[Any], *, text_budget: int = TURN_TEXT_BUDGET, max_prepared: int = 3
 ) -> list[TurnItem]:
     """Snapshot a run's messages, spending at most ``text_budget`` characters of text.
 
     Returns the items; the caller subtracts :func:`items_text_size` to carry the remainder
     into the next run of the same logical turn.
     """
+    messages = list(messages)
+    successful = frozenset(
+        str(getattr(message, "tool_call_id", ""))
+        for message in messages
+        if getattr(message, "role", "") == "tool" and not getattr(message, "is_error", False)
+    )
     items: list[TurnItem] = []
     for message in messages:
-        item = snapshot_message(message, text_budget=text_budget)
-        text_budget -= len(item.text)
+        item = snapshot_message(
+            message,
+            text_budget=text_budget,
+            prepared_budget=max_prepared,
+            successful_calls=successful,
+        )
+        max_prepared -= sum(bool(call.prepared_html) for call in item.tool_calls)
+        text_budget -= items_text_size([item])
         items.append(item)
     return items
 
 
 def items_text_size(items: Iterable[TurnItem]) -> int:
-    return sum(len(item.text) for item in items)
+    return sum(
+        len(item.text) + sum(len(call.prepared_html) for call in item.tool_calls) for item in items
+    )
 
 
 def refusal(

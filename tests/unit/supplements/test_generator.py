@@ -407,10 +407,9 @@ def test_a_ladder_no_one_can_reach_falls_back_to_the_tier_then_the_session() -> 
         usable=None,
         static_models=lambda provider: {},
     )
-    # ``usable=None`` is "cannot tell", not "none": a provider with NO registry rows is
-    # accepted (an aggregator that lists nothing statically still serves models), so the
-    # ladder's first rung is tried rather than the session silently winning.
-    assert plain.source == "ladder" and plain.spec.provider == "anthropic"
+    # Unknown static ids cannot justify guessing a paid direct-provider target.
+    # Aggregators still enter through the explicitly resolved tier/session specs.
+    assert plain.source == "session" and plain.spec is session
     empty = generator.resolve_design_model(
         configured="auto",
         session_spec=session,
