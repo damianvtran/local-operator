@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from local_operator.config import read_config_values
 from local_operator.helpers import convert_heic_to_png_file
+from local_operator.i18n.keys import wire_errors_files as _wf
 from local_operator.server.desktop import require_desktop
 from local_operator.server.utils import local_tokens
 from local_operator.server.utils.static_roots import (
@@ -24,6 +25,9 @@ from local_operator.server.utils.static_roots import (
     resolve_servable,
 )
 
+# Keep exception tails opaque and English text byte-identical: released previews
+# consume status, while desktop error readers accept the additive text envelope.
+# StaticPathDenied belongs to the path policy and remains an unchanged passthrough.
 router = APIRouter(tags=["Static"])
 logger = logging.getLogger("local_operator.server.routes.static")
 
@@ -172,7 +176,7 @@ async def get_image(
         if not mime_type or mime_type not in ALLOWED_IMAGE_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File is not an allowed image type: {mime_type or 'unknown'}",
+                detail=_wf.image_type(mime_type=mime_type or "unknown").envelope(),
             )
 
         # Check if this is a HEIC/HEIF file that needs conversion
@@ -190,7 +194,7 @@ async def get_image(
             except Exception as e:
                 logger.exception(f"Failed to convert HEIC/HEIF file {expanded_path}: {e}")
                 raise HTTPException(
-                    status_code=500, detail=f"Failed to convert HEIC/HEIF file: {str(e)}"
+                    status_code=500, detail=_wf.heic_conversion(error=str(e)).envelope()
                 )
 
         # Return the file as-is for other image types
@@ -201,7 +205,7 @@ async def get_image(
         raise
     except Exception as e:
         logger.exception(f"Error serving image file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=_wf.internal_error(error=str(e)).envelope())
 
 
 @router.get(
@@ -235,7 +239,7 @@ async def get_video(
         if not mime_type or mime_type not in ALLOWED_VIDEO_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File is not an allowed video type: {mime_type or 'unknown'}",
+                detail=_wf.video_type(mime_type=mime_type or "unknown").envelope(),
             )
 
         # Return the file
@@ -246,7 +250,7 @@ async def get_video(
         raise
     except Exception as e:
         logger.exception(f"Error serving video file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=_wf.internal_error(error=str(e)).envelope())
 
 
 @router.get(
@@ -280,7 +284,7 @@ async def get_audio(
         if not mime_type or mime_type not in ALLOWED_AUDIO_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File is not an allowed audio type: {mime_type or 'unknown'}",
+                detail=_wf.audio_type(mime_type=mime_type or "unknown").envelope(),
             )
 
         # Return the file
@@ -291,7 +295,7 @@ async def get_audio(
         raise
     except Exception as e:
         logger.exception(f"Error serving audio file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=_wf.internal_error(error=str(e)).envelope())
 
 
 @router.get(
@@ -323,7 +327,7 @@ async def get_html(
         if not mime_type or mime_type not in ALLOWED_HTML_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File is not an allowed HTML type: {mime_type or 'unknown'}",
+                detail=_wf.html_type(mime_type=mime_type or "unknown").envelope(),
             )
 
         try:
@@ -332,13 +336,13 @@ async def get_html(
             logger.exception(f"HTML file is not valid UTF-8: {expanded_path}")
             raise HTTPException(
                 status_code=400,
-                detail="HTML file is not valid UTF-8 text.",
+                detail=_wf.html_utf8().envelope(),
             )
         except Exception as e:
             logger.exception(f"Error reading HTML file: {e}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Internal Server Error: {str(e)}",
+                detail=_wf.internal_error(error=str(e)).envelope(),
             )
 
         return Response(content=content, media_type=mime_type)
@@ -347,7 +351,7 @@ async def get_html(
         raise
     except Exception as e:
         logger.exception(f"Error serving HTML file: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=_wf.internal_error(error=str(e)).envelope())
 
 
 # ------------------------------------------------------- signed URLs (Phase A)
@@ -396,7 +400,7 @@ def _require_sign_auth(request: Request) -> None:
     try:
         require_desktop(request)
     except HTTPException as exc:
-        raise HTTPException(401, "A local access token or desktop bearer is required.") from exc
+        raise HTTPException(401, _wf.sign_auth().envelope()) from exc
 
 
 @router.post(
@@ -423,11 +427,13 @@ async def sign_static_url(
     600 s, cap 3600 s.
     """
     if body.route not in SIGNABLE_ROUTES:
-        raise HTTPException(400, f"route must be one of: {', '.join(SIGNABLE_ROUTES)}")
+        raise HTTPException(400, _wf.sign_route(routes=", ".join(SIGNABLE_ROUTES)).envelope())
     if not body.path:
-        raise HTTPException(400, "path must not be empty.")
+        raise HTTPException(400, _wf.sign_path().envelope())
     ttl_s = local_tokens.TTL_DEFAULT_S if body.ttl_s is None else body.ttl_s
     if not 0 < ttl_s <= local_tokens.TTL_MAX_S:
-        raise HTTPException(400, f"ttl_s must be between 1 and {local_tokens.TTL_MAX_S}.")
+        # An opaque bound string preserves the ungrouped decimal English contract;
+        # ICU formats an integer as 3,600, unlike the former f-string's 3600.
+        raise HTTPException(400, _wf.sign_ttl(maximum=str(local_tokens.TTL_MAX_S)).envelope())
     url, exp = local_tokens.sign_url(body.route, body.path, ttl_s=ttl_s)
     return SignResponse(url=url, exp=exp)

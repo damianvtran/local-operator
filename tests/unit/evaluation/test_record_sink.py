@@ -46,7 +46,10 @@ from local_operator.evaluation.record_sink import (
     RecordSink,
     RecordSinkError,
 )
-from local_operator.evaluation.session_arm import run_session_episode
+from local_operator.evaluation.session_arm import (
+    EPISODE_TOOL_SURFACE,
+    run_session_episode,
+)
 from local_operator.harness.types import ReasoningDeltaEvent
 from local_operator.mcp.tool_bridge import create_mcp_tool_name
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
@@ -491,7 +494,14 @@ def _runner(
     )
     session = _RecordingSession(events)
     session_spec = SessionSpec(
-        hosting="test", model="mock", approvals=ApprovalPolicy.auto(), name="arm-record"
+        hosting="test",
+        model="mock",
+        # The episode posture: an explicit world boundary plus the pinned
+        # surface declared as its own approval (EPISODE_TOOL_SURFACE).
+        world_root=scratch_root / "world",
+        tools=EPISODE_TOOL_SURFACE,
+        approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+        name="arm-record",
     )
 
     async def rescue(descriptor: Any, **kwargs: Any) -> Any:

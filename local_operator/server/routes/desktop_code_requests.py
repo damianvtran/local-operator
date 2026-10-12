@@ -51,6 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from local_operator.code_requests import cache as code_requests_cache
 from local_operator.code_requests import ledger, service
 from local_operator.code_requests.hook import load_context_async
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_code_requests import (
     CodeRequestListing,
@@ -332,7 +333,7 @@ async def code_requests(
     if not _session_exists(config_dir, session_id):
         raise HTTPException(
             404,
-            {"code": "session_not_found", "message": f"no conversation with id {session_id}"},
+            _wd.session_not_found(session_id=session_id).envelope(code="session_not_found"),
         )
     scan_state, needs_scan = _scan_state(config_dir, session_id)
     if needs_scan:
@@ -392,7 +393,7 @@ async def code_requests_refresh(session_id: SessionID, body: RefreshBody, reques
     if not _session_exists(config_dir, session_id):
         raise HTTPException(
             404,
-            {"code": "session_not_found", "message": f"no conversation with id {session_id}"},
+            _wd.session_not_found(session_id=session_id).envelope(code="session_not_found"),
         )
     session_dir = _session_dir(config_dir, session_id)
     started_at = time.time()

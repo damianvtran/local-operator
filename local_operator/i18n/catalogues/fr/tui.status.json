@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, one {# agent} many {# d’agents} other {# agents}}",
+  "tui.status.band.starting": "démarrage…",
+  "tui.status.band.working": "en cours",
+  "tui.status.jobs": "{count, plural, one {# tâche} many {# de tâches} other {# tâches}}",
+  "tui.status.model.connecting": "connexion…",
+  "tui.status.model.setup": "configuration",
+  "tui.status.tunnel.parked": "accès distant désactivé"
+}

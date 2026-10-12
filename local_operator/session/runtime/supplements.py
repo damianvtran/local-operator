@@ -213,6 +213,11 @@ class SupplementRunner:
         #: never raises -- the ``read_monitor_settings`` posture (``Session.__init__``
         #: reads ``values.monitor`` the same way, on the same kind of build path).
         self._settings = self._read_settings()
+        # The generic harness hook defaults off; only this graphics-enabled owner
+        # requests bounded private bytes. Nothing changes durable/model history.
+        self._session._prepared_capture_enabled = bool(
+            policy.enabled() and self._settings.active and self._settings.graphics
+        )
         self._task: asyncio.Task[None] | None = None
         #: The detached maintenance pass (sweep.py): its own slot, deliberately NOT
         #: ``_task`` -- every control op gates its cut on ``_task``/``_running`` being
@@ -541,7 +546,20 @@ class SupplementRunner:
         )
         if pre.skipped:
             return
-        service = self._seam() if self._seam is not None else None
+        components: list[Component] = []
+        prepared_detail: list[str] = []
+        if pre.prepared and want_graphics:
+            from local_operator.supplements.prepared import promote
+
+            for candidate, content in pre.prepared:
+                result, refusal = promote(content, candidate.path, pre.evidence.datasets)
+                if result is not None:
+                    components.extend(result.components)
+                if refusal:
+                    prepared_detail.append(refusal)
+        # Explicit prepared work must not wait for a decoration vendor. The same
+        # decision function applies its deterministic file rules and bounds locally.
+        service = self._seam() if self._seam is not None and not pre.prepared else None
         decision = await decide_supplement(
             service,
             user_text=provenance.user_text,
@@ -560,6 +578,18 @@ class SupplementRunner:
             decision.graphics,
             (time.perf_counter() - started) * 1000.0,
         )
+        if pre.prepared:
+            # The preview is local, but every ordinary deliverable still participates
+            # in the same file bounds/selection. A vendor outage cannot hide them.
+            if want_files and not decision.featured and not decision.more:
+                deliverables = tuple(item for item in pre.candidates if item.deliverable)
+                decision = Decision(
+                    featured=deliverables[: settings.max_featured],
+                    more=deliverables[settings.max_featured :],
+                    vendor="prepared",
+                )
+            await self._write(answer.id, decision, components=components, detail=prepared_detail)
+            return
         if decision.graphics and want_graphics:
             # Files AND graphics: the generator half runs on its own task so a steer can cut
             # it without touching the decision's work, and so a slow model can never delay
@@ -575,16 +605,24 @@ class SupplementRunner:
             return
         await self._write(answer.id, decision)
 
-    async def _write(self, anchor: str, decision: Decision) -> None:
+    async def _write(
+        self,
+        anchor: str,
+        decision: Decision,
+        *,
+        components: Sequence[Component] = (),
+        detail: Sequence[str] = (),
+    ) -> None:
         """Journal the decision. A decision with nothing to show writes NOTHING.
 
         An empty ``done`` row would render as nothing anyway (``reader_disposition``) while
         costing a journal line per turn the vendor declined; the spam-rate measurement reads
         the DEBUG line and the golden set, not the journal.
         """
-        if decision.empty and not decision.more:
+        if decision.empty and not decision.more and not components:
             return
         job = new_job_id()
+        stored = await self._store(components)
         self._live_jobs.add(job)
         try:
             # Files-only: no generator is coming, so the first row is TERMINAL. A ``decided``
@@ -594,11 +632,16 @@ class SupplementRunner:
             # assumed to be 1 -- a re-used anchor must not collide with rows it already has.
             def build_done(base: Mapping[str, Any] | None) -> Mapping[str, Any]:
                 version = int(base.get("version", 0) or 0) + 1 if base is not None else 1
-                return dict(
+                final = dict(
                     build_details(
                         anchor=anchor, job=job, version=version, state="done", decision=decision
                     )
                 )
+                if stored:
+                    final["components"] = stored
+                if detail:
+                    final["detail"] = list(detail)
+                return final
 
             final = await self._commit_row(anchor=anchor, build=build_done)
             if final is not None:
@@ -752,7 +795,7 @@ class SupplementRunner:
                 max_output_tokens=settings.max_output_tokens,
                 max_cost_usd=settings.max_cost_usd,
                 timeout_s=settings.timeout_s,
-                price=lambda usage: self._price(usage, resolved),
+                model_price=self._price,
                 on_progress=lambda stage, elapsed: self._progress(
                     details, "running", stage=stage, elapsed_s=elapsed
                 ),
@@ -772,10 +815,16 @@ class SupplementRunner:
                 final: dict[str, Any] = dict(next_version(base, state=state, error=error))
                 final["components"] = components
                 final["model"] = outcome.model
+                final["model_source"] = outcome.model_source
+                final["attempts"] = list(outcome.attempts)
                 final["turns"] = outcome.turns
                 final["tokens_in"] = outcome.tokens_in
                 final["tokens_out"] = outcome.tokens_out
-                final["cost_usd"] = round(outcome.cost_usd, 6)
+                final["cost_known"] = outcome.cost_known
+                if outcome.cost_known:
+                    final["cost_usd"] = round(outcome.cost_usd, 6)
+                else:
+                    final.pop("cost_usd", None)
                 if outcome.instruction:
                     final["instruction"] = outcome.instruction[:MAX_INSTRUCTION_CHARS]
                 if outcome.detail:
@@ -900,22 +949,37 @@ class SupplementRunner:
 
         parts: list[str] = []
         usage: Any = None
-        async for event in self._session._stream_fn(request, None):
-            if isinstance(event, StreamTextDelta):
-                parts.append(event.delta)
-            elif isinstance(event, StreamUsageEvent):
-                usage = event.usage
+        try:
+            async for event in self._session._stream_fn(request, None):
+                if isinstance(event, StreamTextDelta):
+                    parts.append(event.delta)
+                elif isinstance(event, StreamUsageEvent):
+                    usage = event.usage
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A usage event can precede a provider stream error. Preserve that spend
+            # across the transport boundary before deciding whether recovery is affordable.
+            raise generator.CompletionFailure(exc, usage) from exc
         return "".join(parts), usage
 
-    def _price(self, usage: Any, resolved: Any) -> float:
+    def _price(self, usage: Any, resolved: Any) -> float | None:
         """What one fork turn cost, through THE money computation (``cost_for_usage``).
 
         The same function the status band and the ledger writer use, so the cap cannot
-        disagree with ``/usage`` about what a job has spent. Never raises: a pricing failure
-        must not end a job (the ledger still prices it on its own background thread).
+        disagree with ``/usage`` about what a job has spent. ``None`` means unknown
+        affordability, not free: the generator keeps completed work but cannot buy
+        another paid invocation. Explicit receipts and known local-free calls differ.
         """
-        if usage is None:
+        from local_operator.model.configure import _usage_cost
+
+        receipt = _usage_cost(usage)
+        if receipt is not None:
+            return receipt
+        if resolved.spec.provider in {"test", "ollama", "lmstudio", "vllm"}:
             return 0.0
+        if usage is None:
+            return None
         try:
             from local_operator.model.configure import (
                 cost_for_usage,
@@ -924,10 +988,33 @@ class SupplementRunner:
 
             spec = resolved.spec
             info = resolve_model_info(spec.provider, spec.model_id)
-            return float(cost_for_usage(spec.provider, info, usage) or 0.0)
+            if info.id == "unknown" or info.input_price == 0 or info.output_price == 0:
+                return None
+            return float(cost_for_usage(spec.provider, info, usage))
         except Exception:  # noqa: BLE001 -- an unpriceable turn is not a failed job
             logger.debug("supplement turn could not be priced", exc_info=True)
-            return 0.0
+            return None
+
+    def _metadata_text(self, value: str, *, fallback: str, limit: int) -> str:
+        """Raw authored bytes stay private; journal/live labels must use history's scrubber."""
+        import sys
+
+        from local_operator.ansi import sanitize_prompt_line
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = value
+        redact = getattr(self._session, "_redact_tool_result_text", None)
+        if callable(redact):
+            safe = redact(safe)
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            safe = runtime.scrub(safe)
+        if not isinstance(safe, str):
+            return fallback
+        safe = scrub_shapes(safe)
+        if safe != value or not safe.strip():
+            return fallback
+        return sanitize_prompt_line(safe, limit=limit) or fallback
 
     async def _store(self, components: Sequence[Component]) -> list[dict[str, Any]]:
         """Store each accepted component as a blob and build the row's ``components[]``.
@@ -955,8 +1042,12 @@ class SupplementRunner:
             entries.append(
                 {
                     "attachment": ref.digest,
-                    "title": component.title,
-                    "source": component.source,
+                    "title": self._metadata_text(
+                        component.title, fallback="Supporting visual", limit=160
+                    ),
+                    "source": self._metadata_text(
+                        component.source, fallback="Local turn evidence", limit=320
+                    ),
                     "mime": "text/html",
                     "height_hint": component.height_hint,
                 }
@@ -1001,6 +1092,12 @@ class SupplementRunner:
                     if state == "done"
                     else []
                 ),
+                model=str(details.get("model", "") or ""),
+                model_source=str(details.get("model_source", "") or ""),
+                attempts=[str(item) for item in (details.get("attempts") or [])][
+                    : self._settings.max_turns
+                ],
+                detail=[str(item)[:480] for item in (details.get("detail") or [])][:8],
                 error=str(details.get("error", "") or ""),
             )
             await await_emit(event)

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
-from local_operator.skills.discovery import Skill
+from local_operator.skills.discovery import Skill, packaged_skill_root
 
 MAX_READ_BYTES = 200 * 1024
 """Files larger than this are truncated; resources ship text, not binaries."""
@@ -371,18 +371,48 @@ def resource_url(scheme: str, name: str) -> str:
     return f"{scheme}://{quote(name, safe='')}"
 
 
+def _bounded_resource(path: Path, boundary: Path) -> bool:
+    """Boundary containment for a RESOLVED resource path, catalog exempt.
+
+    The packaged catalog is release knowledge a bounded session keeps (see
+    ``default_skill_roots``), so its resources legitimately resolve outside
+    the world. Everything else — including a world resource whose DIRECTORY
+    or BODY FILE was swapped for an escaping symlink after discovery — must
+    stay inside; the exemption is by provenance (the release tree), never by
+    skill name (QA rounds 1–2, Q2/Q5/Q6).
+    """
+
+    if path == boundary or path.is_relative_to(boundary):
+        return True
+    try:
+        packaged = packaged_skill_root().resolve()
+    except OSError:
+        return False
+    return path == packaged or path.is_relative_to(packaged)
+
+
 def resolve_resource_url(
     url: str,
     resources: Mapping[str, Skill],
     *,
     scheme: str,
     label: str,
+    boundary: Path | None = None,
 ) -> str | None:
     """Resolve one internal resource scheme, or return ``None`` for others.
 
     Unknown names list only resources in this scheme. That bounded error is the
     model's self-correction path and never leaks user skills while resolving a
     packaged guide (or vice versa).
+
+    ``boundary``, when set, is the READ-time half of a bounded session's
+    contract: before anything under a resource is read, the resource's own
+    directory must resolve inside the boundary — a directory whose symlink
+    target moved outside after discovery is reported with the same unknown
+    shape a name miss uses, so the boundary check leaks nothing about the
+    outside tree. Child reads inherit the check because ``_resolve_child``
+    already enforces containment relative to the resource directory. ``None``
+    is every ordinary call, unchanged.
     """
     prefix = f"{scheme}://"
     if not url.startswith(prefix):
@@ -403,14 +433,44 @@ def resolve_resource_url(
         available = ", ".join(sorted(resources.keys())) or "(none)"
         raise ValueError(f"Unknown {label}: {name}\nAvailable: {available}")
 
+    if boundary is not None:
+        # READ-time canonical containment (see the docstring): the check runs
+        # on the resource DIRECTORY, which the body read (file_path) and every
+        # child read both live under. A resolver must never raise a raw
+        # OSError, so an unresolvable base denies.
+        try:
+            base = resource.base_dir.resolve()
+        except (OSError, RuntimeError):
+            base = None
+        if base is None or not _bounded_resource(base, boundary):
+            raise ValueError(f"Unknown {label}: {name}")
+
     path = parts.path
     if not path or not path.strip("/"):
-        body = _read_text_capped(resource.file_path)
+        body_file = resource.file_path
+        if boundary is not None:
+            # The BODY FILE's own containment, not just its directory's: a
+            # cached resource whose SKILL.md was swapped for a symlink to an
+            # out-of-world file leaves the directory intact and was the
+            # residual bypass (QA round 2, Q6) — the directory check above
+            # cannot see it.
+            try:
+                body_real = body_file.resolve()
+            except (OSError, RuntimeError):
+                body_real = None
+            if body_real is None or not _bounded_resource(body_real, boundary):
+                raise ValueError(f"Unknown {label}: {name}")
+        body = _read_text_capped(body_file)
         listing = _reference_listing(resource, scheme=scheme)
         return body + "\n" + listing if listing else body
     return _resolve_child(resource, path, scheme=scheme, label=label)
 
 
-def resolve_skill_url(url: str, skills: Mapping[str, Skill]) -> str | None:
+def resolve_skill_url(
+    url: str,
+    skills: Mapping[str, Skill],
+    *,
+    boundary: Path | None = None,
+) -> str | None:
     """Resolve a ``skill://`` URL while preserving the public skills API."""
-    return resolve_resource_url(url, skills, scheme="skill", label="skill")
+    return resolve_resource_url(url, skills, scheme="skill", label="skill", boundary=boundary)

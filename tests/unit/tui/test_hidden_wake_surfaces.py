@@ -21,6 +21,11 @@ import pytest
 from local_operator.harness.types import CustomMessage
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.tui.app import OperatorApp, _resume_tail_start
+from local_operator.tui.widgets.transcript import (
+    QuietGroupBlock,
+    TranscriptView,
+    WakeBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 from tests.unit.tui.test_wake_ui import _paint, _schedule
 
@@ -382,3 +387,93 @@ async def test_a_quiet_result_settles_nothing_and_retires_a_stray_card() -> None
         await pilot.pause()
         assert app._painted_tool_card("q1") is None
         assert list(app.query(ToolCard)) == []
+
+
+# -- the quiet-group fold over wake receipts (design §5, slice S5) -----------
+
+
+def _distinct_visible_wake(text: str, wake_id: str) -> CustomMessage:
+    """A visible wake receipt with its own identity — ``visible_wake`` above
+    pins one wake for the hidden-delivery cells, and a run of two needs two
+    distinct deliveries (the live-receipt dedupe keys on id and occurrence)."""
+    return CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": f"(alarm) Scheduled wake {wake_id} — {text}",
+            "wake_id": wake_id,
+            "occurrence": 1,
+        },
+    )
+
+
+def _persisted_peer(body: str, entry_id: str):
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    return SimpleNamespace(
+        role=None,
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        id=entry_id,
+        text="",
+        tool_calls=None,
+        content=[],
+        details={"body": body, "sender": {"pid": 9, "conversation_name": "other"}},
+    )
+
+
+def _quiet_bars(app) -> list[QuietGroupBlock]:
+    view = app.query_one(TranscriptView)
+    return [b for b in view.blocks() if isinstance(b, QuietGroupBlock)]
+
+
+@pytest.mark.asyncio
+async def test_two_wake_receipts_replay_under_one_group_bar() -> None:
+    """A run of wake receipts folds like any other family (design §5, S5):
+    the bar states the family's word and the count, and the receipt rows are
+    its members — folded while collapsed, listed when opened."""
+    session = FakeSession()
+    session._history = [
+        simple_user("morning"),
+        _distinct_visible_wake("a", "w1"),
+        _distinct_visible_wake("b", "w2"),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if _quiet_bars(app):
+                break
+        (bar,) = _quiet_bars(app)
+        assert bar.group.family == "wake"
+        assert bar.group.count == 2
+        row = bar._build_row(100).plain
+        assert "wake" in row and "messages · 2" in row
+        wakes = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, WakeBlock)]
+        assert len(wakes) == 2
+        assert all(not wake.display for wake in wakes), "members fold while collapsed"
+        bar.toggle_expanded()
+        await pilot.pause()
+        assert all(wake.display for wake in wakes), "opening lists the receipts in place"
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_run_replays_as_one_bar_over_both_kinds() -> None:
+    """A peer receipt and a wake receipt in one run state ``mixed`` together:
+    the family is the run's composition, not the first row's kind."""
+    session = FakeSession()
+    session._history = [
+        simple_user("morning"),
+        _persisted_peer("note", "p1"),
+        _distinct_visible_wake("check the build", "w1"),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if _quiet_bars(app):
+                break
+        (bar,) = _quiet_bars(app)
+        assert bar.group.family == "mixed"
+        assert bar.group.count == 2
+        row = bar._build_row(100).plain
+        assert "mixed" in row and "messages · 2" in row

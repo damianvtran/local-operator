@@ -83,6 +83,7 @@ from local_operator.evaluation.runner.public_reply import (
     normalise_public_reply,
     public_reply_contract,
     public_reply_schema,
+    read_action_sequence,
     tolerated_fields_note,
 )
 from local_operator.harness.reply_channel import (
@@ -596,6 +597,15 @@ def validation_diagnostic(error: ValidationError) -> str:
 #: second-batch messages name the limit, the alternative and the rule. Rewriting
 #: one of these would throw away the only part of this that was ever measured.
 #:
+#: ``batch-shape`` deliberately LEFT this set when the decoder learned to read
+#: one-action replies and action SEQUENCES (2026-10-11). The rule sentence stays
+#: verbatim as the hint's prefix -- the class table and every sealed artifact
+#: are read through it -- but after those tolerances the population left under
+#: the class is overwhelmingly "no action stated at all": an empty object, a
+#: note-only envelope, a sole value that is not a decision. None of those are
+#: repaired by the bare rule; the hint now appends the accepted shape and the
+#: one way to send a note with no work (see ``rejection_hint``).
+#:
 #: ``env-version-misplaced`` is deliberately NOT here even though the decoder
 #: now names its defect: naming the misplaced key is only half the repair, and
 #: the half it cannot state -- the accepted LAYOUT -- is what this class needs,
@@ -609,7 +619,6 @@ _PRESERVED_HINTS = frozenset(
     {
         "envelope-shape",
         "second-batch",
-        "batch-shape",
         "adapter-capability",
         "empty-reply",
     }
@@ -772,6 +781,22 @@ def rejection_hint(
 
     if class_key in _PRESERVED_HINTS:
         return reason
+    if class_key == "batch-shape":
+        # The rule sentence stays verbatim as the PREFIX -- the class table and
+        # every sealed artifact are read through it -- but it is no longer the
+        # whole hint. The decoder reads one-action replies and action sequences
+        # now, so the population left here is the replies that state NO action
+        # at all: over the sealed corpus recounted 2026-10-11, 31 of the 46
+        # refusals left are that shape (23 ``{}``, 8 note-only), and those need
+        # the accepted reply itself, plus the one action that answers "a note
+        # and no work". The example is built from the schema against the
+        # observation in hand, so the hint cannot advertise a shape the decoder
+        # would refuse.
+        return (
+            reason + ' -- reply with one JSON object whose "actions" array holds '
+            "at least one action; when a note is all you have to send, make the "
+            'action a "wait". For example: ' + _example_json(surface, observation, shape)
+        )
     if class_key == "env-version-misplaced":
         # Appended rather than replaced, as ``out-of-frame-coordinate`` does: the
         # decoder's sentence already names the key that landed in the wrong
@@ -871,8 +896,10 @@ def rejection_hint(
                 "for you to state: send the actions themselves."
             )
         return (
-            "every action must carry the "
-            f'"observation_id" of the observation being answered: "{observation.observation_id}"'
+            "state the "
+            f'"observation_id" of the observation being answered ("{observation.observation_id}") '
+            "on at least one action; actions that omit it inherit that binding, and a batch "
+            "that states no binding, or a different observation, is refused"
         )
     if class_key == "field-invalid":
         return _field_invalid_hint(reason, observation, surface, shape)
@@ -1403,10 +1430,11 @@ def build_system_prompt(
         "current observation. Omit observation_id from individual actions; if you "
         "include legacy per-action IDs, every one must match the top-level ID."
         if compact
-        else 'Every action is an object whose type is given by the key "kind" (NOT "type"),\n'
-        'and every action must carry the "observation_id" of the observation you are\n'
-        "looking at right now: that echo is what binds a decision to the screen it was\n"
-        "made about, and a batch naming any other observation is refused. These are the"
+        else 'Every action is an object whose type is given by the key "kind" (NOT "type").\n'
+        'A batch must state the "observation_id" of the observation you are looking at\n'
+        "right now on at least one of its actions -- every action that omits it inherits\n"
+        "that binding: the echo is what binds a decision to the screen it was made about,\n"
+        "and a batch naming no observation, or any other one, is refused. These are the"
     )
     shape_intro = (
         "\nThese are the only permitted shapes:" if compact else "\nonly permitted shapes:"
@@ -1460,7 +1488,8 @@ fence:
 
 This is a MODEL-REPLY object, not the adapter protocol. "public_observations"
 is optional -- a string of at most {MAX_PUBLIC_OBSERVATIONS_CHARS} characters,
-where empty is valid. Record only concise NEW factual data
+where empty is valid. The reply must carry at least one action: when a note is
+all you have to send, make the action a "wait". Record only concise NEW factual data
 or visible progress observed on the CURRENT screen that may be needed later,
 because old screenshots are removed before text summarization. Do not repeat
 prior notes, invent facts, record credentials/secrets, or provide deliberation,
@@ -1610,6 +1639,7 @@ def parse_decision(
     compaction: CompactionRecord | None = None,
     action_surface: ActionSurface = LEGACY_ACTION_SURFACE,
     action_binding: str = LEGACY_ACTION_BINDING,
+    channel_arguments: bool = False,
 ) -> ModelDecision:
     """Parse the reply's ACTIONS strictly and bind them to the current observation.
 
@@ -1625,37 +1655,110 @@ def parse_decision(
     Strict about the DECISION, not about the framing around it. The framing is
     normalised by :func:`normalise_public_reply` before anything here validates:
     a bare action array, an ``action_batch`` wrapper, the full envelope, any of
-    those inside one generic tool-call serialization, and any of those followed
-    by text all reach this function as the same decision. What survives as a
-    refusal is what cannot be read as a decision -- malformed or duplicated JSON,
-    a stale observation binding, two action arrays that could each be the one
-    meant.
+    those inside one generic tool-call serialization, one action object written
+    as a sentence, a SEQUENCE of one-action objects written without the array
+    (:func:`read_action_sequence`), and any of those followed by text all reach
+    this function as the same decision. What survives as a refusal is what
+    cannot be read as a decision -- malformed or duplicated JSON, a stale
+    observation binding, two action arrays that could each be the one meant, a
+    reply that states no action at all, and material a reply carried after the
+    one thing this decoder read.
+
+    ``channel_arguments`` says what the PAYLOAD is: the argument text of a
+    dedicated reply-channel call (``harness/reply_channel``), whose arguments
+    ARE the reply. It widens exactly one reading -- a sole key of any name is
+    read structurally there (``public_reply._exactly_one_decision``) -- and no
+    other: every named carrier, declared key, sequence, binding check and
+    validation is the same one a prose reply crosses, and prose never gets the
+    structural reading at all. The client sets it only where the bytes
+    provably came off that channel (``EpisodeModelClient.decide``).
     """
 
-    decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
+    decoded, trailing, leading_framing_bytes = _decode_leading_json(
+        payload, channel_arguments=channel_arguments
+    )
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note, tolerated_fields = normalise_public_reply(decoded, action_binding=action_binding)
+    trailing_read_as_sequence = False
+    if trailing:
+        # The reply carried more than its first value, and its first value was
+        # not itself a decision (a complete envelope followed by text is
+        # tolerated below, unchanged). Try the whole payload as a SEQUENCE of
+        # single actions -- the objects of the array, the brackets never
+        # written. Only when that reads does the reply's first value stop being
+        # the thing to judge: a sequence that does not read leaves ``at_end``
+        # to hold the refusal it always had rather than execute the head and
+        # silently drop the remainder.
+        sequence = read_action_sequence(payload)
+        if sequence is not None:
+            actions, note, tolerated_fields = sequence, None, ()
+            trailing_read_as_sequence = True
+        else:
+            actions, note, tolerated_fields = normalise_public_reply(
+                decoded,
+                action_binding=action_binding,
+                at_end=False,
+                channel_arguments=channel_arguments,
+            )
+    else:
+        actions, note, tolerated_fields = normalise_public_reply(
+            decoded, action_binding=action_binding, channel_arguments=channel_arguments
+        )
     if action_binding == COMPACT_ACTION_BINDING:
         try:
-            actions = bind_compact_actions(decoded, actions, observation.observation_id)
+            actions = bind_compact_actions(
+                decoded,
+                actions,
+                observation.observation_id,
+                channel_arguments=channel_arguments,
+            )
         except ValueError as error:
             raise ActionBatchRefused(
                 "decision does not bind to the current observation_id",
                 class_key="observation-binding",
             ) from error
     elif action_binding == LEGACY_ACTION_BINDING:
-        # Legacy schemas still require every per-action ID. Check those values
-        # against the pending observation before ActionBatch can normalize them.
-        for action in actions:
+        # A batch may state its binding ONCE -- on any one action -- and omit it
+        # on the others; the omissions inherit the stated id. Binding a whole
+        # batch to one screen once is a natural model decision, and the harness
+        # can complete the echo itself rather than spending a corrective round
+        # trip on a formality. The shape this admits is the one read out of a
+        # sealed 2026-09 OSWorld rejection: a two-action batch bound on its first
+        # action only, refused as observation-binding. Refused turns ran ~10% of
+        # that campaign's calls (137 of 1340) and tracked task failure. What must
+        # NOT move: a stated id that names a DIFFERENT observation refuses the
+        # whole batch -- an action meant for a screen the environment has moved
+        # past must never be admitted by filling in its siblings -- and a batch
+        # that states no id at all is still refused, because with nothing stated
+        # a stale batch would silently inherit the CURRENT observation, which is
+        # the one failure this check exists to stop. A batch of non-objects is
+        # not this check's business and falls through to validation unchanged.
+        # Both refusals raise the sentence the class table and every sealed
+        # artifact were read with, so old and new bundles bucket identically;
+        # only where an omitted id is completed changed.
+        mappings = [action for action in actions if isinstance(action, Mapping)]
+        for action in mappings:
             if (
-                isinstance(action, Mapping)
-                and action.get("observation_id") != observation.observation_id
+                "observation_id" in action
+                and action["observation_id"] != observation.observation_id
             ):
                 raise ActionBatchRefused(
                     "actions at indexes [0] bind to a different observation_id",
                     class_key="observation-binding",
                 )
+        if mappings and not any("observation_id" in action for action in mappings):
+            raise ActionBatchRefused(
+                "actions at indexes [0] bind to a different observation_id",
+                class_key="observation-binding",
+            )
+        actions = [
+            (
+                {**action, "observation_id": observation.observation_id}
+                if isinstance(action, Mapping) and "observation_id" not in action
+                else action
+            )
+            for action in actions
+        ]
     else:
         raise ValueError("action_binding must be 'legacy' or 'compact'")
     # Keep the visible response, not a reconstruction from its actions, whenever
@@ -1663,7 +1766,18 @@ def parse_decision(
     # context carries verbatim. It is redacted at the runner's resolved-secret
     # boundary before replay.
     public_reply = payload.strip() if note is not None else None
-    if trailing:
+    if trailing_read_as_sequence:
+        # The remainder was not ignored -- it was read as the reply's other
+        # actions -- so it gets its own reading rather than the ignored-text
+        # line below. Logged in the same style and for the same reason: a
+        # tolerance nobody can observe is indistinguishable from the harness
+        # quietly mangling a reply, and the count is what says what ran.
+        logger.warning(
+            "decision was assembled from the single-action objects of an "
+            "actions sequence (array brackets never written): %d action(s) read",
+            len(actions),
+        )
+    elif trailing:
         # Tolerated, but never silent. A model that reliably appends junk is a
         # signal worth seeing -- it may point at a prompt or provider problem
         # -- and a tolerance nobody can observe is indistinguishable from the
@@ -1723,6 +1837,10 @@ def parse_decision(
     return ModelDecision(
         action_batch=batch,
         public_reply=public_reply,
+        # The structural-reading fact rides the decision because MANY readers
+        # decode these bytes again (episode recording is one); a reader without
+        # it reads a different reply. See ``ModelDecision.channel_arguments``.
+        channel_arguments=channel_arguments,
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
@@ -2679,6 +2797,12 @@ class ProviderModelClient:
                 compaction=compaction,
                 action_surface=action_surface,
                 action_binding=self._action_binding,
+                # Whether the bytes just judged came off the reply channel.
+                # ``channel_reply`` truthy is exactly the condition that
+                # replaced the prose with the call's own arguments a few lines
+                # up; a falsy channel reply leaves the prose in place, and
+                # prose keeps the closed carrier list -- see ``parse_decision``.
+                channel_arguments=bool(channel_reply),
                 # Was hardcoded to 0 while the runner sent no tools and read no
                 # call. Now that the reply channel exists, the bundle records
                 # how the model actually answered — which is the measurement

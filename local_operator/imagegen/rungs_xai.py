@@ -34,15 +34,17 @@ probe ran this wave by operator decision):
   ``response_format``), the bounded downloader fetches it — tolerant, never
   the primary path.
 
-**Editing** (wired media wave-2 edit lane, 2026-10-10): ``POST
-/v1/images/edits`` with the single-image shape — ``"image": {"url": <data
-URI>, "type": "image_url"}`` — and the same ``data[]``/``usage`` parse as
-generations. Edits bill input AND output (the pricing page says so
-explicitly), so the generations flat rate must never be reused as an edit
-cost: the reported ``usage.cost_in_usd_ticks`` stays the only figure, and
-nothing replaces it when absent. Up to 5 references are documented for
-multi-image editing; that shape arrives with the multi-source wire, and
-``num_images > 1`` on the single-image shape is a recorded skip.
+**Editing** (wired media wave-2 edit lane, 2026-10-10; multi-source wire
+2026-10-11): ``POST /v1/images/edits`` with one source in the single-image
+shape — ``"image": {"url": <data URI>, "type": "image_url"}`` — or several
+in the multi-image shape — ``"images": [{"url": ..., "type":
+"image_url"}, ...]``, up to five references (docs fetched 2026-10-11); the
+vendor documents the two fields as mutually exclusive, so exactly one is
+ever sent. Same ``data[]``/``usage`` parse as generations. Edits bill input
+AND output (the pricing page says so explicitly), so the generations flat
+rate must never be reused as an edit cost: the reported
+``usage.cost_in_usd_ticks`` stays the only figure, and nothing replaces it
+when absent. ``num_images > 1`` on the edit endpoint is a recorded skip.
 """
 
 from __future__ import annotations
@@ -95,7 +97,7 @@ async def run_xai(
     key: str,
     num_images: int,
     image_size: str,
-    source_url: str | None,
+    source_urls: list[str] | None,
     seed: int | None,
     model: str | None,
     emit: ProgressFn | None,
@@ -123,20 +125,24 @@ async def run_xai(
         "response_format": "b64_json",
     }
     path = XAI_IMAGES_PATH
-    if source_url is not None:
-        # The wired edit shape is the single-image one (docs fetched
-        # 2026-10-10): an ``image`` object whose ``url`` takes the data URI;
-        # ``n`` is a generations-only parameter, so an edit carries no count
-        # (the multi-image page's 1..5 references arrive with the
-        # multi-source wire). A larger request is a recorded SKIP rather
-        # than silently delivering one image (review round 1, R2).
+    if source_urls:
+        # One source keeps the single-image shape (``image``); several ride
+        # the multi-image shape (``images``, up to five references — docs
+        # fetched 2026-10-11). The vendor documents the two fields as
+        # mutually exclusive, so exactly one is ever sent. ``n`` is a
+        # generations-only parameter, so an edit carries no count: a larger
+        # request is a recorded SKIP rather than silently delivering one
+        # image (review round 1, R2).
         if num_images > 1:
             raise RungSkipped(
                 "xAI's edit endpoint documents no image count; a multi-image "
                 "request is skipped rather than silently delivering fewer.",
                 reason_class="unsupported",
             )
-        body["image"] = {"url": source_url, "type": "image_url"}
+        if len(source_urls) == 1:
+            body["image"] = {"url": source_urls[0], "type": "image_url"}
+        else:
+            body["images"] = [{"url": s, "type": "image_url"} for s in source_urls]
         path = XAI_IMAGES_EDITS_PATH
     else:
         body["n"] = num_images

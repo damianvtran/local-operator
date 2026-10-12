@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.billing_links import BillingKind
 from local_operator.providers.quota_notice import (
     QuotaVerdict,
@@ -225,7 +226,7 @@ async def quota_notice(
     try:
         definition = controller.provider(requested)
         if definition is None:
-            raise HTTPException(422, "Unknown provider")
+            raise HTTPException(422, _wd.unknown_provider().envelope())
         resolved = definition.id
 
         reports: list[UsageReport] = controller.cached_usage_reports(resolved)

@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "Не удалось получить конфигурацию: {error}",
+  "wire.errors.settings.config_unreadable": "Файл конфигурации невозможно прочитать. Исправьте его перед сохранением.",
+  "wire.errors.settings.config_update_failed": "Не удалось обновить конфигурацию: {error}",
+  "wire.errors.settings.credential_key_empty": "Ключ учётных данных не может быть пустым",
+  "wire.errors.settings.credential_retrieve_failed": "Не удалось получить учётные данные: {error}",
+  "wire.errors.settings.credential_update_failed": "Не удалось обновить учётные данные: {error}",
+  "wire.errors.settings.inline_credentials": "Используйте endpoint без встроенных учётных данных и параметров запроса.",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "Не предоставлено ни одного допустимого поля для обновления",
+  "wire.errors.settings.not_registered": "Этот параметр не зарегистрирован.",
+  "wire.errors.settings.system_prompt_retrieve_failed": "Не удалось получить системный промпт: {error}",
+  "wire.errors.settings.system_prompt_update_failed": "Не удалось обновить системный промпт: {error}"
+}

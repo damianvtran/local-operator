@@ -971,6 +971,37 @@ async def test_the_announce_keeps_its_semantic_lamp() -> None:
         )
 
 
+#: The sentence the durable notice paints for ``_SLACK_DOWN`` (no signpost: rung 4).
+_SLACK_SENTENCE = "MCP slack failed: command not found: slack-mcp"
+
+
+def _painted_lines(grid: str) -> list[str]:
+    """The non-blank rows of a painted frame, right-stripped."""
+    return [line.rstrip() for line in grid.splitlines() if line.strip()]
+
+
+def _notice_sentence_rows(rows_from_notice: list[str]) -> list[str]:
+    """The text of the slack notice's own rows, read off the painted frame.
+
+    The first row carries the notice's ``✗ `` spine; a continuation row is indented
+    onto the hanging column instead. Stops at the first blank cell run or as soon as
+    the rows reassemble the whole sentence, so a row of the composer beneath it is
+    never swallowed once the notice is complete. Empty before the notice paints.
+    """
+    start = next((i for i, row in enumerate(rows_from_notice) if "MCP slack failed:" in row), None)
+    if start is None:
+        return []
+    parts: list[str] = []
+    for row in rows_from_notice[start:]:
+        text = row.split("\u2717", 1)[1].strip() if "\u2717" in row else row.strip()
+        if not text:
+            break
+        parts.append(text)
+        if " ".join(parts) == _SLACK_SENTENCE:
+            break
+    return parts
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("columns", [100, 80, 70, 60, 50, 44, 40])
 async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns: int) -> None:
@@ -1009,7 +1040,21 @@ async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns
             return _frame(app)
 
         assert await _until(pilot, lambda: "MCP slack" in _grid())
-        lines = [line.rstrip() for line in _grid().splitlines() if line.strip()]
+        if columns < 70:
+            # WAIT FOR THE SENTENCE, NOT FOR ITS FIRST WORD. At these widths the notice
+            # wraps onto a second row, and "MCP slack" is already on screen in the frame
+            # where the block is still one row tall — the continuation row (``found:
+            # slack-mcp``) lands a frame later, once the block's fold and its height pin
+            # agree. CI read the first frame: ``'MCP slack failed: command not ❯
+            # Message Local Operator… ◆ model › ⊙ 2 MCP'`` — the notice's first row
+            # followed directly by the composer's (shards 2026-10-09/10, [40] and
+            # [44]). The predicate is the condition the assertion below is about; if it
+            # never holds, the read below reports the frame it ended on.
+            await _until(
+                pilot,
+                lambda: " ".join(_notice_sentence_rows(_painted_lines(_grid()))) == _SLACK_SENTENCE,
+            )
+        lines = _painted_lines(_grid())
         # The D1-1 shape, asserted on the frame: the pointer's tail orphaned onto
         # a row of its own. Wherever the tail appears, the whole signpost is on
         # that row with it.
@@ -1051,21 +1096,11 @@ async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns
             # require it whole. A clamp (the failure mode this rung exists to
             # avoid) leaves the tail unconsumed, and a surviving ``— /mcp`` leaves
             # text after the sentence.
-            expected = "MCP slack failed: command not found: slack-mcp"
             first = next(i for i, line in enumerate(lines) if "MCP slack failed:" in line)
-            parts: list[str] = []
-            for line in lines[first:]:
-                # The first row carries the notice's ``✗ `` spine; a continuation
-                # row is indented onto the hanging column instead.
-                text = line.split("\u2717", 1)[1].strip() if "\u2717" in line else line.strip()
-                if not text:
-                    break
-                parts.append(text)
-                if " ".join(parts) == expected:
-                    break
+            parts = _notice_sentence_rows(lines[first:])
             painted = " ".join(parts)
             assert (
-                painted == expected
+                painted == _SLACK_SENTENCE
             ), f"rung 4 is not the whole sentence at {columns} columns: {painted!r}"
 
 

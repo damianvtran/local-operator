@@ -47,6 +47,10 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The open-frame trace names a real output file, read once at import.
+    # Inheriting it could append test timings to the operator's trace; tests
+    # that exercise tracing must opt in with their own isolated output path.
+    "LOP_OPEN_TRACE",
     # The click ladder's launch rung looks for `local-operator-ui` on PATH,
     # which on a machine that has the app installed FINDS IT. A test that drives
     # `open_session` without doubling the rung therefore starts the operator's
@@ -472,11 +476,24 @@ def arm_process_desktop_gates() -> None:
         os.environ[name] = value
 
 
+def scrub_import_time_environment() -> None:
+    """Clear resource destinations before production modules capture them.
+
+    A function-scoped fixture runs after collection: relay imports open_trace
+    while collecting its tests, so clearing the variable in that fixture leaves
+    the already-captured output path live. Match the desktop gates' import-time
+    and configure-time protection without changing production's once-at-import
+    semantics. A tracing test can still opt in afterward in its own subprocess.
+    """
+    os.environ.pop("LOP_OPEN_TRACE", None)
+
+
 # At IMPORT, not only in a hook: a collection-time import (a module-scope helper,
 # a fixture that builds a child env) runs before ``pytest_configure`` in a worker
 # that receives already-collected items, and the whole point of setting it here
 # is that no child can be spawned before it is in the environment.
 arm_process_desktop_gates()
+scrub_import_time_environment()
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -487,6 +504,7 @@ def pytest_configure(config: pytest.Config) -> None:
     session's first test.
     """
     arm_process_desktop_gates()
+    scrub_import_time_environment()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1234,14 +1252,54 @@ def _temp_roots(item: pytest.Item) -> tuple[Path, ...]:
     already failed. `Exception`, not `OSError`, for the same reason the sweep
     itself suppresses broadly — a test may have replaced the path machinery this
     walk depends on, and discovering nothing is the right failure here.
+
+    ``tmp_path`` is named in ``funcargs`` for every test that REQUESTS it, but
+    NOT for one that only receives it through a dynamically resolved fixture
+    (``request.getfixturevalue``) — the network fixtures' house idiom
+    (``devices`` and everything built on it). Measured on a ``secret_mesh``-shaped
+    cell: 0 roots here, the candidate list collapsed to the single default-config
+    entry, and the broker under the resolved root survived its test — the
+    fixture-mediated leak of #2078/#2033. ``_resolved_tmp_path`` is the fallback
+    for that shape.
     """
     tmp_path = getattr(item, "funcargs", {}).get("tmp_path")
+    if not isinstance(tmp_path, Path):
+        tmp_path = _resolved_tmp_path(item)
     if not isinstance(tmp_path, Path):
         return ()
     with suppress(Exception):
         if tmp_path.is_dir():
             return (tmp_path, *(child for child in tmp_path.rglob("*") if child.is_dir()))
     return ()
+
+
+def _resolved_tmp_path(item: pytest.Item) -> Path | None:
+    """The ``tmp_path`` THIS item had resolved, when ``funcargs`` does not name it.
+
+    Read off the request tree's shared fixture map (``_fixture_defs`` on the
+    item's top request): pytest creates ONE dict at the top request and passes it
+    down by reference to every ``SubRequest`` (``fixtures.py``'s
+    ``SubRequest.__init__``), and each resolution — including a dynamic
+    ``request.getfixturevalue`` chain — records its value there. So the top
+    request still names a ``tmp_path`` the item's static fixture closure never
+    did.
+
+    Private and read-only, both deliberate. There is no public query for "was
+    this fixture already resolved": asking through ``getfixturevalue`` would
+    CREATE a fresh directory for every test that never used one. If a pytest
+    upgrade stops exposing the map, this degrades to ``None`` (the pre-fallback
+    behaviour) and
+    ``test_a_broker_under_a_fixture_mediated_root_is_dead_once_that_test_has_torn_down``
+    reddens, rather than a leak resuming silently.
+    """
+    request = getattr(item, "funcargs", {}).get("request")
+    fixture_defs = getattr(request, "_fixture_defs", None)
+    fixturedef = fixture_defs.get("tmp_path") if isinstance(fixture_defs, dict) else None
+    cached = getattr(fixturedef, "cached_result", None)
+    if not isinstance(cached, tuple) or not cached:
+        return None
+    value = cached[0]
+    return value if isinstance(value, Path) else None
 
 
 @pytest.fixture(autouse=True)

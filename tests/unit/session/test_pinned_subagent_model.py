@@ -624,7 +624,7 @@ async def test_task_tool_tells_the_model_not_to_retry_on_another_tier(tmp_path, 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         raise SubagentModelUnavailable("hi", "no model configured at subagents.models.hi")
 
     context = ToolContext(subagent_launcher=launcher)
@@ -865,7 +865,7 @@ async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         return f"job-{label}"
 
     context = ToolContext(subagent_launcher=launcher, session_model_label="test/m")

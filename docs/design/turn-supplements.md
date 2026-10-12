@@ -1543,6 +1543,8 @@ LOOK
 - Keep height content-sized, under ~480px; split rather than scroll.
 - No animation, transitions, or external fonts. Values stay readable without hover — tooltips are enhancement only (relay/native have no hover). **Accepted loss (round-2 D2-4):** where a label is still truncated on a no-hover surface, the full text is unreachable there — the axis titles and the data's own precision carry the meaning, and the fixture set (App. C) shows the worst case rather than assuming it away.
 
+- Interactive controls use native buttons, visible focus and keyboard operation; no hover-only content. Keep motion off, including under prefers-reduced-motion.
+
 TECHNICAL CONTRACT
 - No network, no storage, no navigation: never use fetch, XMLHttpRequest, WebSocket, import(), eval, Function, <form>, <iframe>, <object>, <embed>, <base>, <link>, <meta>, external src/href, javascript: URLs, window.open, localStorage, cookies. They are blocked and the component is discarded.
 - Helpers (prefer them; they size, label and theme correctly):

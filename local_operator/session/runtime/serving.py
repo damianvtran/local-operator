@@ -69,6 +69,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
+from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
     from local_operator.harness.types import AudioContent, ImageContent
@@ -103,6 +104,7 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
+    Transcript,
     is_bookkeeping_entry,
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
@@ -3078,6 +3080,13 @@ class ServingSessionHandle(SessionHandle):
     async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
         return self._session.history_page(before, anchor)
 
+    @property
+    def journal_order_supported(self) -> bool:
+        transcript = getattr(self._session, "transcript", None) or getattr(
+            self._session, "_transcript", None
+        )
+        return isinstance(transcript, Transcript)
+
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
 
@@ -3108,7 +3117,112 @@ class ServingSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — the relay is additive, never a gate
                 logger.debug("runtime event serialization failed", exc_info=True)
 
-        return self._session.subscribe(handler)
+        unsubscribe_events = self._session.subscribe(handler)
+        transcript = getattr(self._session, "transcript", None) or getattr(
+            self._session, "_transcript", None
+        )
+        if not isinstance(transcript, Transcript):
+            return unsubscribe_events
+        from local_operator.session import transcript_index
+
+        directory = Path(transcript.directory)
+        root, session_id = directory.parent.parent, directory.name
+        pending: dict[str, tuple[dict[str, Any], tuple[int, int, float]]] = {}
+        correction: asyncio.Task[Any] | None = None
+        closed = False
+
+        async def emit_order() -> None:
+            # All-row durable boundaries, NOT tokens, trigger this single-flight
+            # scan. The callback returns immediately; a cold index never blocks
+            # the live relay. The pending map carries identities, not payloads.
+            attempts = 0
+            while pending and not closed:
+                attempts += 1
+                task, _ = transcript_index.start_refresh(root, session_id)
+                try:
+                    await asyncio.shield(task)
+                except Exception:  # noqa: BLE001 - correction never undoes durability
+                    logger.debug("journal order refresh failed", exc_info=True)
+                    pending.clear()
+                    on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                    return
+                index = transcript_index.fresh_resident(root, session_id)
+                if index is None:
+                    if attempts >= 3:
+                        pending.clear()
+                        on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                        return
+                    continue
+                rows = []
+                reconcile = False
+                for id_, (descriptor, source) in list(pending.items()):
+                    pending.pop(id_, None)
+                    # A later append preserves this prefix; a replaced writer
+                    # inode or a same-size changed source does not. Never label
+                    # a late old-file notification with a rebuilt domain.
+                    if index.sig.get("inode") != source[0] or index.sig.get("size", -1) < source[1]:
+                        reconcile = True
+                        continue
+                    if index.sig.get("size") == source[1] and index.sig.get("mtime") != source[2]:
+                        reconcile = True
+                        continue
+                    seq = index.journal_rows.get(id_)
+                    if seq is not None:
+                        rows.append({**descriptor, "journal_seq": seq})
+                    else:
+                        reconcile = True
+                for at in range(0, len(rows), 128):
+                    on_event(
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": index.journal_generation,
+                            "rows": rows[at : at + 128],
+                        }
+                    )
+
+                if reconcile:
+                    # Refusing stale provenance is not recovery by itself. A
+                    # quiet send must still learn the new source without a
+                    # next token/read. One signal per rejected batch; never
+                    # relabel old-file descriptors with the rebuilt domain.
+                    on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+
+        def committed(rows: tuple[Any, ...], source: tuple[int, int, float]) -> None:
+            nonlocal correction
+            for row in rows:
+                payload = row.payload
+                details = payload.get("details") or {}
+                pending[row.id] = (
+                    {
+                        "id": row.id,
+                        "type": row.type,
+                        "role": payload.get("role"),
+                        "tool_call_id": payload.get("tool_call_id"),
+                        "anchor": details.get("anchor") if isinstance(details, dict) else None,
+                    },
+                    source,
+                )
+            if len(pending) > 4096:
+                # Bounded even if a cold build outlives an unusual burst. A
+                # coalesced authoritative snapshot is the recovery, not a
+                # silent dropped old-send annotation.
+                pending.clear()
+                on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+            if correction is None or correction.done():
+                correction = asyncio.create_task(emit_order())
+
+        unsubscribe_commits = transcript.subscribe_commits(committed)
+
+        def unsubscribe() -> None:
+            nonlocal closed
+            closed = True
+            unsubscribe_events()
+            unsubscribe_commits()
+            pending.clear()
+            if correction is not None:
+                correction.cancel()
+
+        return unsubscribe
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
@@ -8192,10 +8306,14 @@ class ServingSessionHandle(SessionHandle):
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
-                # can do rather than promising a detach it cannot perform.
+                # can do rather than promising a detach it cannot perform. The
+                # sentence is the CONTRACT's own (see
+                # ``tui/app.py::_team_detach_receipt``), byte-for-byte, so the
+                # three refusal surfaces cannot drift (M12 follow-up, #2072).
                 return SlashResult(
                     kind="notice",
-                    text="this session cannot run a team, so there is no team to detach",
+                    text="this session can list and chart teams, but not run one, "
+                    "so there is no team to detach",
                     style="warning",
                 )
             # Read BEFORE the call, and off the OBJECT rather than its name
@@ -8267,7 +8385,8 @@ class ServingSessionHandle(SessionHandle):
             # refusal because nothing on screen says which one you got.
             return SlashResult(
                 kind="notice",
-                text="this session cannot run a team. /team chart <name> shows a roster",
+                text="this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 style="warning",
             )
         # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
@@ -8960,7 +9079,7 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice",
                 text=(
                     f"language: {resolved} ({language_name(resolved)}) — "
-                    f"/language <{'|'.join(options)}> switches; space lists"
+                    f"/language <{'|'.join(options)}>; space"
                 ),
                 style="info",
             )
@@ -9630,7 +9749,11 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not publish the subagent counts", exc_info=True)
 
     # -- turn-supplement control ops (lane C1b; memo §2.7) --------------------------------
+    # The runtime socket owns another thread even for daemon/exec. Lazy reads
+    # and controls must hop before touching the runner or journal; an on-loop
+    # test cannot detect an omitted hop, so real threaded RPC pins all five.
 
+    @_on_session_loop
     async def supplement_cancel(self, anchor: str, job: str) -> str:
         """Cancel a running generator job. Idempotent; a settled job answers neutrally.
 
@@ -9641,21 +9764,25 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         return await self._supplements.cancel_job(anchor, job)
 
+    @_on_session_loop
     async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
         """Cut the in-flight attempt and start version + 1 with the user's instruction."""
         self._check_loop_thread()
         return await self._supplements.steer_job(anchor, job, text)
 
+    @_on_session_loop
     async def supplement_restart(self, anchor: str, job: str) -> str:
         """Version + 1 with the previous instruction (or none): the Retry affordance."""
         self._check_loop_thread()
         return await self._supplements.restart_job(anchor, job)
 
+    @_on_session_loop
     async def supplement_dismiss(self, anchor: str) -> str:
         """Hide the row for good and count it as a spam signal (memo §2.7, §5.2)."""
         self._check_loop_thread()
         return await self._supplements.dismiss(anchor)
 
+    @_on_session_loop
     async def supplements_for(self, anchors: list[str]) -> dict[str, dict[str, Any]]:
         """``{anchor: newest row}`` for the given anchors (memo §2.7's lazy read op).
 

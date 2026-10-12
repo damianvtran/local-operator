@@ -187,12 +187,12 @@ class SessionRow(BaseModel):
     #: a row this build cannot answer for carries the null rather than an
     #: omission.
     #:
-    #: REMOTE ROWS carry no VALUE in this build — the mesh lane owns the
-    #: producer half and adds the same name and unit later; until then the
-    #: key holds the declared default on those rows like every other field only
-    #: the local half fills, and an older daemon omits it entirely. A client
-    #: reads null/absent as "fall back to the row's creation time", which is
-    #: also what it does before the first user message of a session exists.
+    #: REMOTE ROWS carry the peer's claim whenever the peer computes one (the
+    #: mesh producer half: ``network/relay.py`` computes it on outbound peer
+    #: rows); a peer that predates it omits the key entirely, and a peer row
+    #: whose transcript holds no typed user send holds the declared default. A
+    #: client reads null/absent as "fall back to the row's creation time",
+    #: which is also what it does before the first user message exists.
     last_user_at: float | None = None
 
     @field_validator("subagents_running", "subagents_queued", mode="before")
@@ -648,6 +648,10 @@ class HistoryEntry(BaseModel):
     #: ``extra`` on this model is pydantic's ``ignore``, so an older renderer drops
     #: the key and keeps today's behaviour. See ``HistoryTsSource``.
     ts_source: HistoryTsSource
+    # Source position is distinct from time and only emitted for an opted-in
+    # reader with a verified page/index view. None must not add strict DTO keys
+    # to legacy responses (the same exclude_if policy as open-frame facts).
+    journal_seq: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
 
 
 class RunFacts(BaseModel):
@@ -700,6 +704,19 @@ class RunFacts(BaseModel):
 
 
 class HistoryPage(BaseModel):
+    journal_generation: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    journal_order_state: Literal["ready", "building", "unsupported", "unavailable"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Bounded same-session lookup for already-loaded rows outside this page:
+    # in particular a cached send that aged out before the viewer subscribed.
+    # Missing ids are named, not assigned fabricated ordinals.
+    journal_ordinals: dict[str, int] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    journal_missing_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool

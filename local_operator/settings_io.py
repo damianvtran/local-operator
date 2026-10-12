@@ -723,6 +723,24 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.network_description()),
     ),
+    # Split out of ``network`` (the trigger note's Q5, settled by reading
+    # ``SECTIONS``): this policy is read LIVE — every update front end reads it
+    # fresh at its own start, and the relay's rollout driver re-reads it before
+    # every ask, so a roll already running halts at its next member boundary —
+    # while every key under ``network`` is read once at relay start and that
+    # section's description says so ("All take effect when the relay
+    # restarts"). Scope is uniform within a section by construction (AGENTS.md,
+    # "Adding a configuration key"), so saying something true here means a
+    # section of its own — the same split ``session_cleanup`` and
+    # ``memory_guard`` took. The KEY and its config-file path stay under
+    # ``network`` (RU §3: "defaulted in the config file's existing ``network:``
+    # section"); only the registry's grouping moved.
+    Section(
+        "mesh_updates",
+        _t(_ws.mesh_updates_title()),
+        Scope.LIVE,
+        _t(_ws.mesh_updates_description()),
+    ),
     # The Aida keys. Scope LIVE, with the caveats stated in the description
     # rather than hidden behind a dishonest label: the pause flag is delivered
     # to every live process by the config watcher on its 2 s tick (that IS the
@@ -801,6 +819,21 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.speech_title()),
         Scope.LIVE,
         _t(_ws.speech_description()),
+    ),
+    # Agent messages (Team Bridge, RFC §5): the local half of a feature whose
+    # eligibility, consent and endpoint state are SERVER state. LIVE because
+    # every consumer reads these keys per call — the desktop routes read the
+    # manager they hold and the connector is built per use — so an edit lands
+    # on the next surface open with no relaunch. Its own section rather than
+    # rows under an existing one for the §2 terminology reason: "agent
+    # messages" is the feature noun, and grouping it under ``agents`` (starter
+    # roles) or ``network`` (transport) would hide which of the three local
+    # "team" senses this feature is not.
+    Section(
+        "team_bridge",
+        _t(_ws.team_bridge_title()),
+        Scope.LIVE,
+        _t(_ws.team_bridge_description()),
     ),
     Section(
         "retired",
@@ -4515,6 +4548,35 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=3650.0,
         help=(_t(_ws.network_audit_max_age_days_help())),
     ),
+    # THE SWITCH (S3b; mesh-update-propagation.md §5): auto-roll is reachable
+    # only when this reads ``auto``. A per-run ``lop update --no-roll``
+    # overrides it; the manual verbs (``lop network update``) work under
+    # either. Stored under the ``network`` block — the config-file location is
+    # the design's ("beside ``keepalive_s``, ``link_idle_s``", RU §3) — while
+    # the SECTION above is ``mesh_updates`` for the scope reason stated on it.
+    # The default mirrors ``rollouts.DEFAULT_ROLLOUT_ON_UPDATE``, which
+    # ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins.
+    Setting(
+        key="network.rollout_on_update",
+        path=("network", "rollout_on_update"),
+        section="mesh_updates",
+        label=_t(_ws.network_rollout_on_update_label()),
+        kind=Kind.ENUM,
+        default="auto",
+        help=_t(_ws.network_rollout_on_update_help()),
+        choices=(
+            Choice(
+                "auto",
+                _t(_ws.network_rollout_on_update_choice_auto_label()),
+                _t(_ws.network_rollout_on_update_choice_auto_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.network_rollout_on_update_choice_off_label()),
+                _t(_ws.network_rollout_on_update_choice_off_description()),
+            ),
+        ),
+    ),
     # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
     # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
     # is held only until a handshake resolves, so this bounds neither `max_links`
@@ -5049,6 +5111,48 @@ SETTINGS: tuple[Setting, ...] = (
             'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
         ),
         help=_t(_ws.speech_voice_instructions_help()),
+    ),
+    # -- team bridge (agent messages, RFC §5) ---------------------------------
+    # Defaults are LITERALS here, not imports: this module stays off the import
+    # path of the package that reads these keys (it is loaded on every CLI
+    # start), and `_consumer_defaults()` in tests/unit/test_settings_io.py
+    # imports DEFAULT_TEAM_BRIDGE_* from ``local_operator.team_bridge.settings``
+    # to pin that the two cannot drift. Every path is a genuinely NESTED tuple;
+    # the fail-closed normalisation of each value lives with the consumer, so a
+    # hand-edited value reads as the shipped default rather than crashing a
+    # surface.
+    #
+    # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
+    # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a
+    # public row would dress session-format state as a knob. Screening is not
+    # registered AND not a key: it is the admission gate (§8, §13.9), an
+    # invariant no write may disable (the status route's receipt states it; a
+    # test pins that no registered setting can turn it off). The allowlist's
+    # default state and cues are server truth (§9), surfaced as data by
+    # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
+    # would drift from the server silently.
+    Setting(
+        key="team_bridge.enabled",
+        path=("team_bridge", "enabled"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_enabled_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_ws.team_bridge_enabled_help()),
+    ),
+    Setting(
+        key="team_bridge.session",
+        path=("team_bridge", "session"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_session_label()),
+        kind=Kind.TEXT,
+        default="",
+        # ONE session id: the designation §5.6 makes the wake consent. Deliberately
+        # not a LIST — a list would imply multiple wake destinations, which the
+        # connector contract does not have in v1. Empty clears back to "none
+        # designated" (badge only).
+        empty_unsets=True,
+        help=_t(_ws.team_bridge_session_help()),
     ),
 )
 

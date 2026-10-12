@@ -31,9 +31,18 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
 from local_operator.interpreter import python_argv
 from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.procstate import O_BINARY
+
+#: The render-point resolver for this module's copy (RFC §3.1): ``_t(msg)``
+#: renders a ``wire.exec`` message in the active locale. Module-level because
+#: the resolver reads root and locale at each call, so a locale move is picked
+#: up without re-binding; it pulls no engine imports (the module's cheap-import
+#: contract stands).
+_t = tr("wire.exec")
 
 
 def logs_dir() -> Path:
@@ -697,13 +706,19 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     try:
         resolve_hosting_model_dry(exec_args)
     except ValueError as exc:
-        print(f"\n\033[1;31mError: {exc}\033[0m", file=sys.stderr)
+        print(
+            "\n\033[1;31m" + _t(_wd.error_line(error=str(exc))) + "\033[0m",
+            file=sys.stderr,
+        )
         # Return 1, not -1: this becomes the process exit code via exit(main()),
         # and a negative return maps to exit 255 (item 18's contract is that a
         # preflight failure exits with a clean non-zero, not a wrapped -1).
         return 1
     except Exception as exc:  # noqa: BLE001 — never spawn blind
-        print(f"\n\033[1;31mError: preflight failed: {exc}\033[0m", file=sys.stderr)
+        print(
+            "\n\033[1;31m" + _t(_wd.error_preflight(error=str(exc))) + "\033[0m",
+            file=sys.stderr,
+        )
         return 1
 
     logs_root = _ensure_logs_dir()
@@ -799,24 +814,25 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     # The reason is already written to a file whose path we hold, and the
     # launcher is still in the foreground: making the user open a log to read a
     # one-line validation error is a gap we can close for free.
-    print(
-        f"Background job {job_id}: {status} (execution receipt)"
-        + (f" \u2014 {failure}" if failure else ""),
-        file=sys.stderr,
+    receipt = f"Background job {job_id}: {status}"
+    # The receipt's skeleton (``Background job ``, the id, ``: ``, the status
+    # token) is the machine contract §1.2.2 pins — it is composed HERE, never
+    # catalogue-side, so no translation can move it. The prose around it
+    # (the "execution receipt" clarifier and the failure tail) is catalogue-
+    # owned and joins after the token.
+    receipt += (
+        _t(_wd.receipt_failure_suffix(failure=failure)) if failure else _t(_wd.receipt_suffix())
     )
+    print(receipt, file=sys.stderr)
     if state.get("session_id"):
-        print(
-            f"Session: {state['session_id']} (the conversation) \u2014 attach or resume: "
-            f"lop --resume {state['session_id']}",
-            file=sys.stderr,
-        )
-    print(f"Status: lop exec --status {job_id}", file=sys.stderr)
-    print(f"Log: {log_path}", file=sys.stderr)
+        print(_t(_wd.session_pointer(session_id=str(state["session_id"]))), file=sys.stderr)
+    print(_t(_wd.status_pointer(job_id=str(job_id))), file=sys.stderr)
+    print(_t(_wd.log_pointer(log_path=str(log_path))), file=sys.stderr)
     if getattr(exec_args, "control", False):
         # A supervised run can park on a gate and sit at `running` indefinitely.
         # `lop sessions` is the one command that shows what a run NEEDS, and it
         # was the one command this receipt never mentioned.
-        print("Waiting on you? lop sessions shows what a run needs", file=sys.stderr)
+        print(_t(_wd.waiting_on_you()), file=sys.stderr)
     elif status in ("starting", "running"):
         # The receipt is where a launch is read back, so a run nobody can
         # approve has to say so HERE rather than only in a transcript of
@@ -1098,14 +1114,7 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     # that it will be denied. Best-effort on purpose; see the helper.
     if _saved_auto_approval():
         return None
-    return (
-        "Warning: this run cannot ask for approval (no terminal attached), so "
-        "any tool call that needs approval will be denied.\n"
-        "  Remedies: --control parks cards for a supervisor; --yolo auto-approves "
-        "every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds "
-        "this run's reach to them; tool_approval_mode: auto in the config answers "
-        "every call the same way for every run."
-    )
+    return _t(_wd.approval_advisory())
 
 
 def run_exec(command: str | None, args: ExecArgs) -> int:
@@ -1130,14 +1139,22 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
 
     refusal = reject_detached_supervisor_fd(args)
     if refusal is not None:
-        print(f"exec failed: {refusal}", file=sys.stderr)
+        print(
+            # i18n: ignore stable prefix + dynamic payload
+            f"exec failed: {refusal}",
+            file=sys.stderr,
+        )
         return 1
     has_loop = args.loop is not None or args.loop_goal is not None
     try:
         team = resolve_startup(args)
         command = resolve_prompt(command, has_loop=has_loop)
     except (ValueError, OSError) as exc:
-        print(f"exec failed: {exc}", file=sys.stderr)
+        print(
+            # i18n: ignore stable prefix + dynamic payload
+            f"exec failed: {exc}",
+            file=sys.stderr,
+        )
         return 1
     # The positional is optional so a loop-only or piped run can omit it
     # (argparse cannot express "required unless --loop/--loop-goal/stdin"), so
@@ -1147,22 +1164,21 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     # typed --goal expected the TUI's /goal, which also sends the text.
     if not command.strip() and not has_loop:
         if args.clear_goal:
+            # `exec failed: ` is the machine-stable prefix §1.2.2 pins; the
+            # sentence after it is catalogue-owned (the anchor never enters a
+            # translation unit).
             print(
-                "exec failed: --clear-goal adjusts a run, it does not start one. "
-                "Pair it with --resume SESSION_ID plus a prompt or --loop.",
+                f"exec failed: {_t(_wd.clear_goal_needs_start())}",
                 file=sys.stderr,
             )
         elif args.goal:
             print(
-                "exec failed: --goal sets the objective but does not start work "
-                "(unlike the TUI's /goal). Add a prompt, pipe one on stdin (or "
-                "'-'), or run a loop with --loop N.",
+                f"exec failed: {_t(_wd.goal_only_sets_objective())}",
                 file=sys.stderr,
             )
         else:
             print(
-                "exec failed: no prompt. Pass one as an argument, pipe it on stdin "
-                "(or '-'), or run a loop with --loop/--loop-goal",
+                f"exec failed: {_t(_wd.no_prompt())}",
                 file=sys.stderr,
             )
         return 1
@@ -1194,5 +1210,9 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
     except Exception as exc:  # noqa: BLE001 — CL-19: raising prompt = exit 1
-        print(f"exec failed: {exc}", file=sys.stderr)
+        print(
+            # i18n: ignore stable prefix + dynamic payload
+            f"exec failed: {exc}",
+            file=sys.stderr,
+        )
         return 1

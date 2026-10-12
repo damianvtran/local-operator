@@ -711,6 +711,17 @@ class TranscriptEntry:
     # of base64 re-sent per token would swamp the SSE. ``id`` is the message
     # id the endpoint resolves against.
     images: list[dict[str, Any]] = field(default_factory=list)
+    # Video attachments, as lightweight REFERENCES not bytes — the parallel
+    # family to ``images`` with its OWN index space (a video artifact never
+    # shifts an image index and vice versa; each family's walk is the whole
+    # contract with its endpoint). Each is ``{"index": int, "mime_type":
+    # str, "duration_s": float | None}``; the bytes are fetched lazily from
+    # ``/api/sessions/{pid}/attachment?entry=<id>&i=<index>&kind=video`` —
+    # which is the one Range-capable route, because phone Safari will not
+    # play a <video> served as a full-body 200. ``duration_s`` rides only
+    # when the artifact carried one (absence renders reduced, never a
+    # synthesized zero).
+    videos: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
     # Settled streaming is not the same as complete representation: transport

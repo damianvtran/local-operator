@@ -694,7 +694,7 @@ def test_the_create_route_refuses_with_a_503_and_no_receipt(
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.serve_retiring = True
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.post(
             "/v1/desktop/sessions",
             json={"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": str(tmp_path)},
@@ -739,7 +739,7 @@ def test_the_create_route_does_not_call_every_failure_a_retirement(
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = Boom(tmp_path)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.post(
             "/v1/desktop/sessions",
             json={"request_id": "01234567-89ab-cdef-0123-456789abcdef", "cwd": str(tmp_path)},
@@ -1583,7 +1583,7 @@ async def test_every_route_that_reaches_the_door_refuses_once_latched(
         ), f"{route.endpoint}: {response.status_code} {response.text[:200]}"
         detail = response.json()["detail"]
         assert detail["code"] == "daemon-retiring", route.endpoint
-        assert detail["message"] == retire.RETIRING_MESSAGE, route.endpoint
+        assert detail["text"] == retire.RETIRING_MESSAGE, route.endpoint
         assert started == [], f"{route.endpoint} reached the spawn seam"
         bridge = pool.bridges.get(session_id)
         assert bridge is None or bridge.warm_task is None, f"{route.endpoint} started a warm"
@@ -1723,7 +1723,7 @@ async def test_a_duplicate_aside_request_answers_409_and_claims_nothing(
             )
 
         assert response.status_code == 409, response.text
-        assert "already used" in response.json()["detail"]
+        assert "already used" in response.json()["detail"]["text"]
         assert started == [], "the duplicate reached the spawn seam"
         assert _claimed_receipts(tmp_path) == set()
         assert list(app.state.desktop_asides) == [REQUEST_ID], "the claim was rewritten"

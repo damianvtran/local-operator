@@ -66,6 +66,7 @@ from local_operator.evaluation.protocol import (
 from local_operator.evaluation.record_sink import RecordSinkError
 from local_operator.evaluation.session_arm import (
     BRIDGE_WEDGED_TERMINAL,
+    EPISODE_TOOL_SURFACE,
     RECOVERY_AFTER_READBACK_LOSS,
     ActionBridge,
     ObservationRenderer,
@@ -1195,7 +1196,15 @@ class TestEpisodeSessionSurface:
                 scratch_root=scratch.cwd_path.parent,
             )
             spec = SessionSpec(
-                hosting="test", model="mock", approvals=ApprovalPolicy.auto(), name="arm-surface"
+                hosting="test",
+                model="mock",
+                # The episode posture: a world boundary + the pinned surface,
+                # declared as its own approval (see session_arm
+                # .EPISODE_TOOL_SURFACE / validate_episode_session_spec).
+                world_root=scratch.cwd_path,
+                tools=EPISODE_TOOL_SURFACE,
+                approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+                name="arm-surface",
             )
             async with sdk.open_session(spec, roots=scratch) as session:
                 deadline = time.monotonic() + 25.0
@@ -1206,8 +1215,10 @@ class TestEpisodeSessionSurface:
                         break
                     await asyncio.sleep(0.1)
                 assert decl.tool_name in names, names
-                assert {"task", "team", "hub", "jobs"} <= set(names), names
-                assert len(names) >= 20
+                # The DECLARED surface, resolved: the members the flow needs
+                # are live, and nothing outside the declaration leaked in.
+                assert {"task", "team", "hub", "jobs", "wait", "bash"} <= set(names), names
+                assert set(names) <= set(EPISODE_TOOL_SURFACE), names
         finally:
             await bridge.stop()
 
@@ -1746,7 +1757,12 @@ class TestBridgeWedgeOutcome:
         )
         session = _ScriptedSession(scratch_root, script)
         session_spec = SessionSpec(
-            hosting="test", model="mock", approvals=ApprovalPolicy.auto(), name="arm-wedge"
+            hosting="test",
+            model="mock",
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-wedge",
         )
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:
@@ -2173,7 +2189,9 @@ class TestAgentStopOutcome:
         session_spec = SessionSpec(
             hosting="test",
             model="mock",
-            approvals=ApprovalPolicy.auto(),
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
             name="arm-ending",
         )
 

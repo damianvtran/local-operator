@@ -1087,6 +1087,7 @@ async def _run_session_arm(
     MUST: MCP discovery is cwd-scoped).
     """
 
+    from local_operator.evaluation.session_arm import EPISODE_TOOL_SURFACE
     from local_operator.evaluation.session_arm import (
         _outcome_json as _session_outcome_json,
     )
@@ -1118,8 +1119,16 @@ async def _run_session_arm(
     agent_home = Path(
         os.environ.get("LOCAL_OPERATOR_HOME") or (home / "local-operator-home")
     ).resolve()
-    cwd = scratch_root / "workspace"
-    cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # THE WORLD SPLIT (world-boundary slice). The launcher seeds controller
+    # state (the secret store, auth.db, config) under ``$SCRATCH/home``; the
+    # model's world must NOT contain it, or the seatbelt jail would hand the
+    # model's own shell read access to a decryptable store. So the episode's
+    # world is its own sibling directory: ``scratch/world`` is the
+    # confinement root, the cwd, and the discovery boundary, while
+    # HOME/config/agent-home, records and the bridge stay outside it.
+    world = scratch_root / "world"
+    world.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cwd = world
     try:
         roots = SessionRoots(
             config_dir=config_dir, agent_home=agent_home, cwd=cwd, allow_volatile=False
@@ -1132,10 +1141,14 @@ async def _run_session_arm(
     session_provider, session_model = args.session_route or route
     session_spec = SessionSpec(
         hosting=session_provider,
-        # exec --yolo semantics: see session_arm.SESSION_APPROVALS for why an
-        # unattended episode must not turn its own gates into a measurement.
         model=session_model,
-        approvals=ApprovalPolicy.auto(),
+        # The world boundary + the pinned surface: validate_episode_session_spec
+        # refuses anything else, and the declaration is the approval for
+        # exactly the tools it names (see session_arm.EPISODE_TOOL_SURFACE for
+        # why the reach is pinned there and what it keeps out).
+        world_root=world,
+        tools=EPISODE_TOOL_SURFACE,
+        approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
     )
     try:
         resolved = resolver.resolve([ref.name for ref in spec.secret_refs])
@@ -1155,14 +1168,16 @@ async def _run_session_arm(
         secrets=resolved,
         display_name=f"arm-{spec.episode_id}",
         max_wall_s=args.session_wall_s,
-        # The episode's tools are confined to the run's scratch: an episode runs
-        # a real session on the HOST, and without this its shell and file tools
-        # reach the operator's whole filesystem -- measured 2026-09-28: an
-        # episode's model ran `find /Users/damian/worktrees/osworld ...` and
-        # read a task input out of the apparatus's gated assets. See
-        # ``local_operator.tools.confinement`` for the boundary and its stated
-        # residual holes; reversal is deleting this one argument.
-        confinement_root=scratch_root,
+        # The episode's tools are confined to the episode's WORLD (see the
+        # split above): an episode runs a real session on the HOST, and
+        # without this its shell and file tools reach the operator's whole
+        # filesystem -- measured 2026-09-28: an episode's model ran
+        # `find /Users/damian/worktrees/osworld ...` and read a task input
+        # out of the apparatus's gated assets. The split additionally keeps
+        # the seeded controller store out of that same reach. See
+        # ``local_operator.tools.confinement`` for the boundary and its
+        # stated residual holes.
+        confinement_root=world,
     )
     print(json.dumps(_session_outcome_json(outcome), indent=2, sort_keys=True))
     diagnostic = outcome.diagnostic or ""

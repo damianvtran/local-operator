@@ -176,6 +176,24 @@ def _peer_age(value: Any) -> float:
     return AGE_UNKNOWN_S if age <= 0 else age
 
 
+def _peer_last_user(value: Any) -> float | None:
+    """``last_user_at`` from a peer: a positive number, or NO claim (``None``).
+
+    NUMBER-OR-ABSENT is the sidebar lane's contract for this key (the desktop
+    sidebar's RUNNING order reads it, falling back to ``created_at`` then
+    catalogue order), and this is its parse at the mesh boundary: the value is
+    read through the same ``peer_number`` every numeric peer claim goes through,
+    so bools (``float(True)`` is the ``1.0``-into-1970 hazard this field's
+    siblings were cleaned of), ``NaN``, infinities, negatives, containers and
+    unreadable spellings all land where an absent key lands, while the
+    numeric-string spelling a mixed fleet can still send is accepted. A claimed
+    zero is no claim too — the refusal the renderer applies (``last_user_at <=
+    0`` is "no claim", never 1970) — and nothing is ever minted here.
+    """
+    number = peer_number(value, default=0.0)
+    return number if number > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # The peer catalogue seam (the transport's network/catalog.py implements it)
 # ---------------------------------------------------------------------------
@@ -232,6 +250,14 @@ class PeerRow:
     #: refusals, and the create-reply seed spelled the same claim ``0.0``, so
     #: the two readers disagreed about one claim (QA round 1 on #2044).
     started: float = 0.0
+    #: When the person last sent this session a message, as an epoch — the
+    #: desktop sidebar's RUNNING-order clock (``session/last_user.py`` is the
+    #: origin's reading of it; ``mtime``/``created_at``'s unit). ``None`` is NO
+    #: claim: absent, null, a bool, garbage, a negative or a claimed zero all
+    #: land here (``_peer_last_user``/``peer_number``), and the consumer's
+    #: fallback chain — ``created_at``, then catalogue order — runs on. Never
+    #: minted here.
+    last_user_at: float | None = None
     age_s: float = 0.0
     reachable: bool = True
     placement: SessionPlacement = field(default_factory=local_placement)
@@ -317,6 +343,7 @@ class PeerRow:
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=peer_number(data.get("started"), default=0.0),
+            last_user_at=_peer_last_user(data.get("last_user_at")),
             age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),
@@ -344,6 +371,7 @@ class PeerRow:
             "detached": self.detached,
             "capabilities": list(self.capabilities),
             "started": self.started,
+            "last_user_at": self.last_user_at,
             "age_s": self.age_s,
             "locality": "remote",
             "peer": self.peer_block,

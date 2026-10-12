@@ -13,6 +13,7 @@ from local_operator.agents import (  # Added
     ExecutionType,
     ProcessResponseStatus,
 )
+from local_operator.i18n.keys import wire_errors_agents as _wa
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.server.dependencies import get_agent_registry, get_job_manager
 from local_operator.server.models.schemas import CRUDResponse
@@ -113,13 +114,13 @@ async def get_job_status(
             result=job_summary,
         )
     except KeyError:
-        raise HTTPException(status_code=404, detail=f'Job with ID "{job_id}" not found')
+        raise HTTPException(status_code=404, detail=_wa.job_not_found_id(job_id=job_id).envelope())
     except HTTPException:
         # Re-raise HTTP exceptions to preserve their status code and detail
         raise
     except Exception:
         logger.exception(f"Unexpected error while retrieving job {job_id}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=500, detail=_wa.internal_server_error().envelope())
 
 
 @router.get(
@@ -214,7 +215,7 @@ async def list_jobs(
         )
     except Exception:
         logger.exception("Unexpected error while listing jobs")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=500, detail=_wa.internal_server_error().envelope())
 
 
 @router.delete(
@@ -287,10 +288,7 @@ async def cancel_job(
             # (e.g., already completed, failed, or previously cancelled).
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Job {job_id} cannot be cancelled (already completed, failed, or "
-                    "previously cancelled)"
-                ),
+                detail=_wa.job_cannot_cancel(job_id=job_id).envelope(),
             )
 
         # If cancellation was successful and there is an agent_id, update agent history
@@ -356,13 +354,13 @@ async def cancel_job(
             message=f"Job {job_id} cancelled successfully",
         )
     except KeyError:  # Raised by get_job or potentially cancel_job if job_id not found
-        raise HTTPException(status_code=404, detail=f'Job with ID "{job_id}" not found')
+        raise HTTPException(status_code=404, detail=_wa.job_not_found_id(job_id=job_id).envelope())
     except HTTPException:
         # Re-raise HTTP exceptions to preserve their status code and detail
         raise
     except Exception:
         logger.exception(f"Unexpected error while cancelling job {job_id}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=500, detail=_wa.internal_server_error().envelope())
 
 
 @router.post(
@@ -427,4 +425,4 @@ async def cleanup_jobs(
         )
     except Exception:
         logger.exception("Unexpected error during job cleanup")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        raise HTTPException(status_code=500, detail=_wa.internal_server_error().envelope())

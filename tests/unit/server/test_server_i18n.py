@@ -1,8 +1,8 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-Only `en` ships in M0, so the shipped-tree assertions are about shape (map,
-hash, ETag, 304, 404s) rather than about translated content; the fixture test
-proves a populated catalogue traverses the same path.
+Waves 1-2 ship `en`, `es`, `fr`, `ru` and `vi`; the shipped-tree assertions are
+about shape (map, hash, ETag, 304, 404s) rather than about translated content;
+the fixture test proves a populated catalogue traverses the same path.
 """
 
 from __future__ import annotations
@@ -27,6 +27,15 @@ async def test_catalogue_route_serves_map_and_hash(test_app_client) -> None:
     assert payload["result"]["content_sha256"] == sha
     assert response.headers["etag"] == f'"{sha}"'
     assert response.headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.asyncio
+async def test_a_wave1_locale_is_served_once_translated(test_app_client) -> None:
+    # Wave 1: `fr` used to 404 for want of a file; it now serves its bytes.
+    response = await test_app_client.get("/v1/i18n/catalogues/fr/wire.errors")
+    assert response.status_code == 200
+    raw = (Path(catalogues.__file__).parent / "catalogues" / "fr" / "wire.errors.json").read_bytes()
+    assert response.json()["result"]["content_sha256"] == hashlib.sha256(raw).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -63,7 +72,7 @@ async def test_weak_and_list_validators_still_revalidate_to_304(test_app_client)
 @pytest.mark.parametrize(
     "path",
     [
-        "/v1/i18n/catalogues/fr/wire.errors",  # locale exists in the wave list, not shipped
+        "/v1/i18n/catalogues/hi/wire.errors",  # supported locale, wave not shipped: no file yet
         "/v1/i18n/catalogues/en/nope",  # unknown namespace
         "/v1/i18n/catalogues/en/..",  # traversal-shaped component
     ],

@@ -259,6 +259,38 @@ class TestCatalogueParity:
         )
         assert i18n_check.check_catalogues() == []
 
+    def test_locale_missing_a_namespace_passes(self, tmp_path, monkeypatch, i18n_check) -> None:
+        """Per-namespace coverage (2026-10-11 amendment, docs/design/i18n.md §6):
+        a namespace born after a locale's last translation wave is not an error
+        — it rides en-fallback until its own wave, and the per-namespace ship
+        gate decides whether the locale is offered."""
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "x"},
+                "en/newborn.json": {"newborn.y": "y"},
+                "fr/demo.json": {"demo.x": "t"},
+            },
+        )
+        assert i18n_check.check_catalogues() == []
+
+    def test_present_file_with_drift_still_fails(self, tmp_path, monkeypatch, i18n_check) -> None:
+        # The flip side: scope narrowed, judgement unchanged — a file the
+        # locale PRESENTS is validated against en exactly as before.
+        self._fixture(
+            tmp_path,
+            monkeypatch,
+            {
+                "en/demo.json": {"demo.x": "x"},
+                "en/newborn.json": {"newborn.y": "y"},
+                "fr/demo.json": {"demo.x": "t"},
+                "fr/newborn.json": {},
+            },
+        )
+        problems = i18n_check.check_catalogues()
+        assert any("missing key 'newborn.y'" in p for p in problems)
+
     def test_key_set_mismatch(self, tmp_path, monkeypatch, i18n_check) -> None:
         self._fixture(
             tmp_path,

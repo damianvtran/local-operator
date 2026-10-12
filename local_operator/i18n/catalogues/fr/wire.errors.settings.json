@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "Erreur lors de la récupération de la configuration : {error}",
+  "wire.errors.settings.config_unreadable": "Le fichier de configuration ne peut pas être lu. Réparez-le avant d’enregistrer.",
+  "wire.errors.settings.config_update_failed": "Erreur lors de la mise à jour de la configuration : {error}",
+  "wire.errors.settings.credential_key_empty": "La clé de l’identifiant ne peut pas être vide",
+  "wire.errors.settings.credential_retrieve_failed": "Erreur lors de la récupération des identifiants : {error}",
+  "wire.errors.settings.credential_update_failed": "Erreur lors de la mise à jour de l’identifiant : {error}",
+  "wire.errors.settings.inline_credentials": "Utilisez un endpoint sans identifiants intégrés ni paramètres de requête.",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "Aucun champ de mise à jour valide fourni",
+  "wire.errors.settings.not_registered": "Ce paramètre n’est pas déclaré.",
+  "wire.errors.settings.system_prompt_retrieve_failed": "Erreur lors de la récupération du prompt système : {error}",
+  "wire.errors.settings.system_prompt_update_failed": "Erreur lors de la mise à jour du prompt système : {error}"
+}

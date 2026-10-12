@@ -176,7 +176,8 @@ gate to cover them is a separate, larger decision and is recorded rather than
 made here.
 
 `/v1/static/*` is the one of those four that now carries its own hardening
-(`server/utils/static_roots.py`), because it is the one that reads arbitrary files:
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files
+(except the Host check below, which since P1.5 covers every route of the app):
 
 - **The bound is the connection, not a directory list.** `lop serve` refuses every
   non-loopback bind (`0.0.0.0`, `::`, LAN addresses, non-loopback-resolving names:
@@ -195,12 +196,18 @@ made here.
   `403` does not say whether the file exists and names the remedy. `..` is refused
   outright in both postures. This design is
   `docs/design/file-serving-and-surface-convergence.md` §3.
-- **Host check.** A `Host` that is a DNS name other than `localhost` (or the
-  daemon's own `--host`) is refused with `403`, so a DNS-rebinding page, which is
-  same-origin and needs no CORS grant, cannot use the route. IP literals pass (the
-  app dials `http://127.0.0.1:<port>`); a wildcard/empty announced host fails
-  closed -- only IP literals and `localhost` are admitted and a DNS name is refused
-  (the former wildcard-bind bypass is deleted).
+- **Host check -- every route, not just this family (P1.5, RFC §3.6).** A `Host`
+  that is a DNS name other than `localhost` (or the daemon's own `--host`) is
+  refused with `403` on every route of the app, so a DNS-rebinding page, which is
+  same-origin and needs no CORS grant, cannot use any of them. Admitted: IP
+  literals (the app dials `http://127.0.0.1:<port>`), `localhost` in its port,
+  case and trailing-dot spellings, and the daemon's announced bind when it is a
+  specific name; a wildcard/empty announced host fails closed -- only IP literals
+  and `localhost` pass and a DNS name is refused (the former wildcard-bind bypass
+  is deleted); an absent `Host` passes (HTTP/1.0 clients; no browser omits it).
+  No route or client exemption exists: the shipped surfaces and the CLI dial
+  `127.0.0.1` literals, and a tunnel or SSH port-forward presents the literal it
+  dialed.
 - **Response policy.** Every response, errors included, carries `nosniff` and a
   `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
   grant is made to an origin that is not on the admitted allowlist -- including, unlike
@@ -2144,8 +2151,13 @@ disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_p
 native (phone) WebView frame is pending its own lane; and the static preview routes
 (`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
 short-lived signed URLs (see the static section), but refusing is a later phase
-and the client change to present a credential is the recorded follow-up. No renderer
-consumes any of this yet: the TUI, UI, relay and native renderers are separate lanes.
+and the client change to present a credential is the recorded follow-up. Shipped since
+this contract's head: two renderer lanes consume the wire today -- the TUI (the file
+callouts, the `N more` disclosure and the state line; an HTML component is skipped
+silently, no placeholder) and the desktop UI (the same callouts and state line, each
+component in a sandboxed frame with its one `Source: ...` caption) -- while the relay
+web renderer is in review (core PR #2222) and the native phone renderer is a separate
+lane, not shipped.
 The READ half is implemented (routes lane C2): the desktop document route serves the
 assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
 `attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
@@ -2761,3 +2773,75 @@ path).
 it is deliberately a NEW key rather than a bump of `subagent_transcript`, whose
 reader gate asks with no minimum version: a bump would leave an older backend
 passing that gate while the live half does not exist.
+
+
+## Journal source order (opt-in `journal_order=1`)
+
+`features.journal_order: 1` states that the build supports journal-index order,
+not that every row or owner is ready. A viewer declares `journal_order=1` on
+history, snapshot and events. Without that declaration the new keys/events are
+absent (including JSON null defaults), preserving older strict DTOs. Older
+backends omit the vocabulary: clients retain an explicit legacy fallback, not
+a fabricated journal coordinate.
+
+A verified page carries `journal_order_state: ready`, `journal_generation`,
+and each entry's `journal_seq`. This is the 0-based complete-line ordinal from
+the existing transcript index, including rows omitted from search/rail views.
+It is **not** the bridge/frame publication `seq`, a message timestamp, or an
+arrival counter. Times remain presentation data. The page payload and index
+must share the reader's verified inode/size/mtime view; raced pages, cold or
+stale indexes omit authority and say `building`/`unavailable`. A peer with no
+owner-provided domain says `unsupported`; the receiver never assigns ordinals
+from its own disk. Missing information does not erase previously proven facts.
+
+`order_ids` is an optional, bounded lookup on these existing requests: at most
+512 entry IDs, each 1..128 characters. It has no effect without the declaration.
+The same-session index returns `journal_ordinals` for found IDs and explicitly
+names `journal_missing_ids`; it never truncates and pretends all were ranked.
+This handles an already-loaded optimistic send whose durable row aged out of
+the page before the viewer subscribed. Invalid query shapes return 422. The
+lookup shares the page's verified source/generation; it is not another journal
+scan or a global cross-session ID service.
+
+Generation is opaque **equality only**. Appends retain it; a rewrite/full
+rebuild/cache loss remints it and invalidates old ordinals. Clients capture a
+conversation order revision at request dispatch and commit for all snapshot,
+history, anchored and jump reads. An unmatched non-authoritative domain asks
+for one coalesced authoritative snapshot rather than switching generations;
+late old-revision responses cannot undo the installed domain. No UUID ordering
+or timestamp comparison can replace that fence.
+
+The owner advertises `journal-order-v1` only with an all-row post-fsync observer;
+the attach viewer declares `journal_order: true`. After a successful durable
+batch, background existing-index singleflight emits `journal_order_ready` with
+`journal_generation` and bounded `rows` descriptors (`id`, `journal_seq`, role,
+tool-call identity and supplement anchor where applicable). This corrects an
+already-streamed row even if the history-delta filter excluded it, without a
+later token/page. A streamed settle before fsync remains provisional. No scan
+runs per token or synchronously in the bridge event relay. Desktop subscribers
+also opt in, for live and replay alike. The mesh's closed owner-dial auth
+allowlist forwards `journal_order`; it does not drop the declaration or borrow
+receiver authority. The actual attach handshake omits it for older owners and
+the runtime ANDs declaration with its own capability. New route flags use
+Annotated query constraints with ordinary Python defaults (0/None), so direct
+route callers retain legacy behavior as well as HTTP-bound callers.
+Cold page indexes issue the same late
+metadata correction; a raced/unavailable source requests authoritative reconcile.
+
+Order metadata is NOT frontend state: a snapshot's sequence watermark cannot
+supersede an off-page correction absent from its bounded page/ID lookup. The
+pre-open drain preserves negotiated corrections after the snapshot unless the
+same published frame was already delivered in initial replay. Rejected writer
+provenance (including a real compaction while the index builds) or missing
+mapping emits one coalesced reconcile per batch, never an old-file coordinate
+labeled with the rebuilt domain. Safe old page-cache degradation after a
+same-inode/same-size rewrite remains unchanged: it omits authority until a
+fresh page is served; this contract does not refactor that cache.
+
+Consumers use one transitive ordering policy: confirmed same-domain source
+positions are distinct from explicit provisional admission/anchor blocks.
+Do not compare by ordinal for one pair and by time for another (that creates
+cycles). Tools/supplements retain their owning message/call and their own entry
+ordinal separately; row identity owns attachments, sender and payload. Metadata
+updates must change order even when payload bytes did not change, and omitted
+metadata on a live update cannot clear a known coordinate.

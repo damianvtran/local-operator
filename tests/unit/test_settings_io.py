@@ -91,6 +91,11 @@ def _consumer_defaults() -> dict[str, object]:
     # ``NetworkSettings.from_config`` resolves an absent key against
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
+    #
+    # The mesh-roll switch is the same shape, from ITS reader: ``rollouts``'
+    # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
+    # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
+    # same value or the page would advertise a policy the driver does not apply.
     from local_operator.network.credentials import GRANT_TTL_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
@@ -99,6 +104,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_HANDSHAKES,
         DEFAULT_PORT,
     )
+    from local_operator.network.rollouts import DEFAULT_ROLLOUT_ON_UPDATE
 
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
@@ -252,6 +258,10 @@ def _consumer_defaults() -> dict[str, object]:
         "network.listen_address": DEFAULT_LISTEN_ADDRESS,
         "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
+        # Read fresh by every update front end and re-read by the rollout driver
+        # (``rollouts.rollout_policy`` resolves an absent key against exactly
+        # this constant — the reader's own fallback, not a restatement).
+        "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
@@ -353,6 +363,7 @@ def _consumer_defaults() -> dict[str, object]:
     consumers.update(_classification_consumer_defaults())
     consumers.update(_monitor_consumer_defaults())
     consumers.update(_supplements_consumer_defaults())
+    consumers.update(_team_bridge_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -517,6 +528,31 @@ def _monitor_consumer_defaults() -> dict[str, object]:
         "monitor.maxConsecutiveFailures": monitor_settings.DEFAULT_MAX_CONSECUTIVE_FAILURES,
         "monitor.maxDeliveriesPerHour": monitor_settings.DEFAULT_MAX_DELIVERIES_PER_HOUR,
         "monitor.normalizeTimestamps": monitor_settings.DEFAULT_NORMALIZE_TIMESTAMPS,
+    }
+
+
+def _team_bridge_consumer_defaults() -> dict[str, object]:
+    """The registry's ``team_bridge.*`` rows, asked of the module that reads them.
+
+    The agent-messages feature's readers live in
+    ``local_operator.team_bridge.settings`` (stdlib-only precisely so this test
+    can import it cheaply), and the registry rows carry literals because
+    ``settings_io`` stays off the package's import path. This block is what
+    turns a drifted literal into a red test rather than a page that advertises
+    a state the feature will not honour — the rule every consumer block above
+    follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
+    state (no row), and the allowlist's defaults are server truth surfaced as
+    data by ``team_bridge.client.allowlist_view``, not config.
+    """
+
+    from local_operator.team_bridge.settings import (
+        DEFAULT_TEAM_BRIDGE_ENABLED,
+        DEFAULT_TEAM_BRIDGE_SESSION,
+    )
+
+    return {
+        "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.session": DEFAULT_TEAM_BRIDGE_SESSION,
     }
 
 

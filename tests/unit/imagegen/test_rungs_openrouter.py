@@ -79,7 +79,7 @@ async def _run(recorder: _Recorder, **kwargs: Any):
         key="ork-1",
         num_images=1,
         image_size="square_hd",
-        source_url=None,
+        source_urls=None,
         seed=None,
         model=None,
         emit=None,
@@ -198,7 +198,9 @@ async def test_an_edit_checks_the_model_capability_then_sends_input_references()
     )
 
     result = await _run(
-        recorder, source_url=f"data:image/png;base64,{PNG_B64}", client=_client(handler)
+        recorder,
+        source_urls=[f"data:image/png;base64,{PNG_B64}"],
+        client=_client(handler),
     )
 
     assert recorder.requests[0].method == "GET"
@@ -226,7 +228,11 @@ async def test_an_edit_on_a_model_without_image_input_is_a_skip_and_never_sends(
     )
 
     with pytest.raises(RungSkipped) as caught:
-        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+        await _run(
+            recorder,
+            source_urls=["data:image/png;base64,AAAA"],
+            client=_client(handler),
+        )
 
     assert caught.value.reason_class == "unsupported"
     assert "does not declare image input" in str(caught.value)
@@ -243,7 +249,11 @@ async def test_an_edit_on_an_unlisted_model_is_a_skip() -> None:
     )
 
     with pytest.raises(RungSkipped) as caught:
-        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+        await _run(
+            recorder,
+            source_urls=["data:image/png;base64,AAAA"],
+            client=_client(handler),
+        )
 
     assert "does not list image model" in str(caught.value)
     assert len(recorder.requests) == 1
@@ -259,7 +269,11 @@ async def test_a_models_read_that_cannot_answer_raises_instead_of_guessing() -> 
     )
 
     with pytest.raises(APIError):
-        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+        await _run(
+            recorder,
+            source_urls=["data:image/png;base64,AAAA"],
+            client=_client(handler),
+        )
 
 
 @pytest.mark.asyncio
@@ -274,8 +288,31 @@ async def test_a_mangled_models_200_raises_instead_of_reporting_unlisted() -> No
     )
 
     with pytest.raises(APIError):
-        await _run(recorder, source_url="data:image/png;base64,AAAA", client=_client(handler))
+        await _run(
+            recorder,
+            source_urls=["data:image/png;base64,AAAA"],
+            client=_client(handler),
+        )
     assert len(recorder.requests) == 1, "the generation was never reached"
+
+
+@pytest.mark.asyncio
+async def test_a_multi_source_edit_is_skipped_in_rung_before_any_request() -> None:
+    """Belt-and-braces (spec §3): the cascade filter pre-skips SINGLE/1 for a
+    multi request, so this guard only fires for a direct caller — and it must
+    fire BEFORE the models listing, spending nothing."""
+    recorder = _Recorder()
+
+    with pytest.raises(RungSkipped) as caught:
+        await _run(
+            recorder,
+            source_urls=["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+            client=_client(lambda request: httpx.Response(500)),
+        )
+
+    assert caught.value.reason_class == "unsupported"
+    assert "one reference image" in str(caught.value)
+    assert recorder.requests == [], "skipped before the wire"
 
 
 @pytest.mark.asyncio
