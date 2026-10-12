@@ -61,6 +61,10 @@ from local_operator.model.registry import (
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
+from local_operator.session.request_observation import (
+    RequestSubscriberHolder,
+    build_request_final_observation,
+)
 
 logger = logging.getLogger("local_operator.model.configure")
 
@@ -3423,6 +3427,26 @@ class SessionStreamFn:
         self._settings = settings
         self._session_id = session_id
         self._parent_session_id: str | None = None
+        # -- Opt-in request observation (local_operator.session.request_observation).
+        #
+        # ``_observation_root`` is a reference to the ROOT stream of this fork
+        # tree; ``None`` means this stream IS the root. The reference (rather
+        # than a copied holder value) is what makes a child created BEFORE the
+        # parent subscribed still see the later install: it resolves the root
+        # holder once per request, at request start, never per delta. ``fork``
+        # carries it down, so grandchildren share the same root.
+        #
+        # ``_request_observers`` holds the subscriber set and is allocated
+        # ONLY when someone subscribes -- ``None`` on the root is the whole
+        # default fast path: no allocation, no callback, no per-delta check on
+        # the ordinary request. ``_request_job_id``/``_request_actor_role``
+        # carry the child Session's existing job/role metadata so observation
+        # rows can attribute a role without guessing from model names; bound
+        # by the subagent fork site, ``None`` for root-owned requests.
+        self._observation_root: SessionStreamFn | None = None
+        self._request_observers: RequestSubscriberHolder | None = None
+        self._request_job_id: str | None = None
+        self._request_actor_role: str | None = None
         # The identity this session's PROVIDER CACHE is keyed under, which is
         # the session id for an ordinary session and the PARENT's id for a fork.
         #
@@ -3865,6 +3889,17 @@ class SessionStreamFn:
         self._transport.owners += 1
         child._parent_session_id = self._session_id
         child._descendant_request_counter = self._descendant_request_counter
+        # The observation carrier is ROOT-scoped, so every fork in the tree
+        # resolves the same subscriber holder. This must be the root REFERENCE
+        # rather than a copied holder value: a child forked while the root had
+        # no subscribers must still be covered when the root subscribes later
+        # (the pre-existing-child case), and a literal ``None`` copy could
+        # never see the install. Ordinary routing callbacks, credential pins
+        # and cache identity stay child-local exactly as before -- only this
+        # carrier is shared. ``getattr`` because recorder-style doubles build
+        # streams via ``object.__new__`` and never ran ``__init__``; a stream
+        # with no carrier reads exactly like a root with no subscribers.
+        child._observation_root = getattr(self, "_observation_root", None) or self
         if cache_lineage_id:
             # A TRUE transcript fork replays a byte-identical prefix, so the
             # parent's host is genuinely warm for it — the same reasoning that
@@ -3884,6 +3919,101 @@ class SessionStreamFn:
                 model: set(hosts) for model, hosts in self._provider_retired.items()
             }
         return child
+
+    def subscribe_requests(self, handler: Callable[[Any], None]) -> Callable[[], None]:
+        """Opt this stream's TREE into request-final observation.
+
+        Effective for requests BEGUN while subscribed: the handler set is
+        snapshotted at each request's start, so a request already in flight
+        follows whatever the snapshot said, and requests that finished before
+        the call are never replayed (a caller must install before the work it
+        wants observed). Returns an idempotent unsubscribe.
+
+        Installs on the ROOT holder regardless of which stream in the tree is
+        asked, because the observed identity is root-tree scoped: a
+        subscription is one tree's, never a process-global hook.
+        """
+        root = getattr(self, "_observation_root", None) or self
+        holder = getattr(root, "_request_observers", None)
+        if holder is None:
+            # Lazily allocated on first install; fork's shared root reference
+            # is what lets a child forked earlier reach it.
+            holder = RequestSubscriberHolder()
+            root._request_observers = holder
+        return holder.subscribe(handler)
+
+    def bind_request_actor(self, *, job_id: str | None, actor_role: str | None) -> None:
+        """Attach the child Session's existing job/role identity to this stream.
+
+        Called by the subagent fork site with the values it already passes to
+        the child Session constructor (``job_id``, ``agent_type``) so an
+        observation can attribute a request to the delegated role that made
+        it without a new agent registry and without guessing from model names.
+        Display/attribution metadata only -- never an authorization identity.
+        """
+        self._request_job_id = job_id
+        self._request_actor_role = actor_role
+
+    def _request_observation_target(
+        self,
+    ) -> tuple[RequestSubscriberHolder, tuple[Callable[[Any], None], ...]] | None:
+        """Resolve the observation target ONCE, at request start.
+
+        The single resolution per request is the contract: no per-delta
+        observer check exists, and the ``None`` fast path is this method
+        returning ``None`` after two tolerant attribute reads (``getattr``:
+        recorder rigs build streams via ``object.__new__`` without
+        ``__init__``, and a stream with no carrier must read like a root with
+        no subscribers). The returned snapshot tuple is what the request's
+        final notifies, so subscribing or unsubscribing mid-request cannot
+        change which handlers a given request delivers to.
+        """
+        root = getattr(self, "_observation_root", None) or self
+        holder = getattr(root, "_request_observers", None)
+        if holder is None:
+            return None
+        return holder, holder.snapshot()
+
+    def _notify_request_final(
+        self,
+        target: tuple[RequestSubscriberHolder, tuple[Callable[[Any], None], ...]],
+        *,
+        request_id: str,
+        request: ChatRequest,
+        usage: Any,
+        upstream_host: str | None,
+        ok: bool,
+        outcome: str,
+        duration_ms: float,
+    ) -> None:
+        """Build and deliver one record; never raises into the request path.
+
+        The whole block is best-effort: an observation bug must not mask the
+        provider's outcome or fail a turn the analytics side already recorded
+        (the same contract ``_record_usage`` lives under). Handler failures
+        are counted on the holder and surfaced on the owning session's
+        shutdown receipt.
+        """
+        try:
+            holder, handlers = target
+            root = getattr(self, "_observation_root", None) or self
+            observation = build_request_final_observation(
+                request_id=request_id,
+                tree_id=root._session_id,
+                session_id=self._session_id,
+                parent_session_id=self._parent_session_id,
+                job_id=self._request_job_id,
+                actor_role=self._request_actor_role,
+                request=request,
+                usage=usage,
+                upstream_host=upstream_host,
+                ok=ok,
+                outcome=outcome,
+                duration_ms=duration_ms,
+            )
+            holder.notify(handlers, observation)
+        except Exception:  # noqa: BLE001 -- observation never breaks a turn
+            logger.warning("request observation delivery failed", exc_info=True)
 
     @property
     def routing_settings(self) -> Mapping[str, Any]:
@@ -6058,6 +6188,10 @@ class SessionStreamFn:
         """
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
+        # Resolved ONCE here, at request start (see
+        # ``_request_observation_target``): the ordinary path pays two
+        # attribute reads and a ``None`` check per REQUEST, never per delta.
+        observation_target = self._request_observation_target()
         first_token_at: float | None = None
         # Stream start to the model's first REASONING fragment. Recorded
         # alongside ``ttft_ms`` rather than folded into it: they are two
@@ -6099,6 +6233,7 @@ class SessionStreamFn:
             component_chars = {}
 
         final_usage: Usage | None = None
+        upstream_host: str | None = None
         ok = True
         counted_child_request = self._counts_as_child_request
         if counted_child_request:
@@ -6166,6 +6301,15 @@ class SessionStreamFn:
                 if stop_reason in ("error", "aborted") or getattr(event, "error", None):
                     ok = False
                 served = getattr(event, "served_provider", None)
+                if served:
+                    # The aggregator upstream HOST, kept for the observation
+                    # separately from the hosting provider: the two are
+                    # different facts (a host vs a route), and the failover
+                    # re-pin logic below reads the same frame for its own
+                    # purpose. One truthy check per event on a value already
+                    # read -- captured unconditionally so an aborted/errored
+                    # end frame still names the host that was contacted.
+                    upstream_host = str(served)
                 if served and stop_reason is not None and stop_reason not in ("error", "aborted"):
                     # Re-pin IMMEDIATELY when the served host differs from the
                     # current pin, with no hysteresis: that host is the one
@@ -6254,13 +6398,14 @@ class SessionStreamFn:
                     last_output_at=last_output_at,
                     output_deltas=output_deltas,
                 )
+            duration_ms = (time.monotonic() - started_at) * 1000
             self._record_usage(
                 request,
                 component_chars,
                 final_usage or Usage(),
                 ok and outcome != "incomplete",
                 request_id=request_id,
-                duration_ms=(time.monotonic() - started_at) * 1000,
+                duration_ms=duration_ms,
                 ttft_ms=(
                     (first_token_at - started_at) * 1000 if first_token_at is not None else -1
                 ),
@@ -6278,6 +6423,21 @@ class SessionStreamFn:
                 decode_us=ledger_window_us,
                 output_deltas=output_deltas,
             )
+            # The observation rides AFTER the analytics ledger, alongside it in
+            # the same ``finally``: same facts, ONE clock read (``duration_ms``
+            # above) shared so the two records cannot disagree, and the whole
+            # block skipped -- before any allocation -- when nobody subscribed.
+            if observation_target is not None:
+                self._notify_request_final(
+                    observation_target,
+                    request_id=request_id,
+                    request=request,
+                    usage=final_usage,
+                    upstream_host=upstream_host,
+                    ok=ok and outcome != "incomplete",
+                    outcome=outcome,
+                    duration_ms=duration_ms,
+                )
 
     def _record_usage(
         self,
