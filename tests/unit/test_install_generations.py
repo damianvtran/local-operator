@@ -54,6 +54,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("LOP_INSTALL_ROOT", raising=False)
+    # These legacy layout fixtures synthesize dist-info, not published signed
+    # wheels. Keep publication/signing explicit test seams; the positive and
+    # negative mutation-evidence contract lives in test_install_transaction.
+    monkeypatch.setattr(update_mod, "_fresh_publication", lambda _target, _mode: None)
+    monkeypatch.setattr(update_mod, "_verify_signed_candidate", lambda _generation, _mode: None)
     return tmp_path
 
 
