@@ -177,6 +177,36 @@ async def test_resume_restores_the_pinned_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selector, default", [("radient/auto", "auto"), ("deepseek/deepseek-flash", "high")]
+)
+async def test_explicit_auto_persists_intent_but_displays_resolved_target_default(
+    tmp_path, selector, default
+):
+    """Resume must retain a reset, not freeze today's resolved default as a dial.
+
+    The journal carries the route's intent while host events carry the request
+    spec's effective level. A future metadata default change must still apply
+    to a restored automatic route, even when today's default is a fixed depth.
+    """
+    stream = RoutedStream()
+    session = _session(tmp_path, stream)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await stream.route_handler(FallbackTarget(selector, "auto"), "synthetic quota")
+    assert _route_entries(session)[-1]["active"] == {"selector": selector, "effort": "auto"}
+    assert session.effective_model.reasoning_effort == default
+    changes = [event for event in events if isinstance(event, ModelChangeEvent)]
+    assert changes[-1].effort == default
+
+    resumed_stream = RoutedStream()
+    resumed = _session(tmp_path, resumed_stream)
+    assert resumed.effective_model.reasoning_effort == default
+    assert resumed_stream.restored == [(selector, "auto", "test/m")]
+    assert resumed._active_route == (selector, "auto")
+
+
+@pytest.mark.asyncio
 async def test_resume_after_recovery_restores_nothing(tmp_path):
     first = RoutedStream()
     _session(tmp_path, first)  # binds the route handler; entries land in tmp_path/sess
