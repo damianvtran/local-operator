@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider and model must be provided together, or neither.",
+  "wire.errors.media.radient_key_missing": "Radient API key is not configured on the server.",
+  "wire.errors.media.save_audio_failed": "Failed to save uploaded audio file: {error}",
+  "wire.errors.media.speech_generate_failed": "Failed to generate speech: {error}",
+  "wire.errors.media.speech_no_credential": "Sign in to Radient in Settings to enable speaking aloud.",
+  "wire.errors.media.speech_radient_credit_low": "Your Radient credit balance is too low for speech. Add credits in the Radient Console to continue.",
+  "wire.errors.media.speech_radient_sign_in_failed": "Your Radient sign-in has stopped working. Sign in again in Settings.",
+  "wire.errors.media.speech_temporarily_unavailable": "Speech is temporarily unavailable. Try again in a moment.",
+  "wire.errors.media.speech_unavailable": "Speech is unavailable right now. Try again in a moment.",
+  "wire.errors.media.speech_unknown_agent": "This conversation's agent is no longer available.",
+  "wire.errors.media.speech_upstream_no_response": "Speech generation failed upstream: No response from the upstream: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "Speech generation failed upstream: Radient reported an error (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "Speech generation failed upstream: Upstream responded {status}: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "Your {vendor} credit balance is too low for speech. Add credits with {vendor} to continue.",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} refused your API key. Replace it.",
+  "wire.errors.media.temp_audio_missing": "Temporary audio file not found after saving.",
+  "wire.errors.media.transcription_unexpected": "An unexpected error occurred during transcription: {error}",
+  "wire.errors.media.unknown_model": "Unknown model {provider}/{model}: {error}",
+  "wire.errors.media.unknown_provider": "Unknown provider {provider}."
+}

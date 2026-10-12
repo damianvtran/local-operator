@@ -66,6 +66,17 @@ def speech_request_data():
     }
 
 
+def _media_envelope(detail: object) -> dict[str, Any]:
+    """Validate the JSON shape before inspecting migrated refusal sentences.
+
+    FastAPI accepts arbitrary JSON detail but inherits Starlette's string-typed
+    attribute. Taking object here reflects that wire boundary without a cast or
+    ignoring the analyzer; a string from an unconverted arm must fail at runtime.
+    """
+    assert isinstance(detail, dict)
+    return detail
+
+
 def _speech_logged_the_stack(caplog) -> None:
     """Assert the route logged an ERROR whose stack survived to ``caplog``.
 
@@ -324,7 +335,11 @@ async def test_create_speech_generic_exception(speech_request_data, mock_radient
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 500
-    assert "Failed to generate speech: Something went wrong" in exc_info.value.detail
+    assert exc_info.value.detail == {
+        "code": "wire.errors.media.speech_generate_failed",
+        "params": {"error": "Something went wrong"},
+        "text": "Failed to generate speech: Something went wrong",
+    }
     # The one fault class that needs a stack gets one (review round 2, finding 1).
     _speech_logged_the_stack(caplog)
 
@@ -364,7 +379,8 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Sign in to Radient in Settings to enable speaking aloud."
     mock_radient_client.create_speech_response.assert_not_called()
 
 
@@ -408,7 +424,8 @@ async def test_create_speech_passes_actionable_refusals_through(
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == status
-    assert exc_info.value.detail == sentence
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == sentence
 
 
 @pytest.mark.asyncio
@@ -425,10 +442,11 @@ async def test_create_speech_keeps_the_502_path_for_an_error_envelope(mock_radie
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 502
-    assert "Radient reported an error (HTTP 200)" in exc_info.value.detail
+    detail = _media_envelope(exc_info.value.detail)
+    assert "Radient reported an error (HTTP 200)" in detail["text"]
     # The envelope's designed `error` field is extracted; the raw frame is not quoted.
-    assert exc_info.value.detail.endswith("vendor quota exceeded")
-    assert '{"error"' not in exc_info.value.detail
+    assert detail["text"].endswith("vendor quota exceeded")
+    assert '{"error"' not in detail["text"]
 
 
 @pytest.mark.asyncio
@@ -445,8 +463,9 @@ async def test_create_speech_extracts_the_error_field_for_other_statuses(mock_ra
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 502
-    assert "unknown model eleven_bogus_v1" in exc_info.value.detail
-    assert '{"error"' not in exc_info.value.detail
+    detail = _media_envelope(exc_info.value.detail)
+    assert "unknown model eleven_bogus_v1" in detail["text"]
+    assert '{"error"' not in detail["text"]
 
 
 def _speech_request(**overrides: Any) -> SpeechRequest:
@@ -722,14 +741,15 @@ async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
                     _env_config(),
                 )
         assert exc_info.value.status_code == expected_status
+        detail = _media_envelope(exc_info.value.detail)
         if expected is None:
             # A rate limit, a fault and a rejected request are not credit
             # conditions: they keep the sentence that names nobody, so it is not
             # asserted as a vendor literal.
-            assert "ElevenLabs" not in exc_info.value.detail
+            assert "ElevenLabs" not in detail["text"]
         else:
-            assert exc_info.value.detail == expected
-        assert "Radient" not in exc_info.value.detail
+            assert detail["text"] == expected
+        assert "Radient" not in detail["text"]
 
 
 @pytest.mark.asyncio
@@ -768,7 +788,8 @@ async def test_a_generic_vendor_refusal_keeps_the_provider_neutral_sentence(tmp_
             )
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "Speech is unavailable right now. Try again in a moment."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Speech is unavailable right now. Try again in a moment."
 
 
 def test_an_over_long_speak_aloud_input_is_refused_at_the_schema():
@@ -808,7 +829,8 @@ async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path, caplog):
         )
 
     assert exc_info.value.status_code == 404
-    assert exc_info.value.detail == "This conversation's agent is no longer available."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "This conversation's agent is no longer available."
     radient_client.create_speech_response.assert_not_called()
     # The raw id stays support-visible through the log line, not the copy
     # (design round 1, D1).
@@ -847,7 +869,8 @@ async def test_create_agent_speech_requires_a_credential_before_any_work(tmp_pat
             )
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Sign in to Radient in Settings to enable speaking aloud."
     configure_call.assert_not_called()
     voice_call.assert_not_called()
     radient_client.create_speech_response.assert_not_called()
@@ -883,7 +906,8 @@ async def test_create_agent_speech_passes_refusals_through(tmp_path):
             )
 
     assert exc_info.value.status_code == 402
-    assert exc_info.value.detail == (
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == (
         "Your Radient credit balance is too low for speech. "
         "Add credits in the Radient Console to continue."
     )
@@ -917,7 +941,11 @@ async def test_create_agent_speech_500_logs_the_stack(tmp_path, caplog):
             )
 
     assert exc_info.value.status_code == 500
-    assert "Failed to generate speech: boom" in exc_info.value.detail
+    assert exc_info.value.detail == {
+        "code": "wire.errors.media.speech_generate_failed",
+        "params": {"error": "boom"},
+        "text": "Failed to generate speech: boom",
+    }
     _speech_logged_the_stack(caplog)
 
 

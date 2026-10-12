@@ -107,7 +107,7 @@ async def test_create_transcription_no_api_key(test_app_client, temp_audio_file)
 
     mock_radient_client.create_transcription.assert_not_called()
     assert response.status_code == 500
-    assert "Radient API key is not configured" in response.json()["detail"]
+    assert "Radient API key is not configured" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -147,7 +147,7 @@ async def test_create_transcription_file_save_failure(test_app_client, tmp_path,
         del app.dependency_overrides[get_radient_client]
 
     assert response.status_code == 500
-    assert "Failed to save uploaded audio file" in response.json()["detail"]
+    assert "Failed to save uploaded audio file" in response.json()["detail"]["text"]
     # The failed upload must leave nothing behind.
     assert list(scratch.iterdir()) == []
 
@@ -175,7 +175,7 @@ async def test_create_transcription_client_runtime_error(test_app_client, temp_a
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "Radient API error" in response.json()["detail"]
+    assert "Radient API error" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -201,7 +201,7 @@ async def test_create_transcription_client_value_error(test_app_client, temp_aud
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 400
-    assert "Invalid parameter" in response.json()["detail"]
+    assert "Invalid parameter" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -228,7 +228,7 @@ async def test_create_transcription_file_not_found_error(test_app_client, temp_a
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "Temporary audio file not found after saving" in response.json()["detail"]
+    assert "Temporary audio file not found after saving" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_create_transcription_unexpected_error(test_app_client, temp_audio
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "An unexpected error occurred during transcription" in response.json()["detail"]
+    assert "An unexpected error occurred during transcription" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
