@@ -1052,7 +1052,7 @@ def _competing_batch_offset(
     return None, trailing.find("{", index) >= 0
 
 
-def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
+def _actions_from_json_string(value: Any, *, channel_arguments: bool = False) -> tuple[Any, bool]:
     """The action array a JSON-encoded ``actions`` STRING evidently carries.
 
     A model that writes its actions as a string -- ``{"actions": "[{...}]"}``
@@ -1103,12 +1103,27 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     :func:`_decode_leading_json` refuses to make for leading noise. The decision
     is what must not cost the turn; the note is memory, and a batch carrying no
     note is the ordinary legacy shape this module already accepts.
+
+    ``channel_arguments`` rides both inner readers (the :func:`_decode_leading_json`
+    that finds the leading array, and the :func:`_competing_batch_offset` scan
+    over what follows it) for the reason every other reader of these bytes
+    carries it: a reader that drops it reads a DIFFERENT reply. Measured on
+    this change: ``{"reply_json": {"actions": "<arr>, {\"zzz\": {same-obs}}"}}``
+    was ACCEPTED with the hidden same-observation batch silently dropped -- the
+    invented key is exactly what the flag-less candidate scan cannot unwrap,
+    the same failure the string carrier itself had. The flag is safe here
+    (never over-broad): the scan only ever looks at text that would otherwise
+    be DROPPED, it compares against this reply's own observation ids, and when
+    it finds a competitor this function keeps the refusal (returns the string
+    unchanged) -- a tolerance may accept a decision, it may never drop one.
     """
 
     if not isinstance(value, str):
         return value, False
     try:
-        decoded, trailing, _framing = _decode_leading_json(value)
+        decoded, trailing, _framing = _decode_leading_json(
+            value, channel_arguments=channel_arguments
+        )
     except DecisionParseError:
         return value, False
     if not isinstance(decoded, list) or not decoded:
@@ -1116,13 +1131,16 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     if not all(isinstance(action, Mapping) for action in decoded):
         return value, False
     if trailing:
-        observation_ids, _uses_string_actions = _batch_observation_ids({"actions": decoded})
+        observation_ids, _uses_string_actions = _batch_observation_ids(
+            {"actions": decoded}, channel_arguments=channel_arguments
+        )
         offset, exhausted = _competing_batch_offset(
             trailing,
             observation_ids,
             # The decoder is built with the same hook as ``_decode_leading_json``'s
             # so a candidate carrying duplicate keys is refused identically.
             json.JSONDecoder(object_pairs_hook=_unique_object),
+            channel_arguments=channel_arguments,
         )
         if offset is not None or exhausted:
             # Unlike the legacy array spelling, this reply is accepted only by
@@ -1184,7 +1202,13 @@ def _batch_observation_ids(value: Any, *, channel_arguments: bool = False) -> tu
     observation_ids: set[str] = set()
     uses_string_actions = False
     for raw_actions in (value.get("actions"), nested_value):
-        actions, coerced = _actions_from_json_string(raw_actions)
+        # The flag rides every reader of these bytes; this scan may be the one
+        # that decides a competing batch exists, and an invented-key candidate
+        # is invisible to it without the channel fact (see
+        # ``_actions_from_json_string``).
+        actions, coerced = _actions_from_json_string(
+            raw_actions, channel_arguments=channel_arguments
+        )
         uses_string_actions = uses_string_actions or coerced
         if not isinstance(actions, list):
             continue
@@ -1779,9 +1803,12 @@ def normalise_public_reply(
         return actions, None, tolerated_fields
     batch = framed.get("action_batch")
     nested_actions, nested_from_string = _actions_from_json_string(
-        batch.get("actions") if isinstance(batch, Mapping) else batch
+        batch.get("actions") if isinstance(batch, Mapping) else batch,
+        channel_arguments=channel_arguments,
     )
-    top_actions, top_from_string = _actions_from_json_string(framed.get("actions"))
+    top_actions, top_from_string = _actions_from_json_string(
+        framed.get("actions"), channel_arguments=channel_arguments
+    )
     if isinstance(top_actions, list) and isinstance(nested_actions, list):
         # Two action arrays in one reply is the SAME ambiguity as two batches in
         # one payload -- which one did the model mean? -- and it is a question

@@ -306,6 +306,47 @@ async def test_the_same_sole_key_wrapper_as_prose_stays_refused() -> None:
     assert raised.value.class_key == "batch-shape"
 
 
+@pytest.mark.asyncio
+async def test_the_actions_string_reader_refuses_a_hidden_batch_at_the_client() -> None:
+    """Round-2 residual (M1/Q3): the string reader's refusal reaches the client.
+
+    The actions-as-JSON-string spellings ``_actions_from_json_string`` coerces
+    run a competing-batch scan of their own; without the channel fact a hidden
+    same-observation batch under an invented key was invisible there, and the
+    real client ADMITTED the visible batch with the remainder silently dropped
+    (measured: ``ADMITTED[1]`` on both spellings). Both spellings now refuse at
+    this boundary, with the carrier's own class -- the same classes their
+    declared-key and bare siblings get -- while a candidate naming another
+    observation stays the tolerated quotation.
+    """
+
+    current = observation()
+    action = json.loads(finish_payload(current))["actions"][0]
+    array = json.dumps([dict(action)])
+    hidden = json.dumps({"zzz": {"actions": [dict(action)]}})
+    quotation = json.dumps({"zzz": {"actions": [dict(action, observation_id="0" * 64)]}})
+
+    with pytest.raises(DecisionRejected) as top:
+        await _client(
+            ChannelStream(json.dumps({"actions": array + " , " + hidden})),
+            model_spec=_spec(supports_tools=True),
+        ).decide(current, _turns(current))
+    assert top.value.class_key == "batch-shape"
+
+    with pytest.raises(DecisionRejected) as nested:
+        await _client(
+            ChannelStream(json.dumps({"action_batch": {"actions": array + " , " + hidden}})),
+            model_spec=_spec(supports_tools=True),
+        ).decide(current, _turns(current))
+    assert nested.value.class_key == "envelope-shape"
+
+    decision = await _client(
+        ChannelStream(json.dumps({"actions": array + " , " + quotation})),
+        model_spec=_spec(supports_tools=True),
+    ).decide(current, _turns(current))
+    assert len(decision.action_batch.actions) == 1
+
+
 def test_the_channel_hands_back_raw_bytes_rather_than_a_repaired_object() -> None:
     """Re-serializing would quietly REPAIR duplicate keys the strict decoder
     exists to reject, turning a transparent channel into a lenient one."""

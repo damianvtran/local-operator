@@ -696,6 +696,52 @@ async def test_a_wrapped_channel_reply_survives_episode_recording(
 
 
 @pytest.mark.asyncio
+async def test_a_hidden_second_batch_in_an_actions_string_never_executes(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Round-2 residual (M1/Q3): fail-closed at the runner, nothing executed.
+
+    Pre-fix the runner COMPLETED / SCORED on this reply -- the visible batch
+    executed and the hidden same-observation batch was silently dropped
+    (measured on the real runner). With the string reader carrying the channel
+    fact the reply is rejected at the real client, the corrective path is
+    exhausted against the static stream, and the episode seals failed/unscored
+    with ``model``-category ``decision-rejected`` errors -- and the adapter
+    never sees an ``execute`` for either batch.
+    """
+
+    # Deferred: test_public_reply imports this module for ``_rescue_ok``.
+    from tests.unit.evaluation.runner.test_provider_client import (
+        _client,
+        finish_payload,
+    )
+    from tests.unit.evaluation.runner.test_reply_channel import ChannelStream, _spec
+
+    current = observation(episode_id, 0)
+    action = json.loads(finish_payload(current))["actions"][0]
+    array = json.dumps([dict(action)])
+    hidden = json.dumps({"zzz": {"actions": [dict(action)]}})
+    reply = json.dumps({"actions": array + " , " + hidden})
+
+    client = _client(ChannelStream(reply), model_spec=_spec(supports_tools=True))
+    adapter = FakeAdapter(tmp_path, episode_id, score=ScoreArtifact(status="scored", binary=1))
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=client)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.status == "unscored"
+    assert "execute" not in adapter.calls
+    assert outcome.bundle_root is not None
+    rejected = [
+        error
+        for error in payloads(outcome.bundle_root, ErrorPayload)
+        if error.diagnostic_code == "decision-rejected"
+    ]
+    assert rejected and all(error.category == "model" for error in rejected)
+
+
+@pytest.mark.asyncio
 async def test_route_change_is_not_sealed_as_comparable(tmp_path: Path, episode_id: str) -> None:
     """A silent provider fallback is exactly what comparability exists to catch."""
 

@@ -2000,6 +2000,51 @@ def test_a_competing_batch_inside_a_string_carrier_is_still_refused() -> None:
     assert decision.action_batch.to_canonical_json() == _canonical(body, current)
 
 
+def test_the_actions_string_reader_carries_the_channel_fact() -> None:
+    """M1 residual (review round 2): the actions-as-JSON-string reader threads it.
+
+    ``_actions_from_json_string`` coerces the string and runs its own
+    competing-batch scan over what follows the array -- both inner calls read
+    the same bytes every other reader does, and without the channel fact an
+    invented-key candidate there is invisible: measured, ``{"reply_json":
+    {"actions": "<arr>, {\"zzz\": {same-obs}}"}}`` and the nested
+    ``action_batch.actions`` spelling were ACCEPTED with the hidden
+    same-observation batch silently dropped, while the declared-key and bare
+    spellings refused. All six now refuse; an other-observation candidate is
+    still the tolerated quotation.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    other = _one_action(observation(1))
+
+    def string_with(candidate: Any) -> str:
+        return json.dumps([action]) + " , " + json.dumps(candidate)
+
+    for candidate in (
+        {"zzz": {"actions": [dict(action)]}},
+        {"input": {"actions": [dict(action)]}},
+        {"actions": [dict(action)]},
+    ):
+        # The class follows the CARRIER, not the candidate key: the invented
+        # key is refused with the same sentence its declared/bare siblings get
+        # (measured), because the refusal it causes is the carrier's own.
+        for body, expected in (
+            ({"actions": string_with(candidate)}, "batch-shape"),
+            ({"action_batch": {"actions": string_with(candidate)}}, "envelope-shape"),
+        ):
+            payload = json.dumps({"reply_json": body})
+            with pytest.raises(DecisionParseError) as info:
+                parse_decision(payload, current, route=ROUTE, channel_arguments=True)
+            assert classify_rejection(str(info.value)) == expected, payload
+
+    tolerated = json.dumps(
+        {"reply_json": {"actions": string_with({"zzz": {"actions": [dict(other)]}})}}
+    )
+    decision = parse_decision(tolerated, current, route=ROUTE, channel_arguments=True)
+    assert len(decision.action_batch.actions) == 1
+
+
 def test_the_recording_re_decode_reads_what_the_decoder_accepted() -> None:
     """B1: the SECOND reader of an accepted reply carries the channel fact.
 
