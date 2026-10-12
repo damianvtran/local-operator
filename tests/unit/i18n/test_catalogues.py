@@ -44,6 +44,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.desktop",
         "wire.errors.files",
         "wire.errors.media",
+        "wire.errors.sdk_startup",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
