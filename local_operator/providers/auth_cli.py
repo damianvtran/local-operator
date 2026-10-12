@@ -210,7 +210,10 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
 
     manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
-        on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
+        on_auth_url=on_auth_url,
+        on_progress=on_progress,
+        on_manual_code_input=manual_input,
+        displays_warnings=True,
     )
 
 

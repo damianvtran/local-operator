@@ -1221,8 +1221,81 @@ def _fetch_openai_oauth(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     return rows
 
 
+def _row_from_meta_muse_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+    """Project the ACTUAL authenticated metadata['muse-code'] dialect.
+
+    Observed 2026-10-12 on /muse-code/models with a device-minted subscription
+    key. Full is offered only through this listing, never a marketing alias.
+    Contributor routes are not silently enrolled: they have separate terms
+    and stay out of this subscription-only integration.
+    """
+    model_id = _first_str(entry.get("id"))
+    if not model_id.startswith("muse-") or model_id.endswith("-contributor"):
+        return None
+    metadata = _mapping(_mapping(entry.get("metadata")).get("muse-code"))
+    if metadata.get("is_hidden") is not False:
+        return None
+    modalities = _mapping(metadata.get("modalities"))
+    output = modalities.get("output")
+    if not isinstance(output, list) or "text" not in output:
+        return None
+    row = _row_from_openai_entry(entry, "meta-muse")
+    if row is None:
+        return None
+    limits = _mapping(metadata.get("limit"))
+    variants = _mapping(metadata.get("variants"))
+    efforts = tuple(
+        level for level in ("minimal", "low", "medium", "high", "xhigh", "max") if level in variants
+    )
+    inputs = modalities.get("input")
+    return dataclasses.replace(
+        row,
+        name=model_id.removeprefix("muse-").replace("-", " ").title(),
+        context_window=_positive_int(limits.get("context")),
+        max_tokens=_positive_int(limits.get("output")),
+        supports_images=isinstance(inputs, list) and "image" in inputs,
+        supports_tools=_stated_bool(metadata.get("tool_call")),
+        reasoning=_stated_bool(metadata.get("reasoning")),
+        reasoning_efforts=efforts,
+        authoritative_fields=(
+            "context_window",
+            "max_tokens",
+            "supports_images",
+            "supports_tools",
+            "reasoning",
+            "reasoning_efforts",
+        ),
+    )
+
+
 def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
-    """The provider's model catalogue, including ChatGPT's OAuth-only route."""
+    """The provider's model catalogue, including subscription-only routes."""
+    if ctx.provider_id == "meta-muse":
+        if not ctx.api_key or not ctx.is_oauth:
+            # Never ask a public/PAYG catalogue and call it plan availability.
+            return None
+        body = _get_json(
+            ctx,
+            f"{ctx.base_url.removesuffix('/v1')}/muse-code/models",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {ctx.api_key}",
+                "x-api-version": "1.0.0",
+            },
+            params={},
+        )
+        if body is None:
+            return None
+        entries = _entry_list(body, "data", "models")
+        if entries is None:
+            return None
+        rows = [row for entry in entries if (row := _row_from_meta_muse_entry(entry)) is not None]
+        # All-junk is an outage, not an authoritative empty subscription.
+        recognized = any(
+            isinstance(_mapping(entry.get("metadata")).get("muse-code"), Mapping)
+            for entry in entries
+        )
+        return rows if rows or not entries or recognized else None
     if _serves_account_scoped_catalogue(
         ctx.provider_id,
         is_oauth=ctx.is_oauth,
@@ -2002,7 +2075,9 @@ def _listing_replaces_static(
     inventory. Preserve other providers' established union/account semantics.
     An unavailable or invalid payload never gets deletion authority.
     """
-    return rows is not None and (provider_id == "deepseek" or (account_scoped and bool(rows)))
+    return rows is not None and (
+        provider_id in ("deepseek", "meta-muse") or (account_scoped and bool(rows))
+    )
 
 
 def cached_available_models(
@@ -2239,6 +2314,11 @@ def _available_models(
     timeout: float,
     want_id: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
+    if provider_id == "meta-muse" and api_key and not account_id:
+        # Email-only sign-ins are valid. Callers normally pass normalized
+        # email as scope; a direct caller still gets key-isolated cache, never
+        # a shared plan catalogue. Only a digest reaches a cache filename.
+        account_id = "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
     definition = get_provider_definition(provider_id)
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
@@ -2309,7 +2389,9 @@ def _available_models(
         is_oauth=is_oauth,
         api_key=api_key,
         account_id=account_id,
-    )
+    ) or bool(definition.id == "meta-muse" and is_oauth and api_key and account_id)
+    # Muse cache isolation is independent of Codex transport dispatch. Adding
+    # it to OPENAI_OAUTH_PROVIDERS would send Meta keys to ChatGPT instead.
     key = _cache_key(
         storage_id,
         account_scoped=account_scoped,

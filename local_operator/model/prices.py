@@ -182,7 +182,7 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
 #: catalogues: a zero there is a quoted zero (``zai/glm-4.7-flash`` is $0 on
 #: Z.AI's own pricing page) and is exactly what ``free`` is for.
 _PLAN_BILLED_KEYS: frozenset[str] = frozenset(
-    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan"}
+    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan", "meta-muse"}
 )
 
 #: Every models.dev key the projection keeps, derived from the map above so the

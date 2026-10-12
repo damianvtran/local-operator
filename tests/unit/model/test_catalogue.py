@@ -949,7 +949,7 @@ def test_an_env_var_resolves_when_no_store_row_holds_the_key(
     assert configure_mod._catalogue_api_key(provider) == "sk-env-value"
 
 
-def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch) -> None:
+def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch, tmp_path) -> None:
     """Precedence AND credential kind, for the provider where both were wrong.
 
     With the callable ``env_keys`` form unread, ``ANTHROPIC_API_KEY`` resolved to
@@ -962,23 +962,29 @@ def test_an_env_api_key_beats_a_stored_oauth_row_and_keeps_its_kind(monkeypatch)
     """
     from local_operator.model import configure as configure_mod
 
-    monkeypatch.setattr(
-        configure_mod,
-        "_oauth_listing_token",
-        lambda _provider: ("oauth-access-token", True, None),
-    )
-    assert configure_mod._catalogue_credential("anthropic") == (
+    calls = []
+
+    def stored_oauth(provider, *, base=None):
+        # A listing must read credentials from its selected config root, never
+        # accidentally use another root merely because this is a test double.
+        assert provider == "anthropic" and base == tmp_path
+        calls.append(base)
+        return "oauth-access-token", True, None
+
+    monkeypatch.setattr(configure_mod, "_oauth_listing_token", stored_oauth)
+    assert configure_mod._catalogue_credential("anthropic", base=tmp_path) == (
         "oauth-access-token",
         True,
         None,
     )
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-explicit")
-    assert configure_mod._catalogue_credential("anthropic") == (
+    assert configure_mod._catalogue_credential("anthropic", base=tmp_path) == (
         "sk-ant-explicit",
         False,
         None,
     )
+    assert calls == [tmp_path]
 
 
 def test_an_oauth_token_from_the_environment_is_not_sent_as_an_api_key(monkeypatch) -> None:

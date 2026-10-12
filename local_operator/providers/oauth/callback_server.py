@@ -531,6 +531,11 @@ class LoginCallbacks:
     #: not. Optional and reporting-only (``report_safely``), so no host has to
     #: implement it and a raising sink cannot cost a sign-in.
     on_flow_details: Callable[..., Awaitable[None] | None] | None = None
+    #: Explicit host capability: warnings are actually displayed verbatim.
+    #: Desktop currently maps warning callbacks to generic operation status,
+    #: so presence of on_warning alone must NOT suppress a legal/privacy
+    #: disclosure in URL instructions. Unknown hosts retain the full copy.
+    displays_warnings: bool = False
 
 
 async def report_flow_details(

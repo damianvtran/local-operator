@@ -389,6 +389,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the device-id file under the agent home, beside the provider's own config",
     ),
     "local_operator/providers/qwencloud_console.py": (1, "a SECRET's name"),
+    "local_operator/providers/meta_muse_credentials.py": (
+        1,
+        "REF_PREFIX is an encrypted provider-secret SQL namespace, not a session "
+        "directory entry; neither sealed keys nor account references travel with sessions",
+    ),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
     "local_operator/mobile/push_devices.py": (
