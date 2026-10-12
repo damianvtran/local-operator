@@ -75,6 +75,21 @@ USELESS_NOTICE = "[Uneventful result elided]"
 #: surface has superseded (see :func:`prune_stale_frames`).
 STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
 
+#: A superseded victim at least this large may be blanked even inside the
+#: warm cache suffix (Fix C). The warm-suffix guard exists because blanking
+#: forces the [redacted] to re-write everything after the victim at the
+#: cacheWrite premium, so a small victim costs more than it saves. That
+#: arithmetic inverts for a large one: a victim bigger than the suffix it
+#: invalidates repays the re-write on the NEXT request alone (the suffix is
+#: re-billed once; the victim would be re-billed on every request until
+#: compaction). 8,000 tokens mirrors ``cache_warm_suffix_tokens``' default
+#: so the comparison is victim-vs-suffix in the same units the guard
+#: already uses. This is deliberately NOT an earlier trigger: pruning
+#: already runs post-turn (session._maybe_compact -> _plan_compaction);
+#: the victims that accumulated did so because this guard deferred them,
+#: so the guard is where the fix belongs.
+OVERSIZED_SUPERSEDE_TOKENS = 8000
+
 #: How many of the newest frame-bearing messages the session-side stale-frame
 #: sweep always keeps (see :func:`prune_stale_frames_in_place`). Two, not one:
 #: a before/after capture pair — the flow the sweep must not break — is exactly
@@ -707,8 +722,12 @@ def prune_tool_outputs(
             if not idle and suffix_tokens[i] > cache_warm_suffix_tokens:
                 # Inside the warm cache prefix: re-writing it costs the
                 # cacheWrite premium on the whole suffix. Leave it for
-                # compaction, which rebuilds the cache anyway.
-                continue
+                # compaction, which rebuilds the cache anyway — UNLESS the
+                # victim alone outweighs that suffix (see
+                # OVERSIZED_SUPERSEDE_TOKENS): then the re-write is repaid
+                # by not re-billing the victim on the very next request.
+                if estimate_tokens(message) < OVERSIZED_SUPERSEDE_TOKENS:
+                    continue
             _blank(message, notice)
             changed = True
 

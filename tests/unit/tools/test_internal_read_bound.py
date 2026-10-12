@@ -600,3 +600,51 @@ async def test_no_read_branch_returns_an_unbounded_result(tmp_path: Path) -> Non
 
     # The directory listing must stay expandable, not merely clipped.
     assert "spill://" in _text_of(dir_result)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_skill_read_is_shaped_like_internal_read(tmp_path: Path) -> None:
+    """Fix A: a SKILL.md read by its on-disk path gets the outline shape.
+
+    The internal-URL branch already shapes this document to ~7 KB; the same
+    bytes via ``~/.claude/skills/<name>/SKILL.md`` used to return the plain
+    8 KiB clamp with no outline, so an agent that reached for the file path
+    (the instinctive spelling) lost both the saving and the guarantee that
+    every operative heading stays visible.
+    """
+    doc = _skill_like_document()
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-skill-test")
+
+    result = await _call(context, {"path": str(target)})
+
+    body = _text_of(result)
+    assert len(body) <= 8192  # shaped, not the plain clamp and not the doc
+    assert len(body) < len(doc) // 2
+    assert _GATE_HEADING in body  # the deep operative heading stays visible
+    assert "PARTIAL" in body
+    assert result.details is not None
+    assert result.details["url"] == "skill://fixture-skill"
+    assert result.details["path"] == str(target)
+    # The full text is still reachable: the advertised spill range resolves.
+    handle = result.details["spill"]["handle"]
+    expanded = await _call(context, {"path": handle, "range": "1-20"})
+    assert "Fixture Skill" in _text_of(expanded)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_skill_raw_read_stays_exact(tmp_path: Path) -> None:
+    """raw=true is the explicit exact-bytes request; shaping must not eat it."""
+    doc = _skill_like_document()
+    skill_dir = tmp_path / "skills" / "fixture-skill"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text(doc, encoding="utf-8")
+    context = ToolContext(cwd=str(tmp_path), session_id="fs-skill-raw-test")
+
+    result = await _call(context, {"path": str(target), "raw": True})
+
+    assert "PARTIAL" not in _text_of(result)

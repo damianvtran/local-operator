@@ -5531,6 +5531,77 @@ def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
     return ""
 
 
+def _internal_url_for_path(path: Path) -> str | None:
+    """The ``skill://``/``guide://`` URL a filesystem path IS, or ``None``.
+
+    WHY THIS EXISTS (Fix A, measured 2026-10): the internal-URL branch shapes
+    an 82 KB skill to ~7 KB (head + complete heading outline), but the same
+    bytes reached by their on-disk path bypassed shaping entirely. The file
+    path is the instinctive spelling — transcripts show agents reading
+    ``~/.claude/skills/<name>/SKILL.md`` directly after a shaped
+    ``skill://`` read, paying the 8 KiB clamp instead of the outline and,
+    worse, losing the outline's guarantee that every operative heading stays
+    visible. Deriving the URL here lets the filesystem branch reuse the
+    internal shape instead of growing a second one.
+
+    The name comes from the file's own frontmatter (``name:``) when it
+    declares one, falling back to the parent directory name — the same
+    fallback discovery uses. A bounded ancestor walk (the resource layout is
+    ``<root>/<name>/...``, never deep) finds the body file; reference files
+    map to ``<url>/<relative path>`` so the shaped footer advertises the
+    same expansion the resolver would serve.
+
+    CONSTRAINT: this only NAMES the document for shaping and for the
+    pruning exemption. The result still carries ``details['path']`` (the
+    real path compaction supersedes on); ``url`` is additive.
+    """
+    name = path.name.casefold()
+    body_file = "skill.md" if name == "skill.md" else "guide.md" if name == "guide.md" else None
+    if body_file is None:
+        # A reference file: its resource is the nearest ancestor holding a body.
+        for ancestor in path.parents:
+            for candidate, scheme in (("SKILL.md", "skill"), ("GUIDE.md", "guide")):
+                if (ancestor / candidate).is_file():
+                    body_file = candidate.lower()
+                    break
+            if body_file is not None:
+                break
+        else:
+            return None
+        resource_dir = ancestor  # type: ignore[possibly-undefined]
+        scheme = "skill" if body_file == "skill.md" else "guide"  # type: ignore[possibly-undefined]
+    else:
+        resource_dir = path.parent
+        scheme = "skill" if body_file == "skill.md" else "guide"
+    declared: str | None = None
+    try:
+        head = (
+            (resource_dir / body_file.upper()).read_bytes()[:4096].decode("utf-8", errors="replace")
+        )
+    except OSError:
+        head = ""
+    if head.startswith("---"):
+        for line in head.splitlines()[1:]:
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "name" and value.strip():
+                declared = value.strip().strip('"').strip("'")
+                break
+    resource_name = declared or resource_dir.name
+    if not resource_name:
+        return None
+    url = f"{scheme}://{resource_name}"
+    if path.parent != resource_dir:
+        try:
+            url += "/" + path.relative_to(resource_dir).as_posix()
+        except ValueError:
+            return None
+    elif name != body_file:
+        url += f"/{path.name}"
+    return url
+
+
 def _shape_internal_document(
     content: str, target: str, context: ToolContext | None
 ) -> tuple[str, dict[str, Any] | None]:
@@ -8545,6 +8616,29 @@ async def _read_path(
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
+
+    # A skill/guide file read by its ON-DISK path gets the internal shape,
+    # not the plain 8 KiB clamp (Fix A; see _internal_url_for_path). Only a
+    # whole-file, non-raw read qualifies — a range or raw=true is the
+    # caller explicitly asking for exact bytes, and shaping it would break
+    # the expansion calls the shaped footer itself advertises. The shaped
+    # body spills the full text, so nothing becomes unreachable: the footer
+    # names a range into the spill handle, exactly like a skill:// read.
+    if not params.range and not params.raw:
+        internal_url = _internal_url_for_path(path)
+        if internal_url is not None:
+            body, spill_details = _shape_internal_document(text, internal_url, context)
+            if spill_details is not None or body != text:
+                return _text(
+                    tool_call_id,
+                    "read",
+                    body,
+                    details={
+                        "path": str(path),
+                        "url": internal_url,
+                        **(spill_details or {}),
+                    },
+                )
 
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full

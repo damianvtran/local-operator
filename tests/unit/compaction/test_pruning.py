@@ -487,3 +487,22 @@ def test_error_frames_are_never_swept():
 
     assert dropped == 0
     assert any(isinstance(block, ImageContent) for block in failed.content)
+
+
+def test_oversized_superseded_victim_blanks_despite_warm_suffix():
+    """Fix C: a victim bigger than the warm suffix it invalidates is blanked.
+
+    The warm-suffix guard defers small victims because re-writing the suffix
+    costs more than they save. A victim larger than that suffix inverts the
+    arithmetic — it would be re-billed on every request until compaction,
+    while the suffix is re-written only once.
+    """
+    big = _read_result("/repo/big.py", words=30000)
+    messages = [big, _assistant_big(words=10000), _read_result("/repo/big.py")]
+    suffix = compute_suffix_tokens(messages)
+    assert suffix[0] > 8000
+    assert estimate_tokens(big) > suffix[0]
+
+    _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
+    assert changed is True
+    assert big.text == SUPERSEDED_NOTICE
