@@ -1896,3 +1896,133 @@ def test_a_dropped_send_row_is_still_counted_cross_session(tmp_path):
     assert run.action_count == 1
     assert run.cross_actions == 1, "a dropped send row is cross-session"
     assert run_payload(run)["cross_session_action_count"] == 1
+
+
+# Cache loss is a domain change even if every payload/ordinal stays identical:
+# a late old-domain response must not regain authority by payload equality.
+def test_cache_loss_remints_domain_without_changing_coordinates(tmp_path: Path):
+    write_rows(tmp_path, [user("loss-u", 100.0), assistant("loss-a", 99.0)])
+    before = ti.refresh_index(tmp_path, SID)
+    assert before is not None
+    ti.index_path(tmp_path, SID).unlink()
+    after = ti.refresh_index(tmp_path, SID)
+    assert after is not None
+    assert after.journal_generation != before.journal_generation
+    assert after.journal_rows == before.journal_rows
+
+
+def test_incremental_reread_keeps_prefix_and_replaces_suffix_coordinates(tmp_path: Path):
+    write_rows(
+        tmp_path,
+        [
+            user("prefix-u", 100.0),
+            assistant("prefix-a", 101.0),
+            user("suffix-u", 102.0),
+            assistant("suffix-a", 103.0),
+        ],
+    )
+    before = ti.refresh_index(tmp_path, SID)
+    assert before is not None
+    assert before.scan.window_rows > 0
+    # Model a stale suffix coordinate in a resident parsed view: the suffix
+    # reread must replace it rather than retaining a lookup from that view.
+    before.journal_rows["suffix-a"] = 12345
+    write_rows(tmp_path, [assistant("append-a", 104.0)])
+    after = ti._scan_incremental(journal_path(tmp_path), before, None)
+    assert after.journal_generation == before.journal_generation
+    assert after.journal_rows == {
+        "prefix-u": 0,
+        "prefix-a": 1,
+        "suffix-u": 2,
+        "suffix-a": 3,
+        "append-a": 4,
+    }
+
+
+def test_missing_generation_is_unknown_not_a_fabricated_domain(tmp_path: Path):
+    write_rows(tmp_path, [user("unknown-u", 100.0)])
+    ti.refresh_index(tmp_path, SID)
+    path = ti.index_path(tmp_path, SID)
+    raw = json.loads(path.read_text())
+    raw["journal_generation"] = None
+    path.write_text(json.dumps(raw))
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None
+    assert cached.journal_generation == ""
+
+
+# Journal order belongs to all rows, not only the rail/search subset. Keeping
+# these coordinates in the existing scan avoids re-reading the full journal
+# for each backward page (and clock regressions must not change their meaning).
+def test_all_row_journal_order_persists_across_cache_reads(tmp_path: Path):
+    rows = [
+        assistant("order-a", 100.0),
+        {
+            "id": "order-custom",
+            "ts": 99.0,
+            "type": "custom",
+            "payload": {"custom_type": "session_model_switch"},
+        },
+        tool("order-tool", 98.0),
+    ]
+    write_rows(tmp_path, rows)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    assert index.journal_rows == {"order-a": 0, "order-custom": 1, "order-tool": 2}
+    assert index.journal_generation
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None
+    assert cached.journal_rows == index.journal_rows
+    assert cached.journal_generation == index.journal_generation
+
+
+def test_journal_append_keeps_generation_and_all_row_ordinals(tmp_path: Path):
+    write_rows(tmp_path, [user("order-u", 100.0), assistant("order-a", 101.0)])
+    before = ti.refresh_index(tmp_path, SID)
+    assert before is not None
+    write_rows(
+        tmp_path,
+        [
+            {
+                "id": "order-c",
+                "ts": 99.0,
+                "type": "custom",
+                "payload": {"custom_type": "session_model_switch"},
+            }
+        ],
+    )
+    after = ti.refresh_index(tmp_path, SID)
+    assert after is not None
+    assert after.journal_generation == before.journal_generation
+    assert after.journal_rows == {"order-u": 0, "order-a": 1, "order-c": 2}
+
+
+def test_journal_rewrite_invalidates_old_coordinates(tmp_path: Path):
+    write_rows(tmp_path, [user("old-u", 100.0), assistant("old-a", 101.0)])
+    before = ti.refresh_index(tmp_path, SID)
+    assert before is not None
+    replacement = journal_path(tmp_path).with_suffix(".replacement")
+    replacement.write_text(json.dumps(user("new-u", 1.0)) + "\n", encoding="utf-8")
+    replacement.replace(journal_path(tmp_path))
+    after = ti.refresh_index(tmp_path, SID)
+    assert after is not None
+    assert after.journal_generation != before.journal_generation
+    assert after.journal_rows == {"new-u": 0}
+
+
+def test_journal_order_uses_complete_scanned_lines_not_visible_subset(tmp_path: Path):
+    path = journal_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(user("line-u", 100.0))
+        + "\n"
+        + "not-json\n"
+        + json.dumps(assistant("line-a", 99.0))
+        + "\n"
+        + '{"id":"torn',
+        encoding="utf-8",
+    )
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    assert index.journal_rows == {"line-u": 0, "line-a": 2}
+    assert index.scan.rows == 3
