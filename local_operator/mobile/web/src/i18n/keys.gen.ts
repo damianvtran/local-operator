@@ -154,6 +154,10 @@ export type MessageParams = {
   "wire.errors.media.transcription_unexpected": { "error": string };
   "wire.errors.media.unknown_model": { "provider": string; "model": string; "error": string };
   "wire.errors.media.unknown_provider": { "provider": string };
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": { "resume": string; "error": string };
+  "wire.errors.sdk_startup.attach_runtime_missing": { "resume": string };
+  "wire.errors.sdk_startup.profile_attach_failed": { "profile": string };
+  "wire.errors.sdk_startup.tool_inventory_mismatch": { "spec_tools": string; "policy_tools": string };
   "wire.errors.settings.config_retrieve_failed": { "error": string };
   "wire.errors.settings.config_unreadable": undefined;
   "wire.errors.settings.config_update_failed": { "error": string };
