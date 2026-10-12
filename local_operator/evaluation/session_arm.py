@@ -2097,7 +2097,6 @@ async def run_session_episode(
     #: the join surface must not flood the record, and must not end the join
     #: either -- the canonical task is still the thing being waited on, and a
     #: record failure never releases ownership (see the module's failure rule).
-    rejoin_error_recorded = False
     outcome: SessionArmOutcome
 
     def _mark_rescue_required() -> None:
@@ -2416,108 +2415,43 @@ async def run_session_episode(
                 shutdown_result = await handle.session.shutdown_owned_work(
                     "episode-turn-complete", timeout_s=config.cleanup_timeout
                 )
-            except Exception as error:  # noqa: BLE001 - the close-out must still reach the close
+            except (
+                BaseException
+            ) as error:  # noqa: BLE001 - the close-out must still reach the close
                 # A RAISED first join is UNVERIFIED like an incomplete one: the
-                # shutdown_result stays None and the retained disposition
-                # below applies (no release). It never authorizes cleanup.
+                # shutdown_result stays None and the retained hold below applies
+                # (no release).
                 record.write(
                     "error",
                     {"scope": "shutdown", "diagnostic": f"{type(error).__name__}: {error}"},
                 )
-            # THE RETAINED JOIN (R2, review round 3). An incomplete receipt
-            # used to fall through to a bounded context exit and a failed
-            # outcome whose durable story was a descriptor -- but the caller's
-            # own event loop then exited, and ``asyncio.run`` cancelled the
-            # canonical cleanup with it (measured in round 2). Now the caller
-            # stays IN the join: while the canonical disposal is live, the
-            # host repeatedly makes the SAME public bounded join until it
-            # completes, and NOTHING is torn down in the meantime -- no
-            # context exit, no bridge stop, no adapter close, no rescue, no
-            # descriptor discard. The episode keeps every scope, subscriber,
-            # RecordSink, socket and owner-FD it holds; a frontend that gives
-            # up waiting may detach, and the host goes on joining. A settled
-            # canonical that can never complete (cancelled, hook-failed) ends
-            # the loop into the same truthful retained-failure disposition as
-            # before -- never a restart and never a false complete. WHY THE
-            # LOOP IS BOUNDED-SAFE: each attempt calls the PUBLIC bounded join,
-            # which WAITS on the canonical task for up to its bound, so the
-            # loop cannot spin; an attempt that returns without having waited
-            # (wall clock AND the receipt's elapsed_ms both tiny) is the
-            # settled case, handled by leaving the loop.
+            # THE RETAINED HOLD (R2 / review round 3, rewritten in round 4).
+            # An incomplete receipt used to fall through to a bounded context
+            # exit and a failed outcome whose durable story was a descriptor --
+            # but the caller's own event loop then exited, and ``asyncio.run``
+            # cancelled the canonical cleanup with it (measured in round 2).
+            # Now EVERY state that is not a VERIFIED join -- None/raised,
+            # cancelled, hook-failed, settled, complete=False -- is held inside
+            # ``_hold_retained_join``, which returns only a complete receipt.
+            # NOTHING is torn down while unverified: no context exit, no bridge
+            # stop, no adapter close, no rescue, no descriptor discard, and no
+            # elapsed-time state classifier (round 3 rejected timing as a state
+            # proof). The episode keeps every scope, subscriber, RecordSink,
+            # socket and owner-FD it holds; a frontend that gives up waiting may
+            # detach, and the host goes on joining.
             owned_complete = bool(shutdown_result is not None and shutdown_result.complete)
-            if not owned_complete and shutdown_result is not None:
-                provisional_receipt = {
-                    "pending_job_ids": list(shutdown_result.pending_job_ids),
-                    "errors": list(shutdown_result.errors)[:4],
-                    "elapsed_ms": shutdown_result.elapsed_ms,
-                }
-                try:
-                    record.write(
-                        "provisional",
-                        {
-                            "reason": "owned work unverified; holding the host until "
-                            "the canonical disposal joins",
-                            **provisional_receipt,
-                            "steps": bridge.steps,
-                        },
-                    )
-                except BaseException as error:  # noqa: BLE001 - the join outranks the record
-                    if not record_errors:
-                        record_errors.append(error)
-                if owner_status is not None:
-                    owner_status.phase(
-                        "provisional",
-                        detail="owned work unverified; host retained until the join",
-                        receipt=provisional_receipt,
-                    )
-                while True:
-                    attempt_started = time.monotonic()
-                    try:
-                        refreshed = await handle.session.shutdown_owned_work(
-                            "episode-turn-complete", timeout_s=_OWNED_REJOIN_TIMEOUT_S
-                        )
-                    except Exception as error:  # noqa: BLE001 - keep joining
-                        if not rejoin_error_recorded:
-                            rejoin_error_recorded = True
-                            record.write(
-                                "error",
-                                {
-                                    "scope": "shutdown-rejoin",
-                                    "diagnostic": f"{type(error).__name__}: {error}",
-                                },
-                            )
-                        await asyncio.sleep(_OWNED_REJOIN_TIMEOUT_S)
-                        continue
-                    if refreshed is not None and refreshed.complete:
-                        shutdown_result = refreshed
-                        owned_complete = True
-                        break
-                    # Did this attempt actually SIT on a live canonical? The
-                    # WALL CLOCK and the receipt's own ``elapsed_ms`` must
-                    # BOTH agree it returned without waiting a real interval
-                    # before this counts as settled; either signal saying it
-                    # waited keeps the join alive. (A receipt that is
-                    # cancelled/hook-failed returns in milliseconds, so it is
-                    # never read as a live join waiting to complete -- and no
-                    # retry can change it, because a settled canonical task is
-                    # never recreated.)
-                    waited_wall = time.monotonic() - attempt_started
-                    waited_reported = float(getattr(refreshed, "elapsed_ms", 0.0) or 0.0) / 1000.0
-                    if (
-                        waited_wall >= _OWNED_REJOIN_TIMEOUT_S * 0.5
-                        or waited_reported >= _OWNED_REJOIN_TIMEOUT_S * 0.5
-                    ):
-                        # The attempt sat on a LIVE canonical (it waited out
-                        # its bound): loop immediately -- it has just done its
-                        # bounded join, so this cannot spin.
-                        continue
-                    # SETTLED without a complete verdict: a cancelled or
-                    # hook-failed canonical is terminal and is never recreated
-                    # (R3), so no retry can change it; leave the loop and let
-                    # the gate below report the retained disposition.
-                    break
-                if owned_complete and owner_status is not None:
-                    owner_status.phase("closing", detail="canonical join completed")
+            if not owned_complete:
+                shutdown_result = await _hold_retained_join(
+                    handle,
+                    record,
+                    owner_status,
+                    first_result=shutdown_result,
+                    record_errors=record_errors,
+                    bridge=bridge,
+                )
+                owned_complete = True
+            if owner_status is not None:
+                owner_status.phase("closing", detail="canonical join completed")
             close_joined = False
             if owned_complete:
                 try:
@@ -2593,35 +2527,21 @@ async def run_session_episode(
                 },
             )
         if not owned_complete:
-            status = "failed"
-            if shutdown_result is None:
-                incomplete_detail = "shutdown_owned_work returned no receipt"
-            elif shutdown_result.errors:
-                incomplete_detail = "; ".join(shutdown_result.errors)
-            else:
-                incomplete_detail = shutdown_result.reason
-            retain_note = (
-                " The worker was NOT released: owned work is unverified, the "
-                "rescue descriptor is retained, and a fresh verified join (or a "
-                "separately authorized supervisor teardown) must precede any "
-                "release."
-                if retain_resources
-                else ""
-            )
-            stop_diagnostic = (
-                f"owned-work shutdown did not complete before scoring: {incomplete_detail}."
-                f"{retain_note}"
-            )
+            # UNREACHABLE BY CONSTRUCTION (R3-A1): the retained hold above
+            # returns only a VERIFIED join. Fail CLOSED if a future edit finds
+            # a way here -- raising routes into the outer handler, which
+            # RETAINS unverified owned work rather than sealing a failed
+            # outcome over it.
+            raise AssertionError("unverified owned work reached the close-out gate")
         # --- score, then cleanup, then close (mirrors _close_out) -----------
         score: Any = None
         score_error: BaseException | None = None
         if not owned_complete:
-            # A REFUSAL, not a failure: nothing is scored, nothing is raised;
-            # the record and the outcome's diagnostic both say why.
-            record.write(
-                "score_refused",
-                {"reason": "owned-work shutdown incomplete before scoring"},
-            )
+            # UNREACHABLE BY CONSTRUCTION (R3-A1), the same invariant as the
+            # close-out gate above: a score over unverified owned work would
+            # read as a finished episode while its children may still touch
+            # the world. Fail closed into the retaining outer handler.
+            raise AssertionError("unverified owned work reached the score gate")
         else:
             try:
                 score = (
@@ -2657,45 +2577,24 @@ async def run_session_episode(
                     {"scope": "score", "diagnostic": f"{type(error).__name__}: {error}"},
                 )
         receipts: tuple[Any, ...] = ()
-        if retain_resources:
-            # THE DESTRUCTIVE-RELEASE GATE (R2): releasing the worker (the
-            # cleanup RPC's close_session/release_instance/revoke_lease) is
-            # only safe once the owned tree is a VERIFIED join -- an
-            # unverified cleanup may still have live jobs calling into that
-            # worker, and tearing the resource down underneath them is the
-            # hazard this gate exists for. The release is SKIPPED here; the
-            # rescue descriptor is RETAINED (never discarded, rescue never
-            # attempted) so the resource stays discoverable for a later
-            # verified teardown (the sweep) or the TTL schedule, and
-            # ``rescue_required`` marks the worker as not-confirmed-clean.
-            rescue_required = True
-            record.write(
-                "cleanup_retained",
-                {
-                    "reason": "owned work unverified; release deferred",
-                    "pending_job_ids": (
-                        list(shutdown_result.pending_job_ids) if shutdown_result is not None else []
-                    ),
-                    "errors": (list(shutdown_result.errors) if shutdown_result is not None else []),
-                    "descriptor_retained": descriptor is not None,
-                    "descriptor_id": descriptor.descriptor_id if descriptor is not None else None,
-                },
+        # NOT-COMPLETE NEVER REACHES THIS LINE (R3-A1): the retained hold above
+        # returns only a VERIFIED join, so the release path always runs here.
+        # A future editor who finds a way past the hold must come back to this
+        # boundary instead of re-adding a silent retained-release branch.
+        try:
+            receipts = await adapter_session.cleanup(
+                CleanupParams(
+                    operation_id=f"cleanup-{spec.episode_id}",
+                    cleanup_plan=plan,
+                    action_ids=tuple(action.action_id for action in plan.actions),
+                ),
+                timeout=config.cleanup_timeout,
             )
-        else:
-            try:
-                receipts = await adapter_session.cleanup(
-                    CleanupParams(
-                        operation_id=f"cleanup-{spec.episode_id}",
-                        cleanup_plan=plan,
-                        action_ids=tuple(action.action_id for action in plan.actions),
-                    ),
-                    timeout=config.cleanup_timeout,
-                )
-            except BaseException as error:
-                record.write(
-                    "error",
-                    {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
-                )
+        except BaseException as error:
+            record.write(
+                "error",
+                {"scope": "cleanup", "diagnostic": f"{type(error).__name__}: {error}"},
+            )
             # A dead worker cannot produce evidence, and "attempted" alone is
             # never evidence of cleanup -- ``aggregate_cleanup`` is the one
             # statement of that rule (exactly one receipt per declared action;
@@ -2757,7 +2656,25 @@ async def run_session_episode(
         exc_retain = handle is not None and not (
             shutdown_result is not None and bool(shutdown_result.complete)
         )
-        retain_resources = retain_resources or exc_retain
+        if exc_retain and handle is not None:
+            # RETAIN FIRST (R3-A1): an exception that landed before the join
+            # completed does not make owned work verified -- a mid-turn
+            # BaseException, a failure inside the retained hold, or a path
+            # that never got a receipt. The host HOLDS in the same shared
+            # retained join until the join is VERIFIED (it returns only
+            # complete), and only then does this failure path proceed to
+            # report and release. Nothing here exits in front of live owned
+            # scopes.
+            shutdown_result = await _hold_retained_join(
+                handle,
+                record,
+                owner_status,
+                first_result=shutdown_result,
+                record_errors=record_errors,
+                bridge=bridge,
+            )
+            exc_retain = False  # the retained join returned VERIFIED
+        retain_resources = exc_retain
         if adapter_session is not None and plan is not None and not cleanup_done:
             if exc_retain:
                 rescue_required = True
@@ -2950,10 +2867,114 @@ def _cleanup_forces_rescue(plan: CleanupPlan, receipts: Sequence[Any]) -> bool:
         return True
 
 
-#: The bound for the close-out's RE-QUERY of the owning receipt after a late
-#: verified join. The canonical task is already done by then, so the call
-#: resolves immediately; the small bound only guards a pathological state.
+#: The bound for each bounded RE-QUERY of the owning receipt while the host is
+#: RETAINED on unverified owned work. The canonical task is either live (the
+#: call waits on it, so the loop cannot spin) or settled (the call returns
+#: quickly and the pause below paces the loop).
 _OWNED_REJOIN_TIMEOUT_S = 5.0
+
+#: Pause between retained-join attempts once an attempt returned WITHOUT
+#: waiting a real interval. A settled canonical (cancelled, hook-failed) is
+#: never recreated, so re-asking cannot change its answer -- the hold is a
+#: lifetime guarantee for the scopes it keeps alive, not a retry loop, and
+#: the pause is what keeps it from spinning (review round 4 rejected the
+#: elapsed-time classifier that used to END the hold instead).
+_OWNED_REJOIN_PACE_S = 5.0
+
+
+async def _hold_retained_join(
+    handle: Any,
+    record: Any,
+    owner_status: Any,
+    *,
+    first_result: Any,
+    record_errors: list[BaseException],
+    bridge: Any,
+) -> Any:
+    """Hold the host until owned work is a VERIFIED join; return only complete.
+
+    THE ONE PLACE THE RETENTION CONTRACT LIVES (R2, review rounds 3-4; used by
+    the normal close-out AND the failure path so the two cannot drift). Every
+    state that is not ``complete`` -- a None/raised first join, cancelled or
+    hook-failed settled canonicals, ``complete=False`` with pending jobs -- is
+    RETAINED here: the caller's context, bridge, RecordSink, subscriber,
+    socket and owner-FD stay alive, no final seal or terminal status is
+    written, and the loop re-asks the PUBLIC bounded join (paced when an
+    attempt returns without waiting) until it completes. A settled canonical
+    is terminal and is NEVER recreated or re-admitted: the loop's only job is
+    to keep the scopes alive and keep asking, and the caller proceeds only
+    when a receipt proves the join happened. Cancellation does not outrank
+    retention: ``CancelledError`` is a BaseException and is caught here like
+    any other join failure -- a cancelling host is not a verdict about owned
+    work.
+    """
+    if first_result is not None and first_result.complete:
+        return first_result
+    provisional_receipt = (
+        {
+            "pending_job_ids": list(first_result.pending_job_ids),
+            "errors": list(first_result.errors)[:4],
+            "elapsed_ms": first_result.elapsed_ms,
+        }
+        if first_result is not None
+        else {
+            "pending_job_ids": [],
+            "errors": ["the first bounded join returned no receipt"],
+            "elapsed_ms": None,
+        }
+    )
+    try:
+        record.write(
+            "provisional",
+            {
+                "reason": "owned work unverified; holding the host until "
+                "the canonical disposal joins",
+                **provisional_receipt,
+                "steps": bridge.steps,
+            },
+        )
+    except BaseException as error:  # noqa: BLE001 - the join outranks the record
+        if not record_errors:
+            record_errors.append(error)
+    if owner_status is not None:
+        try:
+            owner_status.phase(
+                "provisional",
+                detail="owned work unverified; host retained until the join",
+                receipt=provisional_receipt,
+            )
+        except BaseException as error:  # noqa: BLE001 - observation is not disposition
+            # A status writer is advisory, like RecordSink. Losing either must
+            # never unwind the owner before the public join proves cleanup.
+            if not record_errors:
+                record_errors.append(error)
+    rejoin_error_recorded = False
+    while True:
+        pause = _OWNED_REJOIN_PACE_S
+        try:
+            refreshed = await handle.session.shutdown_owned_work(
+                "episode-turn-complete", timeout_s=_OWNED_REJOIN_TIMEOUT_S
+            )
+            if refreshed is not None and refreshed.complete:
+                return refreshed
+        except BaseException as error:  # noqa: BLE001 - keep joining
+            if not rejoin_error_recorded:
+                rejoin_error_recorded = True
+                try:
+                    record.write(
+                        "error",
+                        {
+                            "scope": "shutdown-rejoin",
+                            "diagnostic": f"{type(error).__name__}: {error}",
+                        },
+                    )
+                except BaseException:  # noqa: BLE001 - the join outranks the record
+                    pass
+            pause = _OWNED_REJOIN_TIMEOUT_S
+        try:
+            await asyncio.sleep(pause)
+        except BaseException:  # noqa: BLE001 - cancellation is not a verified disposition
+            pass
 
 
 async def _bounded_close(handle: EpisodeSession, timeout_s: float) -> bool:

@@ -119,18 +119,13 @@ why.
 NOT released: no cleanup RPC (`close_session`/`release_instance`/
 `revoke_lease`), no adapter close, no supervisor terminate — an unverified
 cleanup may still have live owned calls into that worker. The rescue
-descriptor is retained (`cleanup_retained` in the record, `rescue_required`
-true, `rescue_complete` null), so a later verified join or the TTL/supervisor
-schedule finishes the story. The context exit is BOUNDED (`_bounded_close`):
-after an incomplete shutdown it is awaited only to its bound, and the join
-attempt is dropped on timeout. Within a live process the canonical cleanup
-keeps running under its own shield; the CLI, however, returns through
-`asyncio.run`, which cancels pending tasks at teardown — so the durable
-retention across process exit is the DESCRIPTOR plus the launchd TTL, never
-a claim that the in-process cleanup completed or survived. A late join that
-DOES complete re-queries the owning receipt (a fresh, truthful read —
-incomplete receipts are never cached); only a receipt that now reads
-`complete=True` re-enables scoring and the normal release path. Ordinary
+descriptor stays retained without release or a terminal seal. The managed
+OWNER retains its loop/context/bridge/observer/worker FD and paced public joins
+for ALL unverified outcomes, including a settled failed canonical. There is no
+elapsed-time exit or inference that a missing receipt is clean. Only a fresh
+complete receipt re-enables context close, scoring and normal release. The
+FRONTEND can return boundedly without closing any of those owning scopes.
+Ordinary
 abort semantics are unchanged: first-Esc child continuation, TUI
 cancellation and the wall kill switch behave exactly as before; the explicit
 shutdown is the OWNING CALLER's terminal, not a keybinding.
@@ -169,14 +164,13 @@ teardown (measured: a delayed dispose hook stayed pending while the process
 exited). The entry now has TWO roles:
 
 * **frontend** (default): refuses unless a managed supervisor exists (Darwin
-  launchd; anywhere else, `--owner-backend detached` exists for rigs/tests
-  only, never for a paid run); starts the SAME script/interpreter under a
+  launchd; unsupported platforms refuse before preparation); starts the SAME script/interpreter under a
   per-episode managed lease; verifies the owner's identity from the lease
   record (pid + birth token, and on launchd the OS's own `job_pid` answer for
   the job label); waits boundedly for a terminal status; and then reports the
   owner's SEALED outcome. On its own timeout it exits `failed_provisional`
-  and NEVER stops the owner -- detaching is not a stop; only a start that
-  never admitted is reaped (by exact label/pid). An owner that vanishes
+  and NEVER stops the owner -- detaching is not a stop; missing admission
+  status is uncertainty, not permission to reap. An owner that vanishes
   without a terminal status is reported `owner_lost_unverified`; nothing is
   inferred, deleted or re-run from a dead pid.
 * **owner** (`--owned-host`, internal): verifies its lease BEFORE anything is
@@ -186,17 +180,17 @@ exited). The entry now has TWO roles:
   the same public `shutdown_owned_work`, bounded attempts, nothing torn down
   in the meantime (no context exit, no adapter close, no bridge stop, no
   rescue, no descriptor discard) -- until a fresh COMPLETE receipt admits the
-  normal close-out, or the canonical settles unverifiable (cancelled /
-  hook-failed: never restarted, never relabelled), which keeps the truthful
-  failed/retained disposition. `--in-process-host` keeps the offline rig's
-  in-process mode; the rig owns that process's lifetime.
+  normal close-out. Settled unverifiable canonicals stay retained (never
+  restarted/relabelled) pending a separately authorized proved disposition.
+  Internal rig composition is injected through Python, not public unmanaged
+  flags; the fixture explicitly owns that process's teardown.
 
 The owner writes a small non-secret status file under the run root
 (`owner/<owner_id>/status.json`): phases `starting -> admitted -> running ->
 provisional|closing -> complete|ended`, plus the public shutdown receipt and
 the outcome path. A retained owner writes `provisional`; if its canonical
-settles unverifiable it exits into the retained-failure disposition and its
-durable state is the rescue descriptor + TTL -- stated in the outcome, never
+settles unverifiable it REMAINS provisional in the live owner; a descriptor
+and TTL are not a substitute for that lifetime or a cleanup proof -- never
 inferred as clean.
 
 The retention contract is deliberately bounded: it proves a SURVIVING OWNER
@@ -250,3 +244,50 @@ post-outcome substitution; historical readiness flags (task_026 user
 simulator/GitLab dependencies, 029 setup timing, 043 parser) are leads for a
 separate preflight, not results. Blocked cases are held and reported, never
 silently dropped or replaced.
+
+
+### Round-4 managed-owner lifetime and transport contract
+
+Managed execution retains the **whole existing SDK host**, not merely a rescue
+file, for every unverified public join: pending, None, raised, cancelled/failed
+canonical, record-write failure and host-task cancellation. Bounded public
+joins are paced; an immediate false answer is never interpreted through elapsed
+time. A settled failed canonical is **not recreated**. The same context,
+observer, MCP socket and adapter owner FD remain owned until a fresh public
+complete receipt permits close-out. The frontend may exit provisionally; it does
+not reap a host because a best-effort status file is absent or unreadable.
+The descriptor and cloud TTL do not certify cleanup; a permanently failed
+canonical remains retained pending a separately authorized, proved disposition.
+
+The production script cannot select the old `--in-process-host` or detached
+rig mode. Tests compose those through an internal injected parser entry; the
+ordinary CLI requires its existing managed Darwin supervisor. This is retention,
+**not** a guarantee of force-killing descendants that leave the process group.
+No normal CLI/TUI/SDK session policy or model loop is changed.
+
+There is **no plaintext `secrets.json` handoff**. Managed session invocations
+refuse env-only overrides and all inline `--infra NAME=VALUE` before launch.
+They cannot safely classify arbitrary inline values as non-secret, and argv is
+persisted in the LaunchAgent plist. Use `--secret NAME` and
+`--infra-ref [purpose:]NAME=STORE_REF`: only sealed-store names cross the boundary;
+the already-existing CredentialStoreResolver resolves them inside the isolated
+owner after core-source validation. Infrastructure ref values participate in the
+same secret redaction set. No new encryption, broker, pricing ledger, model driver
+or credential staging is introduced. Reply-arm inline/env inputs are unchanged.
+Missing refs fail before worker preparation. Real credentials are never used in
+these scripted proofs.
+
+Start ownership is exclusive: an existing lease/plist/registration is not this
+attempt's to overwrite, stop or delete. Failed-start teardown requires this
+attempt's exact written plist bytes and a positively pending (unadmitted) lease.
+The owner retires its own exact LaunchAgent only after canonical join, context
+exit, close-out, seal and output flush. That retirement checks owner nonce,
+source/lease, current PID/birth and launchd's own running PID, and does not depend
+on the frontend surviving. Missing admission status means **unknown**, not zero
+allocation. Detached fixture liveness rejects a zombie, not just a reused PID.
+
+Zero-cost real SDK/native-child/verified-worker hosted evidence is recorded per
+fault in the round-4 remediation notes. The old in-process matrix is not a claim
+that all hosted cases passed. None of this is paid-pilot approval or a live AWS
+cleanup/composite proof; integrated merged source, loader wheel and direct-route
+infrastructure still require separate preflight before the frozen twenty tasks.

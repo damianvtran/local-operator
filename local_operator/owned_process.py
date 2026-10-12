@@ -30,10 +30,14 @@ WHAT IT DELIBERATELY IS NOT:
 * No restart, ever: the Darwin job is ``KeepAlive=false`` and the POSIX child
   is a plain detached process. A crashed owner stays dead -- an episode is
   never silently re-run or re-allocated.
-* No secrets in argv, the environment block, the plist, or the status file.
-  Names may travel (``--secret-env`` already takes names); VALUES travel only
-  through a 0600 handoff file under the run root that the owner reads once and
-  unlinks (``write_secret_handoff`` / ``consume_secret_handoff``).
+* No secrets in argv, the environment block, the plist, or the status file --
+  and no plaintext secret file either. There is NO secret channel here at all
+  (round 4, S3: mode 0600 is access control, not encryption, and it bought a
+  pre-bind write edge, an ignorable unlink error and a durable artifact for a
+  crashed host). The owner resolves its refs from the sealed credential store
+  through the isolated config root it inherits; a managed run that lists
+  env-only overrides is refused before allocation, and no value of any
+  argument is persisted into the plist.
 
 IDENTITY, NOT FLAGS (round-2 acceptance case 2). The owner verifies itself
 against the lease record the frontend wrote BEFORE it starts: the recorded
@@ -63,7 +67,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -79,6 +82,7 @@ ENV_OWNER_ID = "LOP_OWNED_OWNER_ID"
 ENV_BACKEND = "LOP_OWNED_BACKEND"
 ENV_JOB_LABEL = "LOP_OWNED_JOB_LABEL"
 ENV_SOURCE_PIN = "LOP_OWNED_SOURCE_PIN"
+ENV_LEASE_PATH = "LOP_OWNED_LEASE_PATH"
 
 #: How long the owner waits for the frontend to bind its pid into the lease
 #: record. The child can boot before the parent has finished writing the
@@ -96,7 +100,11 @@ _STATUS_POLL_S = 0.25
 
 #: Files under ``<run_root>/owner/<owner_id>/``. One layout for every writer
 #: and reader -- the frontend, the owner, and the tests cannot drift apart
-#: about where the lease, status, or handoff live.
+#: about where the lease or the status live.
+#:
+#: "owner" is an INTERNAL run-root segment, never a session-copy entry: the
+#: whole tree lives under a caller-chosen DURABLE run root (``--run-root``),
+#: reaches no ``sessions/`` directory, and carries no translated user text.
 _OWNER_DIR = "owner"
 
 _OWNER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{3,63}$")
@@ -151,10 +159,6 @@ class OwnerPaths:
     @property
     def stderr_path(self) -> Path:
         return self.directory / "stderr.log"
-
-    @property
-    def secrets_path(self) -> Path:
-        return self.directory / "secrets.json"
 
     def prepare(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -403,52 +407,6 @@ class OwnerStatusChannel:
             pass
 
 
-def write_secret_handoff(path: Path, values: Mapping[str, str]) -> None:
-    """Write the 0600 secret handoff file the owner reads once and unlinks.
-
-    Secrets must not ride argv, the plist, or the environment block; this
-    file is the one sanctioned channel, and its location (under the run root,
-    outside the model's world directory) is the frontend's deliberate choice.
-    An EMPTY mapping writes nothing -- absence is the ordinary no-secrets
-    case, and an empty file would only invite a reader to unlink something
-    that was never there.
-    """
-    if not values:
-        return
-    _atomic_write_bytes(path, (json.dumps(dict(values), sort_keys=True) + "\n").encode())
-
-
-def consume_secret_handoff(path: Path) -> dict[str, str]:
-    """Read-and-UNLINK the handoff; injection into the environment is the
-    caller's job (the owner), because only the owner knows which names its
-    resolution layer reads. A corrupt/missing file is refused loudly: the
-    handoff existing but being unreadable means the frontend intended secrets
-    that will now be silently absent, which is exactly the failure mode the
-    handoff exists to prevent.
-    """
-    if not path.exists():
-        return {}
-    try:
-        parsed = json.loads(path.read_bytes())
-    except (OSError, ValueError) as error:
-        raise OwnedProcessRefused(
-            f"the secret handoff at {path} is unreadable ({error}); refusing to run "
-            "with secrets that were handed off but cannot be read"
-        ) from error
-    finally:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    if not isinstance(parsed, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in parsed.items()
-    ):
-        raise OwnedProcessRefused(
-            f"the secret handoff at {path} does not hold a name->value string map; refusing"
-        )
-    return dict(parsed)
-
-
 def _write_lease(path: Path, payload: Mapping[str, Any]) -> None:
     _atomic_write_bytes(path, (json.dumps(dict(payload), sort_keys=True) + "\n").encode())
 
@@ -488,6 +446,16 @@ def job_label_for(owner_id: str) -> str:
     return f"com.damian.lop-episode.{owner_id}"
 
 
+#: Every ``launchctl`` call is BOUNDED. The startup wait promises a real
+#: deadline, and an ``launchctl`` that hangs reopens the unbounded wait under
+#: it -- the appear loop's own deadline cannot fire while it is blocked inside
+#: one call (R4 review). On expiry the synthetic rc 124 (``timeout(1)``'s own
+#: convention) reads as "the supervisor did not answer", which is the same
+#: answer the helpers already give a refusal, so no caller mistakes a hung
+#: call for a loaded job.
+_LAUNCHCTL_TIMEOUT_S = 5.0
+
+
 def launchctl_runner(*args: str) -> "subprocess.CompletedProcess[str]":
     """The runner shape :mod:`local_operator.launchd`'s helpers expect.
 
@@ -495,9 +463,16 @@ def launchctl_runner(*args: str) -> "subprocess.CompletedProcess[str]":
     ``subprocess.run`` call with kwargs -- so passing ``subprocess.run``
     directly answers ``TypeError: bufsize must be an integer`` (measured:
     bootstrap failed after 10 attempts against a working launchctl). One
-    spelling for every caller in this module and the frontend.
+    spelling for every caller in this module and the frontend -- and one
+    bound (see ``_LAUNCHCTL_TIMEOUT_S``) so the startup deadline is real.
     """
-    return subprocess.run(["launchctl", *args], capture_output=True, text=True)
+    argv = ["launchctl", *args]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=_LAUNCHCTL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            argv, 124, "", f"launchctl timed out after {_LAUNCHCTL_TIMEOUT_S:g}s"
+        )
 
 
 def verify_owned_admission(
@@ -628,24 +603,31 @@ def start_owned_process(
     spec: OwnedProcessSpec,
     *,
     startup_timeout_s: float,
-    secret_env: Mapping[str, str] | None = None,
 ) -> OwnedProcessLease:
     """Start ONE owner under a managed lease; verify it is actually running.
 
-    The start is fail-closed and its own cleanup is scoped to the job THIS
-    call created (exact label / exact child pid): a failed start unregisters
-    and reaps only that, never anything of the operator's. On success the
-    returned lease is a read/detach handle -- see the class docstring for why
-    there is no stop.
+    The start is fail-closed and its own cleanup is scoped to EXACTLY what
+    this call created: ``_start_launchd`` retires only the plist and the
+    registration THIS attempt wrote and loaded, and a collision with another
+    run's plist is refused before anything is written and left untouched
+    (R3-S1 -- the previous shape let the shared exception handler boot out and
+    unlink a job this call never created; measured). The detached branch can
+    fail only before a child exists. On success the returned lease is a
+    read/detach handle -- see the class docstring for why there is no stop.
+
+    SECRETS NEVER CROSS THIS BOUNDARY: there is no handoff file and no
+    secret-bearing field in the spec (R3-S3), so no plaintext artifact exists
+    for a failed, interrupted or crashed start to leave behind. The owner
+    resolves its own refs from the sealed credential store through the
+    config root it inherits.
     """
     _refuse_spec(spec)
 
     # The agent-shell policy FIRST, before anything is written: starting a
     # session-creating process from inside an agent shell is refused by the
     # CLI's own inventory (one fact, one place -- see sdk._guard_agent_shell,
-    # which this mirrors for the launch path), and a refusal must not leave a
-    # secret handoff file behind for a run that never started. The refusal
-    # message is exec_session_refusal's own.
+    # which this mirrors for the launch path). The refusal message is
+    # exec_session_refusal's own.
     from local_operator.agent_shell import exec_session_refusal
 
     refusal = exec_session_refusal()
@@ -654,22 +636,28 @@ def start_owned_process(
 
     paths = owner_paths(spec.run_root, spec.owner_id)
     paths.prepare()
-    if secret_env:
-        write_secret_handoff(paths.secrets_path, secret_env)
 
     job_label = job_label_for(spec.owner_id) if spec.backend == "launchd" else None
     # PENDING lease first: the owner may boot before the parent knows the pid,
     # and it waits for the bind (verify_owned_admission). An unwritten lease
     # would be indistinguishable from a forged invocation.
-    _write_lease(
-        paths.lease_path,
-        _lease_payload(spec, job_label=job_label, pid=None, birth_scheme=None, birth=None),
-    )
+    # Exclusive creation is the ownership fence: a repeated owner id may not
+    # rewrite another attempt's lease before discovering its plist collision.
+    pending = _lease_payload(spec, job_label=job_label, pid=None, birth_scheme=None, birth=None)
+    try:
+        with paths.lease_path.open("xb") as stream:
+            os.chmod(paths.lease_path, 0o600)
+            stream.write((json.dumps(pending, sort_keys=True) + "\n").encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError as error:
+        raise OwnedProcessRefused("owner lease already exists; choose a fresh owner id") from error
 
     env = dict(spec.env)
     env[ENV_OWNER_ID] = spec.owner_id
     env[ENV_BACKEND] = spec.backend
     env[ENV_SOURCE_PIN] = spec.source_pin
+    env[ENV_LEASE_PATH] = str(paths.lease_path)
     if job_label is not None:
         env[ENV_JOB_LABEL] = job_label
 
@@ -685,10 +673,11 @@ def start_owned_process(
         else:
             pid = _start_detached(spec, env=env, paths=paths)
     except OwnedProcessRefused:
-        _cleanup_failed_start(spec, paths=paths, job_label=job_label, pid=None)
+        # ``_start_launchd`` has already retired exactly what it created
+        # (its own plist and load); nothing here may touch another run's job
+        # (R3-S1).
         raise
-    except Exception as error:  # noqa: BLE001 - every failure must reap its own start
-        _cleanup_failed_start(spec, paths=paths, job_label=job_label, pid=None)
+    except Exception as error:  # noqa: BLE001 - convert to the module's refusal type
         raise OwnedProcessRefused(
             f"the owner failed to start ({type(error).__name__}: {error}); nothing was "
             "left running"
@@ -754,6 +743,14 @@ def _start_launchd(
     guard addresses; ``$HOME`` in the plist's environment is the EPISODE's
     scratch home, which is a different fact. ``RunAtLoad`` starts the job on
     bootstrap; ``KeepAlive=false`` guarantees a crash is never relaunched.
+
+    FAILURE IS SELF-SCOPED (R3-S1). This call retires ONLY the plist it wrote
+    and the load it performed; a collision with an existing plist is refused
+    BEFORE anything is written and is never touched -- the previous shape
+    left that decision to a shared handler which booted out and unlinked the
+    OTHER run's registration (measured: an existing job's pid went away and
+    its plist was removed). ``_retire_launchd_attempt`` is the one teardown
+    and it is reachable only from here, after the write.
     """
     import plistlib
 
@@ -770,11 +767,17 @@ def _start_launchd(
     plist_path = agents / f"{job_label}.plist"
     if plist_path.exists():
         # A session-unique label colliding with an existing plist means a
-        # previous run of THIS owner id leaked; do not stomp it silently.
+        # previous run of THIS owner id leaked; do not stomp it silently --
+        # and do not clean it up either: this call did not create it.
         raise OwnedProcessRefused(
             f"{plist_path} already exists for owner {spec.owner_id}; refusing to "
             "overwrite another run's job (boot it out or choose a fresh owner id)"
         )
+    existing_job = launchctl_runner("print", f"{launchd.job_domain()}/{job_label}")
+    if existing_job.returncode == 0:
+        raise OwnedProcessRefused("owner registration already exists; choose a fresh owner id")
+    if existing_job.returncode != 113:
+        raise OwnedProcessRefused("launchd absence is unverified; no owner start attempted")
     plist = {
         "Label": job_label,
         "ProgramArguments": list(spec.argv),
@@ -785,109 +788,138 @@ def _start_launchd(
         "StandardOutPath": str(paths.stdout_path),
         "StandardErrorPath": str(paths.stderr_path),
     }
-    _atomic_write_bytes(plist_path, plistlib.dumps(plist), mode=0o600)
-
-    reload = launchd.reload_job(label=job_label, path=plist_path, runner=launchctl_runner)
-    if not reload.ok:
-        try:
-            plist_path.unlink()
-        except OSError:
-            pass
-        raise OwnedProcessRefused(
-            f"launchd refused to load the owner job {job_label}: {reload.detail or reload.outcome}"
-        )
-    # The caller's admission bound is the budget: waiting longer than the
-    # frontend will wait only burns the episode's start window.
-    appear_budget = min(_OWNER_APPEAR_TIMEOUT_S, max(0.5, appear_timeout_s))
-    deadline = time.monotonic() + appear_budget
-    while True:
-        pid = launchd.job_pid(label=job_label, path=plist_path, run=launchctl_runner)
-        if pid is not None:
-            return pid
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(_OWNER_APPEAR_POLL_S)
-    raise OwnedProcessRefused(
-        f"launchd loaded {job_label} but reported no pid within {appear_budget:g}s"
-    )
-
-
-def _cleanup_failed_start(
-    spec: OwnedProcessSpec,
-    *,
-    paths: OwnerPaths,
-    job_label: str | None,
-    pid: int | None,
-) -> None:
-    """Reap ONLY the job this start created (exact label / exact child pid).
-
-    Scoped by construction: the label is this owner's, and the detached pid is
-    the one Popen returned. Nothing here touches other jobs, other pids, or
-    any process tree ('no unscoped kills').
-    """
-    if spec.backend == "launchd" and job_label is not None:
-        try:
-            from local_operator import launchd
-
-            home = launchd.real_home()
-            if home is not None:
-                plist_path = home.joinpath("Library", "LaunchAgents", f"{job_label}.plist")
-                launchd.bootout_job(label=job_label, path=plist_path, runner=launchctl_runner)
-                try:
-                    plist_path.unlink()
-                except OSError:
-                    pass
-        except Exception:  # noqa: BLE001 - a failed start must not raise on cleanup
-            pass
-    elif pid is not None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    created = False
+    registered = False
+    payload = plistlib.dumps(plist)
     try:
-        paths.secrets_path.unlink()
+        # Never atomically REPLACE a colliding file: exclusive creation leaves
+        # a racing attempt untouched. Only this successfully-created inode is
+        # eligible for failed-start retirement, while the lease is still
+        # positively fenced PENDING (the owner cannot pass admission yet).
+        with plist_path.open("xb") as stream:
+            created = True
+            os.chmod(plist_path, 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        loaded = launchctl_runner("bootstrap", launchd.job_domain(), str(plist_path))
+        if loaded.returncode != 0:
+            # A timeout/error can hide a successful start. Keep this attempt's
+            # pending lease/plist UNKNOWN; never boot out a registration we did
+            # not positively create (including a racing label collision).
+            raise OwnedProcessRefused("owner bootstrap is unverified; pending lease retained")
+        registered = True
+        # The caller's admission bound is the budget: waiting longer than the
+        # frontend will wait only burns the episode's start window.
+        appear_budget = min(_OWNER_APPEAR_TIMEOUT_S, max(0.5, appear_timeout_s))
+        deadline = time.monotonic() + appear_budget
+        while True:
+            pid = launchd.job_pid(label=job_label, path=plist_path, run=launchctl_runner)
+            if pid is not None:
+                return pid
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_OWNER_APPEAR_POLL_S)
+        raise OwnedProcessRefused(
+            f"launchd loaded {job_label} but reported no pid within {appear_budget:g}s"
+        )
+    except BaseException:
+        if created and registered:
+            pending = _read_lease(paths.lease_path)
+            if pending is not None and pending.get("pid") is None:
+                _retire_launchd_attempt(
+                    job_label=job_label, plist_path=plist_path, expected_bytes=payload
+                )
+        raise
+
+
+def _retire_launchd_attempt(*, job_label: str, plist_path: Path, expected_bytes: bytes) -> None:
+    """Retire EXACTLY the plist and load THIS attempt created -- nothing else.
+
+    Called only from ``_start_launchd``'s failure paths, after the plist was
+    written. The plist is unlinked first (that is the half which guarantees no
+    later reload) and the load is then booted out (a job that never loaded
+    boots out as a no-op refusal). Never called for a collision: that refusal
+    happens before any write, and the other run's job must survive to be
+    inspected or reused.
+    """
+    try:
+        if plist_path.read_bytes() != expected_bytes:
+            return
+        plist_path.unlink()
     except OSError:
+        return
+    try:
+        from local_operator import launchd
+
+        launchd.bootout_job(label=job_label, path=plist_path, runner=launchctl_runner)
+    except Exception:  # noqa: BLE001 - a failed start must not raise on cleanup
         pass
 
 
-def reap_unadmitted_start(lease: OwnedProcessLease) -> None:
-    """Reap ONE start that never admitted; NEVER call on an admitted lease.
+def retire_owned_job(*, job_label: str) -> None:
+    """The OWNER's own terminal retirement: unregister its job, remove its plist.
 
-    The frontend's startup-timeout path: the start succeeded mechanically but
-    the owner never wrote a status, so the episode never began (the owner
-    verifies admission before anything is prepared). Killing an owner that
-    might be doing work is the hazard this module exists to prevent, so the
-    contract is narrow and documented: callers may use this ONLY after seeing
-    an empty status, never a terminal or provisional one. Scoped to the exact
-    label/pid the lease records, with the birth token re-checked before any
-    signal (a reused pid is left alone).
+    WHY THE OWNER DOES IT (R3-F3): the frontend's post-terminal cleanup runs
+    only while the frontend is still alive at the terminal edge; when the
+    frontend exited provisionally first, the job stayed registered and the
+    plist installed with nothing in the pipeline to reap them (measured:
+    stable at t+75 s, in the operator's real LaunchAgents). The owner has just
+    sealed its outcome and flushed when this runs, so it is the one actor
+    guaranteed to be alive at the moment the job is genuinely finished.
+
+    ORDER MATTERS, and the order is measured on this host: the plist is
+    unlinked FIRST -- it is what prevents any later reload -- and the bootout
+    follows. ``launchctl bootout`` of one's own job kills the caller as its
+    first effect, so code after it may never run (observed: the calling shell
+    died inside the call); the unregistration itself still happens, launchd
+    answering ``print`` with rc 113 and no plist left behind. Best-effort by
+    contract: this runs on the close-out path and must never change an outcome.
     """
-    if lease.backend == "launchd" and lease.job_label:
-        try:
-            from local_operator import launchd
-
-            home = launchd.real_home()
-            if home is not None:
-                plist_path = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
-                launchd.bootout_job(label=lease.job_label, path=plist_path, runner=launchctl_runner)
-                try:
-                    plist_path.unlink()
-                except OSError:
-                    pass
-        except Exception:  # noqa: BLE001 - a reap must not raise
-            pass
-    elif lease.pid is not None:
-        if procstate.same_birth(lease.birth_scheme, lease.birth, lease.pid) is not True:
-            # Doubt is not death: without a matching birth token this is not
-            # provably the process the lease started; leave it alone.
-            return
-        try:
-            os.kill(lease.pid, signal.SIGTERM)
-        except OSError:
-            pass
     try:
-        owner_paths(lease.run_root, lease.owner_id).secrets_path.unlink()
-    except OSError:
+        from local_operator import launchd
+
+        home = launchd.real_home()
+        if home is None:
+            return
+        owner_id = os.environ.get(ENV_OWNER_ID)
+        if not owner_id or job_label != job_label_for(owner_id):
+            return
+        # The same verified lease/source/current process proof as admission,
+        # not a caller-supplied label or the mere existence of a plist.
+        import plistlib
+
+        plist_path = home.joinpath("Library", "LaunchAgents", f"{job_label}.plist")
+        payload = plistlib.loads(plist_path.read_bytes())
+        env = payload.get("EnvironmentVariables", {})
+        if env.get(ENV_OWNER_ID) != owner_id:
+            return
+        # Run roots are caller-selected, so the exact lease location travels
+        # in a NONSECRET environment field, never guessed from scratch layout.
+        lease_path = os.environ.get(ENV_LEASE_PATH)
+        if not lease_path:
+            return
+        lease = _read_lease(Path(lease_path))
+        if lease is None or lease.get("owner_id") != owner_id or lease.get("pid") != os.getpid():
+            return
+        if lease.get("backend") != "launchd" or lease.get("job_label") != job_label:
+            return
+        if lease.get("source_pin") != os.environ.get(ENV_SOURCE_PIN):
+            return
+        if env.get(ENV_LEASE_PATH) != lease_path or env.get(ENV_SOURCE_PIN) != lease.get(
+            "source_pin"
+        ):
+            return
+        if (
+            procstate.same_birth(lease.get("birth_scheme"), lease.get("birth"), os.getpid())
+            is not True
+        ):
+            return
+        if launchd.job_pid(label=job_label, path=plist_path, run=launchctl_runner) != os.getpid():
+            return
+        plist_path.unlink()
+        launchd.bootout_job(label=job_label, path=plist_path, runner=launchctl_runner)
+    except Exception:  # noqa: BLE001 - a terminal cleanup must not fail the close-out
         pass
 
 
@@ -915,14 +947,12 @@ __all__ = [
     "PHASE_STARTING",
     "TERMINAL_PHASES",
     "argv_digest",
-    "consume_secret_handoff",
     "job_label_for",
     "launchctl_runner",
     "owner_paths",
     "read_owner_status",
-    "reap_unadmitted_start",
+    "retire_owned_job",
     "start_owned_process",
     "verify_owned_admission",
     "write_owner_status",
-    "write_secret_handoff",
 ]

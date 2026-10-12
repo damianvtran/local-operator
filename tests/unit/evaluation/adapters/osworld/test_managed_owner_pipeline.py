@@ -42,9 +42,42 @@ from tests.unit.evaluation.adapters.osworld.test_session_arm_script import (  # 
 pytestmark = pytest.mark.slow
 
 REPO = Path(__file__).resolve().parents[5]
-FRONTEND = REPO / "scripts" / "run_episode.py"
+SCRIPTS = REPO / "scripts"
+FRONTEND = SCRIPTS / "run_episode.py"
 CANARY_KEY = "canary-key-owned1688"
 CANARY_SECRET = "canary-secret-owned1688"
+
+#: The frontend is spawned through the INJECTED INTERNAL ENTRY (R3-S2), not
+#: through a production flag: ``--owner-backend detached`` and
+#: ``--in-process-host`` exist only on the parser this entry builds, so no
+#: command line can select the unmanaged composition. The owner relaunch this
+#: entry performs still goes through the PRODUCTION parser.
+INTERNAL_ENTRY = (
+    "import sys;"
+    f"sys.path.insert(0, {str(SCRIPTS)!r});"
+    "import run_episode;"
+    "sys.exit(run_episode.main(sys.argv[1:], internal_test_support=True))"
+)
+
+
+def _seed_store(config_dir: Path) -> None:
+    """Put the canaries in the SEALED store -- the one transport that crosses.
+
+    R3-S3 removed the plaintext handoff and refuses env-only overrides on the
+    managed path, so the isolated config dir's ENCRYPTED store is how these
+    synthetic values travel to the owner (the same way an operator's real ones
+    do); the canary assertions below then test the sealed path rather than a
+    file that no longer exists.
+    """
+    from local_operator.secrets.access import open_store
+
+    store = open_store(config_dir, create=True)
+    store.set("AWS_ACCESS_KEY_ID", CANARY_KEY.encode())
+    store.set("AWS_SECRET_ACCESS_KEY", CANARY_SECRET.encode())
+    for entry in _INFRA[1::2]:
+        name, value = entry.split("=", 1)
+        store.set(f"FIXTURE_{name}", value.encode())
+
 
 _INFRA = [
     "--infra",
@@ -108,10 +141,13 @@ def _selector_and_roots(
 
 
 def _frontend_env(scratch: Path, config_dir: Path) -> dict[str, str]:
-    """The isolation contract's three names plus canary-only inputs.
+    """The isolation contract's three names, and NO secret-bearing values.
 
     Built fresh (never inherited): no CMUX/LOP bindings of the pytest
-    process's environment can leak into the episode.
+    process's environment can leak into the episode. The canaries are NOT
+    here (R3-S3): the managed frontend refuses env-only secret overrides, and
+    the value reaches the owner through the sealed store (_seed_store) -- so
+    an environment export would now be a failure, not the input.
     """
     return {
         "PATH": os.environ.get("PATH", ""),
@@ -120,8 +156,6 @@ def _frontend_env(scratch: Path, config_dir: Path) -> dict[str, str]:
         "HOME": str(scratch / "home"),
         "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),
         "LOP_RUN_SCRATCH_ROOT": str(scratch),
-        "AWS_ACCESS_KEY_ID": CANARY_KEY,
-        "AWS_SECRET_ACCESS_KEY": CANARY_SECRET,
     }
 
 
@@ -134,7 +168,8 @@ def _frontend_args(
 ) -> list[str]:
     args = [
         sys.executable,
-        str(FRONTEND),
+        "-c",
+        INTERNAL_ENTRY,
         "--selector",
         str(selector_path),
         "--task-id",
@@ -143,15 +178,21 @@ def _frontend_args(
         "test/fake/model:free",
         "--run-root",
         str(run_root),
-        "--secret-env",
-        "AWS_ACCESS_KEY_ID",
-        "--secret-env",
-        "AWS_SECRET_ACCESS_KEY",
+        # NO --secret-env and no --no-store: the secrets are store refs now
+        # (the defaults ARE AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY), and the
+        # owner resolves them from the isolated sealed store.
         "--max-steps",
         "2",
         "--max-usd",
         "0.01",
-        *_INFRA,
+        *[
+            item
+            for entry in _INFRA[1::2]
+            for item in (
+                "--infra-ref",
+                f"{entry.split('=', 1)[0]}=FIXTURE_{entry.split('=', 1)[0]}",
+            )
+        ],
         "--config-dir",
         str(config_dir),
         "--episode-id",
@@ -160,7 +201,6 @@ def _frontend_args(
         "session",
         "--session-route",
         "test/mock",
-        "--no-store",
         "--owner-backend",
         "detached",
         "--owner-startup-timeout-s",
@@ -191,6 +231,7 @@ def test_the_managed_frontend_reports_the_owners_sealed_outcome(
     selector_path, scratch, config_dir, run_root = _selector_and_roots(
         root, adapter_wheel, spawn_interpreter
     )
+    _seed_store(config_dir)
     completed = subprocess.run(
         _frontend_args(selector_path, run_root, config_dir),
         env=_frontend_env(scratch, config_dir),
@@ -223,6 +264,7 @@ def test_a_frontend_that_stops_waiting_leaves_the_owner_to_finish_and_seal(
     selector_path, scratch, config_dir, run_root = _selector_and_roots(
         root, adapter_wheel, spawn_interpreter
     )
+    _seed_store(config_dir)
     # A wait far shorter than the episode: the frontend MUST exit provisionally
     # without touching the owner (detaching is not a stop).
     completed = subprocess.run(

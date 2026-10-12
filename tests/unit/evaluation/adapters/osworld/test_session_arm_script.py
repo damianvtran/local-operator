@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -140,9 +142,44 @@ def _run_rig(
         args += ["--ask-first"]
     if cleanup_hook is not None:
         args += ["--cleanup-hook", cleanup_hook]
-    completed = subprocess.run(
-        args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
-    )
+    if cleanup_hook == "cancelled":
+        # A permanently failed canonical MUST retain its owner, not return an
+        # outcome. This fixture owns the isolated process lifetime: observe
+        # provisional retention, then perform explicit exact-group teardown.
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=str(REPO),
+            start_new_session=True,
+        )
+        retained = False
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and process.poll() is None:
+                records = list(run_root.rglob("events.jsonl"))
+                if records and '"kind": "provisional"' in records[0].read_text():
+                    retained = True
+                    break
+                time.sleep(0.1)
+            assert retained and process.poll() is None, "failed cleanup must retain its owner"
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate(timeout=10)
+        completed = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    else:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(REPO),
+            check=False,
+            timeout=180,
+        )
     return completed, run_root, log
 
 
@@ -606,10 +643,10 @@ def test_an_incomplete_owned_join_retains_the_worker_end_to_end(
 
     Real SDK + MCP + spawned worker with the reviewer's fault (a public
     dispose hook raising CancelledError): the owning receipt is honestly
-    incomplete, and the close-out must (a) return BOUNDED, (b) refuse the
-    score, and (c) NEVER send the destructive cleanup RPCs -- the traced
-    adapter cleanup must not appear at all, and the record must carry the
-    retained disposition instead of receipts the worker never earned.
+    incomplete. The owning process must stay alive with no score, terminal
+    seal or destructive cleanup RPC. A managed FRONTEND may return boundedly;
+    this injected in-process rig has no frontend and explicitly tears down
+    its own process only after it measured provisional retention.
     """
 
     root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
@@ -617,16 +654,11 @@ def test_an_incomplete_owned_join_retains_the_worker_end_to_end(
         root, adapter_wheel, spawn_interpreter, cleanup_hook="cancelled"
     )
 
-    outcome = _outcome(completed, expect_status="failed")
-    assert outcome["score"] is None
-    assert outcome["rescue_required"] is True
-    assert outcome["rescue_complete"] is None
-    assert "NOT released" in (outcome["diagnostic"] or "")
-
-    # NO destructive release ever ran: the traced cleanup RPC is absent.
+    assert completed.returncode == -signal.SIGKILL
+    assert not list(run_root.rglob("outcome.json")), "no seal over unverified ownership"
     rows = _log_events(log)
     assert not any(row.get("emit") == "cleanup-rpc" for row in rows), rows
-
     kinds = _record_kinds(run_root)
-    assert "cleanup_retained" in kinds
-    assert "score_refused" in kinds
+    assert "provisional" in kinds
+    assert "end" not in kinds
+    assert "score" not in kinds

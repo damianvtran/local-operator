@@ -822,7 +822,13 @@ def _infra_disclosure_metadata(
     return metadata
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentParser:
+    """The CLI surface. ``internal_test_support`` adds the RIG-ONLY switches.
+
+    Nothing reachable from a command line sets it (R3-S2): the offline rigs
+    import this module and pass the kwarg, which is why no production flag
+    exists for an unmanaged composition to be selected through.
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--selector", required=True, type=Path, help="AdapterSelector JSON file")
     parser.add_argument("--task-id", required=True)
@@ -851,6 +857,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="[purpose:]NAME=VALUE",
         help="Non-secret infrastructure input; optional purpose overrides --infra-purpose",
+    )
+    parser.add_argument(
+        "--infra-ref",
+        action="append",
+        default=[],
+        metavar="[purpose:]NAME=STORE_REF",
+        help="resolve an infrastructure input from a sealed credential-store name "
+        "inside the owner; values never ride managed-owner argv",
     )
     parser.add_argument("--infra-purpose", default="benchmark_compute")
     parser.add_argument("--config-dir", type=Path, default=None, help="lop config dir")
@@ -959,23 +973,31 @@ def build_parser() -> argparse.ArgumentParser:
             "is refused, never admitted"
         ),
     )
-    parser.add_argument(
-        "--in-process-host",
-        action="store_true",
-        help=(
-            "run the session episode in THIS process: the offline rig's mode, where "
-            "the test owns the lifetime (see session_arm_rig). NEVER for a paid run -- "
-            "the foreground loop's exit cancels the episode's canonical cleanup"
-        ),
-    )
+    # THE RIG-ONLY SURFACE IS NOT A PUBLIC SWITCH (R3-S2). ``--in-process-host``
+    # and ``--owner-backend detached`` skip the managed owner entirely, so a
+    # real invocation could take the old unsupervised mode; they exist ONLY on
+    # the parser the internal test entry builds. Production parsing rejects
+    # them, so no command line can reach an unmanaged shape through this
+    # script. The default keeps ``args.in_process_host`` defined either way.
+    parser.set_defaults(in_process_host=False)
+    if internal_test_support:
+        parser.add_argument(
+            "--in-process-host",
+            action="store_true",
+            help=(
+                "INTERNAL TEST SUPPORT: run the session episode in THIS process, "
+                "where the test owns the lifetime (see session_arm_rig). Never for a "
+                "paid run -- the foreground loop's exit cancels the episode's "
+                "canonical cleanup"
+            ),
+        )
     parser.add_argument(
         "--owner-backend",
-        choices=("auto", "launchd", "detached"),
+        choices=("auto", "launchd", "detached") if internal_test_support else ("auto", "launchd"),
         default="auto",
         help=(
             "managed-owner backend: 'auto' is launchd on macOS; anywhere without a "
-            "proven supervisor the frontend refuses before prepare. 'detached' is "
-            "rig/test-only (process separation, not supervision)"
+            "proven supervisor the frontend refuses before prepare"
         ),
     )
     parser.add_argument(
@@ -1278,8 +1300,9 @@ _FRONTEND_CLOSE_GRACE_S = 600.0
 
 #: Non-secret environment names forwarded verbatim to the owner: the episode
 #: isolation contract's own facts plus PATH/PYTHONPATH/TMPDIR. Secrets NEVER
-#: travel in the environment to the owner (see ``write_secret_handoff``); the
-#: owner picks up the handoff file and unlinks it before anything runs.
+#: travel in the environment to the owner -- there is no secret channel at all
+#: (R3-S3): the owner resolves its refs from the sealed credential store
+#: through the config root named here.
 _OWNER_ENV_NAMES = (
     "PATH",
     "HOME",
@@ -1374,17 +1397,37 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
         )
     except owned_process.OwnedProcessRefused as error:
         return str(error)
-    # The secret handoff is consumed BEFORE anything is built: the values were
-    # handed off out-of-band (never argv/plist/status), they enter only this
-    # process's environment, and the file is unlinked by the consumer. An
-    # unreadable handoff refuses rather than running without promised secrets.
-    paths = owned_process.owner_paths(args.run_root, owner_id)
-    try:
-        handed = owned_process.consume_secret_handoff(paths.secrets_path)
-    except owned_process.OwnedProcessRefused as error:
-        return str(error)
-    os.environ.update(handed)
+    # THERE IS NO SECRET HANDOFF (R3-S3): no plaintext file exists to consume,
+    # unlink or leak, and nothing is injected into this process's environment.
+    # The owner resolves its refs from the sealed credential store through the
+    # isolated config root it inherited; the managed frontend refuses env-only
+    # overrides before it starts an owner at all.
     return None
+
+
+def _owner_relaunch_argv(raw: list[str]) -> list[str]:
+    """The owner's relaunch argv: the caller's own flags MINUS the internal ones.
+
+    The owner is launched through the PRODUCTION parser -- it may outlive the
+    frontend and must never be admitted through a test-only switch -- so the
+    rig-only flags the internal entry accepts are stripped here, exactly the
+    two that select an unmanaged composition. ``--owner-backend`` goes with
+    them: the owner learns its backend from the VERIFIED lease environment
+    (``owned_process.ENV_BACKEND``), never from argv (R3-S2).
+    """
+    out: list[str] = []
+    skip_next = False
+    for item in raw:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--owner-backend":
+            skip_next = True
+            continue
+        if item == "--in-process-host" or item.startswith("--owner-backend="):
+            continue
+        out.append(item)
+    return out
 
 
 async def _run_managed_frontend(args: argparse.Namespace) -> int:
@@ -1397,8 +1440,8 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
     Darwin; a detached process for rigs), waits boundedly, and then either
     reports the owner's sealed outcome or exits ``failed_provisional`` while
     the owner keeps joining. It NEVER stops a live owner -- no path here
-    touches an admitted lease (detaching is not a stop); only a start that
-    never admitted is reaped, by exact label/pid.
+    touches a bound lease (detaching is not a stop); unreadable status is
+    uncertainty, never permission to reap.
     """
     import uuid as _uuid
 
@@ -1433,7 +1476,40 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
         )
         return EXIT_PREFLIGHT
 
-    raw = list(getattr(args, "_raw_argv", []))
+    if args.secret_env:
+        # ENV-ONLY OVERRIDES CANNOT CROSS A MANAGED BOUNDARY (R3-S3). The value
+        # exists only in THIS process's environment; the owner is a different
+        # process, and the plaintext channel that used to carry such values is
+        # REMOVED (0600 is access control, not encryption, and it left a durable
+        # artifact for crashed starts). Refuse BEFORE anything is allocated
+        # rather than launch an owner whose promised secret resolves empty. The
+        # sealed store IS a transport that survives the boundary -- the owner
+        # reads it through the config root it inherits -- so the remedy is a
+        # ``--secret NAME`` ref (or the reply arm, which runs no owner at all).
+        print(
+            "--secret-env is unsupported for a managed session owner: the value "
+            "lives only in this process's environment and cannot cross into the "
+            "owner without a plaintext artifact (removed). Store it in the "
+            "credential store and reference it with --secret NAME instead; "
+            "refusing before prepare (nothing was allocated).",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+
+    # The frontend cannot classify arbitrary inline values as non-secret
+    # (the guest password was one such value). It therefore persists NONE of
+    # them in ProgramArguments. Name-only sealed refs are resolved by the
+    # owner AFTER source verification; no credential is read by this branch.
+    if args.infra:
+        print(
+            "managed owners refuse inline --infra values: use --infra-ref "
+            "[purpose:]NAME=STORE_REF for sealed name-only transport. "
+            "Refusing before preparation, credentials or allocation.",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+
+    raw = _owner_relaunch_argv(list(getattr(args, "_raw_argv", [])))
     if not raw:
         print("internal error: the frontend has no raw argv to relaunch", file=sys.stderr)
         return EXIT_PREFLIGHT
@@ -1442,7 +1518,6 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
     host_argv = [*raw, "--owned-host"]
     if args.episode_id is None:
         host_argv += ["--episode-id", episode_id]
-    secret_env = {name: os.environ[name] for name in args.secret_env if name in os.environ}
     spec = owned_process.OwnedProcessSpec(
         argv=(sys.executable, str(Path(__file__).resolve()), *host_argv),
         cwd=Path.cwd(),
@@ -1454,7 +1529,7 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
     )
     try:
         lease = owned_process.start_owned_process(
-            spec, startup_timeout_s=args.owner_startup_timeout_s, secret_env=secret_env
+            spec, startup_timeout_s=args.owner_startup_timeout_s
         )
     except owned_process.OwnedProcessRefused as error:
         print(str(error), file=sys.stderr)
@@ -1479,16 +1554,45 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
             break
         await asyncio.sleep(0.1)
     if status is None:
-        # START FAILURE: the owner never admitted, so it never began an
-        # episode (admission precedes prepare); reaping THIS run's own start
-        # by exact label/pid is the sanctioned cleanup.
-        owned_process.reap_unadmitted_start(lease)
-        print(
-            f"the managed owner did not admit within {args.owner_startup_timeout_s:g}s; "
-            "refusing before prepare (nothing was allocated)",
-            file=sys.stderr,
+        # NO ADMISSION READING IS NOT A PROOF OF NO ADMISSION (R3-S1). The
+        # owner writes "admitted" best-effort, so a status-write fault made
+        # this path reap a host that had really admitted and reset its world
+        # (measured: a real reset in the journal, then the frontend killed its
+        # own host while claiming "nothing was allocated"). Absence can mean a
+        # failed write over live work, so NOTHING is reaped here and no claim
+        # about allocation is made; the report says which of the two
+        # verifiable things is true. The lease and status records are the
+        # authority, and either way the retained state stays UNVERIFIED until
+        # something proves otherwise.
+        lost = _owner_lost(lease, None)
+        detail = (
+            "the owner exited without admitting: no terminal status and no live holder "
+            "were observable. Its retained state is UNVERIFIED (it may have admitted "
+            "before dying); read the lease and status records before any teardown."
+            if lost
+            else "the owner's admission could not be read within "
+            f"{args.owner_startup_timeout_s:g}s and a live holder is not provable from "
+            "here: nothing was reaped, and a failed status write is indistinguishable "
+            "from no admission. The lease and status records are the authority."
         )
-        return EXIT_PREFLIGHT
+        print(
+            json.dumps(
+                {
+                    "status": "owner_lost_unverified" if lost else "owner_start_unverified",
+                    "episode_id": episode_id,
+                    "owner_id": lease.owner_id,
+                    "owner_pid": lease.pid,
+                    "owner_backend": lease.backend,
+                    "job_label": lease.job_label,
+                    "lease_path": str(paths.lease_path),
+                    "status_path": str(paths.status_path),
+                    "detail": detail,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return EXIT_EPISODE
 
     wait_s = (
         args.frontend_wait_s
@@ -1538,8 +1642,8 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
                 "lease_path": str(paths.lease_path),
                 "owner_phase": None if status is None else status.phase,
                 "detail": (
-                    "the owner is retained and still running; this frontend stopped "
-                    "WAITING, it did not stop the owner. Reconnect by reading the "
+                    "no terminal receipt was observed; this frontend stopped "
+                    "WAITING, it did not stop or certify the owner. Reconnect by reading the "
                     "status/lease files; the owner seals its own outcome there"
                 ),
             },
@@ -1557,6 +1661,24 @@ def resolve_core_pin() -> str:
     return resolve_core_commit() or "unavailable-test-tree"
 
 
+def _retire_owned_registration_if_launchd() -> None:
+    """R3-F3: the OWNER retires its own job once the terminal phase is on disk.
+
+    The frontend's post-terminal cleanup runs only while the frontend is alive
+    at the terminal edge; a frontend that exited provisionally left the job
+    registered and the plist in the operator's LaunchAgents with nothing to
+    reap them (measured: still there at t+75 s). The owner has just sealed and
+    flushed, so it retires itself -- after the status write, so the outcome is
+    already readable, and never before the seal. In-process/detached
+    compositions carry no job label, so this is a no-op there.
+    """
+    from local_operator import owned_process
+
+    job_label = os.environ.get(owned_process.ENV_JOB_LABEL)
+    if job_label and os.environ.get(owned_process.ENV_BACKEND) == "launchd":
+        owned_process.retire_owned_job(job_label=job_label)
+
+
 def _owner_lost(lease: Any, status: Any) -> bool:
     """Whether the SUPERVISOR says the owner is gone without a terminal status.
 
@@ -1567,12 +1689,21 @@ def _owner_lost(lease: Any, status: Any) -> bool:
     """
     if lease.backend == "detached":
         # No supervisor answers for the detached backend, but the kernel can
-        # still prove DEATH: pid_liveness False (no holder) or a birth-token
-        # mismatch (a different holder) both mean this owner is gone. Doubt
-        # (None) is not death -- the frontend keeps waiting.
+        # still prove DEATH: pid_liveness False (no holder), a ZOMBIE probe,
+        # or a birth-token mismatch (a different holder) all mean this owner
+        # is gone. Doubt (None) is not death -- the frontend keeps waiting.
         from local_operator import procstate
 
         if procstate.pid_liveness(lease.pid) is False:
+            return True
+        # A CORPSE IS NOT A LIVE OWNER (R3-F1). Signal 0 succeeds against an
+        # exited-but-unreaped process, and the detached owner is THIS
+        # process's own child, whose corpse lingers until reaped -- so without
+        # this the frontend reported a dead owner as "retained and still
+        # running" for the whole grace window (measured: `ps` showed state Z
+        # while the report said admitted/alive). ``is_zombie`` is the existing
+        # fails-closed probe for exactly this question.
+        if procstate.is_zombie(lease.pid):
             return True
         return procstate.same_birth(lease.birth_scheme, lease.birth, lease.pid) is False
     if lease.job_label is None:
@@ -1591,14 +1722,15 @@ def _owner_lost(lease: Any, status: Any) -> bool:
         if home is None:
             return False
         plist = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
-        return (
-            launchd.job_pid(
-                label=lease.job_label,
-                path=plist,
-                run=owned_process.launchctl_runner,
-            )
-            is None
-        )
+        pid = launchd.job_pid(label=lease.job_label, path=plist, run=owned_process.launchctl_runner)
+        if pid is not None:
+            return False
+        # job_pid(None) also covers a supervisor timeout/refusal. That is
+        # uncertainty, not proof of death. Confirm an actual absent or stopped
+        # registration before naming owner loss; never turn missing telemetry
+        # into an ownership verdict (the same startup/status-loss rule).
+        probe = owned_process.launchctl_runner("print", f"{launchd.job_domain()}/{lease.job_label}")
+        return probe.returncode in (0, 113)
     except Exception:  # noqa: BLE001 - an unanswerable supervisor has no verdict
         return False
 
@@ -1622,7 +1754,6 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
                 final = json.loads(body)
             except ValueError:
                 final = {}
-            _cleanup_finished_owner(lease)
             return EXIT_OK if final.get("status") == "completed" else EXIT_EPISODE
     print(
         json.dumps(
@@ -1640,47 +1771,21 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
     return EXIT_EPISODE
 
 
-def _cleanup_finished_owner(lease: Any) -> None:
-    """Remove THIS run's finished launchd registration (post-terminal only).
-
-    Terminal status is written after the seal, so the owner is finished or
-    exiting; booting out the exact label this run created cannot cut its work.
-    The detached backend has nothing to clean. A poll for natural exit keeps
-    the bootout from racing the process's last flush.
-    """
-    if lease.backend != "launchd" or lease.job_label is None:
-        return
-    try:
-        from local_operator import launchd, owned_process
-
-        home = launchd.real_home()
-        if home is None:
-            return
-        plist = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if (
-                launchd.job_pid(
-                    label=lease.job_label,
-                    path=plist,
-                    run=owned_process.launchctl_runner,
-                )
-                is None
-            ):
-                break
-            time.sleep(0.1)
-        launchd.bootout_job(
-            label=lease.job_label, path=plist, runner=owned_process.launchctl_runner
-        )
-        try:
-            plist.unlink()
-        except OSError:
-            pass
-    except Exception:  # noqa: BLE001 - a post-terminal cleanup must not fail the report
-        pass
-
-
 async def run(args: argparse.Namespace) -> int:
+    if args.engagement == "session":
+        from local_operator.evaluation.source_pin import (
+            SourcePinError,
+            verify_core_source,
+        )
+
+        try:
+            selected = AdapterSelector.model_validate(json.loads(args.selector.read_text()))
+            if selected.core_source is None:
+                raise SourcePinError("selector has no core_source pin; rebuild before launch")
+            verify_core_source(selected.core_source)
+        except (OSError, ValueError, SourcePinError) as error:
+            print(str(error), file=sys.stderr)
+            return EXIT_PREFLIGHT
     if args.engagement == "session" and not args.owned_host and not args.in_process_host:
         # The session arm's ONLY standalone path is the managed frontend: the
         # bare foreground loop is the lifetime defect (R2), and the rig's
@@ -1695,7 +1800,30 @@ async def run(args: argparse.Namespace) -> int:
     if owner_status is not None:
         owner_status.phase("admitted", detail="managed owner verified before prepare")
     try:
-        infra_values = _parse_infra(args.infra, args.infra_purpose)
+        infra_refs = _parse_infra(args.infra_ref, args.infra_purpose)
+        if infra_refs:
+            if args.no_store:
+                raise ValueError("--infra-ref requires the sealed credential store")
+            from local_operator.evaluation.runner.host_secrets import (
+                CredentialStoreResolver,
+            )
+
+            config_root = args.config_dir or Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
+            values = {
+                value.name: value.value
+                for value in CredentialStoreResolver(config_root).resolve(
+                    [ref.value for ref in infra_refs]
+                )
+            }
+            for ref in infra_refs:
+                if not values.get(ref.value):
+                    raise ValueError(f"missing sealed infrastructure ref {ref.value}")
+            infra_values = tuple(
+                ScopedInfraValue(name=ref.name, purpose=ref.purpose, value=values[ref.value])
+                for ref in infra_refs
+            ) + _parse_infra(args.infra, args.infra_purpose)
+        else:
+            infra_values = _parse_infra(args.infra, args.infra_purpose)
         infra_values = _ensure_action_settle_policy(infra_values, args.infra_purpose)
         # Resolved HERE, in the same handler as the parse that fed it: an
         # unsupported policy is operator input error, and every other ``--infra``
@@ -1712,7 +1840,8 @@ async def run(args: argparse.Namespace) -> int:
     provider, model = args.route
     route = _route_identity(provider, model)
     episode_id = args.episode_id or f"ep-{uuid.uuid4().hex[:12]}"
-    secret_refs = tuple(args.secret) if args.secret is not None else _DEFAULT_SECRET_REFS
+    ref_names = tuple(args.secret) if args.secret is not None else _DEFAULT_SECRET_REFS
+    secret_refs = tuple(dict.fromkeys((*ref_names, *(ref.value for ref in infra_refs))))
     configured_usd_micros = int(round(args.max_usd * 1_000_000))
     try:
         usd_cap = _scale_usd_cap(
@@ -1911,14 +2040,25 @@ async def run(args: argparse.Namespace) -> int:
     return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, internal_test_support: bool = False) -> int:
+    """Parse argv and run one episode.
+
+    ``internal_test_support`` is the INJECTED internal entry (R3-S2): offline
+    rigs import this module and pass it to reach the in-process/detached
+    compositions. Nothing reachable from a command line sets it.
+    """
     raw = list(sys.argv[1:] if argv is None else argv)
-    args = build_parser().parse_args(raw)
+    args = build_parser(internal_test_support=internal_test_support).parse_args(raw)
     # The frontend relaunches THIS SAME invocation under a managed lease; the
     # raw argv is what makes "the same invocation" exact, including flags this
     # process resolved and flags it must not reinterpret.
     args._raw_argv = raw
-    return asyncio.run(run(args))
+    result = asyncio.run(run(args))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if args.owned_host:
+        _retire_owned_registration_if_launchd()
+    return result
 
 
 if __name__ == "__main__":

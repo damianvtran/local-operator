@@ -2493,32 +2493,27 @@ class TestReleaseRetention:
     async def test_an_incomplete_join_never_releases_the_worker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
-        run, _session, adapter, rescued = self._fixture(
-            tmp_path=tmp_path, monkeypatch=monkeypatch, scratch_root=short_scratch
+        release = asyncio.Event()
+        session = _ReleasableSession(
+            short_scratch, [[{"kind": "wait", "duration_ms": 10}]], release=release
         )
-        outcome = await run()
-
-        # The outcome is honest: no score, a named retention, rescue pending.
-        assert outcome.status == "failed"
-        assert outcome.score is None
-        assert outcome.diagnostic is not None
-        assert "owned-work shutdown did not complete before scoring" in outcome.diagnostic
-        assert "NOT released" in outcome.diagnostic
-        assert outcome.rescue_required is True
-        assert outcome.rescue_complete is None  # never attempted on retained resources
-
-        # NOTHING destructive ran: no cleanup RPC, no close RPC, no terminate,
-        # and the rescue descriptor was never consumed.
+        run, _session, adapter, rescued = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            session=session,
+        )
+        task = asyncio.create_task(run())
+        while not session.join_calls:
+            await asyncio.sleep(0.01)
+        assert not task.done()
         assert "cleanup" not in adapter.calls
         assert "close" not in adapter.calls
         assert adapter.terminated is False
         assert rescued == []
-
-        # The record names both facts, so a reader can tell retention from a
-        # failed cleanup.
-        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
-        assert '"kind": "cleanup_retained"' in events
-        assert '"kind": "score_refused"' in events
+        release.set()
+        outcome = await asyncio.wait_for(task, timeout=15)
+        assert outcome.score is not None
 
 
 class TestAskDeliveryReceipt:
@@ -2765,27 +2760,46 @@ class TestReleaseRetentionExceptionPath:
         scratch = short_scratch / "explode"
         scratch.mkdir(parents=True, exist_ok=True)
         session = _ExplodingSession(scratch, [])
+        joins: list[int] = []
+        release = asyncio.Event()
+        original_join = session.shutdown_owned_work
+
+        async def counting_join(reason: str, *, timeout_s: float = 30.0) -> Any:
+            joins.append(1)
+            if release.is_set():
+                return await _ScriptedSession.shutdown_owned_work(
+                    session, reason, timeout_s=timeout_s
+                )
+            return await original_join(reason, timeout_s=timeout_s)
+
+        monkeypatch.setattr(session, "shutdown_owned_work", counting_join)
         run, _session, adapter, rescued = TestReleaseRetention()._fixture(
             tmp_path=tmp_path,
             monkeypatch=monkeypatch,
             scratch_root=scratch,
             session=session,
         )
-        outcome = await run()
-
-        assert outcome.status == "failed"
-        assert outcome.diagnostic is not None
-        assert "synthetic mid-turn failure" in outcome.diagnostic
-        assert outcome.score is None
-        assert outcome.rescue_required is True
-        assert outcome.rescue_complete is None
-        # Same gate: nothing destructive ran on the exception path either.
+        task = asyncio.create_task(run())
+        # RETAIN FIRST (R3-A1): the exception is recorded and the host then
+        # HOLDS -- it does not exit in front of owned work it has not verified.
+        for _ in range(300):
+            if joins:
+                break
+            await asyncio.sleep(0.01)
+        assert joins, "the failure path must reach the retained join"
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the failure path must not exit while unverified"
+        # Same gate as the normal path: nothing destructive ran, and no
+        # outcome was sealed over the unverified work.
         assert "cleanup" not in adapter.calls
         assert "close" not in adapter.calls
         assert adapter.terminated is False
         assert rescued == []
-        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
-        assert '"kind": "cleanup_retained"' in events
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "cancellation is not proof of disposal"
+        release.set()
+        await asyncio.wait_for(task, timeout=15)
 
 
 class _ReleasableSession(_ScriptedSession):
@@ -2902,9 +2916,20 @@ class TestRetainedJoin:
         assert session.join_calls >= 2
 
     @pytest.mark.asyncio
-    async def test_a_settled_canonical_keeps_the_bridge_and_returns_retained(
+    async def test_a_settled_canonical_keeps_the_host_retained(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
+        """R3-A1 (rewritten in round 4): a settled canonical does NOT end the host.
+
+        It used to leave the loop and return a retained-FAILURE outcome, which
+        the caller then sealed while its own ``asyncio.run`` cancelled the
+        cleanup -- so the descriptor was the entire story of a live process
+        (measured in the managed host). Round 4 keeps the physically reasonable
+        reading: no retry can change a settled canonical, so the loop does not
+        spin, but the host STAYS -- every scope it holds stays alive and no
+        seal, terminal status or release happens. External authorized teardown
+        is a separate disposition, never an inference from elapsed time.
+        """
         from local_operator.evaluation import session_arm as session_arm_mod
 
         stops: list[int] = []
@@ -2913,15 +2938,35 @@ class TestRetainedJoin:
             stops.append(1)
 
         monkeypatch.setattr(session_arm_mod.ActionBridge, "stop", recording_stop)
-        run, _session_out, adapter, rescued = TestReleaseRetention()._fixture(
+        release = asyncio.Event()
+        run, session, adapter, rescued = TestReleaseRetention()._fixture(
             tmp_path=tmp_path, monkeypatch=monkeypatch, scratch_root=short_scratch
         )
-        outcome = await asyncio.wait_for(run(), timeout=15)
-        # The settled receipt (cancelled/hook-failed: no retry can help) keeps
-        # the honest retained-failure disposition -- and the bridge is NOT
-        # stopped while ownership is retained (round-2 finding).
-        assert outcome.status == "failed"
-        assert outcome.score is None
-        assert outcome.rescue_required is True
+        original_join = session.shutdown_owned_work
+
+        async def controlled_join(reason: str, *, timeout_s: float = 30.0) -> Any:
+            if release.is_set():
+                return await _ScriptedSession.shutdown_owned_work(
+                    session, reason, timeout_s=timeout_s
+                )
+            return await original_join(reason, timeout_s=timeout_s)
+
+        monkeypatch.setattr(session, "shutdown_owned_work", controlled_join)
+        task = asyncio.create_task(run())
+        # Hold past at least two paced attempts (the settle pace is 5 s), so
+        # "still held" is not merely "the first attempt has not returned".
+        await asyncio.sleep(6.5)
+        assert not task.done(), "a settled canonical must not end the host"
         assert "cleanup" not in adapter.calls
+        assert "close" not in adapter.calls
+        assert adapter.terminated is False
         assert stops == []
+        assert rescued == []
+        # Only a fresh PUBLIC complete receipt permits the fixture to leave.
+        # Actual permanently settled SDK failures are tested in kill-bounded
+        # managed processes; they must never be "fixed" by recreating cleanup.
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        await asyncio.wait_for(task, timeout=15)

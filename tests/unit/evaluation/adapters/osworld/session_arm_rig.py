@@ -619,12 +619,15 @@ def main(argv: list[str] | None = None) -> int:
         "--no-store",
         # THIS rig is the offline in-process host: its scripted wire client is
         # in-process state a spawned owner could never inherit, and the test
-        # owns the process lifetime. The flag is how the standalone entry
-        # says exactly that (R2 round 3); without it the entry is the managed
+        # owns the process lifetime. Without it the entry is the managed
         # frontend and would launch a real owner instead of running here.
         "--in-process-host",
     ]
-    rc = run_episode.main(cli)
+    # INTERNAL TEST SUPPORT (R3-S2): the rig reaches the unmanaged composition
+    # through the injected kwarg -- the standalone script accepts no such flag
+    # at all now, and the owner relaunch it performs still goes through the
+    # production parser.
+    rc = run_episode.main(cli, internal_test_support=True)
     print(f"[rig] exit code: {rc}", file=sys.stderr, flush=True)
     return rc
 
