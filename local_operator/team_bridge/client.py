@@ -83,10 +83,13 @@ from local_operator.team_bridge import availability
 # Embedded served texts (fallbacks; the server is each text's canonical home)
 # ---------------------------------------------------------------------------
 
-#: The status payload's ``api_version`` this client satisfies (§6.6). A payload
-#: below it (or with none at all) surfaces "update your client" and the feature
-#: stops visibly — it never degrades silently.
-MIN_API_VERSION = 1
+#: The ONE ``api_version`` this client implements (§6.6). The comparison is
+#: EXACT rather than a floor: §6.6 mints a new number when the contract breaks,
+#: and a client must stop visibly on a contract it does not know — `>= 1` would
+#: claim versions this build cannot honour (review round 1, R5). Anything else
+#: — a future number, an older one, a malformed one, a numeric bool — surfaces
+#: the update state; it never degrades silently.
+SUPPORTED_API_VERSION = 1
 
 #: The served-text cap every client enforces on what it receives (§5.1): a text
 #: over it is REFUSED (never truncated — truncation would make the SHA records
@@ -151,6 +154,29 @@ SCREENING_TEMPLATE_V1_SHA256 = hashlib.sha256(SCREENING_TEMPLATE_V1.encode("utf-
 #: refresh that failed twice): the CLASS is the signal a caller switches on, and
 #: the sentence is what a user reads — §13.2's "sign in to Radient".
 SIGN_IN_SENTENCE = "Sign in to Radient to use agent messages."  # i18n: ignore §13.2 copy
+
+#: The captured-action guard's refusal (H1 review round 1, R6/Q1). A dialog
+#: stamping account A must not enroll account B after a login switch, so the
+#: local desktop contract carries the captured account and the client compares
+#: it to the EXACT pinned dispatch snapshot BEFORE any upstream write: this
+#: code means the request never left the machine. One stable code, one
+#: sentence; a local contract, not an RFC §2.5 row (like the destination
+#: guard's remedy sentence).
+ACCOUNT_MISMATCH_CODE = "account_mismatch"
+ACCOUNT_MISMATCH_SENTENCE = (  # i18n: ignore local guard, one client sentence
+    "This action was prepared for a different Radient account. Sign in again."
+)
+
+#: §5.6 state F's two sentences, verbatim from the §2.5 closed table. A plan
+#: lapse reads "Plan ended — reading only"; a CONFIRMED kill (the member
+#: tenants-state read returns effective) reads the neutral "Agent messages are
+#: turned off" — neutral across the admin and ops actors by design (D21). The
+#: client never invents a third reading for F: when the kill cannot be
+#: confirmed (a lapse, a scope-excluded organization, or an unreadable
+#: confirmation) the lapse sentence is the F reading, which is also the only
+#: non-oracle choice (S-1).
+STATE_NOTE_LAPSED = "Plan ended — reading only"  # i18n: ignore §2.5 (state.lapsed)
+STATE_NOTE_KILL = "Agent messages are turned off"  # i18n: ignore §2.5 (state.kill)
 
 #: §6.6's version.update string, verbatim: the whole sentence a surface shows when
 #: the server's contract is newer than this client satisfies.
@@ -265,13 +291,15 @@ class BridgeRefusal(Exception):
     def refreshes_status(self) -> bool:
         """Whether the caller's move is §5.2's: refresh status and re-render.
 
-        The one refusal that is a STALENESS signal rather than a verdict: the
-        consent version the caller echoed is not the one the server serves, so
-        the client must re-read status and re-render the served text before it
-        can send again. Never send a stale version silently (reviewer finding 8).
+        The refusals that are STALENESS signals rather than verdicts: a consent
+        version the caller echoed that is not the one the server serves, and a
+        captured account the pinned snapshot no longer matches — both mean
+        "re-read status and re-render before sending again". Never send a stale
+        version silently (reviewer finding 8); never apply a captured action to
+        a different account (review round 1, R6).
         """
 
-        return self.code == "consent_version_unknown"
+        return self.code in ("consent_version_unknown", ACCOUNT_MISMATCH_CODE)
 
 
 class BridgeUnreachable(BridgeRefusal):
@@ -313,6 +341,22 @@ def version_number(version: str) -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def _screening_is_trusted(version: Any, text: Any) -> bool:
+    """Whether a served screening candidate may select embedded bytes (§8.3).
+
+    Screening is the SECURITY floor of the message pipeline (S-13): the served
+    value is a SELECTOR over templates this client ships, never content, so
+    acceptance is exact byte equality with the embedded version — an altered
+    v1, an unembedded v999 or a non-string refuses before any downstream code
+    can consume the bytes as trusted instructions. A genuinely verified
+    signature is the only future widening the contract allows; nothing here
+    needs it in v1 (review round 1, R4). Guidance and consent stay policy
+    texts under the monotonic/cap rules, deliberately not this floor.
+    """
+
+    return version == SCREENING_VERSION_V1 and text == SCREENING_TEMPLATE_V1
 
 
 class AcceptedTexts:
@@ -580,16 +624,43 @@ class TeamBridgeClient:
         an application key, several rows without a pin, a dead grant, a failed
         refresh — §13.2's "sign in to Radient" rather than any fallback);
         ``BridgeRefusal`` for a refused destination.
+
+        The row's own ``account_id`` is the OWNER BINDING: it is read here, at
+        the same moment the pin is resolved, and every request this call
+        authorises must still carry it — a row whose identity cannot be read
+        cannot be attributed, so it answers the sign-in state rather than
+        letting the server later decide whose mailbox the response described
+        (review round 1, R1: fail closed on a missing expected identity).
         """
 
         self._require_destination()
         row = self._pinned_row()
         if row is None:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        return await self._fresh_pinned_access(row.id)
+        raw = dict(row.data) if isinstance(row.data, Mapping) else {}
+        owner = raw.get("account_id")
+        if not isinstance(owner, str) or not owner:
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        return await self._fresh_pinned_access(row.id, expected_account_id=owner)
 
-    async def _fresh_pinned_access(self, credential_id: int, *, force: bool = False) -> OAuthAccess:
+    async def _fresh_pinned_access(
+        self, credential_id: int, *, expected_account_id: str, force: bool = False
+    ) -> OAuthAccess:
         """Refresh-and-read the EXACT pinned row; any failure is terminal.
+
+        ONE SNAPSHOT (review round 1, R1). The store's
+        ``ensure_oauth_fresh_or_raise`` returns the credential row's own data
+        mapping — the same read that held the bearer it hands back — so the
+        token AND the identity (account id, e-mail, org) are taken from that
+        single snapshot and from nothing else. The pre-fix code paired this
+        token with a LATER ``get_credential`` re-read of the row's metadata,
+        and a concurrent same-org re-login could flip that second read to
+        another account: A's bearer attributed to B's mailbox.
+
+        ``expected_account_id`` is the owner binding the caller resolved before
+        dispatch (or the identity the cache was keyed on, for the 401 path).
+        The snapshot must still carry EXACTLY that account, non-empty — a lost
+        or changed identity is itself a refusal, before any retry leaves.
 
         ``force=True`` is the 401 path's request: refresh even though the expiry
         clock may consider the bearer fresh, because the server has already
@@ -604,19 +675,18 @@ class TeamBridgeClient:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE) from failure
         if not isinstance(data, Mapping) or not data.get("access"):
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        row = store.get_credential(credential_id)
-        if row is None or row.provider != "radient" or row.credential_type != "oauth":
+        account_id = data.get("account_id")
+        if not isinstance(account_id, str) or account_id != expected_account_id:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        raw = dict(row.data) if isinstance(row.data, Mapping) else {}
         return OAuthAccess(
             access_token=str(data["access"]),
             credential_id=credential_id,
-            account_id=raw.get("account_id") or data.get("account_id"),
-            email=raw.get("email") or data.get("email"),
-            org_id=raw.get("org_id") or data.get("org_id"),
-            api_endpoint=raw.get("api_endpoint"),
+            account_id=account_id,
+            email=data.get("email"),
+            org_id=data.get("org_id"),
+            api_endpoint=data.get("api_endpoint"),
             kind="oauth",
-            raw=raw,
+            raw=dict(data),
         )
 
     # -- transport ----------------------------------------------------------
@@ -698,17 +768,45 @@ class TeamBridgeClient:
         """One FORCED refresh of the EXACT pinned row, with the owner check.
 
         Refresh-single-flight through the store; the row is the row, never a
-        sibling the cascade would find. The refreshed identity is re-checked
-        against the pinned ``account_id`` BEFORE the retry: if a re-login
-        replaced the account behind this row, the second attempt never leaves —
-        the terminal state is surfaced instead of re-sending the request as
-        somebody else.
+        sibling the cascade would find. The refreshed snapshot must still carry
+        the pinned ``account_id`` — the comparison is UNCONDITIONAL inside
+        :meth:`_fresh_pinned_access`, because the pre-fix "only when both ids
+        are truthy" form let a refresh that LOST the expected identity through
+        (review round 1, R1). If a re-login replaced the account behind this
+        row, the second attempt never leaves: the terminal state is surfaced
+        instead of re-sending the request as somebody else.
         """
 
-        refreshed = await self._fresh_pinned_access(pinned.credential_id, force=True)
-        if pinned.account_id and refreshed.account_id and refreshed.account_id != pinned.account_id:
+        if not pinned.account_id:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        return refreshed
+        return await self._fresh_pinned_access(
+            pinned.credential_id, expected_account_id=pinned.account_id, force=True
+        )
+
+    async def _guarded_access(self, expected_account_id: str | None) -> OAuthAccess | None:
+        """Resolve the dispatch snapshot and enforce a captured-account guard.
+
+        The desktop plane's anti-replay receipt (H1 review round 1, R6/Q1): a
+        dialog captured consent for account A, the user signs in as B, and the
+        old body must yield ZERO mutations. The comparison runs against the
+        EXACT pinned access the dispatch below will use — resolving again
+        inside :meth:`_send` would reopen the very race this closes — and it
+        runs BEFORE any HTTP side effect. ``None`` (no guard supplied) returns
+        ``None`` and ``_send`` resolves as usual; the desktop ROUTES require
+        the field, so the guarded path is the only one the UI can take, and
+        this optionality serves tests and non-UI callers only.
+        """
+
+        if expected_account_id is None:
+            return None
+        access = await self.current_access()
+        if access.account_id != expected_account_id:
+            raise BridgeRefusal(
+                ACCOUNT_MISMATCH_CODE,
+                ACCOUNT_MISMATCH_SENTENCE,
+                http_status=409,
+            )
+        return access
 
     # -- operations ---------------------------------------------------------
 
@@ -723,6 +821,21 @@ class TeamBridgeClient:
         params = {"tenant_id": tenant_id} if tenant_id else None
         return await self._send("GET", "/messaging/settings", params=params)
 
+    async def tenant_state(
+        self, tenant_id: str, *, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """The org switch state — booleans + a generic code only (§5.5, S-22).
+
+        Member-readable by contract, and the ONLY member signal that tells a
+        CONFIRMED admin/ops kill apart from a plan lapse, which is why the F
+        reading asks it (review round 1, Q3 / design round 1, D3). Reasons are
+        never returned and none are requested; the status discipline reads this
+        at the same boundary, for the retained tenant only, and caches it with
+        the F answer it belongs to.
+        """
+
+        return await self._send("GET", f"/tenants/{tenant_id}/messaging/state", access=access)
+
     async def put_settings(
         self,
         *,
@@ -732,6 +845,7 @@ class TeamBridgeClient:
         consented_via: str | None = None,
         label: str | None = None,
         endpoint: Any = _UNKNOWN_ENDPOINT,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """The consent write, with §5.2's client-side preconditions enforced.
 
@@ -746,6 +860,12 @@ class TeamBridgeClient:
         request would be refused and the member could not pause during exactly
         the incident pause exists for. ``label`` with a non-``active`` state is
         therefore a caller bug, refused here before it reaches the wire.
+
+        ``expected_account_id`` is the captured-account guard (§5.2's local
+        desktop receipt; review round 1, R6/Q1): when supplied, the pinned
+        dispatch snapshot must carry exactly that account BEFORE any upstream
+        request, and the SAME snapshot rides the dispatch below — a stale
+        capture refuses locally with zero writes. It is never sent upstream.
 
         ``endpoint`` is the caller's last-known endpoint block (from
         status/settings). The consent echo is REQUIRED when turning on from a
@@ -784,7 +904,8 @@ class TeamBridgeClient:
         if label is not None:
             body["label"] = label
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
-        return await self._send("PUT", "/messaging/settings", body=body)
+        access = await self._guarded_access(expected_account_id)
+        return await self._send("PUT", "/messaging/settings", body=body, access=access)
 
     async def allowlist(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         """The caller's own policy entries, both directions (§6.1, §9.3)."""
@@ -797,6 +918,7 @@ class TeamBridgeClient:
         entries: Iterable[Mapping[str, Any]],
         *,
         tenant_id: str | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """The bounded REPLACE-SET write (§6.1, §9).
 
@@ -804,6 +926,11 @@ class TeamBridgeClient:
         class default (the key must be present — it is, because this method always
         sends it). Shape violations are caller bugs and are refused locally with
         ``ValueError``; the server re-checks everything.
+
+        ``expected_account_id`` is the same captured-account guard settings
+        carries (review round 1, R6: a policy surface must not be the one
+        mutation that skipped the receipt), enforced against the pinned
+        dispatch snapshot before any upstream write and never sent upstream.
         """
 
         normalized = [_normalize_entry(entry) for entry in entries]
@@ -816,7 +943,8 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         _require_body_within(body, ALLOWLIST_BODY_MAX_BYTES)
-        return await self._send("PUT", "/messaging/allowlist", body=body)
+        access = await self._guarded_access(expected_account_id)
+        return await self._send("PUT", "/messaging/allowlist", body=body, access=access)
 
 
 def _require_body_within(body: Mapping[str, Any], cap: int) -> None:
@@ -999,6 +1127,16 @@ class StatusCheck:
     error: BridgeRefusal | None
     account_id: str | None
     texts: Mapping[str, AcceptedText]
+    #: The slots whose served candidate was REFUSED on this answer. The
+    #: accepted copies keep whatever an earlier answer accepted; a surface
+    #: reads this to offer a refresh instead of rendering bytes that were
+    #: refused (review round 1, R3).
+    rejected: tuple[str, ...] = ()
+    #: §5.6 F's sentence — "Plan ended — reading only" or the confirmed-kill
+    #: "Agent messages are turned off" — and ``None`` in every other state.
+    #: Only a status answer that PROVES F carries it; nothing upstream of F
+    #: asserts either reading (review round 1, Q3 / design round 1, D3).
+    state_note: str | None = None
 
     @property
     def update_required(self) -> bool:
@@ -1013,14 +1151,29 @@ class _AccountState:
 
 
 def _api_supported(payload: Mapping[str, Any]) -> bool:
-    """Whether this client satisfies the payload's ``api_version`` (§6.6)."""
+    """Whether this client implements the payload's ``api_version`` (§6.6).
+
+    EXACTLY :data:`SUPPORTED_API_VERSION`, read in the shape the server sends
+    it: ``internal/bridge/texts.go`` pins ``APIVersion = "1"``, a decimal
+    STRING, and the payload's other numeric fields travel as numbers — so this
+    accepts a digit-string or an int and compares the VALUE. A bool is refused
+    explicitly (``True == 1`` in arithmetic would otherwise satisfy the
+    comparison — review round 1, R5); a future or older number, a malformed
+    string and a missing field are all "not a version this build implements"
+    and surface the update state, which admits no eligibility, consent or
+    receive.
+    """
 
     raw = payload.get("api_version")
-    try:
-        version = int(str(raw))
-    except (TypeError, ValueError):
+    if isinstance(raw, bool):
         return False
-    return version >= MIN_API_VERSION
+    if isinstance(raw, int):
+        version = raw
+    elif isinstance(raw, str) and raw.isdigit():
+        version = int(raw)
+    else:
+        return False
+    return version == SUPPORTED_API_VERSION
 
 
 def surface_projection(check: StatusCheck, *, onboarding_seen: bool = False) -> dict[str, Any]:
@@ -1065,29 +1218,67 @@ def surface_projection(check: StatusCheck, *, onboarding_seen: bool = False) -> 
     }
 
 
+def select_tenant(payload: Any) -> Mapping[str, Any] | None:
+    """The §3.2 v1 selection: ONE tenant row for every consumer (§3.2, R2).
+
+    The server returns its rows in the documented order (home tenant first,
+    then lowest tenant id) and this selection TRUSTS that order rather than
+    re-sorting — the contract's ordering is the server's to keep. The first
+    ELIGIBLE row wins; when nothing is eligible the first row holding a
+    retained endpoint is the state-F selection (§5.6: a plan lapse, an
+    admin/ops kill and a scope-excluded organization are byte-identical here
+    by design — S-1 — so the selection must not try to tell them apart).
+    ``None`` means neither: no eligible tenant and nothing retained (state A).
+
+    Derived from this one function, so the tenant id, the endpoint/state, the
+    visibility/on-ramp reading and the consent context all describe the SAME
+    row — the pre-fix code mixed eligibility from every row with endpoints
+    from every row and answered "home is eligible, so show the OTHER row's
+    active endpoint as state C" (review round 1, R2).
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
+    for tenant in tenants:
+        if bool(tenant.get("eligible")):
+            return tenant
+    for tenant in tenants:
+        if isinstance(tenant.get("endpoint"), Mapping):
+            return tenant
+    return None
+
+
+def selected_tenant_id(payload: Any) -> str | None:
+    """The selected row's ``tenant_id`` (§3.2), or ``None`` when nothing selects."""
+
+    selected = select_tenant(payload)
+    if selected is None:
+        return None
+    tenant_id = selected.get("tenant_id")
+    return tenant_id if isinstance(tenant_id, str) and tenant_id else None
+
+
 def _surface_state(check: StatusCheck) -> str | None:
     if check.state == STATE_READY:
-        payload = check.payload
-        if not isinstance(payload, Mapping):
-            return None
-        tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
-        endpoints: list[Mapping[str, Any]] = []
-        for tenant in tenants:
-            endpoint = tenant.get("endpoint")
-            if isinstance(endpoint, Mapping):
-                endpoints.append(endpoint)
-        eligible = any(bool(t.get("eligible")) for t in tenants)
-        if not endpoints:
-            return "B" if eligible else "A"
-        if not eligible:
-            # An endpoint with no eligible tenant: a plan lapse, an admin/ops
-            # kill, or a scope-excluded organization — byte-identical rows by
-            # design (§5.5/S-1), all retained read-only (F).
+        selected = select_tenant(check.payload)
+        if selected is None:
+            return "A"
+        if not bool(selected.get("eligible")):
+            # The retained row: a plan lapse, an admin/ops kill, or a
+            # scope-excluded organization — byte-identical by design
+            # (§5.5/S-1), all retained read-only (F).
             return "F"
-        endpoint_states = {endpoint.get("state") for endpoint in endpoints}
-        if "active" in endpoint_states:
+        endpoint = selected.get("endpoint")
+        if not isinstance(endpoint, Mapping):
+            # Eligible, not enabled: the ORGANIZATION's own on-ramp (B), even
+            # when some later row carries an endpoint — the selection above
+            # decided which organization this machine is about (§3.2).
+            return "B"
+        state = endpoint.get("state")
+        if state == "active":
             return "C"
-        if "paused" in endpoint_states:
+        if state == "paused":
             return "D"
         return "E"
     if check.error is not None and check.error.code == "messaging_unavailable":
@@ -1161,13 +1352,19 @@ class StatusDiscipline:
         """
 
         check = await self._check(boundary)
-        state = _surface_state(check)
-        if state == "G" or state is not None or check.state == STATE_SIGNED_OUT:
+        projection = surface_projection(check)
+        if projection["surface_state"] is not None or check.state == STATE_SIGNED_OUT:
+            # The record carries the POSTURE, not just visibility: the two
+            # drainers render §5.6 F's read-only note and view-only controls
+            # from it, and the note is the F sentence the read above resolved
+            # (review round 1, Q3 / design round 1, D3).
             availability.record(
                 self._config_dir,
-                visible=_surface_visible(check),
+                visible=projection["visibility"]["settings"],
                 state=check.state,
                 checked_at=check.checked_at,
+                read_only=projection["read_only"],
+                note=check.state_note,
             )
         return check
 
@@ -1257,8 +1454,17 @@ class StatusDiscipline:
         texts.rejected = []
         for slot, field in (("guidance", "text"), ("screening", "template"), ("consent", "text")):
             section = payload.get(slot)
-            if isinstance(section, Mapping):
-                texts.accept(slot, version=section.get("version"), text=section.get(field))
+            if not isinstance(section, Mapping):
+                continue
+            version = section.get("version")
+            text = section.get(field)
+            if slot == "screening" and not _screening_is_trusted(version, text):
+                # Selector-only acceptance (§8.3, review round 1, R4): the
+                # refused candidate is recorded rather than swapped for a
+                # stale accepted copy, so a surface can offer a refresh.
+                texts.rejected.append(slot)
+                continue
+            texts.accept(slot, version=version, text=text)
         check = StatusCheck(
             state=STATE_READY if _api_supported(payload) else STATE_UPDATE_REQUIRED,
             boundary=boundary.value,
@@ -1269,9 +1475,40 @@ class StatusDiscipline:
             error=None,
             account_id=access.account_id,
             texts=texts.snapshot(),
+            rejected=tuple(texts.rejected),
         )
+        if _surface_state(check) == "F":
+            # The F sentence needs the member-readable kill confirmation: one
+            # extra read at this same boundary (§5.6 F, review round 1, Q3).
+            check = replace(check, state_note=await self._f_state_note(check, access))
         self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
+
+    async def _f_state_note(self, check: StatusCheck, access: OAuthAccess) -> str:
+        """F's sentence: the kill one when CONFIRMED, the lapse one otherwise.
+
+        §5.5 renders a plan lapse, an admin/ops kill and a scope-excluded
+        organization as byte-identical ``eligible:false`` rows, so the status
+        answer alone cannot tell the readings apart. The member-readable
+        confirmation is the tenants-state read — booleans only, never reasons
+        (S-22) — so this is ONE extra GET at the SAME boundary, only while the
+        answer IS F, only for the retained tenant the selection already chose,
+        and it rides the SAME pinned access as the status read itself. A
+        refusal, a malformed body or no selection reads lapse: the F sentence
+        set has exactly two members, and telling a scope-excluded organization
+        apart from a lapse is what S-1 forbids.
+        """
+
+        tenant_id = selected_tenant_id(check.payload)
+        if tenant_id is None:
+            return STATE_NOTE_LAPSED
+        try:
+            state = await self._client.tenant_state(tenant_id, access=access)
+        except (BridgeSignInRequired, BridgeRefusal):
+            return STATE_NOTE_LAPSED
+        if isinstance(state, Mapping) and state.get("effective") is True:
+            return STATE_NOTE_KILL
+        return STATE_NOTE_LAPSED
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.
@@ -1311,27 +1548,49 @@ def reset_status_disciplines() -> None:
 
 
 def consent_for_display(check: StatusCheck) -> tuple[str, str, str] | None:
-    """``(version, text, source)`` for the onboarding dialog (§13.1).
+    """``(version, text, source)`` for the onboarding dialog (§13.1, R3).
 
-    Priority: the text the status payload SERVES right now (rendered exactly as
-    served — the version the PUT will echo); then the last ACCEPTED copy when the
-    payload carries none (a status refresh that failed keeps the known text
-    visible); then the client's EMBEDDED copy, only while status is unreachable.
-    A signed-out check returns nothing: there is no dialog for an unknown or
-    un-eligible account, and the embedded text must not leak past its contract.
+    Only ACCEPTED bytes are ever displayed, and only to a KNOWN ELIGIBLE owner:
+
+    * ``served`` — the payload's consent IS the text this client accepted on
+      this very answer (the bytes the PUT will echo). A served candidate that
+      was refused (backwards, same-version-changed, oversized) renders
+      NOTHING: the older accepted copy is not silently substituted for it, and
+      the refusal is visible in ``StatusCheck.rejected`` so a surface can
+      refresh and re-render.
+    * ``cached`` / ``embedded`` — offline fallback ONLY while status is
+      genuinely UNREACHABLE (a transport failure, ``BridgeUnreachable``) and
+      the last good payload names an eligible owner. An explicit refusal (the
+      dark-launch 503, any coded refusal) or an eligibility that cannot be
+      established is not "offline": those withhold consent entirely — as do
+      A/F/G, signed-out and unsupported states, for which no dialog exists and
+      no text may leak (review round 1, R3).
     """
 
     payload = check.payload
-    if isinstance(payload, Mapping):
+    selected = select_tenant(payload) if isinstance(payload, Mapping) else None
+    owner_eligible = selected is not None and bool(selected.get("eligible"))
+    accepted = check.texts.get("consent")
+    if check.state == STATE_READY and owner_eligible and isinstance(payload, Mapping):
         consent = payload.get("consent")
         if isinstance(consent, Mapping):
             version = consent.get("version")
             text = consent.get("text")
-            if isinstance(version, str) and isinstance(text, str):
-                return (version, text, "served")
-    accepted = check.texts.get("consent")
-    if accepted is not None:
-        return (accepted.version, accepted.text, "cached")
-    if check.state == STATE_UNAVAILABLE:
+            if (
+                accepted is not None
+                and isinstance(version, str)
+                and isinstance(text, str)
+                and version == accepted.version
+                and text == accepted.text
+            ):
+                return (accepted.version, accepted.text, "served")
+        return None
+    if (
+        check.state == STATE_UNAVAILABLE
+        and isinstance(check.error, BridgeUnreachable)
+        and owner_eligible
+    ):
+        if accepted is not None:
+            return (accepted.version, accepted.text, "cached")
         return (CONSENT_VERSION_V1, CONSENT_TEXT_V1, "embedded")
     return None
