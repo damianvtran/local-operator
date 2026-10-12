@@ -62,7 +62,7 @@ class OwnershipDiscovery(Protocol):
     every caller must read it that way.
     """
 
-    def peer_identity(self) -> tuple[str, int] | None: ...
+    def peer_identity(self) -> tuple[str, int] | tuple[str, int, str] | None: ...
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ class OwnershipHost:
 class _BridgeDiscovery:
     """The extension's peer facts, from the daemon's own published link state."""
 
-    def peer_identity(self) -> tuple[str, int] | None:
+    def peer_identity(self) -> tuple[str, int] | tuple[str, int, str] | None:
         try:
             current = state_store.read()
         except Exception:  # noqa: BLE001 - discovery must never raise at a call site
@@ -104,7 +104,7 @@ class _UiDiscovery:
     this host instead of ``None``, which elsewhere means "must ask".
     """
 
-    def peer_identity(self) -> tuple[str, int] | None:
+    def peer_identity(self) -> tuple[str, int] | tuple[str, int, str] | None:
         try:
             from local_operator.ui_browser import state as ui_state
 
@@ -113,6 +113,11 @@ class _UiDiscovery:
             return None
         if current is None:
             return None
+        # Only invalidates a cached protocol/ownership verdict. Actual rebind still
+        # requires the session's durable proof; a UI restart cannot adopt a tab
+        # from its URL, number or discovery generation.
+        if current.instance_id is not None:
+            return (current.app_version, current.proto, current.instance_id)
         return (current.app_version, current.proto)
 
 
@@ -248,7 +253,7 @@ class BrowserResource:
         self.ownership: bool | None = None
         # The peer identity `self.ownership` was learned against. See
         # `_peer_identity` for why the pair, not just the version.
-        self._ownership_peer: tuple[str, int] | None = None
+        self._ownership_peer: tuple[str, int] | tuple[str, int, str] | None = None
         self._lease_at_creation = self._lease_generation()
         # Whether the execution lease DEFINES this owner's identity. Only then
         # is a lease change a resume that must fence us; an owner whose identity
@@ -620,8 +625,8 @@ class BrowserResource:
         """
         return self._record_owes_reconciliation(self.record)
 
-    def _peer_identity(self) -> tuple[str, int] | None:
-        """The peer's (version, proto), or None when it cannot be told.
+    def _peer_identity(self) -> tuple[str, int] | tuple[str, int, str] | None:
+        """The peer's (version, proto[, UI instance]), or None when unknown.
 
         Read from the DISCOVERY FILE rather than a socket: the host publishes
         these from the same live state `/health` serves, and this is consulted on
@@ -677,7 +682,7 @@ class BrowserResource:
             # extension. A UI host that answers the wire at all ships the whole
             # method set, so it can never be read as old.
             return False
-        version, _proto = peer
+        version = peer[0]
         return extension_older(version, OWNERSHIP_MIN_EXTENSION_VERSION)
 
     async def recover(self) -> dict[str, Any]:

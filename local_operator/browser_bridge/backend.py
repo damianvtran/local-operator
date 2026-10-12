@@ -151,6 +151,14 @@ class BridgeUnreachable(RuntimeError):
     pass
 
 
+class HostPreDeliveryFailure(BridgeUnreachable):
+    """The command was not dispatched; a UI rediscovery may safely retry once.
+
+    Never use for read/write timeout or mid-request disconnect: those can follow
+    a side effect. The extension client preserves its existing no-retry behavior.
+    """
+
+
 #: The two host identifiers the copy and the client seam are parameterised by.
 #: Strings rather than an enum because the same spelling travels outside Python —
 #: in the `ui:`/`bridge:` surface prefixes and in the resource record's `host`
@@ -212,8 +220,9 @@ HOST_COPY: dict[str, HostCopy] = {
         # that is closed (design, failure-UX table).
         label="Local Operator desktop app's browser host",
         no_state=(
-            "the Local Operator desktop app's browser host is not running: no live host "
-            "state. Open the desktop app (and a browser tab in it), then retry."
+            "the Local Operator desktop app's browser host is unavailable: no ready host "
+            "record. The app may still be running with incomplete browser startup. "
+            "Check its browser status before retrying; this does not prove the app is closed."
         ),
         not_answering=(
             "the Local Operator desktop app is no longer answering at 127.0.0.1:{port}; "
@@ -923,11 +932,23 @@ class HostClient:
             switches_known=bool(getattr(current, "switches_known", False)),
         )
 
+    def request_headers(self, current: Any) -> dict[str, str]:
+        """Authentication for one pinned discovery record; hosts may add identity."""
+        return {"X-Bridge-Key": current.session_key}
+
+    async def preflight(self, current: Any) -> None:
+        """Host-specific pre-delivery validation; legacy/extension paths do none."""
+
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        copy = self.copy_for()
         current = self._read()
         if current is None:
-            raise BridgeUnreachable(copy.no_state)
+            raise BridgeUnreachable(self.copy_for().no_state)
+        return await self.call_once(current, method, params)
+
+    async def call_once(self, current: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Execute against the SAME record validated by preflight, without replay."""
+        copy = self.copy_for()
+        await self.preflight(current)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
         timeout = self.timeout_for(method, params)
@@ -935,7 +956,7 @@ class HostClient:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(
                     f"http://127.0.0.1:{current.port}/rpc",
-                    headers={"X-Bridge-Key": current.session_key},
+                    headers=self.request_headers(current),
                     json=request.model_dump(mode="json"),
                 )
         except httpx.ConnectTimeout as exc:
@@ -943,7 +964,7 @@ class HostClient:
             # belongs with the unreachable branch below, not the popup one —
             # httpx.ConnectTimeout subclasses TimeoutException, not
             # ConnectError, so ordering matters here (review finding m1).
-            raise BridgeUnreachable(copy.not_answering.format(port=current.port)) from exc
+            raise HostPreDeliveryFailure(copy.not_answering.format(port=current.port)) from exc
         except httpx.TimeoutException as exc:
             # Read/write/pool timeout AFTER connecting: the host accepted the
             # command and never answered within a budget that already covers
@@ -953,6 +974,10 @@ class HostClient:
             # popup sat waiting on the human, so name the likely cause. We only
             # KNOW the connection was accepted — say that, not "running".
             raise BridgeUnreachable(copy.timeout.format(method=method, timeout=timeout)) from exc
+        except httpx.ConnectError as exc:
+            # Connection refused: no HTTP request reached a dispatcher. This
+            # classification is intentionally narrower than RequestError below.
+            raise HostPreDeliveryFailure(copy.not_answering.format(port=current.port)) from exc
         except httpx.RequestError as exc:
             # Everything else — ConnectError (refused), ReadError /
             # RemoteProtocolError (daemon died mid-request), reset — means the
@@ -960,7 +985,18 @@ class HostClient:
             # (review finding m2: these must NOT get the popup message).
             raise BridgeUnreachable(copy.not_answering.format(port=current.port)) from exc
         if http_response.status_code == 401:
-            raise BridgeUnreachable(copy.rejected_key)
+            raise HostPreDeliveryFailure(copy.rejected_key)
+        if http_response.status_code == 409 and "X-UI-Browser-Instance" in self.request_headers(
+            current
+        ):
+            try:
+                rejected = http_response.json()
+            except ValueError:
+                rejected = None
+            if rejected == {"detail": "host instance changed"}:
+                raise HostPreDeliveryFailure(
+                    "the desktop browser host generation changed before dispatch; rediscover it"
+                )
         try:
             response = Response.model_validate(http_response.json())
         except (ValueError, json.JSONDecodeError) as exc:
