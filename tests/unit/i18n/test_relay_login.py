@@ -130,6 +130,65 @@ def test_present_namespace_honors_real_backend_locale(monkeypatch, tmp_path) -> 
     assert "Mot de passe incorrect." in client.post("/login", data={"password": "wrong"}).text
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "empty",
+        "title_only",
+        "missing_title",
+        "missing_password",
+        "missing_submit",
+        "missing_error",
+        "invalid",
+    ],
+)
+def test_incomplete_namespace_falls_back_as_whole_login(monkeypatch, tmp_path, shape: str) -> None:
+    # Generated identities include the refusal even on GET: otherwise a form
+    # could switch language only after the first failed authentication attempt.
+    title = daemon.relay_login.page_title().code
+    codes = {
+        "title": title,
+        "password": daemon.relay_login.password_label().code,
+        "submit": daemon.relay_login.submit_label().code,
+        "error": daemon.relay_login.error_password().code,
+    }
+    candidate: dict[str, str | int] = {code: "Synthetic French fixture" for code in codes.values()}
+    if shape == "empty":
+        candidate = {}
+    elif shape == "title_only":
+        candidate = {title: "Synthetic French fixture"}
+    elif shape == "invalid":
+        candidate = {title: 42}
+    else:
+        candidate.pop(codes[shape.removeprefix("missing_")])
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "fr").mkdir()
+    (root / "en/relay.login.json").write_text(
+        (ROOT / "local_operator/i18n/catalogues/en/relay.login.json").read_text()
+    )
+    (root / "fr/relay.login.json").write_text(json.dumps(candidate))
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: fr\n")
+    assert daemon.resolve_language() == "fr"
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    page = client.get("/login")
+    refusal = client.post("/login", data={"password": "wrong"})
+    assert page.status_code == 200 and refusal.status_code == 401
+    for response in [page, refusal]:
+        assert '<html lang="en" dir="ltr">' in response.text
+        assert "<title>local operator — sign in</title>" in response.text
+        assert '<label for="password">password</label>' in response.text
+        assert '<button type="submit">sign in</button>' in response.text
+        assert "Synthetic French fixture" not in response.text
+    assert '<p class="error" role="alert">Wrong password.</p>' in refusal.text
+    assert daemon.resolve_language() == "fr"
+
+
 def test_held_namespace_file_cannot_override_backend_eligibility(monkeypatch, tmp_path) -> None:
     root = tmp_path / "catalogues"
     (root / "en").mkdir(parents=True)
@@ -227,7 +286,7 @@ def test_script_comments_and_allowlisted_keys_still_pass_normal_gate(
 
 def test_renderer_literal_mutation_fails() -> None:
     source = (ROOT / "local_operator/mobile/daemon.py").read_text()
-    source = source.replace("text(relay_login.error_password())", '"Hardcoded refusal"')
+    source = source.replace('text(messages["ERROR"])', '"Hardcoded refusal"')
     assert check_login_source(source)
 
 

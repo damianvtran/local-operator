@@ -7836,12 +7836,23 @@ def _render_login_html(*, error: bool = False) -> str:
     translated text resembling a token from being substituted twice.
     """
     locale = resolve_language()
+    messages: dict[str, Msg] = {
+        "TITLE": relay_login.page_title(),
+        "PASSWORD": relay_login.password_label(),
+        "SUBMIT": relay_login.submit_label(),
+        "ERROR": relay_login.error_password(),
+    }
     # Language-of-page describes the copy actually rendered, not preference.
     # A shipped locale may lack this newly extracted namespace; select its
     # English fallback once so assistive pronunciation and direction agree
     # with every message. Never probe any locale the backend did not resolve.
     try:
-        catalogues.load_catalogue(locale, "relay.login")
+        source = catalogues.load_catalogue(locale, "relay.login")
+        # A valid map can still be empty/partial. Include the refusal even on
+        # GET so a failed attempt cannot switch languages or silently mix
+        # English per-key fallback under non-English page metadata.
+        if not {message.code for message in messages.values()}.issubset(source):
+            locale = "en"
     except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
         locale = "en"
 
@@ -7852,13 +7863,11 @@ def _render_login_html(*, error: bool = False) -> str:
         "LANG": html.escape(locale, quote=True),
         "DIR": "rtl" if locale == "ur" else "ltr",
         "MARK_DATA_URI": html.escape(_mark_data_uri(), quote=True),
-        "TITLE": text(relay_login.page_title()),
-        "PASSWORD": text(relay_login.password_label()),
-        "SUBMIT": text(relay_login.submit_label()),
+        "TITLE": text(messages["TITLE"]),
+        "PASSWORD": text(messages["PASSWORD"]),
+        "SUBMIT": text(messages["SUBMIT"]),
         "ERROR": (
-            '<p class="error" role="alert">' + text(relay_login.error_password()) + "</p>"
-            if error
-            else ""
+            '<p class="error" role="alert">' + text(messages["ERROR"]) + "</p>" if error else ""
         ),
     }
     return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
