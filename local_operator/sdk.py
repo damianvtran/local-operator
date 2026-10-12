@@ -92,6 +92,7 @@ if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
 
     from local_operator.harness.types import AgentEvent, EventHandler
+    from local_operator.i18n.messages import Msg
     from local_operator.output_contract import MarkdownSchema, decode_output
     from local_operator.session.protocol import (
         OwningSessionProtocol,
@@ -583,6 +584,19 @@ async def _build_session(
     config_manager = ConfigManager(config_dir=roots.config_path)
     agent_registry = AgentRegistry(config_dir=roots.config_path)
 
+    def startup_refusal_text(message: "Msg") -> str:
+        # The SDK still raises a plain, one-argument SessionSpecError: the
+        # envelope is an internal rendering boundary, not a new exception API.
+        # Only refusals pay for locale imports/reads, AFTER public root isolation.
+        # Reuse this already-scoped manager; None would make the resolver build
+        # another manager (and potentially repair config/load credentials).
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.resolve import DEFAULT_LANGUAGE, resolve_language
+
+        language = config_manager.get_config().values.get("language")
+        locale = resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)
+        return render(message.code, message.params, locale=locale)
+
     # ``Any`` on purpose: ``create_session``'s declared return is
     # ``SessionProtocol``, and the attachment calls below (``attach_team``,
     # ``attach_agent_profile``, ``set_tool_inventory``) are concrete-Session
@@ -607,11 +621,14 @@ async def _build_session(
         # runtime is serving the id, and this root cannot start one until its
         # hosting is configured — which is also why spawn_session()/deliver()
         # cannot be the next step here yet.
+        from local_operator.i18n.keys import wire_errors_sdk_startup
+
         raise SessionSpecError(
-            f"no live runtime is serving {spec.resume!r}, and this root cannot start "
-            f"one: {error} Configure hosting for this root (its config.yml), then "
-            "engage the id with spawn_session()/deliver() and attach once a runtime "
-            "exists."
+            startup_refusal_text(
+                wire_errors_sdk_startup.attach_hosting_unconfigured(
+                    resume=repr(spec.resume), error=str(error)
+                )
+            )
         ) from error
 
     if mode == "attach":
@@ -622,10 +639,12 @@ async def _build_session(
         # silently returning something that will write.
         if getattr(session, "owns_runtime", False):
             await session.dispose()
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
             raise SessionSpecError(
-                f"no live runtime is serving {spec.resume!r}; open it with "
-                "mode='own' to run it in this process, or engage it first with "
-                "spawn_session()/deliver() and attach once a runtime exists."
+                startup_refusal_text(
+                    wire_errors_sdk_startup.attach_runtime_missing(resume=repr(spec.resume))
+                )
             )
         return session
 
@@ -633,7 +652,13 @@ async def _build_session(
         session.attach_team(team)
     if spec.profile:
         if not session.attach_agent_profile(spec.profile):
-            raise SessionSpecError(f"Could not attach profile {spec.profile!r}")
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
+            raise SessionSpecError(
+                startup_refusal_text(
+                    wire_errors_sdk_startup.profile_attach_failed(profile=repr(spec.profile))
+                )
+            )
     inventory = declared_tool_inventory(session, runner_args)
     if spec.approvals.mode == "declared":
         # The policy's own list is the declaration when spec.tools does not
@@ -647,9 +672,14 @@ async def _build_session(
         if inventory is None:
             inventory = policy_tools
         elif tuple(inventory) != policy_tools:
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
             raise SessionSpecError(
-                f"spec.tools {tuple(inventory)} and ApprovalPolicy.declared({policy_tools}) "
-                "name different inventories; state the run's reach once"
+                startup_refusal_text(
+                    wire_errors_sdk_startup.tool_inventory_mismatch(
+                        spec_tools=str(tuple(inventory)), policy_tools=str(policy_tools)
+                    )
+                )
             )
     if inventory is not None:
         session.set_tool_inventory(inventory, unattended=spec.approvals.stands_as_approval)
