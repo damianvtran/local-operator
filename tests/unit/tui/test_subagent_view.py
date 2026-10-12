@@ -55,6 +55,7 @@ from local_operator.harness.types import (
 from local_operator.incidents import format_model_switch_message
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
+    ENTRY_CUSTOM,
     ENTRY_MESSAGE,
     TRANSCRIPT_FILENAME,
     Transcript,
@@ -97,6 +98,7 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     HubMessageBlock,
     NoticeBlock,
+    QuietGroupBlock,
     TranscriptView,
     UserBlock,
     WorkingBlock,
@@ -5706,3 +5708,160 @@ async def test_a_dropped_prepend_settle_does_not_wedge_the_history_gate(tmp_path
         assert (
             len(view._history_ids) > before
         ), "no history loaded after a dropped prepend settle: the gate is wedged"
+
+
+def _durable_row(entry_id: str, payload: dict[str, Any], entry_type: str = ENTRY_MESSAGE):
+    return TranscriptEntry(id=entry_id, ts=1.0, type=entry_type, payload=payload)
+
+
+def test_a_marker_row_correlates_by_id_only_never_by_body_text() -> None:
+    """R3-4 (review round 3): a communication fact for a DIFFERENT source id
+    and a positively marked row carrying the same body are TWO deliveries.
+
+    The legacy body budget belongs to unmarked historical rows without usable
+    provenance; a marked row is suppressed only by identity, so it is neither
+    charged nor swallowed by a stranger's fact."""
+    fact = _durable_row(
+        "fact-old",
+        {
+            "custom_type": HUB_COMMUNICATION_CUSTOM_TYPE,
+            "details": {
+                "direction": "to_child",
+                "body": "same body",
+                "kind": "steer",
+                "communication_id": "old-source-unloaded",
+            },
+        },
+        entry_type=ENTRY_CUSTOM,
+    )
+    marked = _durable_row(
+        "marked-new",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "<parent-message>\nsame body\n</parent-message>"}],
+            "provider_payload": {
+                "hub_receipt": {
+                    "direction": "to_child",
+                    "expects_reply": False,
+                    "steer": True,
+                    "body": "same body",
+                }
+            },
+        },
+    )
+    folded = fold_transcript_entries([fact, marked])
+    keys = [(entry.key, entry.kind) for entry in folded]
+    assert ("comm:fact-old", "parent_message") in keys
+    assert ("marked-new", "parent_message") in keys
+    assert len(keys) == 2
+
+
+def test_a_marked_row_with_an_image_folds_an_attachment_row() -> None:
+    """R3-3 child half + the operator's attachment acceptance: the marked
+    row's image rides the fold as an attachment entry keyed by its ORIGINAL
+    source id and content index; an externalised digest with no resolvable
+    store degrades to the unavailable receipt instead of dropping the row."""
+    payload = {
+        "kind": "message",
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"},
+            {"data": "QUJD", "mime_type": "image/png"},
+        ],
+        "provider_payload": {
+            "hub_receipt": {
+                "direction": "to_child",
+                "expects_reply": False,
+                "steer": True,
+                "body": "Focus on retries",
+            }
+        },
+    }
+    folded = fold_transcript_entries([_durable_row("steer-marked", payload)])
+    rows = [(entry.key, entry.kind, entry.att_data) for entry in folded]
+    assert ("steer-marked", "parent_message", None) in rows
+    assert ("steer-marked:attach:1", "attachment", "QUJD") in rows
+
+    # Same rows, second fold: identical keys and payloads (replay-stable).
+    again = fold_transcript_entries([_durable_row("steer-marked", payload)])
+    assert [(entry.key, entry.kind, entry.att_data) for entry in again] == rows
+
+    # An externalised reference whose store read cannot resolve still folds a
+    # row (unavailable receipt), never a silent drop.
+    digest_payload = {
+        **payload,
+        "content": [
+            {"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"},
+            {"attachment": "f" * 16, "mime_type": "image/png"},
+        ],
+    }
+    digest_rows = [
+        (entry.key, entry.kind, entry.att_data)
+        for entry in fold_transcript_entries([_durable_row("steer-digest", digest_payload)])
+    ]
+    assert ("steer-digest:attach:1", "attachment", None) in digest_rows
+
+
+@pytest.mark.asyncio
+async def test_a_richer_same_id_receipt_restates_the_child_group_facts(tmp_path) -> None:
+    """R3-5 (review round 3): the mounted bar's summary must read the LATEST
+    member facts.
+
+    Drives the real styled SubagentView reconciliation: three tools plus a hub
+    receipt form a quiet group; opening it and then correcting the SAME
+    receipt id (label/intent) must update the bar's reply/steer facts while
+    membership and the open state stay."""
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: tmp_path}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+
+        def receipt(label: str, expects_reply: bool, steer: bool):
+            return subagent_view.SubagentEntry(
+                "comm:q1",
+                "parent_message",
+                text="Focus on retries",
+                details={
+                    "direction": "to_child",
+                    "expects_reply": expects_reply,
+                    "steer": steer,
+                    "label": label,
+                },
+            )
+
+        tools = [
+            subagent_view.SubagentEntry(
+                f"tool-{index}",
+                "tool",
+                tool_name="read",
+                tool_args={"path": f"f{index}"},
+                outcome="success",
+            )
+            for index in range(3)
+        ]
+        view._history_entries = [*tools, receipt("before", True, False)]
+        view._reconcile_current_body()
+        await pilot.pause()
+        bars = [block for block in view._body.blocks() if isinstance(block, QuietGroupBlock)]
+        assert len(bars) == 1
+        bar = bars[0]
+        bar.toggle_expanded()
+        await pilot.pause()
+        assert bar.group.reply_requested == 1
+        assert bar.group.steered == 0
+
+        view._history_entries = [*tools, receipt("after", False, True)]
+        view._reconcile_current_body()
+        await pilot.pause()
+        assert bar._expanded
+        assert bar.group.reply_requested == 0
+        assert bar.group.steered == 1
+        assert "reply requested" not in bar._summary_text()
+        assert "steered" in bar._summary_text()

@@ -760,6 +760,82 @@
       },
       "status": "passed",
       "note": "Team Bridge H1 six-key delta; round-1 MAJOR (self-wake vs connector wake) fixed to passive 'duoc danh thuc', re-audited PASS by session 400497cd6ac8; 0 unresolved. Prior 43/43 verified carried at base 23613202e3. Translator abd0ea96824e; attribution corrected in provenance."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.transcript",
+      "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+      "translator": {
+        "agent": "coder/e8b8156e7ac1",
+        "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor/hub-es-native-audit-recovery",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 4 R1-unchanged new keys re-attested, and R2 fixed keys (actions, reply_requested, steered) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: 96d02f38241b/scratchpad/es-native-delta-audit-r2-model-corrected.json sha256 c5340386f2fce6e1d2fd8a5921b9964bb4a2edfd192d9cb5cf5d4a6722584a15; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.transcript",
+      "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+      "translator": {
+        "agent": "coder/e8b8156e7ac1",
+        "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor/hub-fr-native-audit-recovery",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 4 R1-unchanged new keys re-attested, and R2 fixed keys (actions, reply_requested, steered) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: f6790863cb3b/scratchpad/fr_native_delta_audit_r2_model_corrected.json sha256 ce160d005392b760db6e178c86cc70979bd5866a8181617380756c0ed70c4eb2; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md)."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.transcript",
+      "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+      "translator": {
+        "agent": "coder/e8b8156e7ac1",
+        "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 4 R1-unchanged new keys re-attested, and R2 fixed keys (steered, steered, from) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: 22df995d16a0/scratchpad/ru-native-delta-audit-r2-metadata-corrected.json sha256 3fd5d577c980d84fd0eafec01f70a1b51b2dc7d2a1efb37203a39ab80c49ca56; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.transcript",
+      "source_sha256": "d39f5d6c42e5a4ef6885661a05da0371646ed8616718ba5f61aacf43b78f5dcf",
+      "translator": {
+        "agent": "coder/e8b8156e7ac1",
+        "model": "openai/gpt-6.1-sol (initial draft) + deepseek/deepseek-flash (R2 remediation, after the 12:22:04Z model transition)",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor/hub-vi-native-delta-audit",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Fresh UNION ledger for the 17-key tui.transcript source. Whole-17 coverage is TRANSITIVE and changed-keys-only: old 10 carried from the prior ledger entry, 5 R1-unchanged new keys re-attested, and R2 fixed keys (steered, steered) freshly re-audited — no full-17 re-audit is claimed. R2 native audit passed: 6e5e09cc4464/scratchpad/vi-native-delta-audit-r2.json sha256 d3a8e9d8f4637bd07acdbdbd1fee86d929cce94126261e0e5cdf720617df2f57; original R2 proof retained, report metadata-corrected (model claim corrected to actual generation usage). Translator trajectory: GPT initial draft, then Deepseek remediation after the recorded 12:22:04Z transition (phase note: session e8b8156e7ac1 scratchpad media-rig/translator-provenance-correction.md)."
     }
   ]
 }

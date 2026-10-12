@@ -8,5 +8,12 @@
   "tui.transcript.queued.newest": "· en file d’attente pour le prochain runtime — esc le récupère",
   "tui.transcript.queued.older": "· en file d’attente pour le prochain runtime",
   "tui.transcript.sender.pid": "pid {pid}",
-  "tui.transcript.sender.unknown": "une autre session"
+  "tui.transcript.sender.unknown": "une autre session",
+  "tui.transcript.group.messages": "messages · {count}",
+  "tui.transcript.group.actions": "{count, plural, one {{label} action} many {{label} actions} other {{label} actions}}",
+  "tui.transcript.group.reply_requested": "{count, plural, one {{label} demande de réponse} many {{label} demandes de réponse} other {{label} demandes de réponse}}",
+  "tui.transcript.group.steered": "{count, plural, one {{label} réorientation} many {{label} réorientations} other {{label} réorientations}}",
+  "tui.transcript.hub.reply_requested": "Réponse demandée",
+  "tui.transcript.hub.steered": "Réorienté",
+  "tui.transcript.hub.from": "De {identity}"
 }

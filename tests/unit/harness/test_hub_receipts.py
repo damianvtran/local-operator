@@ -34,6 +34,53 @@ def test_marker_requires_the_namespace_mapping_and_a_real_body() -> None:
     assert hub_receipt_marker({}) is None
 
 
+def test_marker_requires_a_known_direction_and_normalises_flags() -> None:
+    """A body alone is not provenance (review round 3, R3-1; QA Q-child-1).
+
+    Missing, null, numeric, list and unknown directions keep the row's
+    ordinary user handling; present flags normalise to booleans or UNKNOWN —
+    never truthy-cast, never guessed — and non-string advisory fields drop."""
+    from types import SimpleNamespace
+
+    base = {
+        "direction": "to_child",
+        "expects_reply": True,
+        "steer": False,
+        "body": "Focus on retries",
+    }
+    assert hub_receipt_marker(SimpleNamespace(provider_payload={"hub_receipt": base})) == base
+
+    for bad_direction in (None, 3, "unrecognized", [], ["to_child"]):
+        marker = {"body": "raw text", "direction": bad_direction}
+        assert (
+            hub_receipt_marker(SimpleNamespace(provider_payload={"hub_receipt": marker})) is None
+        ), bad_direction
+    assert (
+        hub_receipt_marker(
+            SimpleNamespace(provider_payload={"hub_receipt": {"body": "no direction"}})
+        )
+        is None
+    )
+
+    unknown = hub_receipt_marker(
+        SimpleNamespace(
+            provider_payload={
+                "hub_receipt": {
+                    "direction": "to_parent",
+                    "body": "reply",
+                    "expects_reply": "yes",
+                    "steer": 1,
+                    "label": 7,
+                }
+            }
+        )
+    )
+    assert unknown is not None
+    assert unknown["expects_reply"] is None
+    assert unknown["steer"] is None
+    assert "label" not in unknown
+
+
 def test_structured_body_and_optional_facts_are_retained_verbatim() -> None:
     body = "  first paragraph\n\nsecond paragraph  "
     details = {

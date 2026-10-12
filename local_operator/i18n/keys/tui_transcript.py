@@ -34,6 +34,34 @@ def catchup_missed(*, count: int | float) -> Msg:
     return Msg("tui.transcript.catchup.missed", {"count": count})
 
 
+def group_actions(*, count: int | float, label: str) -> Msg:
+    return Msg("tui.transcript.group.actions", {"count": count, "label": label})
+
+
+def group_messages(*, count: str) -> Msg:
+    return Msg("tui.transcript.group.messages", {"count": count})
+
+
+def group_reply_requested(*, count: int | float, label: str) -> Msg:
+    return Msg("tui.transcript.group.reply_requested", {"count": count, "label": label})
+
+
+def group_steered(*, count: int | float, label: str) -> Msg:
+    return Msg("tui.transcript.group.steered", {"count": count, "label": label})
+
+
+def hub_from(*, identity: str) -> Msg:
+    return Msg("tui.transcript.hub.from", {"identity": identity})
+
+
+def hub_reply_requested() -> Msg:
+    return Msg("tui.transcript.hub.reply_requested", {})
+
+
+def hub_steered() -> Msg:
+    return Msg("tui.transcript.hub.steered", {})
+
+
 def queued_newest() -> Msg:
     return Msg("tui.transcript.queued.newest", {})
 
