@@ -1,0 +1,22 @@
+{
+  "cli.exec_help.agent_id": "ID of the agent to use for this execution (alternative to --agent by name)",
+  "cli.exec_help.background": "Detach the task: spawn a background worker with a log file and exit immediately",
+  "cli.exec_help.clear_goal": "Clear the resumed standing goal",
+  "cli.exec_help.command": "Literal prompt; ''-'' or omitted with piped stdin reads stdin; optional for a loop",
+  "cli.exec_help.control": "Route approvals and questions to an attached supervisor (may wait). Without this flag non-TTY approvals deny; discovery and live attachment are available either way. --yolo remains an explicit approval override.",
+  "cli.exec_help.effort": "Set reasoning effort; validated against the selected model",
+  "cli.exec_help.goal": "Set a literal standing goal. Unlike the TUI''s /goal this does NOT also send the text as a message: pair it with a prompt or --loop",
+  "cli.exec_help.json": "Emit one JSON line per agent event instead of the final text",
+  "cli.exec_help.loop": "Run N continuation iterations after the optional prompt; needs a standing goal",
+  "cli.exec_help.loop_goal": "Continue and judge this goal until achieved (no fixed iteration count)",
+  "cli.exec_help.name": "Set the persisted conversation name",
+  "cli.exec_help.output_format": "Enforce the format of the assistant''s FINAL response. The run fails (exit 1) if no valid payload is produced within --output-retries. Default: no enforcement — behaviour is unchanged.",
+  "cli.exec_help.output_retries": "Max retries after a failed final response (0-5; default 2). Requires --output-format.",
+  "cli.exec_help.output_schema": "JSON Schema file the decoded JSON/YAML/TOML payload must satisfy. For --output-format markdown: a JSON object '{'''required_sections'': [...]'}'. Requires --output-format.",
+  "cli.exec_help.profile": "Attach a reusable role/specialist (/agent counterpart; not legacy --agent)",
+  "cli.exec_help.status": "Read a durable background-job status as JSON; does not start a session",
+  "cli.exec_help.supervisor_fd": "Write this run''s operator capability to this inherited descriptor so the supervisor holding the other end can APPROVE the cards this run parks (stage E). Requires --control; refused with --background. Descriptor numbers only — the value never touches argv, the environment or a file.",
+  "cli.exec_help.team": "Attach a saved team with its manager, roster and briefs",
+  "cli.exec_help.tools": "Comma-separated tools this run may reach, and the ONLY ones. Excluded tools are unreachable, not merely unapproved. The declaration stands as the APPROVAL for its own members only where nobody can be asked — a non-tty run without --control; on a terminal, and under --control, every write/exec call is still decided by the approval gate. A name this build does not have is unreachable and reported",
+  "cli.exec_help.workstream": "Publish this run as a long-lived parallel WORKSTREAM the operator asked for: it is listed in the sidebar, /resume and the phone list, carries the session that opened it, and can be followed and steered. Without it an agent-opened run stays ephemeral: hidden everywhere and silent. Changes only the row''s visibility, never how approvals are handled (pair it with --control for that). Stamps nothing outside an agent''s shell"
+}
