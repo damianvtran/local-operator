@@ -1540,6 +1540,19 @@ def _make_runner(
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
                 finally:
+                    # Record the child's cleanup VERDICT on its owning ancestor
+                    # BEFORE detaching the job edge (review round 2,
+                    # R7-descendant / QA Q5): once this returns, nothing else
+                    # holds the child object, and a settled job is not proof
+                    # its resources joined cleanly. Recorded through this
+                    # existing finalization path, one hop per level; the
+                    # child's verdict is itself recursive, so a grandchild's
+                    # failure reaches the root the same way.
+                    verdict = child._cleanup_verdict_errors()
+                    if verdict:
+                        parent_session._record_descendant_cleanup_failures(
+                            child.session_id, verdict
+                        )
                     if job is not None:
                         # Clear the live edge even if teardown itself fails: a
                         # retained parent row must never pin the child Session.

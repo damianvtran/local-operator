@@ -1211,3 +1211,97 @@ async def test_child_subscription_is_root_scoped_and_child_receipt_reports_tree_
         root_receipt = await session.shutdown_owned_work("tree-cleanup", timeout_s=20)
         assert root_receipt.complete is True, root_receipt.errors
         await _settle(session)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_ordinary_dispose_waiter_keeps_the_cleanup_joinable(
+    scratch: Any, wire: Wire
+) -> None:
+    """R9/Q6: cancelling an ordinary dispose WAITER must not cancel the shared
+    canonical cleanup. The waiter's CancelledError still propagates (waiter
+    cancellation stays honest), a PEER disposer keeps joining, the resource
+    close still lands on release, and a later owning receipt completes."""
+    async with _opened(scratch) as session:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        released: list[bool] = []
+
+        async def cleanup() -> None:
+            entered.set()
+            await release.wait()
+            released.append(True)
+
+        session.add_dispose_hook(cleanup, last=True)
+        first = await session.shutdown_owned_work("retain-on-timeout", timeout_s=0.01)
+        assert first.complete is False
+        canonical = session._owned_shutdown_task
+        assert canonical is not None
+
+        waiter = asyncio.create_task(session.dispose())
+        peer = asyncio.create_task(session.dispose())
+        await asyncio.sleep(0)
+        assert waiter.cancel(), "the waiter cancellation must be accepted, not swallowed"
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert (
+            not canonical.done() and not canonical.cancelled()
+        ), "the shared cleanup must survive a waiter's cancellation"
+
+        release.set()
+        await peer
+        assert released == [True], "the resource close must still land after release"
+        final = await session.shutdown_owned_work("rejoin-original", timeout_s=5)
+        assert final.complete is True, final.errors
+        assert canonical.cancelled() is False
+
+
+@pytest.mark.asyncio
+async def test_root_receipt_includes_disposed_child_cleanup_failures(
+    scratch: Any, wire: Wire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R7-descendant/Q5: a native child whose own disposal is known-unverified
+    must make the owning ancestor's receipt incomplete, with the descendant
+    NAMED -- a settled child job is not proof its resources joined cleanly.
+    (The healthy counterpart -- a cancelled child job with a VERIFIED cleanup
+    stays root-complete -- is pinned by the abort-control tests above.)"""
+    from local_operator.harness import subagent as subagent_module
+
+    children: list[Any] = []
+    original = subagent_module._construct_child_session
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        child = await original(*args, **kwargs)
+
+        async def child_resource_close() -> None:
+            raise RuntimeError("native child resource cleanup failure")
+
+        child.add_dispose_hook(child_resource_close, last=True)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subagent_module, "_construct_child_session", capture)
+    wire.script(
+        "parent",
+        tool_turn("task", {"label": "kid", "prompt": f"{_CHILD_MARKER}: finish"}, "call-task"),
+    )
+    wire.script("parent", text_turn("parent done"))
+    wire.script("child", text_turn("child done"))
+    wire.script("delivery-root", text_turn("delivery ack"))
+
+    async with _opened(scratch) as session:
+        seen: list[RequestFinalObservation] = []
+        session.subscribe_requests(seen.append)
+        await session.prompt(f"{_PARENT_MARKER}: launch a child")
+        await _quiesce(session, wire, seen)
+        assert len(children) == 1
+
+        parent_receipt = await session.shutdown_owned_work("tree-cleanup", timeout_s=20)
+        child_receipt = await children[0].shutdown_owned_work("child-local", timeout_s=10)
+
+    assert child_receipt.complete is False
+    assert any("child_resource_close" in error for error in child_receipt.errors)
+    assert parent_receipt.complete is False, parent_receipt.errors
+    assert any(
+        "descendant" in error and children[0].session_id in error for error in parent_receipt.errors
+    ), parent_receipt.errors
+    assert any("child_resource_close" in error for error in parent_receipt.errors)

@@ -3997,6 +3997,14 @@ class Session:
         # read that policy as evidence the resource was released (R7). Empty
         # for a session whose hooks all returned.
         self._disposal_hook_failures: list[str] = []
+        # Disposed CHILDREN's unverified cleanup, recorded by the child
+        # finalizer on this (the owning ancestor) session -- see
+        # ``_record_descendant_cleanup_failures``. A settled child job is not
+        # proof the child's resources joined cleanly, and the child object is
+        # gone the moment finalization returns; without this list the root
+        # receipt would certify over descendant cleanup it already knows did
+        # not verify (review round 2, R7-descendant / QA Q5).
+        self._descendant_cleanup_failures: list[str] = []
         # -- Explicit owned-work shutdown (``shutdown_owned_work``).
         #
         # ``_owned_work_closing`` is the ADMISSION latch: set synchronously by
@@ -24962,12 +24970,22 @@ class Session:
         if failure is not None:
             errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
         hook_failures = tuple(self._disposal_hook_failures)
-        if complete and hook_failures:
+        if hook_failures:
             # Ordinary disposal logs-and-continues past a failing hook; the
             # receipt must NOT read that non-masking policy as evidence the
-            # resource was released (R7).
+            # resource was released (R7). Extended even when already
+            # incomplete so the receipt always NAMES its reasons.
             complete = False
             errors.extend(hook_failures)
+        descendant_failures = tuple(self._descendant_cleanup_failures)
+        if descendant_failures:
+            # A settled descendant job is not proof the descendant's resources
+            # joined cleanly (R7-descendant / QA Q5). The child finalizer
+            # records each disposed child's disposal verdict on its owning
+            # ancestor; the owning receipt must not certify over cleanup this
+            # session already knows is unverified.
+            complete = False
+            errors.extend(descendant_failures)
         pending_jobs = tuple(job.id for job in self.jobs.list() if job.status == "running")
         in_flight = bool(getattr(self._stream_fn, "child_model_requests_in_flight", False))
         if complete and pending_jobs:
@@ -25012,8 +25030,21 @@ class Session:
         task = self._disposal_task
         if task is not None and task is asyncio.current_task():
             return
+        canonical = self._canonical_disposal()
         try:
-            await self._canonical_disposal()
+            # ``asyncio.shield`` here is LOAD-BEARING, not defensive (review
+            # round 2, R9 / QA Q6): ``Task.cancel`` cancels the future a task
+            # is currently awaiting, so a bare ``await canonical`` made
+            # cancelling an ordinary DISPOSE WAITER cancel the SHARED cleanup
+            # itself -- destroying the retained work an owning shutdown (or a
+            # peer disposer, or the SDK context exit) was joining, after which
+            # no rejoin could ever complete. The shield breaks that link: the
+            # waiter still receives its CancelledError (re-raised below, so
+            # waiter cancellation stays honest), while the canonical cleanup
+            # keeps running and stays joinable. Explicitly cancelling the
+            # canonical task itself remains truthful and incomplete on the
+            # owning receipt.
+            await asyncio.shield(canonical)
         except asyncio.CancelledError:
             # Two distinct cases hide behind one exception type. The WAITER
             # was cancelled: re-raise, cancellation stays honest. Or the
@@ -25028,6 +25059,51 @@ class Session:
             if current is not None and current.cancelling() > 0:
                 raise
             return
+
+    def _cleanup_verdict_errors(self) -> tuple[str, ...]:
+        """Proven-reason lines for cleanup this session cannot certify.
+
+        Read by the CHILD FINALIZER (``harness/subagent.py``) right after a
+        child's ``dispose()`` has been joined, and recorded on the child's
+        owning ancestor, so a descendant's cancelled/failed cleanup or
+        recorded hook failure reaches the ancestor's terminal receipt instead
+        of dying with the child object (review round 2, R7-descendant; QA
+        Q5). Deliberately reports only PROVEN states -- the cancelled/failed
+        canonical task and the two failure lists are exactly the ways the
+        cleanup is known not to have completed; nothing here invents an
+        "unverified" claim from a missing task, which cannot occur at the
+        read site (the finalizer has just awaited the disposal).
+        """
+        reasons: list[str] = []
+        task = self._disposal_task
+        if task is not None and task.done():
+            if task.cancelled():
+                reasons.append("cleanup task was cancelled; owned work state unverified")
+            else:
+                failure = task.exception()
+                if failure is not None:
+                    reasons.append(
+                        f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}"
+                    )
+        reasons.extend(self._disposal_hook_failures)
+        reasons.extend(self._descendant_cleanup_failures)
+        return tuple(reasons)
+
+    def _record_descendant_cleanup_failures(self, session_id: str, errors: tuple[str, ...]) -> None:
+        """Record a disposed child's unverified cleanup on its owning ancestor.
+
+        Called from the child finalizer (``harness/subagent.py``) on the
+        EXISTING finalization path -- no registry, no ledger: one bounded
+        list beside ``_disposal_hook_failures``. The child's own verdict is
+        recursive (it includes ITS descendants), so a grandchild's failure
+        climbs one hop per level. This is the field a future simplification
+        must not drop: without it the root receipt certifies over descendant
+        cleanup it already knows did not verify.
+        """
+        for error in errors:
+            self._descendant_cleanup_failures.append(
+                f"descendant {session_id} cleanup unverified: {error}"
+            )
 
     def _canonical_disposal(self) -> "asyncio.Task[None]":
         """Start (once) or return the canonical disposal task.
