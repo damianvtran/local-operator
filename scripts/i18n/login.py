@@ -47,6 +47,43 @@ _RENDERER_TOKENS = {
 }
 
 
+def _script_literals(code: str) -> list[str]:
+    """Recognize comments only outside quoted literals, preserving escapes.
+
+    This is a conservative copy lexer, not a JavaScript evaluator. Backtick
+    content (including interpolations) is checked as a whole; new dynamic
+    script copy is not an exemption. Escapes remain raw so only the two exact
+    storage keys are allowlisted. Consuming an escaped quote as one unit is
+    essential: otherwise a URL/comment-looking suffix can hide following copy.
+    """
+    literals: list[str] = []
+    index = 0
+    while index < len(code):
+        if code.startswith("//", index):
+            index += 2
+            while index < len(code) and code[index] not in "\r\n\u2028\u2029":
+                index += 1
+        elif code.startswith("/*", index):
+            end = code.find("*/", index + 2)
+            index = len(code) if end < 0 else end + 2
+        elif code[index] in "\"'`":
+            quote = code[index]
+            index += 1
+            start = index
+            while index < len(code):
+                if code[index] == "\\":
+                    index += 2
+                elif code[index] == quote:
+                    break
+                else:
+                    index += 1
+            literals.append(code[start:index])
+            index += 1
+        else:
+            index += 1
+    return literals
+
+
 class _LoginCopy(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -76,10 +113,9 @@ class _LoginCopy(HTMLParser):
         if tag == "script":
             # Comments describe cleanup for developers. The executable string
             # literals are checked separately so new JS-visible copy cannot hide.
-            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", data, flags=re.S)
-            for match in re.finditer(r"(['\"`])(.*?)\1", code, flags=re.S):
-                if match[2] not in _SCRIPT_KEYS:
-                    self.check_copy(match[2], "script literal")
+            for literal in _script_literals(data):
+                if literal not in _SCRIPT_KEYS:
+                    self.check_copy(literal, "script literal")
         elif (tag, data.strip()) != _BRAND:
             self.check_copy(data, f"{tag or 'document'} text")
 
