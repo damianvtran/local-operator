@@ -55,7 +55,11 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V1,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
-from local_operator.team_bridge.types import OwnerSnapshot, ScreeningReceipt
+from local_operator.team_bridge.types import (
+    DELIVERY_STATES,
+    OwnerSnapshot,
+    ScreeningReceipt,
+)
 
 __all__ = [
     "HOLD_CODES",
@@ -102,6 +106,7 @@ HOLD_CODES = (
     "bounce_without_category",
     "model_hold",
     "policy_stale",
+    "local_quarantine",
     "retry_later",
     "write_once_conflict",
     "schema_damaged",
@@ -114,6 +119,8 @@ _REQUEST_FIELD_MAX = 2000
 _REQUEST_FIELDS_MAX = 24
 #: Bounds on server-resolved display metadata (sender id / org label).
 _ENVELOPE_LABEL_MAX = 200
+#: Bound on the rendered type line (type + canonical request metadata).
+_TYPE_LABEL_MAX = 2000
 
 _MAX_REASON_CHARS = 200
 _NONCE_BYTES = 16
@@ -252,12 +259,27 @@ class Envelope:
     """
 
     message_id: str
-    body_text: str
     body_sha256: str
     message_type: str
+    #: The bounded value the CLASSIFIER sees for the type line: the closed
+    #: type plus (for request messages) canonical request metadata, so the
+    #: required request fields reach the model input, not merely the digest.
+    type_label: str
     sender_account: str
+    sender_display: str
     organization: str
+    delivery_state: str | None
     envelope_digest: str
+
+    def private_body(self) -> str:
+        """The raw body: a PRIVATE carrier, never a dataclass field (H3-Q7).
+
+        Kept off ``repr``/``asdict``/JSON so no generic serializer can turn
+        an Envelope into an unscreened body export; the single dispatch is
+        its only reader.
+        """
+
+        return self._private_body  # type: ignore[attr-defined]
 
 
 def _canonicalize_request(request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -323,9 +345,21 @@ def validate_envelope(
     thread_tenant = thread.get("tenant_id", message.get("tenant_id"))
     if thread_tenant is not None and thread_tenant != owner.tenant_id:
         return None, "envelope_unbound"
+    # Delivery (canonical H2 DTO: state/state_at live here; the recipient is
+    # message.recipient — a delivery-nested recipient is only a fallback). A
+    # PRESENT delivery block must carry a closed state; missing/null/wrong
+    # state fails closed (A6). An ABSENT block is a legacy/minimal envelope.
     raw_delivery = item.get("delivery")
     delivery: Mapping[str, Any] = raw_delivery if isinstance(raw_delivery, Mapping) else {}
-    raw_recipient = delivery.get("recipient")
+    delivery_state: str | None = None
+    if "delivery" in item:
+        state = delivery.get("state")
+        if not isinstance(state, str) or state not in DELIVERY_STATES:
+            return None, "envelope_malformed"
+        delivery_state = state
+    raw_recipient = message.get("recipient")
+    if raw_recipient is None:
+        raw_recipient = delivery.get("recipient")
     if isinstance(raw_recipient, Mapping):
         if raw_recipient.get("account_id") != owner.account_id:
             return None, "envelope_unbound"
@@ -342,6 +376,13 @@ def validate_envelope(
         # checked independently. A PRESENT but malformed sender still refuses.
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+    sender_name = sender.get("name")
+    if sender_name is None or sender_name == "":
+        sender_display = sender_account
+    elif isinstance(sender_name, str) and len(sender_name) <= _ENVELOPE_LABEL_MAX:
+        sender_display = sender_name
+    else:
         return None, "envelope_malformed"
 
     organization = message.get("organization", sender.get("organization"))
@@ -363,6 +404,18 @@ def validate_envelope(
         request_canonical = _canonicalize_request(raw_request)
         if request_canonical is None:
             return None, "envelope_malformed"
+    type_label = message_type
+    if request_canonical is not None:
+        # The classifier must SEE the request metadata: the frozen template
+        # has no request placeholder, so the bounded canonical form rides in
+        # the Type line (inert data, single-pass rendered like every value).
+        type_label = (
+            message_type
+            + " request="
+            + json.dumps(request_canonical, sort_keys=True, separators=(",", ":"))
+        )
+        if len(type_label) > _TYPE_LABEL_MAX:
+            return None, "size_exceeded"
 
     digest_payload = json.dumps(
         {
@@ -374,18 +427,20 @@ def validate_envelope(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        Envelope(
-            message_id=message_id,
-            body_text=body_text,
-            body_sha256=body_sha,
-            message_type=message_type,
-            sender_account=sender_account,
-            organization=organization,
-            envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
-        ),
-        None,
+    envelope = Envelope(
+        message_id=message_id,
+        body_sha256=body_sha,
+        message_type=message_type,
+        type_label=type_label,
+        sender_account=sender_account,
+        sender_display=sender_display,
+        organization=organization,
+        delivery_state=delivery_state,
+        envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
     )
+    # Private carrier: never a field, so repr/asdict/JSON stay content-free.
+    object.__setattr__(envelope, "_private_body", body_text)
+    return envelope, None
 
 
 def render_prompt(
@@ -591,16 +646,26 @@ def screen_message(
         return ScreenResult("hold", hold_code=bad_code or "envelope_malformed")
     message_id = envelope.message_id
 
-    # 4. Publish the admission policy epoch (trusted local plumbing) so the
-    #    outcome commit can refuse a policy that moved while the model ran.
+    # 4. CONSUME the published admission authority — the pipeline is never
+    #    its own publisher (A2/A3): a row is bootstrapped from the caller
+    #    ONLY when none exists (first screening for this namespace); once a
+    #    row exists, the caller must EQUAL it, so a stale retained caller
+    #    can neither screen against it nor rewind it (H3-Q3).
     try:
-        epoch = store.publish_screening_policy(
-            owner,
-            version=snapshot.screening_version,
-            template_sha256=snapshot.template_sha256,
-            default_model=snapshot.default_model,
-            revision=snapshot.admission_revision,
-        )
+        current = store.current_screening_policy(owner)
+        if current is None:
+            epoch = store.publish_screening_policy(
+                owner,
+                version=snapshot.screening_version,
+                template_sha256=snapshot.template_sha256,
+                default_model=snapshot.default_model,
+                revision=snapshot.admission_revision,
+            )
+        else:
+            if not _policy_row_matches(current, snapshot):
+                _persist_hold(store, owner, message_id, "policy_stale")
+                return ScreenResult("hold", hold_code="policy_stale")
+            epoch = int(current["epoch"])
     except StoreRefused as failure:
         code = _HOLD_FOR_SCHEMA.get(failure.code, "owner_changed")
         return ScreenResult("hold", hold_code=code)
@@ -635,6 +700,31 @@ def screen_message(
             envelope_digest=envelope.envelope_digest,
         )
         if cached is not None:
+            # FINAL native fence (H3-Q2): a cache hit is never continuing
+            # authority. Re-resolve the live owner, require the published
+            # policy to still equal the snapshot (and the receipt's own
+            # epoch/generation to still be current), then re-read the live
+            # object LAST — any drift refuses the cached disposition.
+            live = store.resolve_owner(
+                credential_id=owner.credential_id,
+                account_id=owner.account_id,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                canonical_base_url=owner.canonical_base_url,
+            )
+            if live != owner:
+                _persist_hold(store, owner, message_id, "owner_changed")
+                return ScreenResult("hold", hold_code="owner_changed")
+            cached_current = store.current_screening_policy(owner)
+            if (
+                cached_current is None
+                or not _policy_row_matches(cached_current, snapshot)
+                or int(cached_current["epoch"]) != int(cached.get("policy_epoch") or -1)
+                or int(cached.get("creator_generation") or -1) != owner.enrollment_generation
+                or not snapshot.matches_live(policy)
+            ):
+                _persist_hold(store, owner, message_id, "policy_stale")
+                return ScreenResult("hold", hold_code="policy_stale")
             receipt = ScreeningReceipt(
                 verdict=cached["verdict"],
                 model=cached["model"],
@@ -645,7 +735,9 @@ def screen_message(
             )
             disposition = "deliver" if cached["verdict"] == "allow" else "bounce"
             return ScreenResult(
-                disposition, receipt=receipt, screened_bytes=len(envelope.body_text.encode("utf-8"))
+                disposition,
+                receipt=receipt,
+                screened_bytes=len(envelope.private_body().encode("utf-8")),
             )
 
     # 7. Account breaker: an open breaker is a hold with its own retry time,
@@ -686,10 +778,10 @@ def screen_message(
     for _ in range(8):
         try:
             rendered = render_prompt(
-                body_text=envelope.body_text,
-                sender=envelope.sender_account,
+                body_text=envelope.private_body(),
+                sender=envelope.sender_display,
                 organization=envelope.organization,
-                msg_type=envelope.message_type,
+                msg_type=envelope.type_label,
                 nonce=nonce,
             )
             break
@@ -709,6 +801,14 @@ def screen_message(
         retry_at = _record_failure(store, owner)
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
         return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
+
+    # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
+    #      SUCCESS: it resets consecutive failures (A5). Only the exception
+    #      path above counts toward the breaker; cached proofs never do.
+    try:
+        store.record_screening_success(owner)
+    except StoreRefused:
+        pass
 
     # 12. Post-await live-policy recheck: the LIVE policy must still equal the
     #     snapshot that authorized the dispatch, or the outcome is refused
@@ -745,6 +845,18 @@ def screen_message(
             store, owner, message_id, attempt_id, fingerprint, epoch, "bounce_without_category"
         )
         return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
+    if disposition == "bounce":
+        # H3-Q1: an UPSTREAM transport record that is already CONFIRMED (a
+        # historical read) must never be turned into a new conflicting
+        # transport reject. A current local reject here stays LOCAL: a hold
+        # with the quarantine reason, no receipt rewrite, original tuple
+        # untouched.
+        transport_state = store.find_intent_state(owner, message_id, "read")
+        if transport_state == "confirmed":
+            _commit_hold(
+                store, owner, message_id, attempt_id, fingerprint, epoch, "local_quarantine"
+            )
+            return ScreenResult("hold", hold_code="local_quarantine").set_private_reason(reason)
     receipt = ScreeningReceipt(
         verdict="allow" if disposition == "deliver" else "reject",
         model=actual_model,
@@ -762,20 +874,33 @@ def screen_message(
             expected_epoch=epoch,
             receipt=receipt,
             envelope_digest=envelope.envelope_digest,
+            verify=lambda: snapshot.matches_live(policy),
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
         return ScreenResult("hold", hold_code=code)
-    try:
-        store.record_screening_success(owner)
-    except StoreRefused:
-        pass
     return ScreenResult(
         disposition,
         receipt=receipt,
         screened_bytes=rendered.screened_bytes,
     ).set_private_reason(reason)
+
+
+def _policy_row_matches(row: Mapping[str, Any], snapshot: "PolicySnapshot") -> bool:
+    """Whether the PUBLISHED policy row equals the caller's frozen snapshot.
+
+    The store row is the authority; the caller object is only a consumer's
+    view. Equality here (not "newer than") is the admission condition — any
+    difference means the consumer is stale and must hold.
+    """
+
+    return (
+        row.get("version") == snapshot.screening_version
+        and row.get("template_sha256") == snapshot.template_sha256
+        and row.get("default_model") == snapshot.default_model
+        and row.get("revision") == snapshot.admission_revision
+    )
 
 
 def _record_failure(store: Store, owner: OwnerSnapshot) -> float | None:

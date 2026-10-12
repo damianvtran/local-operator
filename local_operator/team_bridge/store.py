@@ -116,6 +116,7 @@ _V3_COLUMNS = {
             "envelope_digest",
             "admission_revision",
             "policy_epoch",
+            "creator_generation",
             "created_at",
         }
     ),
@@ -279,6 +280,7 @@ CREATE TABLE IF NOT EXISTS screening_receipts (
     envelope_digest TEXT NOT NULL,
     admission_revision TEXT NOT NULL,
     policy_epoch INTEGER NOT NULL,
+    creator_generation INTEGER NOT NULL,
     created_at REAL NOT NULL,
     PRIMARY KEY (owner_key, message_id)
 );
@@ -961,6 +963,27 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def find_intent_state(self, owner: OwnerSnapshot, message_id: str, target: str) -> str | None:
+        """The ack-intent state for this exact tuple, ANY state (H3-Q1).
+
+        The pipeline needs to know whether an UPSTREAM transport record for
+        this message already exists (pending OR confirmed) before it may
+        commit a fresh current local verdict: a confirmed historical read
+        must never be turned into a new conflicting transport receipt.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT state FROM ack_intents WHERE owner_key = ? AND message_id = ? "
+                    "AND target = ?",
+                    (_owner_key(owner), message_id, target),
+                ).fetchone()
+                return row["state"] if row is not None else None
+        except StoreRefused:
+            return None
+
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
     ) -> dict[str, Any] | None:
@@ -1134,8 +1157,15 @@ class Store:
         template_sha256: str,
         default_model: str | None,
         revision: str,
+        expected_epoch: int | None = None,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
+
+        TRUSTED PUBLISHER entry point (a live configuration source), NOT a
+        screening caller: the pipeline never publishes from its caller
+        object, it only CONSUMES the published row. With ``expected_epoch``
+        this is a CAS guard — a publisher whose view is stale refuses rather
+        than rewriting current authority.
 
         The epoch is the TRUSTED clock for admission: the pipeline captures
         it before dispatch and ``finish_screening`` re-reads it inside the
@@ -1165,6 +1195,11 @@ class Store:
                     (key, version, template_sha256, default_model, revision, time.time()),
                 )
                 return 1
+            if expected_epoch is not None and int(row["epoch"]) != expected_epoch:
+                raise StoreRefused(
+                    "policy_stale",
+                    "published epoch moved under the publisher's view",
+                )
             unchanged = (
                 row["version"] == version
                 and row["template_sha256"] == template_sha256
@@ -1226,7 +1261,8 @@ class Store:
                 self._init(conn)
                 row = conn.execute(
                     "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision, policy_epoch "
+                    "categories, envelope_digest, admission_revision, policy_epoch, "
+                    "creator_generation "
                     "FROM screening_receipts WHERE owner_key = ? AND body_sha256 = ? "
                     "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
                     "AND envelope_digest = ?",
@@ -1244,6 +1280,8 @@ class Store:
                 return {
                     "verdict": row["verdict"],
                     "model": row["model"],
+                    "policy_epoch": row["policy_epoch"],
+                    "creator_generation": row["creator_generation"],
                     "prompt_version": row["prompt_version"],
                     "template_sha256": row["template_sha256"],
                     "body_sha256": row["body_sha256"],
@@ -1268,6 +1306,7 @@ class Store:
         envelope_digest: str | None = None,
         hold_code: str | None = None,
         retry_at: float | None = None,
+        verify: Any = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
 
@@ -1295,9 +1334,15 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            if verify is not None and not verify():
+                # The live source moved between the caller's last check and
+                # this transaction: nothing commits (A2/A3 bridge — the live
+                # check runs INSIDE the native write, not only outside it).
+                raise StoreRefused("policy_stale", "live policy changed at commit")
             key = _owner_key(owner)
             attempt = conn.execute(
-                "SELECT kind, message_id, fingerprint FROM screening_attempts "
+                "SELECT kind, message_id, fingerprint, committed_message_id "
+                "FROM screening_attempts "
                 "WHERE attempt_id = ? AND owner_key = ?",
                 (attempt_id, key),
             ).fetchone()
@@ -1346,8 +1391,8 @@ class Store:
                     conn.execute(
                         "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                         "template_sha256, prompt_version, model, verdict, categories, "
-                        "envelope_digest, admission_revision, policy_epoch, created_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "envelope_digest, admission_revision, policy_epoch, "
+                        "creator_generation, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             key,
                             message_id,
@@ -1360,6 +1405,7 @@ class Store:
                             envelope_digest,
                             _fingerprint_revision(fingerprint),
                             expected_epoch,
+                            owner.enrollment_generation,
                             time.time(),
                         ),
                     )
@@ -1373,6 +1419,13 @@ class Store:
                     (key, message_id),
                 )
             else:
+                # WRITE-ONCE per attempt (reviewer R7): once this attempt has
+                # committed a receipt, a later hold for the same attempt is
+                # refused — an attempt's outcome is exactly one thing.
+                if attempt["committed_message_id"] is not None:
+                    raise StoreRefused(
+                        "write_once_conflict", "attempt already committed its outcome"
+                    )
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, "
                     "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
