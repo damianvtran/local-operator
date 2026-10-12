@@ -617,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
         "--session-route",
         "test/mock",
         "--no-store",
+        # THIS rig is the offline in-process host: its scripted wire client is
+        # in-process state a spawned owner could never inherit, and the test
+        # owns the process lifetime. The flag is how the standalone entry
+        # says exactly that (R2 round 3); without it the entry is the managed
+        # frontend and would launch a real owner instead of running here.
+        "--in-process-host",
     ]
     rc = run_episode.main(cli)
     print(f"[rig] exit code: {rc}", file=sys.stderr, flush=True)

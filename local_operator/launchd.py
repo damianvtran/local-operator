@@ -728,6 +728,31 @@ def kickstart(*, label: str, path: Path, run: Callable[..., object]) -> bool:
     return result is not None and getattr(result, "returncode", 1) == 0
 
 
+def bootout_job(*, label: str, path: Path, runner: Callable[..., object]) -> bool:
+    """Unregister ONE loaded job, and never bring it back.
+
+    :func:`reload_job` owns the bootout + bootstrap PAIR for the rewrite case;
+    this is the single-purpose unregister for a caller whose job must stay
+    gone -- the failed-start cleanup of a session-unique owner job, where a
+    bootstrap would be the exact opposite of what is wanted. Wired from the
+    same primitives (``_call`` + ``_wait_for_label_release``) so there is no
+    second spelling of "has launchd let go yet".
+
+    Applies :func:`is_own_plist` exactly as :func:`kickstart` does, and for
+    the same reproduced reason: from a redirected home, addressing
+    ``gui/<uid>/<label>`` by label alone reaches the OPERATOR's job. False on
+    a refusal, an absent job, or a launchctl refusal; never raises.
+    """
+    if not is_own_plist(path, label):
+        return False
+    target = f"{job_domain()}/{label}"
+    result, _ = _call(runner, "bootout", target)
+    accepted = result is not None and getattr(result, "returncode", 1) == 0
+    if accepted:
+        _wait_for_label_release(target, runner)
+    return accepted
+
+
 def reload_job(
     *,
     label: str,

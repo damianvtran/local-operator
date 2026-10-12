@@ -161,6 +161,61 @@ without `.git` records `commit_source="unavailable"` — the hashes are then
 the artifact identity, and the run says so rather than substituting a
 version string.
 
+## The managed owner (R2 lifetime)
+
+`--engagement session` no longer runs inside the standalone entry's own
+`asyncio.run`: that loop's exit cancels the episode's canonical cleanup at
+teardown (measured: a delayed dispose hook stayed pending while the process
+exited). The entry now has TWO roles:
+
+* **frontend** (default): refuses unless a managed supervisor exists (Darwin
+  launchd; anywhere else, `--owner-backend detached` exists for rigs/tests
+  only, never for a paid run); starts the SAME script/interpreter under a
+  per-episode managed lease; verifies the owner's identity from the lease
+  record (pid + birth token, and on launchd the OS's own `job_pid` answer for
+  the job label); waits boundedly for a terminal status; and then reports the
+  owner's SEALED outcome. On its own timeout it exits `failed_provisional`
+  and NEVER stops the owner -- detaching is not a stop; only a start that
+  never admitted is reaped (by exact label/pid). An owner that vanishes
+  without a terminal status is reported `owner_lost_unverified`; nothing is
+  inferred, deleted or re-run from a dead pid.
+* **owner** (`--owned-host`, internal): verifies its lease BEFORE anything is
+  prepared (a forged flag with no record/label refuses with zero allocation),
+  then runs the ordinary session arm. An incomplete owned-work join no longer
+  falls through to a descriptor-only failure: the owner STAYS IN the join --
+  the same public `shutdown_owned_work`, bounded attempts, nothing torn down
+  in the meantime (no context exit, no adapter close, no bridge stop, no
+  rescue, no descriptor discard) -- until a fresh COMPLETE receipt admits the
+  normal close-out, or the canonical settles unverifiable (cancelled /
+  hook-failed: never restarted, never relabelled), which keeps the truthful
+  failed/retained disposition. `--in-process-host` keeps the offline rig's
+  in-process mode; the rig owns that process's lifetime.
+
+The owner writes a small non-secret status file under the run root
+(`owner/<owner_id>/status.json`): phases `starting -> admitted -> running ->
+provisional|closing -> complete|ended`, plus the public shutdown receipt and
+the outcome path. A retained owner writes `provisional`; if its canonical
+settles unverifiable it exits into the retained-failure disposition and its
+durable state is the rescue descriptor + TTL -- stated in the outcome, never
+inferred as clean.
+
+The retention contract is deliberately bounded: it proves a SURVIVING OWNER
+and a bounded frontend report. It is NOT proof that infinitely resistant
+descendants can be force-killed (POSIX per-group signalling cannot prove a
+whole-tree stop -- `procstate.terminate_process_tree` returns signal
+DELIVERY): a run that requires finite whole-tree death must be refused
+before it starts unless an independently proven supervisor supplies it. No
+privileged tracker, no silent Linux migration (systemd cgroup semantics
+remain a separate, unproven route), and the Darwin job runs with
+`KeepAlive=false` so a crashed owner is never re-run -- a restart can never
+re-allocate an episode.
+
+Owner jobs are session-unique (`com.damian.lop-episode.<owner_id>` under the
+real passwd home's `~/Library/LaunchAgents`) and are cleaned up by exact
+label once terminal. Secrets never ride argv, the plist, the environment or
+the status file: values travel once through a 0600 handoff file under the
+run root that the owner reads and unlinks before anything else runs.
+
 ## AWS / VM references
 
 The adapter README

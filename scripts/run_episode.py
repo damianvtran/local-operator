@@ -950,6 +950,51 @@ def build_parser() -> argparse.ArgumentParser:
             "abort() so the episode ends through the normal stop path. Default: none"
         ),
     )
+    parser.add_argument(
+        "--owned-host",
+        action="store_true",
+        help=(
+            "INTERNAL: run as the managed owner. Requires a VERIFIED lease (identity "
+            "and pid/birth are checked before anything is prepared); a forged flag "
+            "is refused, never admitted"
+        ),
+    )
+    parser.add_argument(
+        "--in-process-host",
+        action="store_true",
+        help=(
+            "run the session episode in THIS process: the offline rig's mode, where "
+            "the test owns the lifetime (see session_arm_rig). NEVER for a paid run -- "
+            "the foreground loop's exit cancels the episode's canonical cleanup"
+        ),
+    )
+    parser.add_argument(
+        "--owner-backend",
+        choices=("auto", "launchd", "detached"),
+        default="auto",
+        help=(
+            "managed-owner backend: 'auto' is launchd on macOS; anywhere without a "
+            "proven supervisor the frontend refuses before prepare. 'detached' is "
+            "rig/test-only (process separation, not supervision)"
+        ),
+    )
+    parser.add_argument(
+        "--owner-startup-timeout-s",
+        type=float,
+        default=60.0,
+        help="how long the frontend waits for the owner's admission status",
+    )
+    parser.add_argument(
+        "--frontend-wait-s",
+        type=float,
+        default=None,
+        help=(
+            "how long the frontend waits for a terminal owner status; default is "
+            "--max-wall-s plus a close-out grace. On expiry it exits "
+            "failed_provisional and the owner keeps running; leaving early is always "
+            "safe (detaching never stops the owner)"
+        ),
+    )
     return parser
 
 
@@ -1070,6 +1115,7 @@ async def _run_session_arm(
     selector: Any,
     resolver: SecretResolver,
     route: tuple[str, str],
+    owner_status: Any = None,
 ) -> int:
     """Drive ONE episode through the session engagement (the pilot arm).
 
@@ -1201,7 +1247,21 @@ async def _run_session_arm(
         # ``local_operator.tools.confinement`` for the boundary and its
         # stated residual holes.
         confinement_root=world,
+        owner_status=owner_status,
     )
+    if owner_status is not None:
+        # The TERMINAL phase is written only here, after the outcome exists
+        # (and after the seal on a completed close-out): the frontend reads
+        # this as "stop waiting; the answer is on disk".
+        owner_status.phase(
+            "complete" if outcome.status == "completed" else "ended",
+            outcome_path=(
+                str(Path(outcome.record_root) / "outcome.json")
+                if outcome.record_root is not None
+                else None
+            ),
+            detail=outcome.diagnostic,
+        )
     print(json.dumps(_session_outcome_json(outcome), indent=2, sort_keys=True))
     diagnostic = outcome.diagnostic or ""
     if outcome.status == "failed_pre_bundle" and diagnostic.startswith(_SECRET_DIAGNOSTICS):
@@ -1211,7 +1271,429 @@ async def _run_session_arm(
     return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
 
 
+#: How much wall time the frontend waits past the episode's own wall budget
+#: before it exits ``failed_provisional``. The owner keeps running; this is a
+#: reporting bound, not a lifetime.
+_FRONTEND_CLOSE_GRACE_S = 600.0
+
+#: Non-secret environment names forwarded verbatim to the owner: the episode
+#: isolation contract's own facts plus PATH/PYTHONPATH/TMPDIR. Secrets NEVER
+#: travel in the environment to the owner (see ``write_secret_handoff``); the
+#: owner picks up the handoff file and unlinks it before anything runs.
+_OWNER_ENV_NAMES = (
+    "PATH",
+    "HOME",
+    "PYTHONPATH",
+    "TMPDIR",
+    "LOCAL_OPERATOR_CONFIG_DIR",
+    "LOP_RUN_SCRATCH_ROOT",
+    "LOCAL_OPERATOR_HOME",
+)
+
+
+def _resolve_owner_backend(args: argparse.Namespace) -> str | None:
+    """The managed-owner backend for this platform, or ``None`` = refusal.
+
+    ``auto`` and an explicit ``launchd`` both mean "the supervised backend or
+    nothing": launchd exists on Darwin only, and elsewhere this repository has
+    no PROVEN finite-teardown supervisor, so the frontend refuses before
+    prepare rather than silently migrating (R2 decision, 2026-10-12).
+    ``detached`` is explicit and rig/test-only: it proves process separation
+    and pid identity, not supervision.
+    """
+    if args.owner_backend == "detached":
+        return "detached"
+    return "launchd" if sys.platform == "darwin" else None
+
+
+def _owner_env_from_self() -> dict[str, str]:
+    """Non-secret environment the owner needs, read from THIS process.
+
+    Only the names the episode contract already depends on travel; nothing
+    here reads or copies secrets (values take the handoff file), and nothing
+    else of the frontend's environment leaks into the episode.
+    """
+    return {name: os.environ[name] for name in _OWNER_ENV_NAMES if name in os.environ}
+
+
+def _owned_host_status_channel(args: argparse.Namespace) -> Any:
+    """The channel a VERIFIED owner writes phases through; ``None`` otherwise.
+
+    Built from the SAME environment the admission check verified, so a run
+    that was admitted always writes its phases to the lease's own status
+    path -- and a run that was not admitted never gets a channel at all.
+    """
+    if not args.owned_host:
+        return None
+    from local_operator import owned_process
+
+    owner_id = os.environ.get(owned_process.ENV_OWNER_ID)
+    backend = os.environ.get(owned_process.ENV_BACKEND)
+    if not owner_id or not backend:
+        return None
+    paths = owned_process.owner_paths(args.run_root, owner_id)
+    return owned_process.OwnerStatusChannel(
+        paths.status_path,
+        owner_id=owner_id,
+        backend=backend,
+        job_label=os.environ.get(owned_process.ENV_JOB_LABEL),
+    )
+
+
+def _owned_host_refusal(args: argparse.Namespace) -> str | None:
+    """Refuse a ``--owned-host`` invocation that is not a VERIFIED owner.
+
+    The flag is not an admission. The lease record the frontend wrote, this
+    process's own pid and birth token, the recorded source pin, and (launchd)
+    the OS's own answer for the job label must all agree, or the sentence for
+    the mismatch is returned -- BEFORE any store, selector or adapter work,
+    so a forged or stale invocation allocates nothing. ``None`` means the
+    invocation is this run's owner and the episode may proceed.
+    """
+    from local_operator import owned_process
+
+    owner_id = os.environ.get(owned_process.ENV_OWNER_ID)
+    backend = os.environ.get(owned_process.ENV_BACKEND)
+    job_label = os.environ.get(owned_process.ENV_JOB_LABEL)
+    if not owner_id or backend not in ("launchd", "detached"):
+        return (
+            "--owned-host runs only as the process a managed lease started (this "
+            "environment carries no owner identity); start the episode through the "
+            "frontend, or use --in-process-host in the offline rig"
+        )
+    from local_operator.evaluation.source_pin import resolve_core_commit
+
+    pin = resolve_core_commit() or "unavailable-test-tree"
+    try:
+        owned_process.verify_owned_admission(
+            run_root=args.run_root,
+            owner_id=owner_id,
+            backend=backend,
+            job_label=job_label,
+            actual_source_pin=pin,
+        )
+    except owned_process.OwnedProcessRefused as error:
+        return str(error)
+    # The secret handoff is consumed BEFORE anything is built: the values were
+    # handed off out-of-band (never argv/plist/status), they enter only this
+    # process's environment, and the file is unlinked by the consumer. An
+    # unreadable handoff refuses rather than running without promised secrets.
+    paths = owned_process.owner_paths(args.run_root, owner_id)
+    try:
+        handed = owned_process.consume_secret_handoff(paths.secrets_path)
+    except owned_process.OwnedProcessRefused as error:
+        return str(error)
+    os.environ.update(handed)
+    return None
+
+
+async def _run_managed_frontend(args: argparse.Namespace) -> int:
+    """Launch the episode's managed owner and report from OUTSIDE its loop.
+
+    The standalone entry no longer runs a session episode in its own
+    ``asyncio.run``: that loop's exit cancels the episode's canonical cleanup
+    (R2 rounds 1-2), which is exactly the lifetime this split removes. Here
+    the frontend starts the SAME script under a managed lease (launchd on
+    Darwin; a detached process for rigs), waits boundedly, and then either
+    reports the owner's sealed outcome or exits ``failed_provisional`` while
+    the owner keeps joining. It NEVER stops a live owner -- no path here
+    touches an admitted lease (detaching is not a stop); only a start that
+    never admitted is reaped, by exact label/pid.
+    """
+    import uuid as _uuid
+
+    from local_operator import owned_process
+
+    backend = _resolve_owner_backend(args)
+    if backend is None:
+        print(
+            "no managed-owner supervisor is available on this platform (launchd is "
+            "macOS-only) and this repository has no proven whole-tree teardown "
+            "elsewhere; refusing before prepare. --owner-backend detached exists for "
+            "rigs/tests only, never for a paid run",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+    try:
+        refuse_volatile_root(Path(args.run_root), label="--run-root")
+    except VolatileRootError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
+    missing = [
+        name
+        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        print(
+            "the managed frontend needs " + ", ".join(missing) + " (the episode "
+            "scratch the launcher sets); refusing to launch an owner against an "
+            "ambient home",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+
+    raw = list(getattr(args, "_raw_argv", []))
+    if not raw:
+        print("internal error: the frontend has no raw argv to relaunch", file=sys.stderr)
+        return EXIT_PREFLIGHT
+    owner_id = f"ep-{_uuid.uuid4().hex[:12]}"
+    episode_id = args.episode_id or f"ep-{_uuid.uuid4().hex[:12]}"
+    host_argv = [*raw, "--owned-host"]
+    if args.episode_id is None:
+        host_argv += ["--episode-id", episode_id]
+    secret_env = {name: os.environ[name] for name in args.secret_env if name in os.environ}
+    spec = owned_process.OwnedProcessSpec(
+        argv=(sys.executable, str(Path(__file__).resolve()), *host_argv),
+        cwd=Path.cwd(),
+        env=_owner_env_from_self(),
+        run_root=Path(args.run_root),
+        owner_id=owner_id,
+        source_pin=resolve_core_pin(),
+        backend=backend,
+    )
+    try:
+        lease = owned_process.start_owned_process(
+            spec, startup_timeout_s=args.owner_startup_timeout_s, secret_env=secret_env
+        )
+    except owned_process.OwnedProcessRefused as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
+
+    paths = owned_process.owner_paths(Path(args.run_root), owner_id)
+
+    def owner_status() -> Any:
+        status = owned_process.read_owner_status(paths.status_path)
+        if status is None or status.owner_id != lease.owner_id:
+            return None
+        if status.pid is not None and status.pid != lease.pid:
+            # The nonce matched but the pid did not: a stale/foreign file.
+            return None
+        return status
+
+    deadline = time.monotonic() + args.owner_startup_timeout_s
+    status = None
+    while time.monotonic() < deadline:
+        status = owner_status()
+        if status is not None:
+            break
+        await asyncio.sleep(0.1)
+    if status is None:
+        # START FAILURE: the owner never admitted, so it never began an
+        # episode (admission precedes prepare); reaping THIS run's own start
+        # by exact label/pid is the sanctioned cleanup.
+        owned_process.reap_unadmitted_start(lease)
+        print(
+            f"the managed owner did not admit within {args.owner_startup_timeout_s:g}s; "
+            "refusing before prepare (nothing was allocated)",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+
+    wait_s = (
+        args.frontend_wait_s
+        if args.frontend_wait_s is not None
+        else float(args.max_wall_s) + _FRONTEND_CLOSE_GRACE_S
+    )
+    wait_deadline = time.monotonic() + wait_s
+    while True:
+        status = owner_status() or status
+        if status is not None and status.phase in owned_process.TERMINAL_PHASES:
+            return _report_owner_outcome(lease, status)
+        if _owner_lost(lease, status):
+            print(
+                json.dumps(
+                    {
+                        "status": "owner_lost_unverified",
+                        "episode_id": episode_id,
+                        "owner_id": lease.owner_id,
+                        "owner_pid": lease.pid,
+                        "owner_backend": lease.backend,
+                        "job_label": lease.job_label,
+                        "status_path": str(paths.status_path),
+                        "detail": (
+                            "the owner process is gone without a terminal status; its "
+                            "retained state is UNVERIFIED -- do not infer cleanup, "
+                            "read the status/lease records before any teardown"
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return EXIT_EPISODE
+        if time.monotonic() >= wait_deadline:
+            break
+        await asyncio.sleep(0.25)
+    print(
+        json.dumps(
+            {
+                "status": "failed_provisional",
+                "episode_id": episode_id,
+                "owner_id": lease.owner_id,
+                "owner_pid": lease.pid,
+                "owner_backend": lease.backend,
+                "job_label": lease.job_label,
+                "status_path": str(paths.status_path),
+                "lease_path": str(paths.lease_path),
+                "owner_phase": None if status is None else status.phase,
+                "detail": (
+                    "the owner is retained and still running; this frontend stopped "
+                    "WAITING, it did not stop the owner. Reconnect by reading the "
+                    "status/lease files; the owner seals its own outcome there"
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return EXIT_EPISODE
+
+
+def resolve_core_pin() -> str:
+    """The running tree's source pin, as the owner will re-derive it."""
+    from local_operator.evaluation.source_pin import resolve_core_commit
+
+    return resolve_core_commit() or "unavailable-test-tree"
+
+
+def _owner_lost(lease: Any, status: Any) -> bool:
+    """Whether the SUPERVISOR says the owner is gone without a terminal status.
+
+    launchd only: ``job_pid`` is the supervisor's own answer, so a label with
+    no pid means the process exited -- and with ``KeepAlive=false`` it will not
+    come back. The detached backend has no supervisor to answer, so this stays
+    False there (doubt is not death: the frontend keeps waiting).
+    """
+    if lease.backend == "detached":
+        # No supervisor answers for the detached backend, but the kernel can
+        # still prove DEATH: pid_liveness False (no holder) or a birth-token
+        # mismatch (a different holder) both mean this owner is gone. Doubt
+        # (None) is not death -- the frontend keeps waiting.
+        from local_operator import procstate
+
+        if procstate.pid_liveness(lease.pid) is False:
+            return True
+        return procstate.same_birth(lease.birth_scheme, lease.birth, lease.pid) is False
+    if lease.job_label is None:
+        return False
+    # launchd: the OS answers. A FRESH provisional write means the owner was
+    # writing moments ago and the pid read is the startup/exit race, never
+    # read as death; a STALE one (no write for the grace) with no job pid is
+    # a settled exit whose retained state stays unverified.
+    if status is not None and status.phase == "provisional":
+        if time.time() * 1000.0 - float(status.updated_ms or 0) < 30_000.0:
+            return False
+    try:
+        from local_operator import launchd, owned_process
+
+        home = launchd.real_home()
+        if home is None:
+            return False
+        plist = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
+        return (
+            launchd.job_pid(
+                label=lease.job_label,
+                path=plist,
+                run=owned_process.launchctl_runner,
+            )
+            is None
+        )
+    except Exception:  # noqa: BLE001 - an unanswerable supervisor has no verdict
+        return False
+
+
+def _report_owner_outcome(lease: Any, status: Any) -> int:
+    """Print the owner's sealed outcome (or the best reading of it).
+
+    Terminal status is written AFTER the seal on a completed close-out, so
+    the outcome file is the answer; when it cannot be read the status itself
+    is printed so the caller still gets a truthful shape. The failed/complete
+    exit contract stays the same as the foreground used to provide.
+    """
+    if status.outcome_path:
+        try:
+            body = Path(status.outcome_path).read_text()
+        except OSError:
+            body = None
+        if body is not None:
+            print(body.rstrip("\n"))
+            try:
+                final = json.loads(body)
+            except ValueError:
+                final = {}
+            _cleanup_finished_owner(lease)
+            return EXIT_OK if final.get("status") == "completed" else EXIT_EPISODE
+    print(
+        json.dumps(
+            {
+                "status": "owner_terminal_unreadable",
+                "owner_id": lease.owner_id,
+                "owner_phase": status.phase,
+                "status_path": str(lease.run_root),
+                "detail": status.detail,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return EXIT_EPISODE
+
+
+def _cleanup_finished_owner(lease: Any) -> None:
+    """Remove THIS run's finished launchd registration (post-terminal only).
+
+    Terminal status is written after the seal, so the owner is finished or
+    exiting; booting out the exact label this run created cannot cut its work.
+    The detached backend has nothing to clean. A poll for natural exit keeps
+    the bootout from racing the process's last flush.
+    """
+    if lease.backend != "launchd" or lease.job_label is None:
+        return
+    try:
+        from local_operator import launchd, owned_process
+
+        home = launchd.real_home()
+        if home is None:
+            return
+        plist = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if (
+                launchd.job_pid(
+                    label=lease.job_label,
+                    path=plist,
+                    run=owned_process.launchctl_runner,
+                )
+                is None
+            ):
+                break
+            time.sleep(0.1)
+        launchd.bootout_job(
+            label=lease.job_label, path=plist, runner=owned_process.launchctl_runner
+        )
+        try:
+            plist.unlink()
+        except OSError:
+            pass
+    except Exception:  # noqa: BLE001 - a post-terminal cleanup must not fail the report
+        pass
+
+
 async def run(args: argparse.Namespace) -> int:
+    if args.engagement == "session" and not args.owned_host and not args.in_process_host:
+        # The session arm's ONLY standalone path is the managed frontend: the
+        # bare foreground loop is the lifetime defect (R2), and the rig's
+        # in-process mode must say so explicitly.
+        return await _run_managed_frontend(args)
+    if args.owned_host:
+        refusal = _owned_host_refusal(args)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return EXIT_PREFLIGHT
+    owner_status = _owned_host_status_channel(args)
+    if owner_status is not None:
+        owner_status.phase("admitted", detail="managed owner verified before prepare")
     try:
         infra_values = _parse_infra(args.infra, args.infra_purpose)
         infra_values = _ensure_action_settle_policy(infra_values, args.infra_purpose)
@@ -1349,6 +1831,7 @@ async def run(args: argparse.Namespace) -> int:
                 selector=selector,
                 resolver=resolver,
                 route=(provider, model),
+                owner_status=owner_status,
             )
         finally:
             if auth_store is not None:
@@ -1429,7 +1912,12 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw)
+    # The frontend relaunches THIS SAME invocation under a managed lease; the
+    # raw argv is what makes "the same invocation" exact, including flags this
+    # process resolved and flags it must not reinterpret.
+    args._raw_argv = raw
     return asyncio.run(run(args))
 
 
