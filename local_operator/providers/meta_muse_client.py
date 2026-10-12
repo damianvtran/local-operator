@@ -27,8 +27,9 @@ from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.failover import ProviderError
 
 ATTRIBUTION_REFUSAL = (
-    "Muse Code subscription attribution unverified for this request; "
-    "sign in again or check the unofficial provider protocol. No PAYG fallback was selected."
+    "Muse Code subscription billing could not be verified for this response. "
+    "Run /login meta-muse and try again. If this repeats, update lop or contact support. "
+    "No PAYG fallback was selected."
 )
 _ACTIVE_OBSERVATION: ContextVar[dict[str, Any] | None] = ContextVar(
     "meta_muse_observation", default=None
@@ -47,9 +48,17 @@ def tool_aliases(request: ChatRequest) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for name in sorted(originals):
         alias = re.sub(r"[^A-Za-z0-9_]", "_", name)[:64] or "tool"
-        if alias != name and alias in occupied:
-            suffix = hashlib.sha256(name.encode()).hexdigest()[:12]
-            alias = alias[:51] + "_" + suffix
+        if alias != name:
+            stem = alias
+            digest = hashlib.sha256(name.encode()).hexdigest()[:12]
+            attempt = 0
+            # A hash candidate can itself be a reserved ORIGINAL name. Check
+            # every final spelling; numeric retries guarantee progress without
+            # assuming distinct digests and stay stable across replay/order.
+            while alias in occupied:
+                suffix = "_" + digest + (f"_{attempt}" if attempt else "")
+                alias = stem[: 64 - len(suffix)] + suffix
+                attempt += 1
         occupied.add(alias)
         mapping[name] = alias
     return mapping
@@ -223,7 +232,7 @@ class MetaMuseClient(OpenAICompatClient):
                 receipt = state.get("receipt")
                 if receipt is None:
                     raise ProviderError(
-                        None, ATTRIBUTION_REFUSAL, kind="request", retryable=False, fail_closed=True
+                        None, ATTRIBUTION_REFUSAL, kind="unknown", retryable=False, fail_closed=True
                     )
                 event = event.model_copy(
                     update={

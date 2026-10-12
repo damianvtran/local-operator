@@ -69,7 +69,8 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -1040,6 +1041,19 @@ class _SerializedConnection:
         with self._lock:
             self._conn.rollback()
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        # Hold both this connection's lock and the SQLite write reservation:
+        # another logout/login must not replace metadata under a compensated
+        # Muse deletion. The caller commits within its cross-store guard.
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self._conn.rollback()
+                raise
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -1648,16 +1662,47 @@ class AuthStore:
 
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
+        row = self.get_credential(credential_id)
+        if row is not None and row.provider == "meta-muse":
+            from local_operator.providers.meta_muse_credentials import (
+                reversible_key_deletion,
+            )
+
+            with self._conn.transaction():
+                # Re-read after the write reservation, so a concurrent login
+                # cannot leave us deleting the former key and the NEW row.
+                row = self.get_credential(credential_id)
+                if row is None:
+                    self._conn.commit()
+                    return
+                metadata = row.data
+
+                def still_recorded() -> bool:
+                    current = self.get_credential(credential_id)
+                    return current is not None and current.data == metadata
+
+                with reversible_key_deletion(
+                    metadata, self._config_dir or self._db_path.parent, restore_if=still_recorded
+                ):
+                    try:
+                        self._conn.execute(
+                            "DELETE FROM auth_credential_blocks WHERE credential_id = ?",
+                            (credential_id,),
+                        )
+                        self._conn.execute(
+                            "DELETE FROM auth_credentials WHERE id = ?", (credential_id,)
+                        )
+                        self._conn.commit()
+                    except BaseException:
+                        # Roll back BEFORE compensating the sealed key. If a
+                        # commit actually succeeded before reporting failure,
+                        # absent metadata must not resurrect an orphan secret.
+                        self._conn.rollback()
+                        raise
+            return
         self._conn.execute(
             "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
         )
-        row = self.get_credential(credential_id)
-        if row is not None and row.provider == "meta-muse":
-            from local_operator.providers.meta_muse_credentials import delete_key
-
-            # Fail before deleting metadata if the encrypted store is locked;
-            # otherwise logout would orphan a key the user can no longer remove.
-            delete_key(row.data, self._config_dir or self._db_path.parent)
         self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
         self._conn.commit()
 

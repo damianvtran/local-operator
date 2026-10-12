@@ -64,11 +64,18 @@ def test_none_removes_tools_and_required_is_explicit_refusal():
 
 @pytest.mark.asyncio
 async def test_actual_factory_posts_responses_and_restores_tool_names():
-    req = request(tools=("hyphen-tool",))
+    # Reserve both the first hash candidate and its numeric retry: neither
+    # requires a hash collision, just an ordinary registered function name.
+    req = request(tools=("a-b", "a_b", "a_b_d44362d67d92", "a_b_d44362d67d92_1"))
+    from local_operator.providers.meta_muse_client import tool_aliases
+
+    aliases = tool_aliases(req)
+    assert len(set(aliases.values())) == len(aliases)
+    wire_name = aliases["a-b"]
     frames = [
         {
             "type": "response.output_item.added",
-            "item": {"type": "function_call", "name": "hyphen_tool", "call_id": "call-1"},
+            "item": {"type": "function_call", "name": wire_name, "call_id": "call-1"},
         },
         {"type": "response.function_call_arguments.delta", "call_id": "call-1", "delta": "{}"},
         {
@@ -78,7 +85,7 @@ async def test_actual_factory_posts_responses_and_restores_tool_names():
                 "output": [
                     {
                         "type": "function_call",
-                        "name": "hyphen_tool",
+                        "name": wire_name,
                         "call_id": "call-1",
                         "arguments": "{}",
                     }
@@ -102,7 +109,7 @@ async def test_actual_factory_posts_responses_and_restores_tool_names():
         assert wire.headers["authorization"] == f"Bearer {KEY}"
         assert wire.headers["x-api-version"] == "1.0.0"
         assert "openai-beta" not in wire.headers and "chatgpt-account-id" not in wire.headers
-        assert json.loads(wire.content)["tools"][0]["name"] == "hyphen_tool"
+        assert json.loads(wire.content)["tools"][0]["name"] == wire_name
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream", "x-request-id": "fixture-request"},
@@ -115,10 +122,10 @@ async def test_actual_factory_posts_responses_and_restores_tool_names():
     names = [
         event.name for event in events if isinstance(event, StreamToolCallDelta) and event.name
     ]
-    assert names == ["hyphen-tool"]
+    assert names == ["a-b"]
     end = next(event for event in events if isinstance(event, StreamEndEvent))
     assert end.provider_payload is not None
-    assert "hyphen_tool" not in json.dumps(end.provider_payload)
+    assert wire_name not in json.dumps(end.provider_payload)
     assert end.provider_payload["meta_muse"]["subscription_usage"]["window"]["usedPercent"] == 7
     assert end.provider_payload["meta_muse"]["request_id"] == "fixture-request"
     assert (
@@ -162,7 +169,9 @@ async def test_missing_unknown_meter_never_borrows_old_receipt_or_succeeds(meter
         client = client_for_spec(request().model, http_client=http)
         assert isinstance(client, MetaMuseClient)
         client.last_subscription_observation = {"window": {"usedPercent": 99}}
-        with pytest.raises(ProviderError, match="subscription attribution unverified") as caught:
+        with pytest.raises(
+            ProviderError, match="subscription billing could not be verified"
+        ) as caught:
             _ = [event async for event in client.stream(request(), KEY)]
     assert caught.value.fail_closed and not caught.value.retryable
 

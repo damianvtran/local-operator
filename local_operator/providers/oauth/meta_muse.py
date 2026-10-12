@@ -13,7 +13,7 @@ import json
 import math
 import re
 import time
-from typing import Any, Awaitable, TypeVar
+from typing import Any, Awaitable, Callable, TypeVar
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -170,6 +170,7 @@ async def login_meta_muse(
     *,
     signal: AbortSignal | None = None,
     http_client: httpx.AsyncClient | None = None,
+    open_browser: Callable[[str], object] | None = None,
 ) -> dict[str, Any]:
     """Approve the device, verify subscription entitlement, return its inference key.
 
@@ -177,7 +178,10 @@ async def login_meta_muse(
     no refresh function: the minted key is static and a refusal requires a new
     explicit login, not an unobservable account-token exchange or PAYG fallback.
     """
-    await report_safely(callbacks.on_warning or callbacks.on_progress, NOTICE)
+    if callbacks.displays_warnings:
+        await report_safely(callbacks.on_warning or callbacks.on_progress, NOTICE)
+    # A host that does not display warning prose gets the complete disclosure
+    # in its approval instructions, not a misleading generic warning state.
     owns_http = http_client is None
     http = http_client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
     headers = {"Accept": "application/json", "x-api-version": "1.0.0"}
@@ -210,10 +214,35 @@ async def login_meta_muse(
         )
         deadline = time.monotonic() + ttl
         await report_flow_details(callbacks, user_code=user_code, expires_in=ttl)
+        instructions = f"Enter code: {user_code} in the browser."
+        if not callbacks.displays_warnings:
+            # Unknown/desktop hosts may not render warning callbacks. Keep the
+            # complete disclosure there; terminal hosts already showed it once.
+            instructions = f"{NOTICE}\n{instructions}"
         if callbacks.on_auth_url is not None:
-            await maybe_await(
-                callbacks.on_auth_url(url, instructions=f"{NOTICE}\nEnter code: {user_code}")
+            await maybe_await(callbacks.on_auth_url(url, instructions=instructions))
+        # The TUI callback renders, but does not open, this URL. Keep the same
+        # injected opener ownership as loopback flows; desktop passes a no-op
+        # because its renderer opens the operation URL. Failed local opening
+        # remains actionable through the always-visible approval link.
+        import webbrowser
+
+        opener = open_browser if open_browser is not None else webbrowser.open
+        try:
+            opened = await _bounded(maybe_await(opener(url)), signal, REQUEST_TIMEOUT_S)
+        except LoginCancelledError:
+            raise
+        except Exception:
+            await report_safely(
+                callbacks.on_warning or callbacks.on_progress,
+                "Browser could not open. Open the displayed approval page to continue.",
             )
+        else:
+            if opened is False:
+                await report_safely(
+                    callbacks.on_warning or callbacks.on_progress,
+                    "Browser could not open. Open the displayed approval page to continue.",
+                )
         intervals: list[float] = []
 
         async def poll() -> DevicePollResult[str]:
