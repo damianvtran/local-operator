@@ -28,8 +28,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     # extraction slice, `wire.settings` by S1, and `wire.errors.settings` (a
     # CHILD of `wire.errors`, RFC §2.2) by the E1 slice; E2 added
     # `wire.errors.desktop` (also a child of `wire.errors`) the same way,
-    # `wire.exec` by E2b, and `wire.errors.agents` by the E2c agents child.
-    # The rest stay empty
+    # `wire.exec` by E2b, `wire.errors.agents` by E2c, and `wire.errors.media`
+    # by E2d. The rest stay empty
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
@@ -39,6 +39,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors",
         "wire.errors.agents",
         "wire.errors.desktop",
+        "wire.errors.media",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -50,6 +51,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         assert catalogues.load_catalogue("en", namespace) == {}
     assert catalogues.load_catalogue("en", "wire.errors.agents") != {}
     assert catalogues.load_catalogue("en", "wire.errors.settings") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.media") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
