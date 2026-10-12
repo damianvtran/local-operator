@@ -175,7 +175,7 @@
     "tone": "title-case"
   },
   "tui.analytics.rate.legend": {
-    "note": "Coverage footnote under both tables: the decode rate speaks for {shown} of {total} calls. Drawn once, only when coverage is partial (a fully-measured run draws nothing). {shown}/{total} format with grouping; {total} selects the plural.",
+    "note": "Coverage footnote under both tables: the decode rate speaks for {shown} of {total} calls. Drawn once, only when coverage is partial (a fully-measured run draws nothing). {shown}/{total} format with grouping; the noun is invariable — \"calls\" for every total at extraction, never pluralise it.",
     "role": "table footnote",
     "tone": "plain, factual"
   },
