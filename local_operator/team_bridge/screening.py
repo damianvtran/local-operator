@@ -1,37 +1,48 @@
 """H3 — the one-shot screener: pure render/parse plus the shared pipeline.
 
-WHAT LIVES HERE. Three separable pieces, all deterministic and testable
-without a provider:
+WHAT LIVES HERE. Deterministic pieces testable without a provider, and the
+ONE pipeline that turns a fetched message into a metadata-only outcome:
 
 1. :func:`render_prompt` — single-pass placeholder substitution over the
    FROZEN embedded template (``bridge-screen-v1``). A fresh cryptographic
    nonce delimits the submission; substituted values are never re-scanned,
    so text inserted from the (hostile) message cannot forge a closing tag or
-   grow a new placeholder.
-2. :func:`parse_verdict` — the frozen two-line reply grammar, strict. Anything
-   that is not exactly ``VERDICT: deliver|hold|bounce`` followed by one
-   nonempty ``REASON:`` line (<=200 chars) is a HOLD: extra prose, markdown,
-   missing/duplicate fields, tool calls, unknown categories on a bounce.
-3. :func:`screen_message` — the ONE shared pipeline: exact-owner and template
-   authority, body-hash binding, H2 intent/cache recovery before any model
-   spend, durable budget reservation BEFORE inference I/O, the single model
-   dispatch, strict parse, and a metadata-only durable outcome. No delivery,
-   no ack, no wake, no body/reason/text ever reaches durable state.
+   grow a new placeholder. The rendered text is a PRIVATE carrier: it is not
+   a dataclass field, so neither ``repr`` nor ``dataclasses.asdict`` nor any
+   generic serializer can leak the message body (H3-Q7).
+2. :func:`parse_verdict` — the frozen two-line reply grammar, strict.
+   Anything that is not exactly ``VERDICT: deliver|hold|bounce`` then one
+   nonempty ``REASON:`` line (<=200 chars) holds: extra prose, markdown,
+   missing/duplicate fields, tool calls, lone surrogates, unknown categories
+   on a bounce.
+3. :func:`screen_message` — the shared pipeline: exact-owner generation,
+   frozen template byte-equality, envelope/participant validation and
+   per-type caps BEFORE any spend, H2 intent reconciliation (never a fresh
+   admission), fingerprint cache keyed on the FULL admission tuple (body +
+   template + model + revision + envelope digest), durable logical budget
+   reservation BEFORE inference I/O, the single model dispatch, strict
+   parse, and a WRITE-ONCE metadata-only outcome fenced on the published
+   policy epoch inside the store's own transaction.
 
 CONTENT LAW. The model reply and the message body are ephemeral: they may
-exist in memory for the duration of one call and are never written to the
-store, logs, analytics, receipts or error text. Durable records carry only
-hashes, closed-enum metadata, model identity, counts and timestamps
-(§13.9's operational metadata; the contract's no-content-cache rule).
+exist in memory for one call and are never written to the store, logs,
+analytics, receipts or error text. Durable records carry only hashes, closed
+enums, model identity, counts and timestamps. Both carry carriers here
+(:class:`RenderedPrompt` text, :class:`ScreenResult` reason) are private
+attributes with accessor methods, deliberately NOT fields.
 
-H3 grants nothing: a ``deliver``/``allow`` here is evidence for the H2 ack
-path only. Working/done, approvals, delivery and any H4 connector remain
-other lanes' work.
+CONTROL LAW. A ``deliver``/allow is evidence for the H2 ack path only;
+working/done, approvals, delivery and any H4 connector remain other lanes'
+work. Budget exhaustion, breaker-open, unknown routes and any local refusal
+are HOLDS, never silent resets. One logical screening may reach up to three
+physical requests (auth re-resolve + fast resend); the wire decorator
+(``reserve_http_attempt``) charges each of those separately.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 from dataclasses import dataclass, field
@@ -48,12 +59,14 @@ from local_operator.team_bridge.types import OwnerSnapshot, ScreeningReceipt
 
 __all__ = [
     "HOLD_CODES",
-    "ScreeningPolicy",
+    "Envelope",
+    "PolicySnapshot",
     "ScreenResult",
     "ScreenRunner",
     "parse_verdict",
     "render_prompt",
     "screen_message",
+    "validate_envelope",
 ]
 
 #: The closed category enum (frozen §8). Bounce receipts carry ONLY these,
@@ -70,10 +83,17 @@ SCREENING_CATEGORIES = (
 #: them ever carries model/vendor prose.
 HOLD_CODES = (
     "owner_mismatch",
+    "owner_changed",
     "template_mismatch",
     "body_hash_mismatch",
-    "intent_conflict",
+    "envelope_unbound",
+    "envelope_malformed",
+    "invalid_content",
+    "invalid_content_type",
+    "size_exceeded",
+    "ack_recovery",
     "budget_exhausted",
+    "breaker_open",
     "runner_unavailable",
     "provider_error",
     "model_identity_unknown",
@@ -81,7 +101,19 @@ HOLD_CODES = (
     "parse_failed",
     "bounce_without_category",
     "model_hold",
+    "policy_stale",
+    "retry_later",
+    "write_once_conflict",
+    "schema_damaged",
 )
+
+#: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
+_TYPE_CAPS = {"note": 16 * 1024, "question": 16 * 1024, "request": 64 * 1024}
+#: Bound on each scalar a request block may carry, and on their count.
+_REQUEST_FIELD_MAX = 2000
+_REQUEST_FIELDS_MAX = 24
+#: Bounds on server-resolved display metadata (sender id / org label).
+_ENVELOPE_LABEL_MAX = 200
 
 _MAX_REASON_CHARS = 200
 _NONCE_BYTES = 16
@@ -97,8 +129,10 @@ class ScreeningPolicy(Protocol):
     accepted status metadata (H1's monotonic, capped, byte-equality rules);
     ``default_model`` is the exact user-configured default resolution (see
     the H3 handoff: NOT an active CoS override, not a classifier tier, not a
-    different-model fallback); ``admission_revision`` names the snapshot the
-    decision is bound to.
+    different-model fallback); ``admission_revision`` names the trusted
+    publisher's current revision of that configuration. The pipeline
+    SNAPSHOTS these at entry and re-reads them after the awaited work, so a
+    mutation during a run cannot be laundered into an admission (H3-Q3).
     """
 
     screening_version: str
@@ -107,52 +141,251 @@ class ScreeningPolicy(Protocol):
     admission_revision: str
 
 
+@dataclass(frozen=True)
+class PolicySnapshot:
+    """The IMMUTABLE admission policy captured before any model work.
+
+    ``approved_serving_identities`` is how an explicitly approved alias
+    resolution crosses: the configured selector is the capture, and the
+    resolver's APPROVED concrete serving identities are listed so a resolved
+    versioned id is not rejected merely for differing spelling (R4). An
+    unlisted identity still holds — never guess a fallback.
+    """
+
+    screening_version: str
+    template_sha256: str
+    default_model: str | None
+    admission_revision: str
+    approved_serving_identities: frozenset[str] = field(default_factory=frozenset)
+
+    @classmethod
+    def capture(cls, policy: ScreeningPolicy) -> "PolicySnapshot":
+        identities = getattr(policy, "approved_serving_identities", ()) or ()
+        return cls(
+            screening_version=str(getattr(policy, "screening_version", "")),
+            template_sha256=str(getattr(policy, "template_sha256", "")),
+            default_model=(policy.default_model if isinstance(policy.default_model, str) else None),
+            admission_revision=str(getattr(policy, "admission_revision", "")),
+            approved_serving_identities=frozenset(str(i) for i in identities),
+        )
+
+    def matches_live(self, policy: ScreeningPolicy) -> bool:
+        """Re-read the LIVE policy object and compare every admission field."""
+
+        return self == PolicySnapshot.capture(policy)
+
+    def accepts_serving_identity(self, actual_model: str) -> bool:
+        return actual_model == self.default_model or (
+            actual_model in self.approved_serving_identities
+        )
+
+
 @dataclass
 class RenderedPrompt:
-    """One rendered screening request. ``text`` is ephemeral; send it, drop it."""
+    """One rendered screening request. The text is PRIVATE (accessor only).
 
-    text: str
-    nonce: str
+    ``text`` is deliberately NOT a field: ``repr()`` and every generic
+    serializer (``dataclasses.asdict``, ``json``) see only the nonce and the
+    hashes, never the body (H3-Q7). Use :meth:`private_text` for the single
+    dispatch and drop the reference.
+    """
+
+    nonce: str = field(repr=False)
     template_sha256: str
     body_sha256: str
     screened_bytes: int
 
+    def private_text(self) -> str:
+        return self._private_text  # type: ignore[attr-defined]
+
 
 @dataclass
 class ScreenResult:
-    """The pipeline's outcome. Content-free by construction.
+    """The pipeline's outcome. The reason is PRIVATE (accessor only).
 
-    ``ephemeral_reason`` is for the CALLER's immediate use (e.g. a local
-    surface) and is deliberately NOT part of any store write: nothing here
-    is ever handed to an agent tool, logged, or persisted.
+    ``ephemeral_reason`` is deliberately NOT a field for the same reason as
+    :class:`RenderedPrompt`: it must never ride ``asdict``/JSON/tool results.
     """
 
     disposition: str  # deliver | bounce | hold
-    hold_code: str | None = None
     receipt: ScreeningReceipt | None = None
+    hold_code: str | None = None
     retry_at: float | None = None
     screened_bytes: int | None = None
-    ephemeral_reason: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._private_reason: str | None = None
+
+    def private_reason(self) -> str | None:
+        return self._private_reason
+
+    def set_private_reason(self, reason: str | None) -> "ScreenResult":
+        self._private_reason = reason
+        return self
 
 
 class ScreenRunner(Protocol):
-    """The one model dispatch H3 allows itself.
+    """One model dispatch, injected. Returns ``(reply_text, actual_model)``.
 
-    Implementations MUST send exactly one user turn derived from the rendered
-    prompt, with no tools, no tool choice, no session/history/system/cache
-    lineage and no callbacks, and MUST report the ACTUAL serving model id (or
-    ``None`` when the runtime cannot evidence it — which holds). Returns
-    ``(reply_text, actual_model_or_none)``. Raises only sanitized, typed
-    errors; vendor prose never escapes.
+    The runner is the WHOLE provider boundary for the pipeline: production
+    supplies an adapter over the harness stream function (controlled QA
+    supplies a scripted callable). It must return the actual serving model
+    identity or ``None`` when it cannot be evidenced — never a guess. Errors
+    it raises are sanitized here into typed holds; nothing of its prose is
+    persisted.
     """
 
     def __call__(self, prompt: str, *, default_model: str) -> tuple[str, str | None]: ...
 
 
-def _body_sha256(body_text: str) -> str:
-    # §8: hash the EXACT UTF-8 stored body.text — no NFC re-normalization,
-    # no JSON re-serialization, no envelope.
-    return hashlib.sha256(body_text.encode("utf-8")).hexdigest()
+def _body_sha256_bytes(body_bytes: bytes) -> str:
+    return hashlib.sha256(body_bytes).hexdigest()
+
+
+@dataclass(frozen=True)
+class Envelope:
+    """Validated, bounded admission input derived from the fetched item.
+
+    Everything here is inert DATA: the digest binds the envelope to the
+    admission so a same-body message with a different sender/type/request
+    cannot reuse another context's verdict.
+    """
+
+    message_id: str
+    body_text: str
+    body_sha256: str
+    message_type: str
+    sender_account: str
+    organization: str
+    envelope_digest: str
+
+
+def _canonicalize_request(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Bound the request block to closed scalar metadata; None if malformed."""
+
+    if len(request) > _REQUEST_FIELDS_MAX:
+        return None
+    canonical: dict[str, Any] = {}
+    for key, value in request.items():
+        if not isinstance(key, str) or not key or len(key) > 64:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return None
+        if isinstance(value, str) and len(value) > _REQUEST_FIELD_MAX:
+            return None
+        canonical[key] = value
+    if not canonical:
+        return None
+    return canonical
+
+
+def validate_envelope(
+    owner: OwnerSnapshot, item: Mapping[str, Any]
+) -> tuple[Envelope | None, str | None]:
+    """Authenticate + bound the fetched item BEFORE any spend.
+
+    Checks, in order: message identity/type against the closed type set;
+    the body's exact utf8 bytes and hash; per-type raw size cap; thread and
+    delivery bindings against the EXACT owner when the server resolved them
+    (absent blocks are allowed — the canonical H2 DTO may omit them — but a
+    PRESENT binding that names another tenant/recipient is a hold, never an
+    admission); and the request block for request-type messages. Malformed
+    Unicode is a typed, content-free hold (H3-Q9).
+    """
+
+    raw_message = item.get("message")
+    message: Mapping[str, Any] = raw_message if isinstance(raw_message, Mapping) else {}
+    message_id = message.get("id")
+    if not isinstance(message_id, str) or not message_id:
+        return None, "envelope_malformed"
+    message_type = message.get("type")
+    if not isinstance(message_type, str) or message_type not in _TYPE_CAPS:
+        return None, "invalid_content_type"
+
+    raw_body = message.get("body")
+    body: Mapping[str, Any] = raw_body if isinstance(raw_body, Mapping) else {}
+    body_text = body.get("text")
+    if not isinstance(body_text, str):
+        return None, "envelope_malformed"
+    try:
+        body_bytes = body_text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None, "invalid_content"
+    if len(body_bytes) > _TYPE_CAPS[message_type]:
+        return None, "size_exceeded"
+    body_sha = _body_sha256_bytes(body_bytes)
+    served_hash = message.get("body_hash")
+    if not isinstance(served_hash, str) or served_hash != body_sha:
+        return None, "body_hash_mismatch"
+
+    raw_thread = item.get("thread")
+    thread: Mapping[str, Any] = raw_thread if isinstance(raw_thread, Mapping) else {}
+    thread_tenant = thread.get("tenant_id", message.get("tenant_id"))
+    if thread_tenant is not None and thread_tenant != owner.tenant_id:
+        return None, "envelope_unbound"
+    raw_delivery = item.get("delivery")
+    delivery: Mapping[str, Any] = raw_delivery if isinstance(raw_delivery, Mapping) else {}
+    raw_recipient = delivery.get("recipient")
+    if isinstance(raw_recipient, Mapping):
+        if raw_recipient.get("account_id") != owner.account_id:
+            return None, "envelope_unbound"
+        endpoint = raw_recipient.get("endpoint_id")
+        if endpoint is not None and endpoint != owner.endpoint_id:
+            return None, "envelope_unbound"
+
+    raw_sender = item.get("sender")
+    sender: Mapping[str, Any] = raw_sender if isinstance(raw_sender, Mapping) else {}
+    sender_account = sender.get("account_id")
+    if sender_account is None:
+        # An ABSENT sender block is UNKNOWN provenance, not false provenance:
+        # the participant bindings that matter (thread tenant, recipient) are
+        # checked independently. A PRESENT but malformed sender still refuses.
+        sender_account = ""
+    if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+
+    organization = message.get("organization", sender.get("organization"))
+    if not isinstance(organization, str) or not organization:
+        organization = owner.tenant_id
+    if len(organization) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+
+    # A request block is REQUIRED for request-type messages and included in
+    # the admission digest WHENEVER present: the digest must cover every
+    # envelope input the classifier can see, so a changed request
+    # specification can never reuse another context's cached verdict
+    # (H3-Q2's request-spec case; a stricter fingerprint only ever misses).
+    request_canonical: dict[str, Any] | None = None
+    raw_request = message.get("request")
+    if message_type == "request" and not isinstance(raw_request, Mapping):
+        return None, "envelope_malformed"
+    if isinstance(raw_request, Mapping):
+        request_canonical = _canonicalize_request(raw_request)
+        if request_canonical is None:
+            return None, "envelope_malformed"
+
+    digest_payload = json.dumps(
+        {
+            "sender": sender_account,
+            "organization": organization,
+            "type": message_type,
+            "request": request_canonical,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        Envelope(
+            message_id=message_id,
+            body_text=body_text,
+            body_sha256=body_sha,
+            message_type=message_type,
+            sender_account=sender_account,
+            organization=organization,
+            envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
+        ),
+        None,
+    )
 
 
 def render_prompt(
@@ -201,13 +434,16 @@ def render_prompt(
     text = "".join(parts)
     if text.count(token) != 3:
         raise ValueError("rendered prompt lost its nonce delimiters")
-    return RenderedPrompt(
-        text=text,
+    rendered = RenderedPrompt(
         nonce=token,
         template_sha256=SCREENING_TEMPLATE_V1_SHA256,
-        body_sha256=_body_sha256(body_text),
+        body_sha256=_body_sha256_bytes(body_text.encode("utf-8")),
         screened_bytes=len(body_text.encode("utf-8")),
     )
+    # Private carrier: set outside the field set so no generic serializer
+    # can reach the body text (H3-Q7).
+    rendered.__dict__["_private_text"] = text
+    return rendered
 
 
 def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
@@ -218,6 +454,10 @@ def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
     """
 
     if not isinstance(reply, str):
+        return None
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in reply):
+        # A lone surrogate could not round-trip to UTF-8 storage; treating it
+        # as a valid verdict would smuggle malformed content downstream.
         return None
     # Exactly two lines: strip the ONE conventional trailing terminator, but
     # an extra blank line is extra output and must reject (strict grammar).
@@ -249,6 +489,37 @@ def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
     return ("bounce", categories, reason, verdict)
 
 
+_HOLD_FOR_SCHEMA = {
+    "schema_damaged": "schema_damaged",
+    "schema_unversioned": "schema_damaged",
+    "schema_unsupported": "schema_damaged",
+    "state_unreadable": "schema_damaged",
+}
+_HOLD_FOR_COMMIT = {
+    "stale_generation": "owner_changed",
+    "not_enrolled": "owner_changed",
+    "busy": "retry_later",
+    "write_once_conflict": "write_once_conflict",
+    "attempt_mismatch": "retry_later",
+    "policy_stale": "policy_stale",
+    "unknown_attempt": "retry_later",
+}
+
+
+def _persist_hold(
+    store: Store, owner: OwnerSnapshot, message_id: str, code: str, retry_at: float | None = None
+) -> None:
+    """Best-effort durable hold for a VALID live owner; never raises."""
+
+    try:
+        store.persist_hold(owner, message_id, code, retry_at=retry_at)
+    except StoreRefused:
+        # An owner that went stale between validation and the hold write
+        # simply gets no row: durable state must never hold another
+        # generation's data, and H4 reconciles from the ack path.
+        pass
+
+
 def screen_message(
     owner: OwnerSnapshot,
     item: Mapping[str, Any],
@@ -260,15 +531,20 @@ def screen_message(
 ) -> ScreenResult:
     """The ONE screening pipeline. At most one runner dispatch per call.
 
-    Order is the contract: authority → template → body hash → H2 intent/cache
-    recovery (no model cost) → durable budget reservation → dispatch → strict
-    parse → metadata-only durable outcome. Every refusal is a hold with a
+    Order is the contract: owner authority → template floor → envelope
+    validation (all pre-spend) → policy publish/epoch → H2 intent
+    reconciliation (never a fresh admission, never a rebill) → full-fingerprint
+    cache → breaker → availability → durable LOGICAL reservation → render →
+    dispatch → live-policy recheck → identity → strict parse → WRITE-ONCE
+    outcome fenced on the published epoch. Every refusal is a hold with a
     closed code; nothing durable ever carries body text, reasons or replies.
     """
 
     store = Store(config_dir)
 
-    # 1. Exact owner + latest committed generation (native guard).
+    # 1. Exact owner + latest committed generation (native guard). Schema
+    #    damage must surface as its own typed hold, never as a provider
+    #    fault and never as a silent repair.
     try:
         committed = store.resolve_owner(
             credential_id=owner.credential_id,
@@ -277,161 +553,259 @@ def screen_message(
             endpoint_id=owner.endpoint_id,
             canonical_base_url=owner.canonical_base_url,
         )
-    except StoreRefused:
-        return ScreenResult("hold", hold_code="owner_mismatch")
+    except StoreRefused as failure:
+        return ScreenResult("hold", hold_code=_HOLD_FOR_SCHEMA.get(failure.code, "owner_mismatch"))
     if committed is None or committed != owner:
+        # A damaged/unknown store also answers None (no authority); name that
+        # reason so the hold is typed and actionable rather than a false
+        # "owner" claim (H3-Q4/Q8: never repair, but never mislabel either).
+        if committed is None and store.schema_problem() is not None:
+            return ScreenResult("hold", hold_code="schema_damaged")
         return ScreenResult("hold", hold_code="owner_mismatch")
 
-    # 2. Template authority: byte-equal frozen v1 only.
+    # 2. Template authority: byte-equal frozen v1 only, checked against an
+    #    IMMUTABLE snapshot so nothing mutated later can launder in.
+    snapshot = PolicySnapshot.capture(policy)
     if (
-        policy.screening_version != SCREENING_VERSION_V1
-        or policy.template_sha256 != SCREENING_TEMPLATE_V1_SHA256
+        snapshot.screening_version != SCREENING_VERSION_V1
+        or snapshot.template_sha256 != SCREENING_TEMPLATE_V1_SHA256
     ):
+        # The owner resolved live, so this early refusal becomes a durable
+        # hold during the message's lifetime (H3-Q8), separate from the
+        # inbox projection's own state.
+        raw_id = item.get("message")
+        held_id = raw_id.get("id") if isinstance(raw_id, Mapping) else None
+        if isinstance(held_id, str) and held_id:
+            _persist_hold(store, owner, held_id, "template_mismatch")
         return ScreenResult("hold", hold_code="template_mismatch")
 
-    # 3. Body binding BEFORE any model request.
-    raw_message = item.get("message")
-    message: Mapping[str, Any] = raw_message if isinstance(raw_message, Mapping) else {}
-    message_id = message.get("id")
-    raw_body = message.get("body")
-    body: Mapping[str, Any] = raw_body if isinstance(raw_body, Mapping) else {}
-    body_text = body.get("text")
-    if not isinstance(message_id, str) or not message_id or not isinstance(body_text, str):
-        return ScreenResult("hold", hold_code="body_hash_mismatch")
-    body_sha = _body_sha256(body_text)
-    served_hash = message.get("body_hash")
-    if not isinstance(served_hash, str) or served_hash != body_sha:
-        return ScreenResult("hold", hold_code="body_hash_mismatch")
+    # 3. Envelope validation before any store write or spend (H3-Q9).
+    envelope, bad_code = validate_envelope(owner, item)
+    if envelope is None:
+        _persist_hold(
+            store,
+            owner,
+            str(item.get("message", {}).get("id", "")),
+            bad_code or "envelope_malformed",
+        )
+        return ScreenResult("hold", hold_code=bad_code or "envelope_malformed")
+    message_id = envelope.message_id
 
-    # 4. Reconcile H2's immutable tuple FIRST: a pending/recorded intent for
-    #    this exact tuple recovers without a new screening round (no rebill).
+    # 4. Publish the admission policy epoch (trusted local plumbing) so the
+    #    outcome commit can refuse a policy that moved while the model ran.
+    try:
+        epoch = store.publish_screening_policy(
+            owner,
+            version=snapshot.screening_version,
+            template_sha256=snapshot.template_sha256,
+            default_model=snapshot.default_model,
+            revision=snapshot.admission_revision,
+        )
+    except StoreRefused as failure:
+        code = _HOLD_FOR_SCHEMA.get(failure.code, "owner_changed")
+        return ScreenResult("hold", hold_code=code)
+
+    # 5. Reconcile H2's immutable tuple FIRST: an existing intent is NEVER a
+    #    fresh admission (H3-Q1/A3). Exact replays reconcile through the ack
+    #    path; this pipeline just refuses to bill or admit behind its back.
     existing = store.find_pending_intent(owner, message_id, "read")
-    if existing is not None and existing["receipt"] is not None:
+    if existing is not None:
         receipt_data = existing["receipt"]
-        if receipt_data.get("body_sha256") == body_sha:
-            return ScreenResult(
-                "deliver",
-                receipt=ScreeningReceipt(
-                    verdict=receipt_data["verdict"],
-                    model=receipt_data["model"],
-                    prompt_version=receipt_data["prompt_version"],
-                    template_sha256=receipt_data["template_sha256"],
-                    body_sha256=receipt_data["body_sha256"],
-                    categories=tuple(receipt_data["categories"]),
-                ),
-            )
+        if receipt_data is None:
+            _persist_hold(store, owner, message_id, "ack_recovery")
+            return ScreenResult("hold", hold_code="ack_recovery")
+        if receipt_data.get("body_sha256") != envelope.body_sha256:
+            _persist_hold(store, owner, message_id, "body_hash_mismatch")
+            return ScreenResult("hold", hold_code="body_hash_mismatch")
+        _persist_hold(store, owner, message_id, "ack_recovery")
+        return ScreenResult("hold", hold_code="ack_recovery")
 
-    # 4b. Same-body cache: reuse ONLY when model+template are the SAME
-    #     (a changed fingerprint must miss rather than replay a stale allow).
-    if policy.default_model is not None:
+    # 6. Fingerprint cache: reuse ONLY under the FULL current admission tuple
+    #    (body + template + model + revision + envelope digest). A changed
+    #    sender/type/request/revision misses and re-screens; a reject is
+    #    reused as the same bounce rather than silently re-billed (H3-Q2).
+    fingerprint = f"{snapshot.admission_revision}|{envelope.envelope_digest}"
+    if snapshot.default_model is not None:
         cached = store.find_screening_receipt(
             owner,
-            body_sha256=body_sha,
-            template_sha256=SCREENING_TEMPLATE_V1_SHA256,
-            model=policy.default_model,
+            body_sha256=envelope.body_sha256,
+            template_sha256=snapshot.template_sha256,
+            model=snapshot.default_model,
+            admission_revision=snapshot.admission_revision,
+            envelope_digest=envelope.envelope_digest,
         )
-        if cached is not None and cached.get("verdict") == "allow":
+        if cached is not None:
+            receipt = ScreeningReceipt(
+                verdict=cached["verdict"],
+                model=cached["model"],
+                prompt_version=cached["prompt_version"],
+                template_sha256=cached["template_sha256"],
+                body_sha256=cached["body_sha256"],
+                categories=tuple(cached["categories"]),
+            )
+            disposition = "deliver" if cached["verdict"] == "allow" else "bounce"
             return ScreenResult(
-                "deliver",
-                receipt=ScreeningReceipt(
-                    verdict="allow",
-                    model=cached["model"],
-                    prompt_version=SCREENING_VERSION_V1,
-                    template_sha256=cached["template_sha256"],
-                    body_sha256=cached["body_sha256"],
-                    categories=tuple(cached["categories"]),
-                ),
+                disposition, receipt=receipt, screened_bytes=len(envelope.body_text.encode("utf-8"))
             )
 
-    # 5. Fresh nonce render (bounded regeneration; the renderer refuses a
-    #    polluted token outright).
-    raw_sender = item.get("sender")
-    sender_data: Mapping[str, Any] = raw_sender if isinstance(raw_sender, Mapping) else {}
+    # 7. Account breaker: an open breaker is a hold with its own retry time,
+    #    BEFORE any reservation (no spend while the route is known-broken).
+    breaker = store.screening_breaker_state(owner)
+    import time as _time
+
+    now = _time.time()
+    if breaker is not None and float(breaker.get("open_until", 0) or 0) > now:
+        _persist_hold(
+            store, owner, message_id, "breaker_open", retry_at=float(breaker["open_until"])
+        )
+        return ScreenResult("hold", hold_code="breaker_open", retry_at=float(breaker["open_until"]))
+
+    # 8. Availability before the reservation: a known-missing runner or an
+    #    unusable default is a durable hold, never a spent budget unit
+    #    (H3-Q8 — no charge for a dispatch that provably cannot happen).
+    if snapshot.default_model is None or runner is None:
+        _persist_hold(store, owner, message_id, "runner_unavailable")
+        return ScreenResult("hold", hold_code="runner_unavailable")
+
+    # 9. Durable LOGICAL reservation BEFORE inference I/O. Exhaustion/busy/
+    #    schema failures are typed holds; never a reset.
+    try:
+        attempt_id = store.reserve_screening_attempt(
+            owner, message_id=message_id, fingerprint=fingerprint
+        )
+    except StoreRefused as failure:
+        code = _HOLD_FOR_SCHEMA.get(failure.code)
+        if code is None:
+            code = {"budget_exhausted": "budget_exhausted"}.get(failure.code, "retry_later")
+        _persist_hold(store, owner, message_id, code)
+        return ScreenResult("hold", hold_code=code)
+
+    # 10. Fresh nonce render. A polluted token or a changed delimiter
+    #     contract refuses; regeneration is bounded (H3 hostile-input control).
     rendered: RenderedPrompt | None = None
     for _ in range(8):
         try:
             rendered = render_prompt(
-                body_text=body_text,
-                sender=str(sender_data.get("account_id", "")),
-                organization=str(owner.tenant_id),
-                msg_type=str(message.get("type", "")),
+                body_text=envelope.body_text,
+                sender=envelope.sender_account,
+                organization=envelope.organization,
+                msg_type=envelope.message_type,
                 nonce=nonce,
             )
             break
         except ValueError:
             if nonce is not None:
-                return ScreenResult("hold", hold_code="template_mismatch")
+                break
             continue
     if rendered is None:
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "template_mismatch")
         return ScreenResult("hold", hold_code="template_mismatch")
 
-    # 6. Durable reservation BEFORE inference I/O: exactly one charge per
-    #    dispatch; exhaustion is a HOLD, never a reset.
-    if policy.default_model is None:
-        return ScreenResult("hold", hold_code="runner_unavailable")
+    # 11. ONE dispatch. Provider failures are typed holds AND advance the
+    #     durable breaker; nothing of the exception's prose is kept.
     try:
-        attempt_id = store.reserve_screening_attempt(owner)
-    except StoreRefused as failure:
-        return ScreenResult(
-            "hold",
-            hold_code=(
-                "budget_exhausted" if failure.code == "budget_exhausted" else "provider_error"
-            ),
-        )
-    if runner is None:
-        store.finish_screening(
-            owner, message_id, attempt_id=attempt_id, hold_code="runner_unavailable"
-        )
-        return ScreenResult("hold", hold_code="runner_unavailable")
-
-    # 7. ONE dispatch; sanitized typed failures only (the runner's contract).
-    try:
-        reply, actual_model = runner(rendered.text, default_model=policy.default_model)
+        reply, actual_model = runner(rendered.private_text(), default_model=snapshot.default_model)
     except Exception:  # noqa: BLE001 - sanitized hold; never prose
-        store.finish_screening(owner, message_id, attempt_id=attempt_id, hold_code="provider_error")
-        return ScreenResult("hold", hold_code="provider_error")
+        retry_at = _record_failure(store, owner)
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
+        return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
 
+    # 12. Post-await live-policy recheck: the LIVE policy must still equal the
+    #     snapshot that authorized the dispatch, or the outcome is refused
+    #     (H3-Q3 — a mid-run default/template/revision switch cannot be
+    #     laundered into an admission, however the runner replies).
+    if not snapshot.matches_live(policy):
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "policy_stale")
+        return ScreenResult("hold", hold_code="policy_stale")
+
+    # 13. Identity: the actual serving model must be the captured default or
+    #     an APPROVED resolution of it; anything else holds (never a guess).
     if actual_model is None:
-        store.finish_screening(
-            owner, message_id, attempt_id=attempt_id, hold_code="model_identity_unknown"
+        _commit_hold(
+            store, owner, message_id, attempt_id, fingerprint, epoch, "model_identity_unknown"
         )
         return ScreenResult("hold", hold_code="model_identity_unknown")
-    if actual_model != policy.default_model:
-        # The runtime resolved a DIFFERENT model than the captured default:
-        # no fallback is authorized, so this is a hold, never an allow.
-        store.finish_screening(
-            owner, message_id, attempt_id=attempt_id, hold_code="model_identity_mismatch"
+    if not snapshot.accepts_serving_identity(actual_model):
+        _commit_hold(
+            store, owner, message_id, attempt_id, fingerprint, epoch, "model_identity_mismatch"
         )
         return ScreenResult("hold", hold_code="model_identity_mismatch")
 
-    # 8. Strict parse → metadata-only durable outcome.
+    # 14. Strict parse → write-once metadata-only outcome.
     parsed = parse_verdict(reply)
     if parsed is None:
-        store.finish_screening(owner, message_id, attempt_id=attempt_id, hold_code="parse_failed")
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "parse_failed")
         return ScreenResult("hold", hold_code="parse_failed")
     disposition, categories, reason, _verdict = parsed
     if disposition == "hold":
-        store.finish_screening(owner, message_id, attempt_id=attempt_id, hold_code="model_hold")
-        return ScreenResult("hold", hold_code="model_hold", ephemeral_reason=reason)
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
+        return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
-        store.finish_screening(
-            owner, message_id, attempt_id=attempt_id, hold_code="bounce_without_category"
+        _commit_hold(
+            store, owner, message_id, attempt_id, fingerprint, epoch, "bounce_without_category"
         )
-        return ScreenResult("hold", hold_code="bounce_without_category")
+        return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
     receipt = ScreeningReceipt(
         verdict="allow" if disposition == "deliver" else "reject",
         model=actual_model,
         prompt_version=SCREENING_VERSION_V1,
         template_sha256=rendered.template_sha256,
-        body_sha256=body_sha,
+        body_sha256=envelope.body_sha256,
         categories=categories,
     )
-    store.finish_screening(
-        owner, message_id, attempt_id=attempt_id, receipt=receipt, hold_code=None
-    )
+    try:
+        store.finish_screening(
+            owner,
+            message_id,
+            attempt_id=attempt_id,
+            fingerprint=fingerprint,
+            expected_epoch=epoch,
+            receipt=receipt,
+            envelope_digest=envelope.envelope_digest,
+        )
+    except StoreRefused as failure:
+        code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
+        _persist_hold(store, owner, message_id, code)
+        return ScreenResult("hold", hold_code=code)
+    try:
+        store.record_screening_success(owner)
+    except StoreRefused:
+        pass
     return ScreenResult(
         disposition,
         receipt=receipt,
         screened_bytes=rendered.screened_bytes,
-        ephemeral_reason=reason,
-    )
+    ).set_private_reason(reason)
+
+
+def _record_failure(store: Store, owner: OwnerSnapshot) -> float | None:
+    """Advance the durable breaker; return its retry time (best effort)."""
+
+    try:
+        return store.record_screening_failure(owner)
+    except StoreRefused:
+        return None
+
+
+def _commit_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    message_id: str,
+    attempt_id: str,
+    fingerprint: str,
+    epoch: int,
+    hold_code: str,
+) -> None:
+    """Record ONE hold against the reserved attempt; never raise."""
+
+    try:
+        store.finish_screening(
+            owner,
+            message_id,
+            attempt_id=attempt_id,
+            fingerprint=fingerprint,
+            expected_epoch=epoch,
+            hold_code=hold_code,
+        )
+    except StoreRefused:
+        _persist_hold(store, owner, message_id, hold_code)
