@@ -22,6 +22,13 @@ from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 
+# Cheap and stdlib-only on purpose: the two registry drainers (this route and
+# the TUI page) must be able to ask "may the agent-messages section render
+# here, right now" without importing the client stack or fetching anything
+# (RFC §5.6 makes the section's visibility dynamic; §5.4 says the static
+# registry is not the gate). See `team_bridge.availability`.
+from local_operator.team_bridge import availability as bridge_availability
+
 router = APIRouter(tags=["Settings"], dependencies=[Depends(require_desktop)])
 # The underlying manager writes a whole YAML snapshot. Serialize this server's
 # read/merge/write operations, not just the final rename, to preserve siblings.
@@ -74,6 +81,17 @@ class SettingView(BaseModel):
     warning: str = ""
     placeholder: str = ""
     gated_by: str | None = None
+    #: A live sentence about this row's CURRENT server-side posture, and
+    #: whether the row can change effective behaviour. Agent messages in
+    #: §5.6 F (plan lapse / confirmed kill): the local preference rows stay
+    #: visible for honesty, but the note is the contract's own sentence — the
+    #: neutral "Agent messages are turned off" in v1 (review round 2, R9) —
+    #: and the UI presents the controls view-only rather than implying an edit
+    #: resumes the flow (H1 review round 1, Q3/D3). Additive and optional,
+    #: like the three fields above: a client that ignores them sees the
+    #: response it saw before, and every other row carries the defaults.
+    state_note: str = ""
+    read_only: bool = False
     #: The value grammar of a HOTKEY row (``"app"`` / ``"desktop"``), DERIVED
     #: in ``settings_io``'s registry from ``keymap.KEY_ACTIONS`` — never
     #: authored twice, so the wire cannot disagree with what the writers
@@ -111,6 +129,18 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         if setting.kind is settings_io.Kind.CASCADE
         else settings_io.read_setting(manager, setting)
     )
+    state_note = ""
+    read_only = False
+    if setting.section == bridge_availability.BRIDGE_SECTION:
+        # The posture comes from the process-local record the status
+        # discipline writes (never a fetch here): §5.6 F renders its note and
+        # asks the UI to present the controls view-only (Q3/D3).
+        observed = bridge_availability.observed(manager.config_dir)
+        if observed is not None and observed.get("read_only"):
+            read_only = True
+            note = observed.get("note")
+            if isinstance(note, str):
+                state_note = note
     return SettingView(
         key=setting.key,
         section=setting.section,
@@ -134,6 +164,8 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
         unit=setting.unit,
+        state_note=state_note,
+        read_only=read_only,
     )
 
 
@@ -156,6 +188,7 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
             manager.reload()
         except settings_io.ConfigUnreadableError:
             raise HTTPException(409, _we.config_unreadable().envelope())
+        root = manager.config_dir
         return CRUDResponse(
             status=200,
             message="Settings retrieved.",
@@ -168,8 +201,19 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
                         "description": section.description,
                     }
                     for section in settings_io.SECTIONS
+                    # §5.6: a dynamically-gated section (agent messages) is
+                    # ABSENT — both its header and every row belonging to it —
+                    # until this daemon has observed an eligible state. The
+                    # record is written by the status discipline's boundary
+                    # reads (`team_bridge.availability`); a daemon that never
+                    # read shows nothing, which is the fail-closed direction.
+                    if bridge_availability.section_visible(section.name, root)
                 ],
-                settings=[_view(manager, setting) for setting in settings_io.SETTINGS],
+                settings=[
+                    _view(manager, setting)
+                    for setting in settings_io.SETTINGS
+                    if bridge_availability.section_visible(setting.section, root)
+                ],
             ),
         )
 
