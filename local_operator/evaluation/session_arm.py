@@ -1080,7 +1080,12 @@ class ActionBridge:
 
         self._steps += 1
         if self.record is not None:
-            self.record("output_epoch", {"kind": kind, "steps": self._steps})
+            # ``epoch_kind``, deliberately NOT ``kind``: a RecordSink row
+            # merges payload keys into its own JSON object, and a payload
+            # ``kind`` would overwrite the row's kind (measured on the offline
+            # rig: epoch rows arrived in events.jsonl renamed to the epoch
+            # kind, invisible to every counter -- the merge collision class).
+            self.record("output_epoch", {"epoch_kind": kind, "steps": self._steps})
 
     async def call(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """One model call, decided exactly as the loop-driven tool decides it."""
@@ -2452,8 +2457,7 @@ async def run_session_episode(
                     # would have linked it said ``score: null``).
                     record.seal_write(
                         record_root / "score.json",
-                        json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True)
-                        + "\n",
+                        json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
                     )
                 except RecordSinkError as error:
                     record_errors.append(error)

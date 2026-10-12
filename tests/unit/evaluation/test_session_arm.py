@@ -566,7 +566,7 @@ class TestCompletionGate:
         # (blueprint §3), recorded before the challenge row.
         assert bridge.steps == 1
         assert [kind for kind, _ in events] == ["output_epoch", "completion_challenged"]
-        assert events[0][1] == {"kind": "finish-challenged", "steps": 1}
+        assert events[0][1] == {"epoch_kind": "finish-challenged", "steps": 1}
         assert events[1][1]["reason"] == "filled the form"
         assert events[1][1]["observation_id"] == obs.observation_id
 
