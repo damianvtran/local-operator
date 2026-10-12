@@ -335,6 +335,8 @@ def scan_skills_dir(
     source: str,
     include_self: bool = False,
     seen: set[str] | None = None,
+    *,
+    boundary: Path | None = None,
 ) -> list[Skill]:
     """Scan one root to a bounded depth: ``<dir>[/<group>...]/<skill>/SKILL.md``.
 
@@ -354,6 +356,10 @@ def scan_skills_dir(
     :func:`discover_skills`) so one physical file is never loaded twice.
     ``include_self`` additionally accepts ``<dir>/SKILL.md`` (the wider
     ecosystem only uses this for Claude-plugin manifests; kept for parity).
+    ``boundary``, when set (an already-normalized world root), drops any
+    candidate whose realpath escapes it BEFORE its metadata is read: a
+    symlinked directory inside the tree pointing at a skill outside it is
+    not this tree's skill, however it is spelled (QA round 1, Q2).
     """
     skills: list[Skill] = []
     if seen is None:
@@ -365,6 +371,8 @@ def scan_skills_dir(
         except OSError:
             return
         if real in seen:
+            return
+        if boundary is not None and not Path(real).is_relative_to(boundary):
             return
         skill = _skill_from_file(skill_md, base_dir, source)
         if skill is None:
@@ -393,14 +401,25 @@ def _sort_key(skill: Skill) -> tuple[str, str, str]:
     return (skill.name.lower(), skill.name, str(skill.file_path))
 
 
-def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
+def discover_skills(
+    roots: Sequence[Path],
+    *,
+    boundary: Path | None = None,
+) -> tuple[list[Skill], list[str]]:
     """Discover skills across roots; earlier roots win name collisions.
 
     Returns ``(skills, warnings)``. Warnings name every shadowed skill so a
     user who wonders why an edit to a home-root skill "did nothing" can see
     that a project-root skill of the same name took precedence. Missing
     roots are silently skipped (the home root may not exist yet).
+
+    ``boundary``, when set, is the world boundary a bounded session
+    validated; it is normalized ONCE here and every scan clips to it — the
+    initial walk and the resolver's miss-path rescan must answer the same
+    question, or the rescan re-admits what the walk excluded. ``None`` is
+    every ordinary call, unchanged.
     """
+    boundary_path = Path(boundary).expanduser().resolve() if boundary is not None else None
     seen: set[str] = set()
     warnings: list[str] = []
     ordered: list[Skill] = []
@@ -408,7 +427,7 @@ def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
         root = Path(root).expanduser()
         if not root.is_dir():
             continue
-        ordered.extend(scan_skills_dir(root, source=str(root), seen=seen))
+        ordered.extend(scan_skills_dir(root, source=str(root), seen=seen, boundary=boundary_path))
 
     by_name: dict[str, Skill] = {}
     final: list[Skill] = []

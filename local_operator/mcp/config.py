@@ -487,14 +487,18 @@ def load_all_mcp_configs(
     must not shadow lower-priority sources.
 
     ``boundary`` is the world boundary a bounded caller validated (the
-    benchmark's SDK world — see ``SessionSpec.world_root``). When set, the
-    HOME-relative sources (items 4, 6 and 8) join only when they lie inside
-    the boundary: a world must not silently inherit the controller home's or
-    the operator home's server declarations. The cwd-scoped sources and the
-    isolated config dir's own ``mcp.json`` are kept — the first are world
-    content, the second is the explicitly scoped controller source the
-    episode's action declaration lives in (see ``evaluation.session_arm``).
-    ``None`` is every ordinary call, unchanged.
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, EVERY
+    candidate but the isolated config dir's own file must RESOLVE inside the
+    boundary — not merely spell a path inside it: the HOME-relative sources
+    join only when the world genuinely owns them (a world must not silently
+    inherit the controller home's or the operator home's server
+    declarations), and the cwd-scoped sources are canonicalized too, so a
+    ``<world>/.mcp.json`` symlinked out to a file elsewhere cannot enter as
+    "world content" (measured: it did, and its servers connected — see
+    ``QA round 1``). The one trusted exemption stays: the config dir's own
+    ``mcp.json`` is the explicitly scoped controller source the episode's
+    action declaration lives in (see ``evaluation.session_arm``). ``None``
+    is every ordinary call, unchanged.
     """
     root = Path(cwd).expanduser()
     home = Path.home()
@@ -539,14 +543,16 @@ def load_all_mcp_configs(
     ]
 
     if world is not None:
-        # Only the HOME-relative sources are clipped: the cwd-scoped entries
-        # are world content by construction, and ``user_path`` is the isolated
-        # config dir's own file — the explicitly scoped controller source.
-        home_relative = {
-            home / ".claude.json",
-            home / ".cursor" / "mcp.json",
-            home / ".codex" / "config.toml",
-        }
+        # ONE canonical-containment pass for every candidate but the isolated
+        # config dir's own file. ``resolve`` is the load-bearing call for the
+        # cwd-scoped rows: their SPELLING is always inside the world, but a
+        # symlinked file resolves outside it, and that was the measured hole
+        # — ``<world>/.mcp.json -> <outer>.json`` entered as world content and
+        # its servers were connected and catalogued to the model (QA round 1,
+        # Q2). A nonexistent candidate resolves to its normalized path and is
+        # kept (its read yields ``None``); the home-relative rows keep the
+        # pre-existing join-only-if-inside semantics, which this predicate
+        # states in canonical form.
 
         def _in_world(path: Path) -> bool:
             try:
@@ -555,7 +561,7 @@ def load_all_mcp_configs(
                 return False
             return canonical == world or canonical.is_relative_to(world)
 
-        candidates = [row for row in candidates if row[0] not in home_relative or _in_world(row[0])]
+        candidates = [row for row in candidates if row[0] == user_path or _in_world(row[0])]
 
     claude_path = home / ".claude.json"
     # First pass: collect every candidate per name (priority order) and the

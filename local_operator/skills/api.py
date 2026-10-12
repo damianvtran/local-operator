@@ -234,6 +234,8 @@ def _refresh_if_changed(
     skills: MutableMapping[str, Skill],
     roots: Sequence[Path],
     state: _RefreshState,
+    *,
+    boundary: Path | None = None,
 ) -> None:
     """Rescan the roots into ``skills`` when the tree changed.
 
@@ -299,7 +301,15 @@ def _refresh_if_changed(
         if fingerprint == state.fingerprint:
             return
         try:
-            discovered, _warnings = discover_skills(roots)
+            # The boundary kwarg joins the call only when there IS one: the
+            # ordinary path must keep the byte-identical two-argument shape
+            # every existing caller and stub was written against (the None
+            # promise is behavioural, and a reduced fake that only knows the
+            # historical signature is exactly how these seams get tested).
+            if boundary is None:
+                discovered, _warnings = discover_skills(roots)
+            else:
+                discovered, _warnings = discover_skills(roots, boundary=boundary)
         except OSError:
             # Do NOT commit the fingerprint here. See point 3 above.
             return
@@ -313,6 +323,8 @@ def _refresh_if_changed(
 def make_skill_resolver(
     skills: Mapping[str, Skill],
     roots: Sequence[Path] | None = None,
+    *,
+    boundary: Path | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``SkillResolver`` adapter for the ``read`` tool.
 
@@ -339,8 +351,20 @@ def make_skill_resolver(
     ``roots=None`` is the default so every existing caller -- and the parallel
     guide resolver, whose resources are packaged and cannot change at runtime
     -- keeps today's behaviour exactly.
+
+    ``boundary``, when set, is the world boundary the session was validated
+    with. It travels BOTH ways through this adapter: the miss-path rescan
+    clips to it (``_refresh_if_changed``), and every resolution is guarded at
+    READ time -- a resource whose directory resolves outside the boundary is
+    reported as unknown, so a skill directory replaced by an escaping symlink
+    after discovery cannot be read through a stale mapping entry. ``None`` is
+    every ordinary call, unchanged.
     """
     state = _RefreshState()
+    # Normalized ONCE at construction: the guard below runs on every read and
+    # must not pay (or vary on) a second resolution, and the SDK already
+    # resolved this path before the session existed.
+    world_boundary = Path(boundary).expanduser().resolve() if boundary is not None else None
     # Narrowed ONCE here rather than re-tested inside the closure, so the hot
     # path carries no type checks. Only a MutableMapping can be refreshed in
     # place: callers pass a plain dict, the read-only ``Mapping`` annotation
@@ -357,7 +381,7 @@ def make_skill_resolver(
         if not url.startswith("skill://"):
             return None
         try:
-            return resolve_skill_url(url, skills)
+            return resolve_skill_url(url, skills, boundary=world_boundary)
         except ValueError as exc:
             message = str(exc)
             if (
@@ -379,7 +403,7 @@ def make_skill_resolver(
                 # at any depth) is never made resolvable by rescanning, so the
                 # work is pure waste on attacker-chosen input.
                 return message
-            _refresh_if_changed(refresh_target, refresh_roots, state)
+            _refresh_if_changed(refresh_target, refresh_roots, state, boundary=world_boundary)
             # ALWAYS re-resolve, whatever the refresh did or did not do. The
             # only question that matters here is "is the name resolvable NOW",
             # and the mapping is shared: a concurrent reader may have populated
@@ -389,7 +413,7 @@ def make_skill_resolver(
             # on the refresh's own outcome is what made the losing thread of a
             # race report ``Unknown skill`` for a skill already in the dict.
             try:
-                return resolve_skill_url(url, skills)
+                return resolve_skill_url(url, skills, boundary=world_boundary)
             except ValueError as retry_exc:
                 message = str(retry_exc)
             except OSError as retry_exc:

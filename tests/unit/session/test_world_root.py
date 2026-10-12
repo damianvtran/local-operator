@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,10 @@ INNER_GUIDANCE = "IN-WORLD-GUIDANCE-SENTINEL"
 OUTER_SKILL = "outer-sentinel-skill"
 INNER_SKILL = "inner-sentinel-skill"
 CHILD_PROBE = "CHILD-WORLD-PROBE"
+MCP_WORLD_FIXTURE = "world-echo-fixture"
+MCP_OUTER_CURSOR = "outer-cursor-sentinel"
+MCP_OUTER_PROJECT = "outer-project-sentinel"
+MCP_OUTER_MARKER = "OUTER-CURSOR-BODY"
 
 #: The task tool's result names its background job as ``job <hex id>`` (the
 #: same shape the session-arm rig parses).
@@ -71,7 +76,11 @@ def episode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> 
     NOT ``tmp_path``: the seatbelt profile deliberately permits READS of
     ``/private/var/folders`` (the per-user temp — dyld caches and mktemp
     machinery live there), so a world sited there cannot demonstrate the
-    kernel denial at all. The tree lives under the REAL home (the same idiom
+    kernel denial at all — and since QA round 1 the SDK preflight REFUSES
+    layouts whose stores sit under such a tree outright (see
+    ``test_controller_state_under_kernel_exposed_trees_is_refused``): the
+    profile cannot deny a child path back out of a broad machinery allow.
+    The tree lives under the REAL home (the same idiom
     ``test_build_and_scripts.durable_path`` uses) and is removed afterwards.
     """
     import pwd
@@ -349,7 +358,20 @@ async def test_the_world_boundary_holds_end_to_end_over_the_real_sdk(
         CONTROLLER_CANARY not in results
     ), "the controller canary's CONTENT must never come back through any tool"
     assert "outside it" in results, "the read of a controller sibling must be refused"
-    assert "Operation not permitted" in results, "the shell must be stopped by the kernel sandbox"
+    # The shell is stopped by the KERNEL on hosts that carry the sandbox
+    # (darwin: seatbelt's "Operation not permitted"); a host WITHOUT one
+    # refuses to run the command at all (``spawn_refusal``) rather than run
+    # it unconfined. Either is the boundary holding — the canary-CONTENT
+    # assertion above is the one that must pass on every host — and asserting
+    # the macOS sentence everywhere made this test fail on Linux while the
+    # sandbox was working as designed (QA round 1, Q4).
+    assert any(
+        marker in results
+        for marker in (
+            "Operation not permitted",
+            "cannot enforce that boundary for shell children",
+        )
+    ), "the shell must be stopped by the kernel sandbox or refused outright"
     # 4. The excluded capability does not resolve.
     assert "Tool not found: secret" in results, results[-600:]
     # 5. The shell runs under the strict allowlist.
@@ -418,10 +440,39 @@ def test_world_root_validation_refuses_incoherent_layouts(tmp_path: Path) -> Non
         return SessionRoots(config_dir=config_dir, agent_home=home, cwd=cwd, allow_volatile=True)
 
     # Happy path: resolved once, created if missing.
-    spec = SessionSpec(world_root=world)
-    assert _resolve_world_root(spec, _roots(world / "sub")) == world
-    fresh = tmp_path / "fresh-world"
-    assert _resolve_world_root(SessionSpec(world_root=fresh), _roots(fresh)) == fresh
+    import pwd
+    import shutil
+    import uuid
+
+    durable = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir)
+        / ".cache"
+        / "lop-world-root-tests"
+        / uuid.uuid4().hex[:12]
+    )
+    durable.mkdir(parents=True, exist_ok=True)
+    try:
+        d_world = durable / "world"
+        d_world.mkdir()
+        d_controller = durable / "controller-home"
+        d_config = d_controller / ".local-operator"
+        d_agent_home = d_controller / "agent-home"
+        for directory in (d_config, d_agent_home):
+            directory.mkdir(parents=True)
+
+        def _durable_roots(cwd: Path) -> SessionRoots:
+            return SessionRoots(
+                config_dir=d_config, agent_home=d_agent_home, cwd=cwd, allow_volatile=True
+            )
+
+        assert (
+            _resolve_world_root(SessionSpec(world_root=d_world), _durable_roots(d_world / "sub"))
+            == d_world
+        )
+        fresh = durable / "fresh-world"
+        assert _resolve_world_root(SessionSpec(world_root=fresh), _durable_roots(fresh)) == fresh
+    finally:
+        shutil.rmtree(durable, ignore_errors=True)
 
     # cwd outside the world.
     with pytest.raises(SessionSpecError, match="does not contain the session's cwd"):
@@ -558,3 +609,248 @@ def test_discovery_roots_clip_at_the_boundary(
         load_repo_guidance(outside, boundary=world)
     with pytest.raises(ValueError):
         load_all_mcp_configs(outside, boundary=world)
+
+    # ---------------------------------------------------------------------
+    # Symlinked SOURCES are not world sources (QA round 1, Q2): an in-world
+    # skill dir symlinked to an ancestor's skill, and a world project
+    # ``.local-operator/mcp.json`` symlinked to an out-of-world file, both
+    # resolve outside the boundary and must be dropped by the same
+    # canonical-containment pass the other sources go through. The unclipped
+    # reads stay permissive, so the clip (not the spelling) is the fix.
+    # ---------------------------------------------------------------------
+    leak = world / ".local-operator" / "skills" / "leaky-name"
+    os.symlink(base / ".local-operator" / "skills" / OUTER_SKILL, leak)
+    assert OUTER_SKILL not in {
+        skill.name
+        for skill in discover_skills(default_skill_roots(world, boundary=world), boundary=world)[0]
+    }, "an in-world symlink re-admitted an ancestor skill"
+
+    outer_mcp_file = base / "outer-mcp.json"
+    outer_mcp_file.write_text(
+        json.dumps({"mcpServers": {"symlink-mcp-sentinel": {"command": "/bin/echo"}}})
+    )
+    os.symlink(outer_mcp_file, world / ".local-operator" / "mcp.json")
+    sym_configs, sym_sources = load_all_mcp_configs(world, boundary=world)
+    assert "symlink-mcp-sentinel" not in sym_configs
+    assert all(
+        Path(source).resolve().is_relative_to(world.resolve()) for source in sym_sources.values()
+    ), sym_sources
+
+    # ---------------------------------------------------------------------
+    # READ time (QA round 1, Q2 second half): a skill directory REPLACED by
+    # an out-of-world symlink after discovery cannot be served through the
+    # stale mapping entry — the resolver refuses before anything is read,
+    # with the same unknown shape a name miss uses.
+    # ---------------------------------------------------------------------
+    import shutil as _shutil
+
+    from local_operator.skills.api import make_skill_resolver
+
+    inner_dir = world / ".local-operator" / "skills" / INNER_SKILL
+    skills_map = {
+        skill.name: skill
+        for skill in discover_skills(default_skill_roots(world, boundary=world), boundary=world)[0]
+    }
+    guard = make_skill_resolver(skills_map, None, boundary=world)
+    assert "body" in (guard(f"skill://{INNER_SKILL}") or "")
+    assert "Unknown skill" in (guard(f"skill://{OUTER_SKILL}") or "")
+    _shutil.rmtree(inner_dir)
+    os.symlink(base / ".local-operator" / "skills" / OUTER_SKILL, inner_dir)
+    swapped = guard(f"skill://{INNER_SKILL}") or ""
+    assert "Unknown skill" in swapped, "a post-discovery dir swap served out-of-world content"
+    # And the same resolver WITHOUT a boundary is the unchanged ordinary
+    # path: the guard is opt-in, not a global behaviour change.
+    ordinary = make_skill_resolver(skills_map, None)
+    assert ordinary(f"skill://{INNER_SKILL}") is not None
+
+
+def test_controller_state_under_kernel_exposed_trees_is_refused() -> None:
+    """QA round 1, Q3: the common ``tempfile`` layout never gets constructed.
+
+    ``tempfile.mkdtemp`` puts the layout under ``/private/var/folders`` — a
+    tree the seatbelt profile must expose read-only to shell children (dyld
+    caches and mktemp machinery live there). Measured: a broad allow defeats
+    a specific later DENY in seatbelt in both rule orders, so the profile
+    CANNOT carve the stores back out; accepted, the confined shell read the
+    dummy controller directly AND through a world symlink. The SDK preflight
+    therefore refuses the layout before anything is allocated. Proven the
+    same way the matrix proved the leak: the RAW default ``mkdtemp`` path,
+    no handpicked fixture. A world under the same tree with its stores
+    elsewhere is still accepted — the refusal guards the stores, not the
+    world — and the durable-home session tests above are the supported
+    shape passing end to end.
+    """
+    import shutil
+    import tempfile
+
+    from local_operator.sdk import _resolve_world_root
+
+    if sys.platform != "darwin":
+        # No kernel sandbox on this host: confined shells are refused
+        # outright (``spawn_refusal``), so there is no kernel path to guard
+        # and the layout is fine.
+        pytest.skip("the kernel-exposure refusal is only meaningful on hosts with the sandbox")
+
+    base = Path(tempfile.mkdtemp())
+    durable = Path(tempfile.mkdtemp())
+    try:
+        world = base / "world"
+        world.mkdir()
+        config = base / "home" / ".local-operator"
+        agent_home = base / "home" / "agent-home"
+        for directory in (config, agent_home):
+            directory.mkdir(parents=True)
+        roots = SessionRoots(
+            config_dir=config, agent_home=agent_home, cwd=world, allow_volatile=True
+        )
+        with pytest.raises(SessionSpecError, match="must expose read-only to shell children"):
+            _resolve_world_root(SessionSpec(world_root=world), roots)
+
+        # Stores outside the exposed trees, world inside: accepted.
+        d_config = Path.home() / ".cache" / "lop-world-root-tests"
+        d_config = d_config / os.urandom(4).hex() / ".local-operator"
+        d_agent = d_config.parent / "agent-home"
+        for directory in (d_config, d_agent):
+            directory.mkdir(parents=True)
+        roots2 = SessionRoots(
+            config_dir=d_config, agent_home=d_agent, cwd=world, allow_volatile=True
+        )
+        assert _resolve_world_root(SessionSpec(world_root=world), roots2) == world.resolve()
+        shutil.rmtree(d_config.parent, ignore_errors=True)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(durable, ignore_errors=True)
+
+
+class McpSkillScriptedClient(ScriptedWorldClient):
+    """The Q1/Q2 probe script: skills before/after a swap, MCP names live.
+
+    Parenting and stages work exactly as the base rig's do (``stage =
+    len(rows)``); the only difference is WHAT the parent asks for. The swap
+    itself happens in the test process BETWEEN prompts, so it works on every
+    host — the scripted shell could not do it on Linux, where confined bash
+    is refused by design.
+    """
+
+    #: Armed by the test between the two prompts (see the class docstring).
+    swapped = False
+
+    def _parent_events(self, rows: list[str]) -> list[Any]:
+        stage = len(rows)
+        if stage == 0:
+            return self._tool_call(0, "read", {"path": f"skill://{INNER_SKILL}"})
+        if stage == 1:
+            return self._tool_call(1, "read", {"path": f"skill://{OUTER_SKILL}"})
+        if stage == 2:
+            return self._tool_call(2, "read", {"path": f"mcp://{MCP_OUTER_CURSOR}"})
+        if stage == 3:
+            return self._tool_call(3, "read", {"path": f"mcp://{MCP_WORLD_FIXTURE}"})
+        if stage == 4:
+            # Prompt one ends HERE; the test swaps the in-world skill dir and
+            # arms ``swapped`` before prompt two, which is where the read of
+            # the swapped name happens — the swap must never be observable as
+            # a pre-swap read.
+            if not self.swapped:
+                return self._text_stop("part one complete", stage)
+            return self._tool_call(4, "read", {"path": f"skill://{INNER_SKILL}"})
+        return self._text_stop("mcp-skill-probe complete", stage)
+
+
+@pytest.fixture
+def scripted_mcp(
+    episode: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> McpSkillScriptedClient:
+    """The MCP/skill scripted transport, wired like ``scripted_``."""
+    import local_operator.providers.clients as clients_mod
+
+    client = McpSkillScriptedClient(episode)
+    original = clients_mod.client_for_spec
+
+    def patched(spec: Any, **kwargs: Any) -> Any:
+        if getattr(spec, "provider", None) == "test":
+            return client
+        return original(spec, **kwargs)
+
+    monkeypatch.setattr(clients_mod, "client_for_spec", patched)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_late_mcp_wiring_and_symlinked_sources_stay_inside_the_world(
+    episode: SimpleNamespace,
+    scripted_mcp: McpSkillScriptedClient,
+) -> None:
+    """QA round 1, Q1+Q2 over the real SDK session and the LIVE manager.
+
+    Planted before the open: the outer home's ``.cursor`` server, a world
+    project file that is a SYMLINK to an out-of-world file, one harmless
+    in-world fixture server (``true``; it exits immediately — nothing is
+    spoken to), and an in-world symlink to the ancestor skill dir. Then:
+    the live manager must know ONLY the in-world server — at startup, at
+    connect-by-name, and after a reload (Q1's exact leak shape was the
+    reload) — and the skill surface must refuse the ancestor both by
+    discovery and after a mid-session dir swap (Q2).
+    """
+    from local_operator.mcp.manager import McpConnectionError
+
+    cursor = episode.home / ".cursor"
+    cursor.mkdir(parents=True, exist_ok=True)
+    (cursor / "mcp.json").write_text(
+        json.dumps({"mcpServers": {MCP_OUTER_CURSOR: {"type": "stdio", "command": "true"}}})
+    )
+    outer_file = episode.base / "outer-mcp-sentinel.json"
+    outer_file.write_text(
+        json.dumps({"mcpServers": {MCP_OUTER_PROJECT: {"type": "stdio", "command": "true"}}})
+    )
+    os.symlink(outer_file, episode.world / ".local-operator" / "mcp.json")
+    (episode.world / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {MCP_WORLD_FIXTURE: {"type": "stdio", "command": "true"}}})
+    )
+    os.symlink(
+        episode.base / ".local-operator" / "skills" / OUTER_SKILL,
+        episode.world / ".local-operator" / "skills" / "sneaky-link",
+    )
+
+    async with sdk.open_session(_episode_spec(episode.world), roots=episode.roots) as session:
+        concrete = cast(Any, session)
+        await session.prompt("mcp and skill probe, part one")
+
+        manager = concrete.mcp_manager
+        assert manager is not None, "the world session must carry a live MCP manager"
+        # The in-world server is the only CONFIGURED one at the live manager.
+        assert MCP_WORLD_FIXTURE in manager._configs, manager._configs
+        for absent in (MCP_OUTER_CURSOR, MCP_OUTER_PROJECT):
+            assert absent not in manager._configs, manager._configs
+            with pytest.raises(McpConnectionError):
+                await manager.connect_configured_server(absent, interactive=False)
+        # Every admitted source file lives inside the world.
+        for source in manager._sources.values():
+            assert Path(source).resolve().is_relative_to(episode.world.resolve()), source
+        # The RELOAD path answers with the same clipped set (Q1's leak was
+        # exactly this call re-reading the unclipped sources).
+        await manager.discover_and_connect()
+        assert set(manager._configs) == {MCP_WORLD_FIXTURE}, manager._configs
+
+        # Prompt two: swap the in-world skill dir for an out-of-world symlink
+        # (test-side, so the scenario itself is host-independent), then read
+        # it through the session's own read tool.
+        inner_dir = episode.world / ".local-operator" / "skills" / INNER_SKILL
+        import shutil
+
+        shutil.rmtree(inner_dir)
+        os.symlink(episode.base / ".local-operator" / "skills" / OUTER_SKILL, inner_dir)
+        scripted_mcp.swapped = True
+        await session.prompt("mcp and skill probe, part two")
+
+    texts = scripted_mcp.tool_texts
+    first_inner = next((i for i, t in enumerate(texts) if f"name: {INNER_SKILL}" in t), None)
+    first_unknown = next((i for i, t in enumerate(texts) if "Unknown skill" in t), None)
+    assert first_inner is not None, "the in-world skill must resolve before any swap"
+    assert first_unknown is not None, "the ancestor skill must stay unresolvable"
+    assert first_inner < first_unknown, "resolution ordering changed"
+    assert "Unknown skill" in texts[-1], "the swapped skill dir served out-of-world content"
+    joined = "\n".join(texts)
+    assert OUTER_GUIDANCE not in joined, "an ancestor sentinel leaked through a tool result"
+    systems = "\n".join(scripted_mcp.system_texts)
+    for name in (MCP_OUTER_CURSOR, MCP_OUTER_PROJECT, "sneaky-link"):
+        assert name not in systems, f"the seed leaked {name} into the system prompt"

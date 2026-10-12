@@ -1760,6 +1760,13 @@ class _KnowledgeHooks:
     #: ecosystem roots by existence, so a root created mid-session would change
     #: the list and quietly widen what the session scans.
     skill_roots: list[Path] = field(default_factory=list)
+    #: The world boundary this session was constructed with, when it has one.
+    #: Carried so the resolver's miss-path rescan clips to the same scope the
+    #: initial walk used — a refresh that silently re-widened the scan would
+    #: re-admit exactly what the boundary excluded (measured: an in-world
+    #: symlink to an outer skill dir was admitted by the reachable walk; QA
+    #: round 1, Q2). ``None`` on every ordinary session.
+    world_root: Path | None = None
     frozen_block: str | None = None
     #: Compaction entry id observed when ``frozen_block`` was computed. A
     #: change here (a new compaction marker) re-opens selection once — the
@@ -2099,11 +2106,12 @@ async def _setup_knowledge(
         hooks.skill_roots = default_skill_roots(
             Path(cwd) if cwd is not None else None, boundary=world_root
         )
+        hooks.world_root = world_root
         #: The baseline the freshness checks compare against, taken HERE because the
         #: tree has just been walked: recording it at first use instead would make a
         #: session's first message look like a change and pay a second full scan.
         hooks.skills_fingerprint = _skills_fingerprint(hooks)
-        skills, discovery_warnings = discover_skills(hooks.skill_roots)
+        skills, discovery_warnings = discover_skills(hooks.skill_roots, boundary=world_root)
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
         hooks.skills_by_name = {skill.name: skill for skill in skills}
@@ -2492,7 +2500,7 @@ def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
     try:
         from local_operator.skills.discovery import discover_skills
 
-        discovered, _warnings = discover_skills(list(hooks.skill_roots))
+        discovered, _warnings = discover_skills(list(hooks.skill_roots), boundary=hooks.world_root)
     except Exception:  # noqa: BLE001 — the roster must survive a scan fault
         logger.debug("classification: live skill rescan failed", exc_info=True)
         return known
@@ -3467,7 +3475,9 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
     # running, because they inherit this closure and it mutates
     # ``hooks.skills_by_name`` IN PLACE. Guides are packaged release resources
     # and cannot change at runtime, so the guide resolver takes no roots.
-    skill_resolver = make_skill_resolver(hooks.skills_by_name, hooks.skill_roots)
+    skill_resolver = make_skill_resolver(
+        hooks.skills_by_name, hooks.skill_roots, boundary=hooks.world_root
+    )
 
     def resolver(url: str) -> str | None:
         guide_result = guide_resolver(url)
@@ -4868,6 +4878,7 @@ async def wire_mcp_into_session(
     *,
     has_ui: bool = False,
     _deferred_boot: bool = False,
+    boundary: Path | None = None,
 ) -> McpManager | None:
     """Discover MCPs but expose their schemas only after explicit reads.
 
@@ -4884,6 +4895,13 @@ async def wire_mcp_into_session(
     get the warning on stderr. Any failure degrades to an empty catalogue, so
     MCP enrichment never becomes a session startup requirement. Returns the
     manager for the caller to dispose, or ``None``.
+
+    ``boundary`` is the session's world boundary when it has one: it travels
+    to the manager so EVERY load — the startup connect, an explicit connect
+    by name, and every reload — answers with the same clipped config set. It
+    is a parameter rather than read off the session because the deferred-boot
+    closure runs before construction state a reader might reach for is
+    settled.
     """
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
@@ -4927,6 +4945,13 @@ async def wire_mcp_into_session(
                 discover_and_load_mcp_tools,
                 secret_base=getattr(session, "config_dir", None),
                 register_secret=getattr(variables, "register_redaction", None),
+                # The world boundary travels through the same tolerance seam as
+                # the credential pair: in-tree callers of this wiring patch the
+                # loader with reduced fakes, and a hard kwarg would break every
+                # one of them. The boundary is enforced inside the loaders
+                # themselves (the manager carries it), so a caller that cannot
+                # receive it cannot be a session's real loader.
+                boundary=boundary,
             ),
         )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
@@ -5943,6 +5968,7 @@ async def create_session(
                     auth_store=plan.auth_store,
                     has_ui=has_ui,
                     _deferred_boot=True,
+                    boundary=world_root,
                 )
                 if manager is not None:
                     attach_mcp_dispose(session, manager)
@@ -5974,6 +6000,7 @@ async def create_session(
         knowledge_hooks=plan.knowledge_hooks,
         auth_store=plan.auth_store,
         has_ui=has_ui,
+        boundary=world_root,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)

@@ -377,12 +377,22 @@ def resolve_resource_url(
     *,
     scheme: str,
     label: str,
+    boundary: Path | None = None,
 ) -> str | None:
     """Resolve one internal resource scheme, or return ``None`` for others.
 
     Unknown names list only resources in this scheme. That bounded error is the
     model's self-correction path and never leaks user skills while resolving a
     packaged guide (or vice versa).
+
+    ``boundary``, when set, is the READ-time half of a bounded session's
+    contract: before anything under a resource is read, the resource's own
+    directory must resolve inside the boundary — a directory whose symlink
+    target moved outside after discovery is reported with the same unknown
+    shape a name miss uses, so the boundary check leaks nothing about the
+    outside tree. Child reads inherit the check because ``_resolve_child``
+    already enforces containment relative to the resource directory. ``None``
+    is every ordinary call, unchanged.
     """
     prefix = f"{scheme}://"
     if not url.startswith(prefix):
@@ -403,6 +413,18 @@ def resolve_resource_url(
         available = ", ".join(sorted(resources.keys())) or "(none)"
         raise ValueError(f"Unknown {label}: {name}\nAvailable: {available}")
 
+    if boundary is not None:
+        # READ-time canonical containment (see the docstring): the check runs
+        # on the resource DIRECTORY, which the body read (file_path) and every
+        # child read both live under. A resolver must never raise a raw
+        # OSError, so an unresolvable base denies.
+        try:
+            base = resource.base_dir.resolve()
+        except (OSError, RuntimeError):
+            base = None
+        if base is None or not (base == boundary or base.is_relative_to(boundary)):
+            raise ValueError(f"Unknown {label}: {name}")
+
     path = parts.path
     if not path or not path.strip("/"):
         body = _read_text_capped(resource.file_path)
@@ -411,6 +433,11 @@ def resolve_resource_url(
     return _resolve_child(resource, path, scheme=scheme, label=label)
 
 
-def resolve_skill_url(url: str, skills: Mapping[str, Skill]) -> str | None:
+def resolve_skill_url(
+    url: str,
+    skills: Mapping[str, Skill],
+    *,
+    boundary: Path | None = None,
+) -> str | None:
     """Resolve a ``skill://`` URL while preserving the public skills API."""
-    return resolve_resource_url(url, skills, scheme="skill", label="skill")
+    return resolve_resource_url(url, skills, scheme="skill", label="skill", boundary=boundary)

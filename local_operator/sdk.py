@@ -714,6 +714,16 @@ def _resolve_world_root(spec: SessionSpec, roots: SessionRoots) -> Path | None:
       registries) — and the refusal names both directions, because a world
       nested inside controller state is the same defect wearing the other
       spelling;
+    * on a host where the kernel sandbox is the enforcement in play, neither
+      store root may lie inside a tree that sandbox must expose read-only to
+      shell children (``/private/var/folders`` — where ``tempfile`` puts the
+      common case — and the other machinery paths): a confined child could
+      read controller state there regardless of the root, because a broad
+      ``allow`` defeats a specific ``deny`` in seatbelt (measured in both
+      rule orders), so the profile CANNOT carve the stores back out. The
+      layout is refused here, before anything is allocated, and the message
+      names the responsible subtree — a durable path like the home directory
+      is the supported shape; ``None`` is untouched.
     * the world is resolved (symlinks, ``..``) exactly like every other root
       so no comparison can be fooled by a path spelling — the same rule
       ``SessionRoots`` states for its own fields.
@@ -747,6 +757,36 @@ def _resolve_world_root(spec: SessionSpec, roots: SessionRoots) -> Path | None:
                 f"world_root {world} sits inside the {label} {path}; the world must be a "
                 "scope of its own, not a folder inside controller state"
             )
+    # The kernel boundary cannot protect the stores wherever the sandbox has
+    # to expose a whole machinery tree: seats measure an allow as defeating a
+    # deny (see ``kernel_exposed_read_subtrees``), so a store under one of
+    # those trees would be readable by the confined shell no matter what the
+    # profile says. Refuse the layout instead — the fail-closed direction.
+    # Gated on the sandbox actually being the enforcement: on a host without
+    # it, confined shells are refused outright (``spawn_refusal``), so there
+    # is no kernel path to guard.
+    from local_operator.tools.confinement import (
+        kernel_exposed_read_subtrees,
+        sandbox_unavailable_reason,
+    )
+
+    if sandbox_unavailable_reason() is None:
+        exposed = kernel_exposed_read_subtrees()
+        stores = (
+            ("config_dir", roots.config_path),
+            ("agent_home", roots.agent_home_path),
+        )
+        for label, path in stores:
+            for subtree in exposed:
+                if path == subtree or path.is_relative_to(subtree):
+                    raise SessionSpecError(
+                        f"world_root {world}: the {label} {path} lies under {subtree}, a "
+                        "tree the kernel sandbox must expose read-only to shell children; "
+                        "a confined child could read controller state there and the sandbox "
+                        "profile cannot carve it back out. Place the world and its stores "
+                        "outside these trees (a durable path such as the home directory "
+                        "works), or run on a host where confined shells are refused."
+                    )
     try:
         world.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as error:
