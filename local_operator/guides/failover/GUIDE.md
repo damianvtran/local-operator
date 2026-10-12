@@ -222,6 +222,25 @@ failing model's id.
 A target is either a legacy `provider/model` string or a mapping with
 `provider`, `model`, and optional `effort`. The mapping form is what lets a
 chain re-list the *current* model at a different effort as a real route.
+An omitted effort carries/clamps the primary's choice under the existing routing
+rules. Explicit `effort: auto` instead clears that inherited override and uses
+the **target's own default**: `radient/auto` sends its router's `auto`, while a
+direct provider uses its default level or omits effort if it has none. This is a
+chain reset, not another fixed depth on the effort ladder. For example:
+
+```yaml
+fallbackChains:
+  default:
+    - provider: radient
+      model: auto
+      effort: auto
+```
+
+To author this mapping, use `lop config edit retry.fallbackChains '<JSON>'` or
+edit `config.yml`; the settings page preserves existing effort labels but its
+selector input does not create them. The agent `setting` tool refuses cascade
+writes because it cannot carry the editor's original snapshot.
+
 An entry without an effort that names the primary is skipped, so a shared
 `default` chain can safely contain models you also select as primary. When the
 primary effort is known, quota preflight and the stream also skip an explicitly
