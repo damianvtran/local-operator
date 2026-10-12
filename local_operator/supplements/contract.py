@@ -151,6 +151,7 @@ class SupplementDetails(TypedDict):
     tokens_in: NotRequired[int]
     tokens_out: NotRequired[int]
     cost_usd: NotRequired[float]
+    cost_known: NotRequired[bool]
     error: NotRequired[str]
     #: The generator's own notes on the row: one line per bound that touched the job and per
     #: adjustment it made (turn/component caps, the cost cap reached before a repair). A

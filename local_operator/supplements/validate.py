@@ -155,6 +155,7 @@ _STRUCTURAL_ATTRS: Final[frozenset[str]] = frozenset(
         "ry",
         "width",
         "height",
+        "offset",
         "stroke-width",
         "stroke-dasharray",
         "stroke-dashoffset",
@@ -677,7 +678,29 @@ def _check_static_numbers(body: str, data: Mapping[str, Any], units: set[str]) -
     return errors
 
 
-def _check_scan(blob: str) -> list[str]:
+class _Resources(HTMLParser):
+    """HTMLParser decodes entities and recognizes quoted/unquoted attributes equally."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.errors: list[str] = []
+        self.tags: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.tags.add(tag)
+        for key, raw in attrs:
+            value = (raw or "").strip().casefold()
+            if key == "srcset":
+                self.errors.append("srcset dependencies are unsupported")
+            if key in {"src", "href", "xlink:href", "poster", "action", "background", "data"}:
+                if not value.startswith(("#", "data:image/")) or tag == "script":
+                    self.errors.append("resource dependencies are unavailable in an inline preview")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+
+def _check_scan(blob: str, *, authored: bool = False) -> list[str]:
     """The §4.2 string scan plus the 3-digit literal rule, on the body (data excluded).
 
     The literal rule blanks the structural attribute values the walk can prove before
@@ -689,30 +712,42 @@ def _check_scan(blob: str) -> list[str]:
     """
     body = strip_data(blob)
     lowered = body.lower()
+    nodes = _Resources()
+    nodes.feed(body)
     errors: list[str] = [
-        f"rejected string {needle!r}" for needle in _BANNED if needle.lower() in lowered
+        f"rejected string {needle!r}"
+        for needle in _BANNED
+        if (needle[1:] in nodes.tags if needle.startswith("<") else needle.lower() in lowered)
     ]
     # CSP intentionally cannot fetch dependencies. Fail honestly before storing a
     # frame that could only render half a document; data images remain self-contained.
-    resources = re.finditer(r"\b(src|href)\s*=\s*([\"'])(.*?)\2", body, re.I | re.S)
-    for resource in resources:
-        value = resource.group(3).strip().casefold()
-        if not value.startswith(("#", "data:image/")):
-            errors.append("resource references must be inline data images or local fragment links")
-    if re.search(r"<script\b[^>]*\bsrc\s*=", body, re.I):
-        errors.append("script dependencies are unavailable in an inline preview")
+    resources = _Resources()
+    resources.feed(body)
+    errors.extend(resources.errors)
+    dependency_text = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    dependency_text = re.sub(
+        r"\\([0-9a-fA-F]{1,6})\s?",
+        lambda match: chr(int(match.group(1), 16)) if int(match.group(1), 16) <= 0x10FFFF else "",
+        dependency_text,
+    )
     if re.search(
-        r"@import\b|\bimport\s*(?:\(|[\"'\{*])|\bexport\s+.*?\bfrom\s*[\"']", body, re.I | re.S
+        r"@import\b|\bimport\s*(?:\(|[\"'\{*])|\bexport\s+.*?\bfrom\s*[\"']",
+        dependency_text,
+        re.I | re.S,
     ):
         errors.append("module and CSS imports are unavailable in an inline preview")
-    for match in re.finditer(r"url\s*\(\s*([\"']?)(.*?)\1\s*\)", body, re.I | re.S):
-        if not match.group(2).strip().casefold().startswith("data:image/"):
-            errors.append("CSS resource URLs must be inline data images")
+    for match in re.finditer(r"url\s*\(\s*([\"']?)(.*?)\1\s*\)", dependency_text, re.I | re.S):
+        if not match.group(2).strip().casefold().startswith(("data:image/", "#")):
+            errors.append("CSS resource URLs must be inline data images or local fragments")
     # The banned-string pass above reads the RAW body (attributes and all); this scan reads
     # the walked text -- §4.2's viewBox/style carve-out widened to the structural table.
     scannable = _blank_structural(re.sub(r"<style\b.*?</style\s*>", "", body, flags=re.I | re.S))
+    if authored:
+        # Authored scripts retain timing/layout literals; displayed claims below
+        # still require exact evidence values. Generated-chart rules stay strict.
+        scannable = _STATIC_SKIP_RE.sub(" ", scannable)
     match = _INLINE_NUMBER_RE.search(scannable)
-    if match is not None:
+    if match is not None and not authored:
         errors.append(
             f"inline numeric literal {match.group(0)!r} (3+ digits) outside structural "
             "attribute values (viewBox, geometry, style): plotted values belong in <data>"
@@ -759,7 +794,9 @@ def _split_inner(inner: str) -> tuple[str, dict[str, Any]]:
     return body, data
 
 
-def validate_output(text: str, evidence: Sequence[Dataset]) -> ValidationResult:
+def validate_output(
+    text: str, evidence: Sequence[Dataset], *, authored: bool = False
+) -> ValidationResult:
     """Parse, scan and provenance-check one fork answer (memo §2.5's turn-1/turn-2 gate)."""
     if text.strip().upper() == "NONE":
         return ValidationResult(none=True)
@@ -780,6 +817,17 @@ def validate_output(text: str, evidence: Sequence[Dataset]) -> ValidationResult:
         except ValueError as error:
             rejected.append(Rejected(title=title, errors=(str(error),)))
             continue
+        if authored:
+            # Standard authored HTML has no proprietary wrapper. Its admissible
+            # value set is copied from supplied turn evidence, never inferred from HTML.
+            data = {
+                f"e{index}": {
+                    "title": item.title,
+                    "columns": list(item.columns),
+                    "rows": [list(row) for row in item.rows],
+                }
+                for index, item in enumerate(evidence)
+            }
         blob = "\n".join(f"<data>{data_json({key: value})}</data>" for key, value in data.items())
         blob = f"{blob}\n{body}" if blob else body
         if len(blob.encode("utf-8")) > MAX_COMPONENT_BYTES:
@@ -789,10 +837,35 @@ def validate_output(text: str, evidence: Sequence[Dataset]) -> ValidationResult:
         checker.close()
         if checker.problem:
             errors.append(f"not well-formed: {checker.problem}")
-        errors.extend(_check_scan(blob))
+        errors.extend(_check_scan(blob, authored=authored))
         data_errors, units = _check_data(data, index)
         errors.extend(data_errors)
-        errors.extend(_check_static_numbers(body, data, units))
+        claims = (
+            re.sub(r"\b(?:Step|Stage|Phase)\s+\d+\b", "", body, flags=re.I) if authored else body
+        )
+        errors.extend(_check_static_numbers(claims, data, units))
+        if authored:
+            supported = {
+                _numeric(cell)
+                for item in evidence
+                for row in item.rows
+                for cell in row
+                if _numeric(cell) is not None
+            }
+            for script in re.findall(r"<script\b[^>]*>(.*?)</script\s*>", body, re.I | re.S):
+                # Timer delay is infrastructure, not a displayed data claim.
+                script = re.sub(
+                    r"(setTimeout|setInterval)\s*\((.*?),\s*\d+\s*\)", "", script, flags=re.S
+                )
+                script = re.sub(
+                    r"\.style\.(?:width|height|padding|margin|gap|fontSize)\s*=\s*"
+                    r"([\"'])[\d.]+(?:px|em|rem|%|vh|vw)\1",
+                    "",
+                    script,
+                )
+                for literal in _INLINE_NUMBER_RE.finditer(script):
+                    if _numeric(literal.group(0)) not in supported:
+                        errors.append("authored script numeric value lacks turn evidence")
         if errors:
             rejected.append(Rejected(title=title, errors=tuple(errors)))
             continue

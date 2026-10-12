@@ -21,7 +21,7 @@ strict and never substitute another model. All completion invocations share the
 same `maxTurns`, deadline and cumulative measured usage/cost. Default two turns
 can therefore cover failure + recovery, not also a repair. An isolated transport
 may itself perform its existing bounded auth re-resolution; two model invocations
-do not mean exactly two HTTP requests. No errand-owned generic retry/backoff loop
+do not mean exactly two HTTP requests. Unknown pricing or missing usage after provider dispatch blocks additional paid invocations; a provider receipt (including explicit $0), known local-free provider, or proven pre-dispatch credential refusal is distinct from unknown cost. No errand-owned generic retry/backoff loop
 or foreground routing mutation is introduced.
 
 The row records model attempts and bounded scrubbed typed diagnosis. Provider
@@ -32,11 +32,11 @@ Legacy rows with only an exception classname cannot recover a historical reason.
 
 A **successful `write` of `.html` or `.htm` in the current logical turn** may publish
 an inline preview directly, without a classifier or generator. The exact in-memory
-write content is captured (at most three documents, 48 KiB UTF-8 per document,
+executed write content is captured privately before history argument redaction (at most three documents, 48 KiB UTF-8 per document,
 also inside the turn's aggregate text budget). Nothing rereads arbitrary existing
 files or sends their contents to a vendor. Written/resolved root boundaries,
 scratch/generated-tree exclusion, sensitive denylist and operator `denyPrefixes`
-all apply before promotion. The original file action remains alongside the preview,
+all apply before promotion. Later successful edits/uncaptured overwrites invalidate the earlier preview; shell/eval conservatively invalidate pending snapshots. Raw bytes never enter model history, diagnostic events or vendor requests. The original file action remains alongside the preview,
 even when the answer explicitly links the newly prepared HTML.
 
 Supported documents have `<!doctype html>`, an optional `lang` on `<html>`, one
@@ -51,7 +51,7 @@ base URLs, meta refresh/custom CSP and unsupported head forms are refused rather
 than silently stripped. Multifile projects and arbitrary websites remain file
 callouts. A refusal does not affect opening/revealing the original file. Inline
 data images remain permitted by the existing CSP. Qualitative diagrams are valid;
-numeric claims still require the turn's existing data provenance. CSS layout
+numeric claims use a component-local value set copied from existing turn evidence, without requiring proprietary authored markup. Unsupported fabricated values still fail; step ordinals and timer delay arguments are not data claims. CSS layout
 numbers are geometry, not plotted claims.
 
 For useful designs: use the injected theme variables, content-sized responsive

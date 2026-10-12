@@ -139,6 +139,7 @@ class GenerationOutcome:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    cost_known: bool = True
     error: str = ""
     #: True when the fork answered the single word ``NONE``: a legitimate "no figure helps".
     none: bool = False
@@ -298,7 +299,7 @@ async def generate(
     validate: ValidateFn | None = None,
     price: Callable[[Any], float] | None = None,
     on_progress: ProgressFn | None = None,
-    model_price: Callable[[Any, DesignModel], float] | None = None,
+    model_price: Callable[[Any, DesignModel], float | None] | None = None,
     started: float | None = None,
     accepted_sink: list[Component] | None = None,
 ) -> GenerationOutcome:
@@ -337,18 +338,33 @@ async def generate(
     turns = 0
     tokens_in = tokens_out = 0
     cost = 0.0
+    cost_known = True
     detail: list[str] = []
     attempts: list[str] = []
     alternate = model.alternate
 
     def account(usage: Any) -> None:
-        nonlocal tokens_in, tokens_out, cost
+        nonlocal tokens_in, tokens_out, cost, cost_known
         tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
         tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
-        if usage is not None:
-            cost += float(
-                model_price(usage, model) if model_price else (price(usage) if price else 0.0)
+        try:
+            measured = (
+                model_price(usage, model)
+                if model_price
+                else (price(usage) if price and usage is not None else None)
             )
+        except Exception:
+            measured = None
+        import math
+
+        try:
+            value = float(measured) if measured is not None else None
+        except (TypeError, ValueError):
+            value = None
+        if value is None or not math.isfinite(value) or value < 0:
+            cost_known = False
+        else:
+            cost += value
 
     prompt = evidence_block(
         datasets, user_text=user_text, answer_text=answer_text, instruction=instruction
@@ -368,8 +384,14 @@ async def generate(
             raise
         except Exception as exc:  # noqa: BLE001 -- fail open: the worst case is no figure
             cause = exc.cause if isinstance(exc, CompletionFailure) else exc
-            if isinstance(exc, CompletionFailure):
-                account(exc.usage)
+            from local_operator.providers.failover import ProviderError
+
+            if not (
+                isinstance(cause, ProviderError)
+                and cause.request_sent is False
+                and (not isinstance(exc, CompletionFailure) or exc.usage is None)
+            ):
+                account(exc.usage if isinstance(exc, CompletionFailure) else None)
             diagnosis = failure_detail(cause)
             detail.append(f"turn {turns}: {diagnosis}")
             logger.warning("supplements: generator %s failed: %s", model.label, diagnosis)
@@ -379,8 +401,10 @@ async def generate(
             if turns >= max(1, max_turns):
                 detail.append(f"bound:{BOUND_TURNS} no turn remains for fallback")
                 break
-            if cost >= max_cost_usd and max_cost_usd >= 0:
-                detail.append(f"bound:{BOUND_COST} reached before fallback")
+            if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
+                detail.append(
+                    f"bound:{BOUND_COST} reached or affordability unavailable before fallback"
+                )
                 error = f"bound:{BOUND_COST}"
                 break
             if timeout_s is not None and clock() - start >= timeout_s:
@@ -442,7 +466,7 @@ async def generate(
         # expiry between turns returns NORMALLY -- the blocks that passed come back through
         # the ordinary tail and are kept -- while the runner's ``wait_for`` remains the hard
         # guard for a turn that hangs mid-flight.
-        if cost >= max_cost_usd and max_cost_usd >= 0:
+        if not cost_known or (cost >= max_cost_usd and max_cost_usd >= 0):
             detail.append(
                 f"bound:{BOUND_COST} cap: ${cost:.4f} of ${max_cost_usd:.2f} reached before repair"
             )
@@ -465,6 +489,7 @@ async def generate(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         cost_usd=cost,
+        cost_known=cost_known,
         error=error,
         none=none,
         instruction=instruction,

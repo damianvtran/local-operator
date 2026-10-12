@@ -404,14 +404,18 @@ def prefilter(
     if want_graphics:
         for item in items:
             for call in item.tool_calls:
-                if call.prepared_html and call.name == "write" and call.id not in failed_calls:
+                if call.id in failed_calls:
+                    continue
+                if call.name in {"bash", "eval"}:
+                    prepared_content.clear()
+                if call.name in {"write", "edit"}:
                     raw = os.path.expanduser(call.args.get("path", ""))
                     absolute = os.path.normpath(
                         raw if os.path.isabs(raw) else os.path.join(cwd, raw)
                     )
-                    prepared_content[absolute] = call.prepared_html
-                    if len(prepared_content) >= 3:
-                        break
+                    prepared_content.pop(absolute, None)
+                    if call.prepared_html and call.name == "write" and len(prepared_content) < 3:
+                        prepared_content[absolute] = call.prepared_html
     prepared: list[tuple[Candidate, str]] = []
     if want_files or prepared_content:
         mentions = _harvest(items)
