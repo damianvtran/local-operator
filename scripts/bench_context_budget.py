@@ -1468,7 +1468,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: evaluation runs), and it cannot move to a guide: it must be resident
 #: BEFORE the model forms a completion claim, which is exactly the moment a
 #: lookup would not happen. Ceiling = head + the 55-token band.
-BUDGET_BILLED_TOKENS = 28_729
+#: RAISED 28,729 -> 28,818 for the multi-source edit lane (the
+#: `generate_image` tool's `source_image_paths`/`source_attachments` list
+#: fields — the two added schema properties; they first measured +279
+#: chars, and the redundant "(multi-source)" description suffixes were
+#: trimmed (-30) under review round 1, leaving +249). CLEAN ARM, NAMED:
+#: fresh `HOME` + `LOCAL_OPERATOR_CONFIG_DIR` per tree, both trees measured
+#: with this script back to back on the same machine:
+#:
+#:   base (origin/main e8b728f8c6)  79,713 chars = ~28,674 billed
+#:   head (this branch)             79,962 chars = ~28,763 billed
+#:   delta                             +249 chars = ~+89
+#:
+#: The delta is the two fields and nothing else: ``tool_schemas`` (52,379
+#: vs 52,130) is the only component that moves, the child arm moves by the
+#: SAME +249 chars (reported as +90 there — the arms' totals round the
+#: shared 249 differently), and ``instructions`` (25,863),
+#: ``tool_inventory`` (785), ``environment`` (81) and ``knowledge`` (854)
+#: are byte-identical to base on both arms. Ceiling = head + the 55-token
+#: band.
+BUDGET_BILLED_TOKENS = 28_818
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1558,7 +1577,18 @@ BUDGET_BILLED_TOKENS = 28_729
 #:   delta                             +467 chars = ~+167
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 25_773
+#: RAISED 25,773 -> 25,863 (with the top arm, same trees, same clean-arm
+#: environment): the child arm carries `generate_image` too and moves by
+#: the SAME +249 chars — reported as +90 here because this arm's total
+#: rounds the shared 249 chars differently (the check that the delta is
+#: the two fields and nothing else):
+#:
+#:   base (origin/main e8b728f8c6)  71,496 chars = ~25,718 billed
+#:   head (this branch)             71,745 chars = ~25,808 billed
+#:   delta                             +249 chars = ~+90
+#:
+#: Ceiling = head + the 55-token band.
+BUDGET_CHILD_BILLED_TOKENS = 25_863
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

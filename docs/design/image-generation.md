@@ -164,8 +164,9 @@ Additive on top of §5's contract; nothing above changes for one-source calls
   (Radient models/status/result, FAL status/result; `timeout`/`network`
   codes, 429/500/502/503/504). Submits are never retried — a blind re-POST
   can double-queue and double-bill; failover is their remedy.
-- **Cost posture**: unchanged; FAL/OpenAI/Google success captions now state
+- **Cost posture**: unchanged; FAL and Google success captions now state
   "No per-call cost was reported (this provider bills at its published
-  rates)." and the ledger keeps `amount=None`/`not_tracked` with that
-  sentence as the row detail (no new basis value — the UI vocabulary stays
-  as it is).
+  rates).", and so does an OpenAI edit when the response carries no usable
+  usage to price — with usable usage the existing estimate prints instead;
+  the ledger keeps `amount=None`/`not_tracked` with that sentence as the
+  row detail (no new basis value — the UI vocabulary stays as it is).
