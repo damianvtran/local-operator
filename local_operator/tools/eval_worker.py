@@ -244,8 +244,12 @@ def _record_tool_failure(name: str, call_id: str, result: dict[str, Any]) -> Non
     _TOOL_FAILURES.append({"name": str(name), "call_id": str(call_id), "text": text})
 
 
-def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
+def _call_tool(name: str, /, **arguments: Any) -> dict[str, Any]:
     """Execute one approved harness tool and return its structured ToolResult.
+
+    The selector is positional-only so EVERY keyword belongs to the selected
+    tool, including ``name`` on project/agent calls. Renaming the selector would
+    merely move the collision to another otherwise valid tool argument.
 
     Read ``result['is_error']`` and ``result['content']`` before consuming it.
     Results stay in Python unless the cell prints or returns them, allowing a
