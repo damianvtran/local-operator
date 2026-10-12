@@ -51,7 +51,7 @@ def _engine_context(tmp_path, manager: AsyncJobManager) -> ToolContext:
     wait/jobs build. The launcher mimics ``Session._launch_subagent`` by
     registering a ``task``-type job on the same manager."""
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         return manager.register("task", label, _quick_runner, registrant_id=None)
 
     return ToolContext(cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=manager)
@@ -469,7 +469,7 @@ async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_p
     verbatim so the delegator's contract cannot drift between children."""
     launched: list[tuple[str, str, str, str | None]] = []
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         launched.append((label, prompt, agent, effort))
         return f"job-{len(launched)}"
 
@@ -508,7 +508,7 @@ async def test_task_batch_launches_concurrent_children_with_shared_context(tmp_p
 async def test_task_single_form_still_works_and_forwards_defaults(tmp_path):
     launched: list[tuple[str, str, str, str | None]] = []
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         launched.append((label, prompt, agent, effort))
         return "job-1"
 
@@ -544,7 +544,7 @@ async def test_the_launch_line_reads_ownership_from_the_row_not_from_the_labels(
         "legacy-other": ("other/model", None),
     }
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         job_id = manager.register("task", label, _quick_runner, registrant_id=None)
         model, owns = stamps[label]
         row = manager.get(job_id)
@@ -598,7 +598,7 @@ async def test_task_rejects_mixed_and_half_forms(tmp_path):
 async def test_task_partial_batch_failure_reports_survivors(tmp_path):
     calls = {"n": 0}
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("engine hiccup")

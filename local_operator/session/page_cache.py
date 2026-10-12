@@ -80,12 +80,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from local_operator.session import open_trace
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     TranscriptPage,
@@ -460,6 +462,17 @@ async def load_transcript_page(
     if key is not None:
         cached = _PAGE_CACHE.get(key)
         if cached is not None:
+            if open_trace.enabled():
+                # A HIT IS THE CHEAPEST PAGE ANSWER and it is invisible from the
+                # outside: ``page.hit`` says the re-open did not re-decode the
+                # journal, which is the structural fact the timing budget cares
+                # about (a ``page.read`` row beside it is the miss that paid).
+                open_trace.mark(
+                    "page.hit",
+                    session=Path(directory).name,
+                    before_id=before_id or "",
+                    limit=limit,
+                )
             return cached
     loop = asyncio.get_running_loop()
     flight = _FLIGHTS.get(key) if key is not None else None
@@ -468,6 +481,7 @@ async def load_transcript_page(
         # the read the other waiter — or the leader's own request — depends on;
         # the task is not the follower's to end.
         return await asyncio.shield(flight[1])
+    read_at = time.monotonic()
     task = asyncio.create_task(
         _read_and_publish(key, directory, before_id, through_id, around_id, before, after, limit)
     )
@@ -478,4 +492,16 @@ async def load_transcript_page(
         # orphan the entry, and a leader whose own await is cancelled still
         # publishes for whoever is left.
         task.add_done_callback(lambda settled: _forget(key, settled))
-    return await asyncio.shield(task)
+    value = await asyncio.shield(task)
+    if open_trace.enabled():
+        # THE MISS THAT PAID: decode + journal read, in milliseconds, under the
+        # same key fields as ``page.hit`` so a trace can be read as a sequence
+        # of hits and misses per open.
+        open_trace.mark(
+            "page.read",
+            (time.monotonic() - read_at) * 1000,
+            session=Path(directory).name,
+            before_id=before_id or "",
+            limit=limit,
+        )
+    return value

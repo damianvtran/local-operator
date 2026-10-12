@@ -1132,7 +1132,9 @@ class SubagentLauncher(Protocol):
     read-only research child (its tool inventory is filtered to retrieval that
     changes nothing — local lookups plus web search/fetch — never to edits or
     execution). ``effort`` routes to a configured model tier (``lo``/``med``/
-    ``hi`` in ``values.subagents.models``); None keeps the parent's model.
+    ``hi`` in ``values.subagents.models``); omission keeps role pins, otherwise
+    the parent's model. ``model="inherit"`` bypasses role pins; an exact
+    ``provider/id`` pins this run. Model and effort are mutually exclusive.
     """
 
     def __call__(
@@ -1142,6 +1144,7 @@ class SubagentLauncher(Protocol):
         *,
         agent: str = "task",
         effort: str | None = None,
+        model: str | None = None,
     ) -> str: ...
 
 

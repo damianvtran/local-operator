@@ -686,19 +686,6 @@ async def test_a_remote_row_carries_the_started_claim_as_its_creation_time(
     assert bare["created_at"] == bare["mtime"] == 0.0
 
 
-class _RowWithLastUser(SessionRow):
-    """A producer row carrying the sidebar lane's ``last_user_at`` claim.
-
-    The shape a later slice's producer emits (the relay-side transcript scan is
-    that slice); this half only forwards a claim that is present, or omits the
-    key entirely. The subclass is the carrier — a plain ``SessionRow`` is a
-    tuple without a dict to hold the extra attribute — and the cell sets the
-    value it means.
-    """
-
-    last_user_at: float | None = None
-
-
 def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -710,6 +697,14 @@ def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     and never a null, so the old ``float(True)``-becomes-``1.0`` hazard cannot
     come back through here and the UI's merge reads absence as no claim,
     falling back to ``created_at``, then catalogue order.
+
+    The rows are plain ``SessionRow`` rows carrying the field the producer
+    slice landed (``last_user_at``, defaulted ``None``). This cell's earlier
+    carrier — a ``SessionRow`` subclass holding the attribute — became the
+    pyright error "cannot override ... because parent class ... is a named
+    tuple" the moment the field itself arrived, which is the
+    field-is-the-carrier shape the subclass comment predicted; the claim is
+    now a constructor keyword.
     """
     from local_operator.server.utils.desktop_mesh import remote_session_rows
     from local_operator.session import peer_rows as peer_rows_mod
@@ -718,11 +713,9 @@ def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     # must LOOK like it is in a network, or ``remote_session_rows`` answers []
     # before it ever asks for rows (the zero-network guard).
     (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
-    claimed = _RowWithLastUser(OTHER, 1789400000.0, "build box chat")
-    claimed.last_user_at = 1789400111.5
+    claimed = SessionRow(OTHER, 1789400000.0, "build box chat", last_user_at=1789400111.5)
     bare = SessionRow("c" * 12, 1789400000.0, "no claim")
-    bool_claim = _RowWithLastUser("d" * 12, 1789400000.0, "old peer")
-    bool_claim.last_user_at = cast(Any, True)
+    bool_claim = SessionRow("d" * 12, 1789400000.0, "old peer", last_user_at=cast(Any, True))
     monkeypatch.setattr(
         peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (claimed, bare, bool_claim)
     )

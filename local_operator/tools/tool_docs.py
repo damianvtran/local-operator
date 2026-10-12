@@ -349,7 +349,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "Relaunch a stopped, paused or failed subagent against its "
                     "own transcript so it continues where it left off; names "
-                    "several targets to fan one message out to a whole batch at once."
+                    "several targets to fan one message out to a whole batch at once. "
+                    "Optional model=inherit follows the parent instead of role pins; "
+                    "model=provider/id pins the continuation (model-choice policy applies). "
+                    "Omission replays the saved per-run selector."
                 ),
             ),
         ),
@@ -495,8 +498,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "and may restrict the child's tools.\n"
             "- ``subagents.model_choice=model`` is the operator's switch that "
             "hands the child's model back; ``effort`` swaps the child's MODEL "
-            "(not its reasoning level), and omitting it inherits this session's "
-            "model and reasoning effort."
+            "(not its reasoning level). Omission keeps role pins, else inherits. "
+            "Single and batch tasks accept model=inherit to bypass role pins, "
+            "or model=provider/id for an exact per-run pin; never combine with effort. "
+            "Exact picks require model_choice=model and validate catalogue/credentials "
+            "before launch. Inherit is available in operator mode too. "
+            "Leave unused optional fields absent, especially effort."
         ),
     ),
     # -- item-7 notes (failure semantics + the system-prompt cuts) ----------

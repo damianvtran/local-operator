@@ -1071,6 +1071,83 @@ def test_the_services_roll_is_scheduled_after_the_reply(monkeypatch: pytest.Monk
     released.set()
 
 
+def test_a_linux_member_reaches_the_relay_refresh_through_the_roll_hand_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drill's seam end to end, in-process: roll → stage → child → relay step.
+
+    The member pass's post-receipt roll (``roll_services_after_reply``) hands off
+    to ``update.refresh_service_daemons_after_upgrade``, and on a Linux member
+    whose relay unit is installed that must reach the relay's own Linux refresh
+    (``refresh_unit_if_stale`` — the stale-relay memo's slice, 2026-10-11).
+    Before it, this chain ended in the A24 sentence: the install moved and the
+    relay kept advertising the previous build (the drill's receipt vs peer-row
+    divergence).
+
+    The child is run IN-PROCESS (the real ``daemons_refresh_command`` executing
+    the real platform table, its relay repair replaced by a recorder) so the cell
+    exercises the hand-off without an interpreter spawn; the subprocess seam
+    itself is pinned by the update cells.
+
+    THE CELL WAITS FOR THE CHILD TO RETURN, not for the repair alone. The first
+    revision waited on an event set by the repair — which fires MID-CHILD — and
+    then read ``seen``, filled by ``_run`` only after ``daemons_refresh_command``
+    returns; on a loaded CI worker the test thread won that race and read an
+    empty dict (``test (3.12, 3)`` on run 38191435186, ``assert None == 0``).
+    ``finished`` is set in ``_run``'s ``finally``, so a child that raised still
+    wakes the waiter and the ``seen["error"]`` assertion reports it.
+    """
+    import io
+    import threading
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from local_operator import launchd
+    from local_operator import update as update_mod
+    from local_operator.network import relay
+
+    finished = threading.Event()
+    repairs: list[str] = []
+    seen: dict[str, Any] = {}
+
+    def _repair() -> Any:
+        repairs.append("network relay")
+        return launchd.PlistRefresh(name="network relay", kind="current")
+
+    monkeypatch.setattr(relay, "refresh_unit_if_stale", _repair)
+    monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+    monkeypatch.setattr(update_mod, "_installed_daemon_plists", lambda: [])
+    monkeypatch.setattr(update_mod, "_linux_relay_unit_installed", lambda: True)
+    # The child's own identity guard: this venv is an editable install, which the
+    # child would refuse before it reached any step (its subject is elsewhere).
+    monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+
+    def _run(argv: list[str], **kwargs: Any) -> Any:
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = update_mod.daemons_refresh_command()
+            seen["argv"] = list(argv)
+            seen["code"] = code
+            return subprocess.CompletedProcess(
+                argv, code, stdout=out.getvalue(), stderr=err.getvalue()
+            )
+        except Exception as exc:  # noqa: BLE001 — surfaced to the asserting thread
+            seen["error"] = repr(exc)
+            raise
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    meshupdate.roll_services_after_reply()
+
+    assert finished.wait(10.0), f"the roll never ran the child to completion: {seen}"
+    assert "error" not in seen, seen.get("error")
+    assert repairs == ["network relay"]
+    assert seen.get("code") == 0
+    assert "--services-only" in seen.get("argv", [])
+
+
 def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:

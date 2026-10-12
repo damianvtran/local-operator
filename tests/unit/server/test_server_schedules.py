@@ -207,7 +207,7 @@ async def test_create_schedule_for_agent_agent_not_found(
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_agent_id} not found" in data["detail"]
+    assert f"Agent with ID {non_existent_agent_id} not found" in data["detail"]["text"]
     mock_agent_registry.load_agent_state.assert_not_called()
     mock_agent_registry.save_agent_state.assert_not_called()
 
@@ -235,7 +235,7 @@ async def test_create_schedule_internal_error(
 
     assert response.status_code == 500
     data = response.json()
-    assert "DB write error" in data["detail"]
+    assert "DB write error" in data["detail"]["text"]
 
 
 # Test for GET /v1/schedules
@@ -384,7 +384,7 @@ async def test_list_all_schedules_internal_error(test_app_client, mock_agent_reg
 
     assert response.status_code == 500
     data = response.json()
-    assert "Registry unavailable" in data["detail"]
+    assert "Registry unavailable" in data["detail"]["text"]
 
 
 # Test for GET /v1/agents/{agent_id}/schedules
@@ -427,7 +427,7 @@ async def test_list_schedules_for_agent_agent_not_found(
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Agent with ID {non_existent_agent_id} not found" in data["detail"]
+    assert f"Agent with ID {non_existent_agent_id} not found" in data["detail"]["text"]
 
 
 # Test for GET /v1/schedules/{schedule_id}
@@ -508,7 +508,7 @@ async def test_get_schedule_by_id_not_found(test_app_client, mock_agent_registry
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]
+    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]["text"]
 
 
 # Test for PATCH /v1/schedules/{schedule_id}
@@ -688,7 +688,7 @@ async def test_edit_schedule_not_found(test_app_client, mock_agent_registry: Mag
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]
+    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]["text"]
 
 
 # Test for DELETE /v1/schedules/{schedule_id}
@@ -770,4 +770,4 @@ async def test_remove_schedule_not_found(test_app_client, mock_agent_registry: M
 
     assert response.status_code == 404
     data = response.json()
-    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]
+    assert f"Schedule with ID {non_existent_schedule_id} not found" in data["detail"]["text"]

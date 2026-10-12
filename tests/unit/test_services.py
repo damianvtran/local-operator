@@ -664,6 +664,46 @@ def test_status_lines_says_so_when_there_are_no_daemons(
 ) -> None:
     monkeypatch.setattr(services, "serve_daemon_reports", _fleet([]))
     monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    # The Linux probe is pinned absent too: "no daemons" must be the CELL'S
+    # state, not the runner's (a Linux host that has the relay unit would
+    # otherwise grow a row here).
+    monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
+    assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
+
+
+def test_status_lines_find_the_relay_unit_on_linux(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Linux row (2026-10-11, stale-relay memo): the supervised relay is visible.
+
+    Without it the operator who was just told "the relay is behind the install"
+    has nothing in `lop services status` to find it with — the plist reader sees
+    no plists off macOS — and the unit-flavoured note states the same invariant
+    the plist rows do, in this platform's noun.
+    """
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([]))
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(
+        services,
+        "_linux_supervised_unit",
+        lambda: Path("/home/x/.config/systemd/user/local-operator-network.service"),
+    )
+    monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
+    lines = services.status_lines()
+    assert "supervised daemon: local-operator-network.service" in lines
+    assert any("its build is not in the unit file" in line for line in lines)
+    assert "      `lop services restart` puts them on the current build" in lines
+    longest = max(len(line) for line in lines)
+    assert longest <= 80, f"longest line is {longest}: {max(lines, key=len)!r}"
+
+
+def test_status_lines_stay_silent_about_units_that_are_not_installed(
+    pointer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No unit file → byte-for-byte the output every other platform prints."""
+    monkeypatch.setattr(services, "serve_daemon_reports", _fleet([]))
+    monkeypatch.setattr(services, "_supervised_daemon_plists", lambda: [])
+    monkeypatch.setattr(services, "_linux_supervised_unit", lambda: None)
     assert services.status_lines() == ["install: 0.59.0", "serve daemons: none running"]
 
 

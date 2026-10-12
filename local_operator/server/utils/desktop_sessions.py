@@ -65,7 +65,7 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import transcript_find, transcript_index
+from local_operator.session import open_trace, transcript_find, transcript_index
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -1594,6 +1594,8 @@ class DesktopSessionBridge:
         (see :meth:`_read_attach_settled`).
         """
         task: asyncio.Task[bool] | None = None
+        trace_at = time.monotonic()
+        attach_landed: bool | None = None
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
@@ -1635,6 +1637,7 @@ class DesktopSessionBridge:
                         else READ_FIRST_FRAME_GRACE_S
                     )
                     done, _ = await asyncio.wait({task}, timeout=grace)
+                    attach_landed = bool(done)
                     if not done:
                         self.read_attach_outran.add(task)
             else:
@@ -1655,6 +1658,20 @@ class DesktopSessionBridge:
             raise
         if self.attention_task is None:
             self.attention_task = asyncio.create_task(self._poll_attention())
+        if open_trace.enabled():
+            # The read envelope's own decomposition: the work before the wait
+            # (lock, facade, attach start) versus the attach wait itself, and
+            # whether the attach landed inside the grace. ``attach_landed`` is
+            # None when no wait happened at all (an already-attached facade) —
+            # the difference between "warm" and "waited and still cold".
+            open_trace.mark(
+                "a.acquire",
+                (time.monotonic() - trace_at) * 1000,
+                session=self.session_id,
+                read=read,
+                attach_started=task is not None,
+                attach_landed=attach_landed,
+            )
         return remote
 
     def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
@@ -3210,6 +3227,10 @@ class DesktopSessionBridge:
             self.attention_served_stale = True
         except (sqlite3.Error, OSError):
             pass
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.snap.attention", (time.monotonic() - started) * 1000, session=self.session_id
+            )
         # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
         # the clone is now taken LAST (see the watermark note above the return).
         # ``self.remote.frontend_state`` is the store object itself
@@ -3289,6 +3310,10 @@ class DesktopSessionBridge:
                 # why the renderer's own paint time is the reason for it.
                 deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
             )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.snap.history", (time.monotonic() - started) * 1000, session=self.session_id
+                )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
         # this frame's ``seq`` was a watermark older than the last suspension in
@@ -3305,6 +3330,10 @@ class DesktopSessionBridge:
         # pins it.
         state = self.state()
         seq, epoch = self.sequence, self.epoch
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
+            )
         return {
             "session_id": self.session_id,
             "epoch": epoch,
@@ -3971,12 +4000,29 @@ class DesktopSessionBridge:
             # NO FACADE AT ALL is the same fact as a cold one for this page's
             # purposes: nothing on this device can read the wire, so the owner's
             # stored journal is the only source -- and it does not need a facade.
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.remote.branch", session=self.session_id, source="stored", facade=False
+                )
             return await self._peer_stored_history(
                 before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
             )
         if remote.is_cold:
+            attach_at = time.monotonic()
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+            if open_trace.enabled():
+                # THE SECOND ATTACH ATTEMPT (the first is ``acquire``'s): paid
+                # only while the facade is still cold after the acquire, and
+                # bounded by the same read envelope. Marked separately because
+                # "the acquire waited" and "the snapshot waited" are different
+                # stretches of the wire's first-frame gap.
+                open_trace.mark(
+                    "a.remote.attach2",
+                    (time.monotonic() - attach_at) * 1000,
+                    session=self.session_id,
+                    still_cold=remote.is_cold,
+                )
         # THE WIRE ANSWERS ONLY WHEN IT CAN ANSWER AT ALL, and there are TWO ways it
         # cannot (agent review round 1, R1-3 — the predicate this comment used to
         # describe was ``is_cold`` alone, which is not the predicate the code runs).
@@ -3993,6 +4039,15 @@ class DesktopSessionBridge:
         # wire.
         cold = remote.is_cold
         rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+        stored = rows is None or (cold and not rows)
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.remote.branch",
+                session=self.session_id,
+                source="stored" if stored else "wire",
+                cold=cold,
+                rows=len(rows) if rows is not None else None,
+            )
         if rows is None or (cold and not rows):
             return await self._peer_stored_history(
                 before_id=before_id, through_id=through_id, limit=limit, open_frame=open_frame
@@ -4147,6 +4202,7 @@ class DesktopSessionBridge:
 
         device_id = str(getattr(self.remote_row, "owner_device", "") or "")
         if device_id:
+            ask_at = time.monotonic()
             page = await asyncio.to_thread(
                 peer_stored_history_page,
                 self.root,
@@ -4156,6 +4212,20 @@ class DesktopSessionBridge:
                 limit=limit,
                 open_frame=open_frame,
             )
+            if open_trace.enabled():
+                # THE MESH ASK, END TO END: control-socket dial, this device's
+                # relay, the hop to the owner's relay, its stored read and build,
+                # and every serialization on the way back. A ``None`` page is
+                # still a timed answer (the ask was made; it failed).
+                open_trace.mark(
+                    "a.stored.ask",
+                    (time.monotonic() - ask_at) * 1000,
+                    session=self.session_id,
+                    device=device_id,
+                    limit=limit,
+                    open_frame=open_frame,
+                    served=page is not None,
+                )
             if page is not None:
                 cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
                 # ``ts_source: "entry"`` IS THIS SOURCE'S OWN FACT, and it is
@@ -5114,6 +5184,7 @@ class DesktopSessionBridge:
         entry_times: bool = False,
         open_frame: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        gen_at = time.monotonic()
         try:
             cutoff = self.sequence
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
@@ -5133,6 +5204,13 @@ class DesktopSessionBridge:
                 open_frame=open_frame,
                 **supplement_read_options(sub.supplements),
             )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.snapshot",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                    open_frame=open_frame,
+                )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after
@@ -5190,6 +5268,12 @@ class DesktopSessionBridge:
                 open_payload["attaching"] = bool(
                     (snapshot.get("payload") or {}).get("attaching", False)
                 )
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.open_yield",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                )
             yield {
                 "session_id": self.session_id,
                 "epoch": self.epoch,
@@ -5202,6 +5286,12 @@ class DesktopSessionBridge:
             # The open frame is metadata, NOT permission to skip this replay.
             for frame in replay:
                 yield frame
+            if open_trace.enabled():
+                open_trace.mark(
+                    "a.gen.snapshot_yield",
+                    (time.monotonic() - gen_at) * 1000,
+                    session=self.session_id,
+                )
             yield snapshot
             for frame in pending_frames:
                 yield frame
