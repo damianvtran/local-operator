@@ -59,6 +59,7 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -144,7 +145,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version
+
+    # argparse help exits before startup owns config repair or locale activation.
+    # Explicit rendering keeps this extraction independent of the global wire
+    # renderer; an EN-only namespace must not un-ship audited locales.
+    help_locale = resolve_help_locale()
 
     # Create parent parser with common arguments
     parent_parser = argparse.ArgumentParser(add_help=False)
@@ -1997,7 +2004,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="?",
         default=None,
-        help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
+        help=_eh.command().envelope(locale=help_locale)["text"],
     )
     # A SECOND positional must PARSE rather than die inside argparse. Without
     # this, `lop exec "Some Title" "do the work"` — the shape an agent reaches
@@ -2010,50 +2017,41 @@ def build_cli_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("extra", nargs="*", default=[], help=argparse.SUPPRESS)
     from local_operator.exec_startup import add_startup_arguments
 
-    add_startup_arguments(exec_parser)
+    add_startup_arguments(exec_parser, help_locale=help_locale)
     exec_parser.add_argument(
         "--status",
         metavar="JOB_ID",
-        help="Read a durable background-job status as JSON; does not start a session",
+        help=_eh.status().envelope(locale=help_locale)["text"],
     )
     # --- Additive exec flags (rewrite) ------------------------------------
     exec_parser.add_argument(
         "--background",
         action="store_true",
-        help="Detach the task: spawn a background worker with a log file and exit immediately",
+        help=_eh.background().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help="Emit one JSON line per agent event instead of the final text",
+        help=_eh.json().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--agent-id",
         type=str,
         dest="agent_id",
-        help="ID of the agent to use for this execution (alternative to --agent by name)",
+        help=_eh.agent_id().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--control",
         action="store_true",
-        help=(
-            "Route approvals and questions to an attached supervisor (may wait). "
-            "Without this flag non-TTY approvals deny; discovery and live attachment "
-            "are available either way. --yolo remains an explicit approval override."
-        ),
+        help=(_eh.control().envelope(locale=help_locale)["text"]),
     )
     exec_parser.add_argument(
         "--supervisor-fd",
         type=int,
         dest="supervisor_fd",
         default=None,
-        help=(
-            "Write this run's operator capability to this inherited descriptor so the "
-            "supervisor holding the other end can APPROVE the cards this run parks "
-            "(stage E). Requires --control; refused with --background. Descriptor "
-            "numbers only — the value never touches argv, the environment or a file."
-        ),
+        help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
