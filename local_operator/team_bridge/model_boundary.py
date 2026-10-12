@@ -420,6 +420,23 @@ class ScreeningWireGuard:
                     return False
         return True
 
+    def route_ok(self, route: Any) -> bool:
+        """ACTUAL selected-send boundary check (R7/Q14): the transport httpx
+        SELECTED for this request must be one of THIS guard's own proxies.
+
+        Called from the dedicated client's synchronous `_transport_for_url`
+        immediately before the send, so a primary replacement, a late
+        foreign mount, a reused proxy or an opaque route is refused with
+        ZERO I/O — the outer stream check alone cannot see the selection.
+        """
+
+        return any(route is proxy for proxy in self._proxies)
+
+    def route_error(self) -> BaseException:
+        """The typed refusal for a selected route that is not ours."""
+
+        return self._refuse("screening selected route is not this job's guard")
+
     def _guard_current(self) -> bool:
         """Whether every recorded transport is still THIS guard's proxy."""
 
@@ -745,6 +762,38 @@ class ScreenModelRunner:
         return "".join(parts), mid
 
 
+_GUARDED_CLIENT_CLS: Any = None
+
+
+def _guarded_screening_client(**kwargs: Any) -> Any:
+    """Build the dedicated screening client whose TRANSPORT SELECTION is
+    itself validated (R7/Q14).
+
+    ``_transport_for_url`` is the exact synchronous call httpx makes to
+    choose the transport for every send — primary or mounted, including
+    redirects and retries. Validating there closes the gap where a route
+    replaced between the outer stream check and the selection still got a
+    POST with no physical charge. The guard is attached as ``_tb_guard``
+    once it exists; a client without a guard (test seams) is unchanged.
+    """
+
+    import httpx
+
+    global _GUARDED_CLIENT_CLS
+    if _GUARDED_CLIENT_CLS is None:
+
+        class _GuardedScreeningClient(httpx.AsyncClient):  # type: ignore[misc]
+            def _transport_for_url(self, url: Any) -> Any:
+                route = super()._transport_for_url(url)
+                guard = getattr(self, "_tb_guard", None)
+                if guard is not None and not guard.route_ok(route):
+                    raise guard.route_error()
+                return route
+
+        _GUARDED_CLIENT_CLS = _GuardedScreeningClient
+    return _GUARDED_CLIENT_CLS(**kwargs)
+
+
 def make_screening_runner(
     *,
     config_dir: Path,
@@ -779,7 +828,7 @@ def make_screening_runner(
     lazy: dict[str, Any] = {"client": None, "stream_fn": None}
 
     def _guard(client: Any) -> Any:
-        return ScreeningWireGuard(
+        guard = ScreeningWireGuard(
             client,
             store=store,
             owner=owner,
@@ -789,6 +838,11 @@ def make_screening_runner(
             expected_epoch=expected_epoch,
             job_ref=job_state,
         )
+        # Attach to the DEDICATED client so its transport SELECTION is
+        # validated at the actual send boundary (R7/Q14).
+        if lazy["client"] is not None:
+            lazy["client"]._tb_guard = guard
+        return guard
 
     async def _ensure() -> Any:
         if lazy["stream_fn"] is not None:
@@ -797,7 +851,7 @@ def make_screening_runner(
 
         from local_operator.model.configure import create_stream_fn
 
-        dedicated = httpx.AsyncClient(
+        dedicated = _guarded_screening_client(
             transport=httpx.AsyncHTTPTransport(retries=0),
             timeout=httpx.Timeout(_SCREEN_WALL_DEADLINE_S, connect=_SCREEN_CONNECT_TIMEOUT_S),
             follow_redirects=False,

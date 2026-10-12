@@ -167,16 +167,23 @@ class PolicySnapshot:
     default_model: str | None
     admission_revision: str
     approved_serving_identities: frozenset[str] = field(default_factory=frozenset)
+    #: Canonical configured provider captured ONCE from the trusted policy
+    #: source (resolver/config + accepted status). Carried through the
+    #: snapshot so the job mint never re-resolves a second, later config
+    #: (R7/Q3: one capture certifies the dispatch).
+    provider: str = ""
 
     @classmethod
     def capture(cls, policy: ScreeningPolicy) -> "PolicySnapshot":
         identities = getattr(policy, "approved_serving_identities", ()) or ()
+        provider = getattr(policy, "provider", "") or ""
         return cls(
             screening_version=str(getattr(policy, "screening_version", "")),
             template_sha256=str(getattr(policy, "template_sha256", "")),
             default_model=(policy.default_model if isinstance(policy.default_model, str) else None),
             admission_revision=str(getattr(policy, "admission_revision", "")),
             approved_serving_identities=frozenset(str(i) for i in identities),
+            provider=provider,
         )
 
     def matches_live(self, policy: ScreeningPolicy) -> bool:
@@ -595,6 +602,12 @@ def _persist_hold(
 #: kept OUT of the default path because a WeakKeyDictionary keyed by the
 #: loop can never collect — each value (dict -> asyncio.Lock -> waiter
 #: futures) holds a STRONG reference back to its own key (R6/Q15).
+#: Renewal cadence + lifetime for the in-flight dispatch keeper (R7/Q15-5):
+#: the store's TTL floor is 60s, so a 20s cadence keeps a long callback ahead
+#: of expiry while an ownership loss is detected within one interval.
+_TURN_KEEPALIVE_S = 20.0
+_TURN_KEEPALIVE_TTL = 90.0
+
 _ACCOUNT_LOCKS: "_weakref.WeakKeyDictionary[Any, dict[tuple[str, str, str], asyncio.Lock]]"
 _ACCOUNT_LOCKS = _weakref.WeakKeyDictionary()
 
@@ -721,6 +734,13 @@ async def screen_message_async(
                 if not reuse:
                     store.release_screen_turn(owner, turn=turn)
 
+    except BaseException:
+        # Setup failures — a damaged schedule store refusing inside
+        # screen_turn_matches, a claim refusal raised as an exception — can
+        # occur BEFORE _screen_core's own finally; owned resources close on
+        # ANY setup exception too (R7/Q15-7). The close is idempotent.
+        await _close_owned_once()
+        raise
     finally:
         _lock.release()
 
@@ -1018,10 +1038,35 @@ async def _screen_core(
 
     # 11. ONE dispatch. Provider failures are typed holds AND advance the
     #     durable breaker; nothing of the exception's prose is kept.
+    #     WHOLE-DURATION lease protection (R7/Q15-5): a callback can outlast
+    #     the TTL floor, so the account turn is renewed WHILE the dispatch is
+    #     in flight and ownership loss CANCELS the inference — no send keeps
+    #     running under a lease a successor now holds (fencing, not luck).
+    lost = {"flag": False}
     try:
-        reply, actual_model = await _maybe_await(
-            _invoke_runner(runner, rendered.private_text(), snapshot.default_model)
-        )
+        outcome = _invoke_runner(runner, rendered.private_text(), snapshot.default_model)
+        if inspect.isawaitable(outcome):
+            dispatch = asyncio.ensure_future(_maybe_await(outcome))
+            keepalive = asyncio.ensure_future(_keep_turn_alive(store, owner, turn, dispatch, lost))
+            try:
+                reply, actual_model = await dispatch
+            finally:
+                keepalive.cancel()
+                try:
+                    await keepalive
+                except BaseException:  # noqa: BLE001 — the keeper is already done
+                    pass
+        else:
+            reply, actual_model = outcome
+    except asyncio.CancelledError:
+        if lost["flag"]:
+            # The lease moved mid-dispatch: typed hold, never a receipt, and
+            # never a release of the successor's turn (release/renew are
+            # token+frame fenced).
+            code = "owner_changed" if not store.current_generation_is_live(owner) else "retry_later"
+            _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+            return ScreenResult("hold", hold_code=code)
+        raise
     except Exception:  # noqa: BLE001 - sanitized hold; never prose
         retry_at = _record_failure(store, owner)
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "provider_error")
@@ -1107,6 +1152,10 @@ async def _screen_core(
             receipt=receipt,
             envelope_digest=envelope.envelope_digest,
             admission_revision=snapshot.admission_revision,
+            # The turn fence runs INSIDE the receipt transaction (R7/Q15-6):
+            # a successor claiming between the outside check and this commit
+            # must not let the old pipeline admit.
+            turn=turn,
             verify=lambda: snapshot.matches_live(policy),
         )
     except StoreRefused as failure:
@@ -1167,6 +1216,37 @@ def _commit_hold(
         )
     except StoreRefused:
         _persist_hold(store, owner, message_id, hold_code)
+
+
+async def _keep_turn_alive(
+    store: Store,
+    owner: OwnerSnapshot,
+    turn: str,
+    dispatch: "asyncio.Future[Any]",
+    lost: dict[str, bool],
+) -> None:
+    """Renew the account turn periodically while a dispatch is in flight.
+
+    On ownership loss (renew refused — successor, expiry or generation
+    move) the DISPATCH is cancelled and the loss is flagged so the caller
+    emits a typed hold instead of leaking a bare CancelledError. The keeper
+    never touches the lease itself beyond renew.
+    """
+
+    import time as _time
+
+    while True:
+        await asyncio.sleep(_TURN_KEEPALIVE_S)
+        try:
+            ok = store.renew_screen_turn(
+                owner, turn=turn, now=_time.time(), ttl=_TURN_KEEPALIVE_TTL
+            )
+        except StoreRefused:
+            ok = False
+        if not ok:
+            lost["flag"] = True
+            dispatch.cancel()
+            return
 
 
 def _invoke_runner(runner: Any, prompt: str, default_model: str) -> Any:
