@@ -41,6 +41,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeConfig,
     EpisodeRunner,
 )
+from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
 from local_operator.harness.types import (
     ModelSpec,
@@ -79,7 +80,7 @@ def _runner(
     episode_id: str,
     *,
     adapter: FakeAdapter,
-    model: ScriptedModel,
+    model: EpisodeModelClient,
     responder: Any = None,
     max_steps: int = 4,
     redactions: RedactionSet | None = None,
