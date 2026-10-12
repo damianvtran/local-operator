@@ -74,7 +74,15 @@ def test_actual_owner_projection_equivalence_only_when_complete_closure_is_bound
         Message(role="user", content=[ImageContent(data="aGVsbG8=", mime_type="image/png")]),
     ]
     entries = [
-        TranscriptEntry(m.id, 1.0, ENTRY_MESSAGE, encode_message_payload(m, attachments))
+        TranscriptEntry(
+            m.id,
+            1.0,
+            ENTRY_MESSAGE,
+            {
+                "kind": "custom" if isinstance(m, CustomMessage) else "message",
+                **encode_message_payload(m, attachments),
+            },
+        )
         for m in messages
     ]
     # Supplements are ENTRY_CUSTOM bookkeeping with an anchor, not arbitrary
@@ -114,6 +122,9 @@ def test_actual_owner_projection_equivalence_only_when_complete_closure_is_bound
     candidate._attachments = attachments
     actual, projected = _window(owner, entries[-1].id), _window(candidate, entries[-1].id)
     assert actual == projected
+    served_ids = {row.id for row in actual}
+    assert messages[3].id in served_ids, "custom injection fixture was not actually projected"
+    assert messages[4].id in served_ids, "attachment fixture was not actually projected"
     partial = read_indexed_raw_rows(directory, index, [target])
     assert partial is not None
     unsafe = _entry_to_message(partial["rows"][0], attachments)
@@ -127,7 +138,7 @@ def test_actual_owner_projection_equivalence_only_when_complete_closure_is_bound
     if output:
         path = Path(output)
         path.mkdir(parents=True, exist_ok=True)
-        body = json.dumps(actual, sort_keys=True, default=str).encode()
+        body = json.dumps([row.model_dump(mode="json") for row in actual], sort_keys=True).encode()
         private = path / "owner-projection.private.json"
         private.write_bytes(body)
         private.chmod(0o600)
