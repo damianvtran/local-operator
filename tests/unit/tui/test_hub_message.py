@@ -371,3 +371,256 @@ async def test_ordered_same_id_repair_groups_like_the_first_paint_control() -> N
     assert closed[2] and all(name != "UserBlock" for name, _ in closed[2])
     assert closed[3] == 1
     assert closed[4] == 3
+
+
+def _marked_receipt(receipt_id: str, body: str) -> Message:
+    """A hub steer as ``comms.steer`` persists it, under a chosen source id."""
+    message = Message.user(
+        f"<parent-message>\nsteer preamble\n\n{body}\n</parent-message>", id=receipt_id
+    )
+    message.provider_payload = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": body,
+        }
+    }
+    return message
+
+
+def _plain_envelope(receipt_id: str, body: str) -> Message:
+    """The same row before its provenance arrives: envelope text, no marker."""
+    return Message.user(
+        f"<parent-message>\nsteer preamble\n\n{body}\n</parent-message>", id=receipt_id
+    )
+
+
+def _source_order(view: TranscriptView) -> list[tuple[str, str, object]]:
+    """The ACTUAL source rows in order (bars are view objects, never rows)."""
+    return [
+        (
+            type(block).__name__,
+            str(getattr(block, "navigation_anchor_id", "")),
+            getattr(block, "navigation_anchor_part", None),
+        )
+        for block in view.blocks()
+        if not isinstance(block, QuietGroupBlock)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ordered_repair_with_bars_on_both_sides_converges_with_the_control() -> None:
+    """R4-1 round-5 acceptance, first half: two existing bars with an unmarked
+    row between them must converge on the fresh control's ONE group when that
+    row's provenance arrives in place — same members in source order, same
+    counts, no stale bars, five distinct leaves, and the reader's open intent
+    survives."""
+
+    def rows(marked_bridge: bool) -> list[Message]:
+        bridge = (
+            _marked_receipt("qa_bridge", "bridging instructions")
+            if marked_bridge
+            else _plain_envelope("qa_bridge", "bridging instructions")
+        )
+        return [
+            _marked_receipt("qa_p1", "one"),
+            _marked_receipt("qa_p2", "two"),
+            bridge,
+            _marked_receipt("qa_p3", "three"),
+            _marked_receipt("qa_p4", "four"),
+        ]
+
+    async def painted(repaired: bool) -> dict:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            view = app.query_one(TranscriptView)
+            if repaired:
+                # The pre-provenance history, the first bar opened by hand,
+                # then ONLY the same-ID repair (no peer prefix replay).
+                for message in rows(marked_bridge=False):
+                    app._project_settled_rows([message])
+                await pilot.pause()
+                bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+                assert [bar.group.count for bar in bars] == [2, 2]
+                bars[0].toggle_expanded()
+                await pilot.pause()
+                app._project_settled_rows([rows(marked_bridge=True)[2]])
+                await pilot.pause()
+            else:
+                for message in rows(marked_bridge=True):
+                    app._project_settled_rows([message])
+                await pilot.pause()
+            bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+            report = {
+                "counts": [bar.group.count for bar in bars],
+                "order": _source_order(view),
+                "expanded": [bar._expanded for bar in bars],
+                "hubs": len([b for b in view.blocks() if isinstance(b, HubMessageBlock)]),
+            }
+            app._append_block(ToolCard("tool-a", "read", {"path": "synthetic.txt"}))
+            await pilot.pause()
+            report["actions"] = [bar.group.actions for bar in bars]
+            app._project_settled_rows([_marked_receipt("qa_p7", "seven")])
+            await pilot.pause()
+            report["counts_after"] = [bar.group.count for bar in bars]
+            return report
+
+    control = await painted(repaired=False)
+    repaired = await painted(repaired=True)
+    assert control["counts"] == [5], control["counts"]
+    assert repaired["counts"] == [5], repaired["counts"]
+    assert control["order"] == repaired["order"]
+    assert [row[1] for row in repaired["order"] if row[0] == "HubMessageBlock"] == [
+        "qa_p1",
+        "qa_p2",
+        "qa_bridge",
+        "qa_p3",
+        "qa_p4",
+    ]
+    assert control["hubs"] == repaired["hubs"] == 5
+    assert control["actions"] == repaired["actions"] == [1]
+    assert control["counts_after"] == repaired["counts_after"] == [6]
+    assert repaired["expanded"] == [True]
+
+
+@pytest.mark.asyncio
+async def test_ordered_repair_keeps_the_untouched_live_tail_connected() -> None:
+    """R4-1 round-5 acceptance, second half: replanning an earlier closed
+    stretch leaves an UNTOUCHED live tail bar connected — the control's
+    action1 parity — without crossing the real human boundary and without
+    unfreezing the earlier closed group."""
+
+    def tool(label: str) -> ToolCard:
+        card = ToolCard(label, "read", {"path": "synthetic.txt"})
+        card.mark_done()
+        return card
+
+    async def painted(repaired: bool) -> dict:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            view = app.query_one(TranscriptView)
+            bridge = (
+                _plain_envelope("qa_bridge", "bridging instructions")
+                if repaired
+                else _marked_receipt("qa_bridge", "bridging instructions")
+            )
+            app._append_block(tool("tool-0"))
+            app._project_settled_rows([bridge])
+            app._append_block(tool("tool-1"))
+            app._append_block(tool("tool-2"))
+            app._project_settled_rows([Message.user("audit the ingest path", id="qa_u")])
+            app._project_settled_rows([_marked_receipt("qa_p5", "five")])
+            app._project_settled_rows([_marked_receipt("qa_p6", "six")])
+            await pilot.pause()
+            if repaired:
+                app._project_settled_rows([_marked_receipt("qa_bridge", "bridging instructions")])
+                await pilot.pause()
+            bars = [block for block in view.blocks() if isinstance(block, QuietGroupBlock)]
+            before = [(bar.group.actions, bar.group.count, bar.group.open) for bar in bars]
+            tail = bars[-1]
+            app._append_block(tool("tool-3"))
+            await pilot.pause()
+            after = [(bar.group.actions, bar.group.count, bar.group.open) for bar in bars]
+            tail_actions = tail.group.actions
+            user_visible = [
+                block for block in view.blocks() if isinstance(block, UserBlock) and block.display
+            ]
+            return {
+                "before": before,
+                "after": after,
+                "tail_actions": tail_actions,
+                "tail_is_same_object": tail is bars[-1],
+                "users": len(user_visible),
+            }
+
+    control = await painted(repaired=False)
+    repaired = await painted(repaired=True)
+    assert control["before"] == repaired["before"], (control["before"], repaired["before"])
+    assert repaired["before"][-1][2] is True, "the untouched tail bar stays open"
+    assert control["after"] == repaired["after"]
+    assert repaired["tail_actions"] == 1 or repaired["after"][-1][0] == 1
+    assert repaired["tail_is_same_object"] is True
+    assert control["users"] == repaired["users"] == 1
+
+
+@pytest.mark.asyncio
+async def test_late_picture_lands_at_its_original_source_seat() -> None:
+    """R3-3 placement acceptance: a late same-ID picture lands in the source's
+    own segment — never past a later human turn — so the progressive history's
+    final source order equals the initial-full one, with a following user and
+    final row on hand."""
+    from local_operator.harness.types import ImageContent
+
+    def picture_row(with_image: bool) -> Message:
+        message = _marked_receipt("qa_h", "look at this")
+        if with_image:
+            message.content.append(ImageContent(data="QUJD", mime_type="image/png"))
+        return message
+
+    async def painted(initial_full: bool) -> list[tuple[str, str, object]]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            view = app.query_one(TranscriptView)
+            # Identical FINAL source rows in both histories; only the pass
+            # structure differs (the progressive half paints h before its
+            # picture exists).
+            app._project_settled_rows([picture_row(initial_full)])
+            await pilot.pause()
+            app._project_settled_rows([Message.user("audit the ingest path", id="qa_u")])
+            await pilot.pause()
+            if not initial_full:
+                app._project_settled_rows([picture_row(True)])
+                await pilot.pause()
+            app._project_settled_rows([Message.assistant("done")])
+            await pilot.pause()
+            # Assistant rows carry a generated id, so the equivalence is
+            # asserted over the SOURCE-OWNED rows; the final row is asserted
+            # separately.
+            rows = _source_order(view)
+            assert rows[-1][0] == "AssistantBlock"
+            return [row for row in rows if row[0] != "AssistantBlock"]
+
+    control = await painted(initial_full=True)
+    repaired = await painted(initial_full=False)
+    assert control == repaired, (control, repaired)
+    assert [(row[0], row[1]) for row in control[:3]] == [
+        ("HubMessageBlock", "qa_h"),
+        ("ImageBlock", "qa_h"),
+        ("UserBlock", "qa_u"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_omitted_pictures_keep_their_citation_labels() -> None:
+    """Q-R6-3 acceptance: a metadata patch that OMITS the pictures is not an
+    instruction to forget them — both widgets, their source parts and their
+    citation labels stay exactly as the authoritative source left them."""
+    from local_operator.harness.types import ImageContent
+
+    def picture_row(count: int) -> Message:
+        message = _marked_receipt("qa_late", "look at this")
+        for _ in range(count):
+            message.content.append(ImageContent(data="QUJD", mime_type="image/png"))
+        return message
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        view = app.query_one(TranscriptView)
+        for count in (0, 1, 2, 2):
+            app._project_settled_rows([picture_row(count)])
+            await pilot.pause()
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        assert [(b.navigation_anchor_part, b._label) for b in images] == [(1, "#1"), (2, "#2")]
+
+        # The omission: same id, pictures absent from the row's content.
+        app._project_settled_rows([_marked_receipt("qa_late", "look at this")])
+        await pilot.pause()
+        images = [block for block in view.blocks() if isinstance(block, ImageBlock)]
+        assert len(images) == 2
+        assert [(b.navigation_anchor_part, b._label) for b in images] == [(1, "#1"), (2, "#2")]
+        assert len([b for b in view.blocks() if isinstance(b, HubMessageBlock)]) == 1

@@ -37599,6 +37599,7 @@ class OperatorApp(App[None]):
         source_id: str | None = None,
         source_indices: list[int] | None = None,
         source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]:
         from local_operator.tui.session_presentation import append_image_blocks
 
@@ -37610,7 +37611,37 @@ class OperatorApp(App[None]):
             source_id=source_id,
             source_indices=source_indices,
             source_total=source_total,
+            after=after,
         )
+
+    def _insert_after(self, anchor: Any, block: Any) -> None:
+        """Mount ``block`` immediately after ``anchor`` (ReplayTarget).
+
+        An ADOPTED source-owned part belongs at its original source seat: a
+        late same-ID picture appended at the physical tail lands past a
+        reader-facing boundary its source never crossed (review round 5, R3-3
+        placement; QA Q-R6-2). Source order is the view's own block order, so
+        the seat is the anchor's index plus one.
+
+        The bounded-resume collection (``_block_sink``) is a page BUILD with
+        no laid-out view to index into; there the collection order is the
+        mount order and the part keeps the plain append behaviour.
+        """
+        if self._projection_message_id:
+            if not block.navigation_anchor_id:
+                block.navigation_anchor_id = self._projection_message_id
+                block.navigation_anchor_part = self._projection_part
+            self._projection_part += 1
+        block.ends_empty_state = True
+        if self._block_sink is not None:
+            self._block_sink.append(block)
+            return
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        if anchor not in blocks:
+            transcript.append_block(block)
+            return
+        transcript.insert_blocks(blocks.index(anchor) + 1, [block])
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
