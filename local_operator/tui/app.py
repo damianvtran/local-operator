@@ -37594,10 +37594,21 @@ class OperatorApp(App[None]):
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
     ) -> list[ImageBlock]:
         from local_operator.tui.session_presentation import append_image_blocks
 
-        return append_image_blocks(self, images, marker_text=marker_text, fold_width=fold_width)
+        return append_image_blocks(
+            self,
+            images,
+            marker_text=marker_text,
+            fold_width=fold_width,
+            source_id=source_id,
+            source_indices=source_indices,
+            source_total=source_total,
+        )
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:

@@ -462,6 +462,20 @@ class ImageBlock(TranscriptBlock):
         if changed and self.is_mounted and self._mode == "kitty":
             self._repaint()
 
+    def set_label(self, label: str) -> None:
+        """Re-label after the source's FULL picture count grew.
+
+        A picture adopted when the source carried one picture names nothing
+        (review round 1, F4); when a later same-ID row expands the source,
+        its label re-reads from the full sequence so progressive adoption
+        converges on the full-initial rendering (review round 4).
+        """
+        if label == self._label:
+            return
+        self._label = label
+        if self.is_mounted:
+            self._repaint()
+
     def on_mount(self) -> None:
         """First paint at the real width (construction guessed 80 cols)."""
         self._repaint()

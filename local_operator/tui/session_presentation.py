@@ -617,6 +617,9 @@ class ReplayTarget(Protocol):
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
     ) -> list[ImageBlock]: ...
 
     def _replace_block(self, old: Any, block: Any) -> bool: ...
@@ -664,6 +667,9 @@ class PreparedReplay(ReplayState):
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
     ) -> list[ImageBlock]:
         # ``fold_width`` is accepted to satisfy ``ReplayTarget``: a prepared
         # replay is built OFFSCREEN, so there is no laid-out destination to
@@ -675,6 +681,9 @@ class PreparedReplay(ReplayState):
             marker_text=marker_text,
             navigation_visible=False,
             fold_width=fold_width,
+            source_id=source_id,
+            source_indices=source_indices,
+            source_total=source_total,
         )
 
     def _replace_block(self, old: Any, block: Any) -> bool:
@@ -1593,43 +1602,78 @@ def project_settled_rows(
                     # The row's own pictures ride exactly as they do on the
                     # human arm below: the marker reclassifies the ROW, never
                     # its attachments, and dropping them was losing visible
-                    # content (review round 3, R3-3). The ADOPTION is by
-                    # ANCHOR COUNT, not by path: an earlier pass may have
-                    # painted this row with no picture at all (the composer
-                    # lets text arrive before bytes) and a later same-ID row
-                    # with authoritative ``ImageContent`` is the first
-                    # occurrence of that picture — skipping it because a SEAT
-                    # survived loses the operator's media, while re-appending
-                    # a replay that re-carries the same parts would double it.
-                    # Counting the anchor's mounted images does both: the
-                    # missing tail is adopted, nothing already mounted is
-                    # repeated, and content that OMITS parts keeps the refs
-                    # it had.
-                    replay_images = [
+                    # content (review round 3, R3-3). Ownership is the
+                    # source's own coordinate (review round 4, R3-3/Q-R5-1):
+                    # (original ordinal, picture) pairs come from the FULL
+                    # authoritative sequence BEFORE any adoption filtering,
+                    # the mounted set is keyed by (source id, part) — body 0,
+                    # picture i owns i + 1 — and only parts this row does not
+                    # own yet are mounted. A replay re-carrying the same parts
+                    # appends nothing, omitted parts keep the media already
+                    # known, and a progressively adopted picture can never
+                    # collide with the body or with another picture whatever
+                    # this pass's mount counter reads.
+                    source_images = [
                         part
                         for part in (getattr(message, "content", None) or [])
                         if isinstance(part, ImageContent)
                     ]
-                    anchored_images = (
-                        sum(
-                            1
+                    # The ORIGINAL image ordinal counts PICTURES, not content
+                    # parts: a text part before the pictures must not shift
+                    # every ownership coordinate by one.
+                    source_media = list(enumerate(source_images))
+                    owned_parts = (
+                        {
+                            block.navigation_anchor_part
                             for block in transcript.blocks()
                             if isinstance(block, ImageBlock)
                             and block.navigation_anchor_id == receipt_id
-                        )
+                        }
                         if receipt_id
-                        else 0
+                        else set()
                     )
-                    missing_images = replay_images[anchored_images:]
+                    missing_media = [
+                        (ordinal, part)
+                        for ordinal, part in source_media
+                        if (ordinal + 1) not in owned_parts
+                    ]
+
+                    def adopt_media() -> bool:
+                        adopted = False
+                        if missing_media:
+                            self._append_image_blocks(
+                                [part for _, part in missing_media],
+                                marker_text=text,
+                                fold_width=fold_width,
+                                source_id=receipt_id or None,
+                                source_indices=[ordinal for ordinal, _ in missing_media],
+                                source_total=len(source_media),
+                            )
+                            adopted = True
+                        # Labels converge on the same rule the seam applies at
+                        # construction: a picture adopted while the source
+                        # carried one picture names nothing, so when the
+                        # source's FULL sequence grows its label re-reads
+                        # from that sequence — full-initial and progressive
+                        # adoption agree on labels, not only on counts.
+                        if receipt_id:
+                            total = len(source_media)
+                            for block in transcript.blocks():
+                                if not (
+                                    isinstance(block, ImageBlock)
+                                    and block.navigation_anchor_id == receipt_id
+                                ):
+                                    continue
+                                ordinal = int(block.navigation_anchor_part or 1) - 1
+                                block.set_label(source_image_label(text, ordinal, total))
+                        return adopted
+
                     existing = hub_receipts.get(receipt_id) if receipt_id else None
                     if existing is not None:
                         if existing.restate_receipt(body, facts):
                             transcript.restate_quiet_member(existing)
                             appended = True
-                        if missing_images:
-                            self._append_image_blocks(
-                                missing_images, marker_text=text, fold_width=fold_width
-                            )
+                        if adopt_media():
                             appended = True
                     else:
                         seat = source_seats.get(receipt_id) if receipt_id else None
@@ -1642,10 +1686,7 @@ def project_settled_rows(
                                 appended = True
                             if receipt_id:
                                 hub_receipts[receipt_id] = seat
-                            if missing_images:
-                                self._append_image_blocks(
-                                    missing_images, marker_text=text, fold_width=fold_width
-                                )
+                            if adopt_media():
                                 appended = True
                         elif isinstance(seat, UserBlock):
                             # RICHER SAME-ID REPLAY: this row was painted as
@@ -1658,23 +1699,27 @@ def project_settled_rows(
                             # membership is disturbed by the swap (a mounted
                             # receipt would have been found by id above).
                             block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            if receipt_id:
+                                # The receipt body owns logical part 0 of the
+                                # source anchor (pictures own i + 1), stamped
+                                # BEFORE the swap so the seat's old coordinates
+                                # cannot win.
+                                block.navigation_anchor_id = receipt_id
+                                block.navigation_anchor_part = 0
                             if self._replace_block(seat, block):
                                 hub_receipts[receipt_id] = block
                                 appended = True
-                            if missing_images:
-                                self._append_image_blocks(
-                                    missing_images, marker_text=text, fold_width=fold_width
-                                )
+                            if adopt_media():
                                 appended = True
                         else:
                             block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            if receipt_id:
+                                block.navigation_anchor_id = receipt_id
+                                block.navigation_anchor_part = 0
                             self._append_block(block)
                             if receipt_id:
                                 hub_receipts[receipt_id] = block
-                            if missing_images:
-                                self._append_image_blocks(
-                                    missing_images, marker_text=text, fold_width=fold_width
-                                )
+                            adopt_media()
                             appended = True
                     continue
                 # The live path never paints harness chrome as a user row
@@ -2155,6 +2200,26 @@ def tool_result_image_blocks(content: Any) -> list[ImageContent]:
     return out
 
 
+def source_image_label(marker_text: str | None, ordinal: int, total: int) -> str:
+    """The ``#N`` label for a picture at ORIGINAL ordinal in a FULL source.
+
+    One rule for construction and for later convergence (review round 4):
+    with ``marker_text`` the number is the source's own citation at that
+    ordinal — citation order equals image order, so an adoption tail can
+    still name the citation it belongs to — otherwise the ergonomic
+    position. A single-picture source names nothing (review round 1, F4).
+    """
+    if total <= 1:
+        return ""
+    if marker_text:
+        from local_operator.tui.widgets.editor import IMAGE_MARKER
+
+        citations = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
+        if ordinal < len(citations):
+            return f"#{citations[ordinal]}"
+    return f"#{ordinal + 1}"
+
+
 def append_image_blocks(
     self: ReplayTarget,
     images: list[ImageContent],
@@ -2162,6 +2227,9 @@ def append_image_blocks(
     marker_text: str | None = None,
     navigation_visible: bool = True,
     fold_width: int = 0,
+    source_id: str | None = None,
+    source_indices: list[int] | None = None,
+    source_total: int | None = None,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -2184,22 +2252,27 @@ def append_image_blocks(
     positional ``#1`` would name a marker the prompt does not contain
     (review round 2, F9). Tool results have no markers and fall back to
     positions.
+
+    SOURCE-OWNED CALLS (review round 4, R3-3/Q-R5-1): with ``source_id``
+    the caller names the source row and passes the ORIGINAL image ordinals
+    (``source_indices``) plus the FULL picture count (``source_total``),
+    and every block is stamped ``(source_id, ordinal + 1)`` BEFORE the
+    appender runs. The receipt body owns logical part 0 and the picture at
+    original ordinal ``i`` owns part ``i + 1``, so a progressively adopted
+    picture cannot collide with the body or with another picture — the
+    mount counter of this pass stops being the authority. Ordinals come
+    from the FULL authoritative source sequence, never from a filtered
+    missing tail, so labels and ownership survive partial adoption; the
+    display label still reads the source's own ``[Image #N]`` citation at
+    that original position when the marker text carries citations.
     """
     from local_operator.tui.app import logger
 
-    indices: list[int] = []
-    if marker_text:
-        from local_operator.tui.widgets.editor import IMAGE_MARKER
-
-        indices = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
+    total = source_total if source_total is not None else len(images)
     mounted: list[ImageBlock] = []
-    for index, image in enumerate(images):
-        if len(images) <= 1:
-            label = ""
-        elif index < len(indices):
-            label = f"#{indices[index]}"
-        else:
-            label = f"#{index + 1}"
+    for position, image in enumerate(images):
+        ordinal = source_indices[position] if source_indices is not None else position
+        label = source_image_label(marker_text, ordinal, total)
         try:
             block = ImageBlock(
                 image.data or None,
@@ -2211,6 +2284,9 @@ def append_image_blocks(
         except Exception:
             logger.debug("image block construction failed", exc_info=True)
             continue
+        if source_id is not None:
+            block.navigation_anchor_id = source_id
+            block.navigation_anchor_part = ordinal + 1
         self._append_block(block)
         mounted.append(block)
     return mounted

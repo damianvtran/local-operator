@@ -2019,9 +2019,7 @@ def test_a_stamped_but_invalid_marker_is_not_re_guessed_from_its_envelope() -> N
     live.absorb_user_event(invalid)
     assert live.projection.transcript[-1].kind == "user"
     live.absorb_user_event(legacy)
-    legacy_rows = [
-        entry for entry in live.projection.transcript if entry.id == "legacy-unstamped"
-    ]
+    legacy_rows = [entry for entry in live.projection.transcript if entry.id == "legacy-unstamped"]
     assert legacy_rows and legacy_rows[-1].kind == "parent_message"
 
 
