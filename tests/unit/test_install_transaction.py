@@ -433,6 +433,23 @@ def test_unparseable_session_namespace_is_not_idle(isolated: Path) -> None:
     assert bad.read_text() == "{broken"
 
 
+def test_lock_identity_nonposix_refuses_before_any_filesystem_access(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = update.stable_root()
+
+    def forbidden(*args: Any, **kwargs: Any):
+        pytest.fail("unsupported identity validation touched the filesystem")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tx.os, "name", "nt")
+        patch.setattr(tx.os, "fstat", forbidden)
+        patch.delattr(tx.os, "getuid")  # the actual missing Windows capability
+        with pytest.raises(tx.LockUnsupported, match="requires POSIX"):
+            tx._validate_lock_identity(root, -1, -1)
+    assert not root.exists()
+
+
 def test_wrong_owned_lock_refuses_before_metadata_write(
     isolated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
