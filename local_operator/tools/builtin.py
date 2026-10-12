@@ -14367,7 +14367,12 @@ async def execute_send(
                 "duplicate suppressed — no new delivery, wake or patience wait. "
                 f"Original confirmed receipt: {previous.text}",
                 details={
-                    **(previous.model_copy(deep=True).details or {}),
+                    # Historical proof is not this call's delivery/wake outcome.
+                    # Current-result consumers must never promote it to a new act.
+                    "original_receipt": {
+                        "text": previous.text,
+                        "details": previous.model_copy(deep=True).details or {},
+                    },
                     "duplicate_suppressed": True,
                     "original_tool_call_id": previous.tool_call_id,
                 },

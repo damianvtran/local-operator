@@ -887,6 +887,13 @@ def _delivery_outcome_summary(summary: str, args: dict[str, object], details: ob
 
     if not isinstance(details, Mapping):
         return summary
+    if details.get("duplicate_suppressed") is True:
+        # Requested mode is not current execution: reuse performed no new act.
+        # Put the discriminator first so right-truncation cannot hide it.
+        marker = _scalar_text(peer_send_mode_label(args))
+        prefix = f"{marker} · "
+        rest = summary[len(prefix) :] if summary.startswith(prefix) else summary
+        return f"receipt reused · no new wake · {rest}"
     delivery = details.get("delivery")
     state = delivery.get("state") if isinstance(delivery, Mapping) else None
     word = DELIVERY_OUTCOME_WORDS.get(state) if isinstance(state, str) else None
