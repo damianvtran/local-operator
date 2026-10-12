@@ -976,6 +976,18 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
 > a one-character CJK value, six characters of escape. Both bounds, and why they
 > are two numbers rather than one, are documented beside the constants in
 > `local_operator/redaction_shapes.py`.
+>
+> **And the residual of that change is not only coverage.** The escaping family
+> can also OVER-mask. A value whose escaping lands exactly ON the 12-character
+> bound — a two-character value — is short enough that an unrelated escaped
+> document can carry the same sequence: measured by review at 96/2000 over a
+> 64-character "common characters" source (0/2000 over a uniform CJK source, and
+> 0/2000 from a three-escape needle upward), and reproduced on the real read path
+> as one marker on a document the base left untouched. Over-masking is not a
+> release, and it is narrower than what such a value already had — its verbatim
+> spelling has no floor, so two adjacent characters of ordinary text were already
+> being rewritten — but it is why the bound is documented as a bound rather than
+> as a guarantee.
 
 ### 5.3 Coordination with the open work, checked rather than assumed
 
