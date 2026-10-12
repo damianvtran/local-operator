@@ -460,6 +460,22 @@ export function imageUrl(sessionId: string, entryId: string, index: number): str
 	return `/api/sessions/${encodeURIComponent(sessionId)}/image?${q}`;
 }
 
+/** One attachment artifact's bytes, keyed by the entry id plus the
+    kind-scoped index the ref emitted. The one RANGE-CAPABLE data route:
+    phone Safari will not play a <video> that arrives as a full-body 200, so
+    the server answers byte-Range requests with 206 + Content-Range. Same
+    content key as `imageUrl` (a message uuid plus the family index), so the
+    same immutable caching applies. */
+export function attachmentUrl(
+	sessionId: string,
+	entryId: string,
+	index: number,
+	kind: "image" | "video",
+): string {
+	const q = new URLSearchParams({ entry: entryId, i: String(index), kind });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/attachment?${q}`;
+}
+
 /* ---- turn supplements ("Highlights", memo §2.7) --------------------------- */
 
 /** The component document route: `{html}` assembled server-side; the bytes
