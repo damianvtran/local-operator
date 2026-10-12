@@ -74,6 +74,132 @@ def _assert_absent(modules: set[str], top_level: str, why: str) -> None:
     assert not offenders, f"{top_level} is back on the startup path ({why}); saw {offenders[:5]}"
 
 
+# The chart is not composed at conversation startup. Pin the optional closure,
+# not a millisecond ceiling: fleet load must not make an eager import look safe.
+_ORG_CHART_CLOSURE = (
+    "local_operator.tui.widgets.org_chart_view",
+    "local_operator.org_chart",
+    "local_operator.tui.org_render",
+    "local_operator.tui.org_layout",
+    "local_operator.teams",
+    "local_operator.types",
+    "local_operator.display_labels",
+    "local_operator.model.suggestion",
+)
+
+
+def test_app_import_leaves_org_chart_optional() -> None:
+    modules = _imported_modules("local_operator.tui.app")
+    for module in _ORG_CHART_CLOSURE:
+        _assert_absent(modules, module, "only a valid chart request needs this closure")
+
+
+def test_ordinary_boot_leaves_org_chart_optional() -> None:
+    # Use the real app/CSS and a provider-free session, in a virgin interpreter:
+    # collection of chart behavior tests must not pre-load the optional module.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import asyncio, json, sys
+from local_operator.tui.app import OperatorApp
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+async def main():
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        assert app._session is session
+        assert app._editor().is_attached
+        assert app._editor().display
+        assert app._transcript_view().display
+        optional = (
+            'local_operator.tui.widgets.org_chart_view',
+            'local_operator.org_chart', 'local_operator.tui.org_render',
+            'local_operator.tui.org_layout',
+        )
+        # Check useful boot before even touching an optional command/registry.
+        assert not any(name in sys.modules for name in optional)
+        # Missing attachment/unknown name do not need the optional renderer.
+        app._run_slash_command('/team chart')
+        app._run_slash_command('/team chart nonexistent-import-probe')
+        await pilot.pause()
+        assert app._org_chart_view is None
+        print(json.dumps(sorted(sys.modules)))
+        from local_operator.teams import TeamRegistry, TeamEditFields
+        from pathlib import Path
+        import tempfile
+        registry = TeamRegistry(Path(tempfile.mkdtemp()))
+        registry.create_team(TeamEditFields(name='import-probe', manager='manager'))
+        session.team_registry = registry
+        app._run_slash_command('/team chart import-probe')
+        await pilot.pause()
+        assert all(name in sys.modules for name in optional)
+        assert app._org_chart_view._root is not None
+        assert app._org_chart_view.team_name == 'import-probe'
+
+asyncio.run(main())
+""",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+        timeout=90,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    modules = set(json.loads(proc.stdout.strip().splitlines()[-1]))
+    # The invalid-command registry lookup may load team models, but must not
+    # load the view, resolver, renderer or layout engine.
+    for module in _ORG_CHART_CLOSURE[:4]:
+        _assert_absent(modules, module, "ordinary useful boot/invalid chart request")
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        "local_operator.tui.app",
+        "local_operator.tui.widgets.org_chart_messages",
+        "local_operator.tui.widgets.org_chart_view",
+    ],
+)
+def test_chart_message_import_order_and_runtime_hints(first: str) -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib, sys, typing
+importlib.import_module(sys.argv[1])
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
+handler_hints = typing.get_type_hints(OperatorApp.on_org_chart_view_dismissed)
+assert handler_hints['message'] is OrgChartViewDismissed
+from local_operator.tui.widgets import org_chart_view as widget
+assert widget.OrgChartViewDismissed is OrgChartViewDismissed
+assert OrgChartViewDismissed().handler_name == 'on_org_chart_view_dismissed'
+assert typing.get_type_hints(widget.OrgChartView.show)['root'] is widget.OrgNode
+assert typing.get_type_hints(widget.OrgChartView.__init__)['team_name'] is str
+result_hints = typing.get_type_hints(widget.OrgChartView.last_result.fget)
+assert result_hints['return'] == widget.RenderResult | None
+assert typing.get_type_hints(widget.render_org)['tier'] == widget.Tier
+print('message identity, runtime hints and handler_name preserved')
+""",
+            first,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+        timeout=90,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert "message identity, runtime hints and handler_name preserved" in proc.stdout
+
+
 # --- CLI entry point ---------------------------------------------------------
 
 
