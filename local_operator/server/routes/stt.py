@@ -42,6 +42,7 @@ from starlette.status import (
 from local_operator.clients.radient_cost import RadientCost
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
+from local_operator.i18n.keys import wire_errors_media as _wm
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_config_manager,
@@ -93,7 +94,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     if not provider or not model:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="provider and model must be provided together, or neither.",
+            detail=_wm.provider_model_pair().envelope(),
         )
     # An unknown provider is refused by name rather than answered about:
     # ``build_model_spec`` happily returns a placeholder spec for any string,
@@ -104,7 +105,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     if get_provider_definition(provider) is None:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown provider {provider!r}.",
+            detail=_wm.unknown_provider(provider=repr(provider)).envelope(),
         )
     # Imported lazily: model/configure.py is heavy and pulls the session
     # machinery, which the health of a plain `/v1/stt/paths` call should not
@@ -116,7 +117,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     except Exception as exc:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown model {provider}/{model}: {exc}",
+            detail=_wm.unknown_model(provider=provider, model=model, error=str(exc)).envelope(),
         )
 
 
@@ -209,7 +210,7 @@ async def create_stt_transcription_endpoint(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save uploaded audio file: {str(e)}",
+            detail=_wm.save_audio_failed(error=str(e)).envelope(),
         )
     finally:
         await file.close()
@@ -234,9 +235,8 @@ async def create_stt_transcription_endpoint(
             # reads to offer the audio door (``model_audio``).
             raise HTTPException(
                 status_code=HTTP_409_CONFLICT,
-                detail={
-                    "code": "stt_unavailable",
-                    "message": str(exc),
+                detail=_wm.media_refusal(error=str(exc)).envelope(code="stt_unavailable")
+                | {
                     "rungs": [_rung_json(rung) for rung in exc.resolution.rungs],
                     "model_audio": exc.resolution.model_audio_capable,
                 },
@@ -246,14 +246,16 @@ async def create_stt_transcription_endpoint(
         # upstream/transport), exactly as the legacy route maps them.
         raise HTTPException(
             status_code=exc.status_code or HTTP_502_BAD_GATEWAY,
-            detail=exc.detail or str(exc),
+            detail=_wm.media_refusal(error=exc.detail or str(exc)).envelope(),
         )
     except ValueError as ve:  # A client-side validation error (e.g. prompt length)
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=_wm.media_refusal(error=str(ve)).envelope()
+        )
     except Exception as e:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during transcription: {str(e)}",
+            detail=_wm.transcription_unexpected(error=str(e)).envelope(),
         )
     finally:
         if os.path.exists(temp_dir):

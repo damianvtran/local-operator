@@ -130,7 +130,10 @@ from local_operator.slash_commands import (
     slash_command_for,
     whole_draft_command,
 )
-from local_operator.supplements.contract import STEER_TEXT_MAX_CHARS
+from local_operator.supplements.contract import (
+    STEER_TEXT_MAX_CHARS,
+    supplement_read_options,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3144,6 +3147,7 @@ async def snapshot(
         list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
         Query(max_length=512),
     ] = None,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3197,6 +3201,7 @@ async def snapshot(
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(bool(supplements)),
             )
         )
 
@@ -3255,6 +3260,7 @@ async def history(
         list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
         Query(max_length=512),
     ] = None,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3297,6 +3303,7 @@ async def history(
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                **supplement_read_options(bool(supplements)),
             )
         )
 
