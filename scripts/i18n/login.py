@@ -40,6 +40,8 @@ _RENDERER_TOKENS = {
     "rtl",
     "ur",
     "ltr",
+    "en",
+    "relay.login",
     "",
     '<p class="error" role="alert">',
     "</p>",

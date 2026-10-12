@@ -52,6 +52,30 @@ def test_english_login_and_auth_contract() -> None:
     assert client.get("/api/sessions").status_code == 401
 
 
+@pytest.mark.parametrize("locale", ["en", "fr", "es", "ru", "vi"])
+def test_actual_shipped_missing_namespace_uses_english_metadata(
+    monkeypatch, tmp_path, locale: str
+) -> None:
+    # Real resolver/catalogues, not a mocked language string: these are the
+    # committed shipped tags while relay.login currently carries English only.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(f"values:\n  language: {locale}\n")
+    assert daemon.resolve_language() == locale
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    for response in [client.get("/login"), client.post("/login", data={"password": "wrong"})]:
+        assert '<html lang="en" dir="ltr">' in response.text
+        assert "<title>local operator — sign in</title>" in response.text
+        assert '<label for="password">password</label>' in response.text
+        assert '<button type="submit">sign in</button>' in response.text
+    assert client.get("/login").status_code == 200
+    refused = client.post("/login", data={"password": "wrong"})
+    assert refused.status_code == 401
+    assert '<p class="error" role="alert">Wrong password.</p>' in refused.text
+
+
 def test_single_backend_locale_live_resolution_and_escaping(monkeypatch, tmp_path) -> None:
     """Synthetic unshipped translations exercise SSR mechanics, not shipment."""
     target = tmp_path / "ur"
@@ -74,6 +98,54 @@ def test_single_backend_locale_live_resolution_and_escaping(monkeypatch, tmp_pat
     assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &amp; __SUBMIT__" in rendered
     monkeypatch.setattr(daemon, "resolve_language", lambda: "en")
     assert '<html lang="en" dir="ltr">' in daemon._render_login_html()
+
+
+def test_present_namespace_honors_real_backend_locale(monkeypatch, tmp_path) -> None:
+    # Synthetic catalogue root, not production translation/ledger shipment.
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "fr").mkdir()
+    english = (ROOT / "local_operator/i18n/catalogues/en/relay.login.json").read_text()
+    (root / "en/relay.login.json").write_text(english)
+    translated = {
+        "relay.login.page.title": "Connexion",
+        "relay.login.password.label": "Mot de passe",
+        "relay.login.submit.label": "Se connecter",
+        "relay.login.error.password": "Mot de passe incorrect.",
+    }
+    (root / "fr/relay.login.json").write_text(json.dumps(translated))
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: fr\n")
+    assert daemon.resolve_language() == "fr"
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    for response in [client.get("/login"), client.post("/login", data={"password": "wrong"})]:
+        assert '<html lang="fr" dir="ltr">' in response.text
+        assert "<title>Connexion</title>" in response.text
+        assert '<label for="password">Mot de passe</label>' in response.text
+        assert '<button type="submit">Se connecter</button>' in response.text
+    assert "Mot de passe incorrect." in client.post("/login", data={"password": "wrong"}).text
+
+
+def test_held_namespace_file_cannot_override_backend_eligibility(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "zh-CN").mkdir()
+    source = (ROOT / "local_operator/i18n/catalogues/en/relay.login.json").read_text()
+    (root / "en/relay.login.json").write_text(source)
+    held = {key: "Held catalogue fixture" for key in json.loads(source)}
+    (root / "zh-CN/relay.login.json").write_text(json.dumps(held))
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: zh-CN\n")
+    assert daemon.resolve_language() == "en"
+    rendered = daemon._render_login_html(error=True)
+    assert '<html lang="en" dir="ltr">' in rendered
+    assert "Held catalogue fixture" not in rendered
+    assert "Wrong password." in rendered
 
 
 def test_source_context_and_generated_key_parity() -> None:

@@ -60,6 +60,7 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n import catalogues
 from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.keys import relay_login
 from local_operator.i18n.messages import Msg, render
@@ -7835,6 +7836,14 @@ def _render_login_html(*, error: bool = False) -> str:
     translated text resembling a token from being substituted twice.
     """
     locale = resolve_language()
+    # Language-of-page describes the copy actually rendered, not preference.
+    # A shipped locale may lack this newly extracted namespace; select its
+    # English fallback once so assistive pronunciation and direction agree
+    # with every message. Never probe any locale the backend did not resolve.
+    try:
+        catalogues.load_catalogue(locale, "relay.login")
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        locale = "en"
 
     def text(message: Msg) -> str:
         return html.escape(render(message.code, message.params, locale=locale))
