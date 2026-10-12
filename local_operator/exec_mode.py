@@ -37,7 +37,6 @@ from local_operator.interpreter import python_argv
 from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.procstate import O_BINARY
 
-
 #: The render-point resolver for this module's copy (RFC §3.1): ``_t(msg)``
 #: renders a ``wire.exec`` message in the active locale. Module-level because
 #: the resolver reads root and locale at each call, so a locale move is picked
@@ -822,9 +821,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     # (the "execution receipt" clarifier and the failure tail) is catalogue-
     # owned and joins after the token.
     receipt += (
-        _t(_wd.receipt_failure_suffix(failure=failure))
-        if failure
-        else _t(_wd.receipt_suffix())
+        _t(_wd.receipt_failure_suffix(failure=failure)) if failure else _t(_wd.receipt_suffix())
     )
     print(receipt, file=sys.stderr)
     if state.get("session_id"):
