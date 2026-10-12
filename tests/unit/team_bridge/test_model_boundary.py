@@ -416,12 +416,21 @@ def test_one_bind_replays_exactly_and_refuses_a_change(tmp_path) -> None:
         approved=("qa-default",),
         epoch=0,
     )
-    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A", job=stub)
-    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-A", job=stub)
-    from local_operator.team_bridge.store import StoreRefused
+    from local_operator.team_bridge.store import StoreRefused, _canonical_job_digest
+
+    # R10/B: the bind digest is the CANONICAL derivation from the job fields
+    # (a literal string or forged attribute is refused), so the test derives
+    # both arms the same way the production binder now verifies them.
+    stub.digest = _canonical_job_digest(stub)
+    job_a = stub.digest
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job_a, job=stub)
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job_a, job=stub)
+    changed = _types.SimpleNamespace(**{**vars(stub), "model": "qa-other"})
+    changed.digest = _canonical_job_digest(changed)
+    job_b = changed.digest
 
     with pytest.raises(StoreRefused) as err:
-        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="JOB-B", job=stub)
+        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job_b, job=changed)
     assert err.value.code == "write_once_conflict"
 
 
