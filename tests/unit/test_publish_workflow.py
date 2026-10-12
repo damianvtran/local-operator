@@ -47,6 +47,7 @@ import yaml
 # Release/dispatch must inspect the same event target the build consumes, not
 # mutable main or a classifier-selected PR subset.
 RELEASE_TARGET_REF = "${{ github.event.release.tag_name || github.sha }}"
+IMMUTABLE_SOURCE_REF = "${{ github.sha }}"
 INVARIANT_JOB = "release-invariants"
 
 
@@ -103,9 +104,149 @@ def _release_invariant_problems(doc: dict[Any, Any]) -> list[str]:
             problems.append(f"{name} overrides dependency success")
         for step in jobs[name]["steps"]:
             if str(step.get("uses", "")).startswith("actions/checkout@"):
-                if step.get("with", {}).get("ref") != RELEASE_TARGET_REF:
-                    problems.append(f"{name} checkout differs from invariant target")
+                if step.get("with", {}).get("ref") != IMMUTABLE_SOURCE_REF:
+                    problems.append(f"{name} checkout is not immutable event SHA")
+        checkout_index = next(
+            i
+            for i, step in enumerate(jobs[name]["steps"])
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        identity = jobs[name]["steps"][checkout_index + 1]
+        if (
+            identity.get("run", "").strip() != 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'
+            or "if" in identity
+            or identity.get("continue-on-error")
+        ):
+            problems.append(f"{name} source identity is not checked before consumption")
     return problems
+
+
+def _tag_retarget_model(doc: dict[Any, Any], event: str, tag_moved: bool) -> dict[str, Any]:
+    """Nonwriting model of actual checkout expressions/needs, not Actions execution."""
+    jobs = doc["jobs"]
+    event_sha, moved_sha = "a" * 40, "b" * 40
+
+    def resolve(ref: str, tag_sha: str) -> str:
+        if ref == IMMUTABLE_SOURCE_REF:
+            return event_sha
+        if ref == RELEASE_TARGET_REF:
+            return tag_sha if event == "release" else event_sha
+        raise AssertionError(f"unsupported source-ref expression: {ref}")
+
+    def checkout(name: str) -> str:
+        return next(
+            step["with"]["ref"]
+            for step in jobs[name]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+
+    def gate_dependency(name: str, visited: set[str]) -> bool:
+        if name == INVARIANT_JOB:
+            return True
+        if name in visited:
+            return False
+        visited.add(name)
+        needs = jobs[name].get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        return any(gate_dependency(parent, visited) for parent in needs)
+
+    validated = resolve(checkout(INVARIANT_JOB), event_sha)
+    assert validated == event_sha
+    later_tag = moved_sha if tag_moved else event_sha
+    # Extension is release-only; its dispatch ref is still checked as a source
+    # configuration control, not a claim that the dispatch actually runs it.
+    rows = {}
+    for name in ("release-build", "extension-release", "keyagent-macos"):
+        steps = jobs[name]["steps"]
+        index = next(
+            i
+            for i, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        next_step = steps[index + 1]
+        identity_assert = (
+            next_step.get("run", "").strip() == 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'
+            and "if" not in next_step
+            and not next_step.get("continue-on-error")
+        )
+        source = resolve(checkout(name), later_tag)
+        dependency = gate_dependency(name, set())
+        rows[name] = {
+            "guard_dependency": dependency,
+            "validated_commit": validated,
+            "source_commit": source,
+            "identity_assert": identity_assert,
+            "build_reachable": dependency and (not identity_assert or source == event_sha),
+        }
+    return rows
+
+
+def test_release_tag_retarget_cannot_change_validated_source() -> None:
+    for event, moved in (("release", True), ("release", False), ("workflow_dispatch", True)):
+        rows = _tag_retarget_model(_workflow(), event, moved)
+        assert all(row["guard_dependency"] for row in rows.values())
+        assert all(row["source_commit"] == row["validated_commit"] for row in rows.values())
+        assert all(row["build_reachable"] for row in rows.values())
+
+
+def test_each_mutable_source_ref_is_rejected_after_guard_success() -> None:
+    for name in ("release-build", "extension-release", "keyagent-macos"):
+        doc = copy.deepcopy(_workflow())
+        step = next(
+            step
+            for step in doc["jobs"][name]["steps"]
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        step["with"]["ref"] = RELEASE_TARGET_REF
+        row = _tag_retarget_model(doc, "release", True)[name]
+        assert row["guard_dependency"]
+        assert row["source_commit"] != row["validated_commit"]
+        assert not row["build_reachable"]
+        assert f"{name} checkout is not immutable event SHA" in _release_invariant_problems(doc)
+
+
+def test_old_unchecked_tag_retarget_cannot_return_silently() -> None:
+    for name in ("release-build", "extension-release", "keyagent-macos"):
+        doc = copy.deepcopy(_workflow())
+        steps = doc["jobs"][name]["steps"]
+        index = next(
+            i
+            for i, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        steps[index]["with"]["ref"] = RELEASE_TARGET_REF
+        del steps[index + 1]
+        row = _tag_retarget_model(doc, "release", True)[name]
+        assert row["build_reachable"] and row["source_commit"] != row["validated_commit"]
+        assert _release_invariant_problems(doc)
+
+
+def test_source_identity_assertion_cannot_be_skipped() -> None:
+    for name in ("release-build", "extension-release", "keyagent-macos"):
+        doc = copy.deepcopy(_workflow())
+        steps = doc["jobs"][name]["steps"]
+        index = next(
+            i
+            for i, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        steps[index + 1]["if"] = "${{ false }}"
+        assert (
+            f"{name} source identity is not checked before consumption"
+            in _release_invariant_problems(doc)
+        )
+
+
+def test_extension_change_detection_uses_verified_commit() -> None:
+    step = next(
+        step
+        for step in _workflow()["jobs"]["extension-release"]["steps"]
+        if step.get("id") == "ext-changed"
+    )
+    assert '"${GITHUB_SHA}^"' in step["run"]
+    assert 'git diff --quiet "$PREV_TAG" "$GITHUB_SHA" -- extension/' in step["run"]
+    assert 'git diff --quiet "$PREV_TAG" "$CURRENT_TAG"' not in step["run"]
 
 
 def test_release_invariants_guard_both_event_paths() -> None:
