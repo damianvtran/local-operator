@@ -378,7 +378,11 @@ def test_attachment_bytes_serves_video_and_the_sidecar_mime(tmp_path, monkeypatc
     cfg.mkdir()
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
 
-    ref = AttachmentStore().put_bytes(MP4_HEADER, "video/mp4")
+    # The sidecar mime is deliberately NOT the video fallback (``video/mp4``):
+    # with the same value on both sides the assertion below would pass even
+    # with the sidecar path dead, proving nothing about it (review round 1,
+    # F2). A distinct mime makes the resolution chain discriminate.
+    ref = AttachmentStore().put_bytes(MP4_HEADER, "video/webm")
     assert ref is not None
     block = AttachmentContent(kind="video", attachment=ref.digest)
     session_id = "sess-video"
@@ -408,7 +412,7 @@ def test_attachment_bytes_serves_video_and_the_sidecar_mime(tmp_path, monkeypatc
     assert found is not None
     data, mime = found
     assert data == MP4_HEADER
-    assert mime == "video/mp4"
+    assert mime == "video/webm"
 
     # Family indexes do not cross: no video at index 1, no image on this
     # message at all, and an unknown kind resolves nothing.

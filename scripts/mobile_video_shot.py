@@ -234,6 +234,22 @@ def _wait_for_event(
     return None
 
 
+def _response_header(headers: dict[str, Any], name: str) -> Any:
+    """One response header's value, looked up case-insensitively.
+
+    HTTP header names are case-insensitive by definition, and CDP preserves
+    whatever case reached the wire — a fixed-case lookup reads a MISS as an
+    absent header (round-1 review, N2: ``accept-ranges`` read as null on a
+    206 that demonstrably carried it). The raw dict also rides the artifact
+    so the question is answerable from the JSON rather than re-derived.
+    """
+    wanted = name.lower()
+    for key, value in (headers or {}).items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
 def _attachment_requests(page: "EventPage", start: int) -> list[dict[str, Any]]:
     """The browser's OWN attachment requests and the status each got back.
 
@@ -258,9 +274,11 @@ def _attachment_requests(page: "EventPage", start: int) -> list[dict[str, Any]]:
             if "/attachment?" in url:
                 entry = requests.setdefault(params.get("requestId") or url, {"url": url})
                 response = params.get("response") or {}
+                headers = response.get("headers") or {}
                 entry["status"] = response.get("status")
-                entry["content_range"] = (response.get("headers") or {}).get("Content-Range")
-                entry["accept_ranges"] = (response.get("headers") or {}).get("Accept-Ranges")
+                entry["content_range"] = _response_header(headers, "Content-Range")
+                entry["accept_ranges"] = _response_header(headers, "Accept-Ranges")
+                entry["headers"] = headers
     return list(requests.values())
 
 
