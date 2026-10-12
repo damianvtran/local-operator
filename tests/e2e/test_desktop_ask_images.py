@@ -34,6 +34,7 @@ import pytest
 import uvicorn
 
 from local_operator.asks import store as ask_store
+from local_operator.harness.types import TextContent
 from local_operator.server.app import app
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -166,7 +167,13 @@ async def test_an_image_answer_reaches_the_durable_row_and_the_model(
         request = stream.requests[0]
         assert len(_images_in(request)) == 1, "the answer's image never reached the provider"
         answer_turn = [m for m in request.messages if m.role == "user"][-1]
-        assert [b.type for b in answer_turn.content] == ["text", "image"]
+        # Text, the picture, then the stored-location note the request carries
+        # for a stored image (session/attachment_hints.py).
+        assert [b.type for b in answer_turn.content] == ["text", "image", "text"]
+        last_block = answer_turn.content[-1]
+        assert isinstance(last_block, TextContent)
+        note_text = last_block.text
+        assert "no filesystem search is needed" in note_text
         print("model input for the answer turn:", [b.type for b in answer_turn.content])
         print(answer_turn.text)
         assert "the screenshot (+1 image, shown below)" in answer_turn.text
@@ -180,6 +187,8 @@ async def test_an_image_answer_reaches_the_durable_row_and_the_model(
         (ref,) = event["attachments"]["q1"]
         assert set(ref) == {"attachment", "mime_type", "bytes"}
         assert (root / "attachments" / f"{ref['attachment']}.bin").exists()
+        # The note on the model's turn names the SAME file the durable ref does.
+        assert f"{ref['attachment']}.bin" in note_text
         journal = [
             line
             for line in (root / "sessions" / sid / "transcript.jsonl").read_text().splitlines()
