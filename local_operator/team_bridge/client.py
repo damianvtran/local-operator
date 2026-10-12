@@ -840,6 +840,119 @@ class TeamBridgeClient:
 
         return await self._send("GET", f"/tenants/{tenant_id}/messaging/state", access=access)
 
+    async def inbox(
+        self,
+        *,
+        tenant_id: str,
+        after: str | None = None,
+        limit: int | None = None,
+        state: str | None = None,
+        thread_id: str | None = None,
+        sender_account_id: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One inbox page (§6.1): deliveries for MY endpoint, cursor paginated.
+
+        ``tenant_id`` is REQUIRED — the server resolves "my endpoint" through
+        the membership the caller names, and H2's exact-owner guard must be
+        able to compare the answer to the committed owner BEFORE anything is
+        persisted (``pull.inbox`` does the comparison; this method is the
+        transport). The cursor is opaque and passed through verbatim: it can
+        reset/regress on a server resync, so nothing here orders or
+        interprets it. ``limit`` is capped at 100 by the server; H2 asks for
+        no more than that (the project default stays the contract's).
+        """
+
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = int(limit)
+        if state is not None:
+            params["state"] = state
+        if thread_id is not None:
+            params["thread_id"] = thread_id
+        if sender_account_id is not None:
+            params["sender_account_id"] = sender_account_id
+        return await self._send("GET", "/messaging/inbox", params=params, access=access)
+
+    async def message(
+        self, message_id: str, *, tenant_id: str, access: OAuthAccess | None = None
+    ) -> dict[str, Any]:
+        """One message + my delivery state (§6.1). Same item envelope as inbox."""
+
+        return await self._send(
+            "GET",
+            f"/messaging/messages/{message_id}",
+            params={"tenant_id": tenant_id},
+            access=access,
+        )
+
+    async def ack(
+        self,
+        message_id: str,
+        *,
+        tenant_id: str,
+        state: str,
+        screening: Mapping[str, Any],
+        client_ref: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance MY delivery state with a hash-bound screening verdict (§6.2).
+
+        ``tenant_id`` is a QUERY parameter, not a body property (the server
+        controller reads it there); ``screening`` is the EXACT tuple the caller
+        recorded as its intent — this method never re-derives, reorders into
+        a different shape, or replaces it. ``client_ref`` rides the body (the
+        bridge's deviation from the Idempotency-Key header, §6.2).
+        """
+
+        body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
+        return await self._send(
+            "POST",
+            f"/messaging/messages/{message_id}/ack",
+            params={"tenant_id": tenant_id},
+            body=body,
+            access=access,
+        )
+
+    async def events(
+        self,
+        *,
+        tenant_id: str,
+        after: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any] | None:
+        """The §6.7 delivery substrate: ONE read; ``None`` = the 204 timeout.
+
+        Deliberately NOT routed through ``_send``: a 204 carries no JSON
+        envelope, so it needs its own explicit branch (parsing an empty body
+        as JSON is exactly the bug the handoff warns about). The 401
+        refresh-once discipline is mirrored here so the one special case does
+        not lose it. Long-poll lifetime, reconnects and schedules are H4's;
+        this is a one-shot primitive.
+        """
+
+        pinned = access or await self.current_access()
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if after is not None:
+            params["after"] = int(after)
+        response = await self._dispatch(
+            "GET", "/messaging/events", pinned.access_token, params=params, body=None
+        )
+        if response.status_code == 401:
+            refreshed = await self._refreshed_access(pinned)
+            response = await self._dispatch(
+                "GET", "/messaging/events", refreshed.access_token, params=params, body=None
+            )
+            if response.status_code == 401:
+                raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        if response.status_code == 204:
+            return None
+        if response.status_code >= 400:
+            raise _refusal(response)
+        return _envelope_result(response)
+
     async def put_settings(
         self,
         *,
