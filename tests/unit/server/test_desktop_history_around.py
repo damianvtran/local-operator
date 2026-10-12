@@ -382,6 +382,64 @@ async def test_journal_order_cold_index_has_no_fabricated_authority(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_cold_order_ids_correct_quiet_cached_echo_without_another_read(tmp_path, monkeypatch):
+    import asyncio
+
+    from local_operator.session import transcript_index as ti
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        ids = [f"{index:012x}" for index in range(205)]
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, ids)
+        # Hold only the existing index scheduler, so the real router must return
+        # a cold page. Releasing it is not a new page, commit, token or user action.
+        release = asyncio.Event()
+        original_refresh = ti.start_refresh
+
+        async def delayed_refresh():
+            await release.wait()
+            actual, _ = original_refresh(tmp_path, harness.session_id)
+            return await actual
+
+        gated = asyncio.create_task(delayed_refresh())
+        monkeypatch.setattr(ti, "start_refresh", lambda root, sid: (gated, False))
+        async with harness.pool.session(harness.session_id, read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe(journal_order=True)
+            try:
+                response = await harness.client.get(
+                    f"/v1/desktop/sessions/{harness.session_id}/history",
+                    params=[("journal_order", "1"), ("limit", "2"), ("order_ids", ids[0])],
+                )
+                assert response.status_code == 200, response.text
+                page = response.json()["result"]
+                assert page["journal_order_state"] == "building"
+                assert "journal_generation" not in page
+                assert ids[0] not in {row["id"] for row in page["entries"]}
+                assert all("journal_seq" not in row for row in page["entries"])
+                release.set()
+                await asyncio.wait_for(gated, timeout=2)
+                queued = await asyncio.wait_for(sub.queue.get(), timeout=2)
+                assert queued is not None
+                frame, _ = queued
+                assert frame["payload"]["type"] == "journal_order_ready", frame
+                correction = frame["payload"]
+                assert correction["journal_generation"]
+                assert {row["id"]: row["journal_seq"] for row in correction["rows"]} == {
+                    ids[0]: 0,
+                    ids[-2]: 203,
+                    ids[-1]: 204,
+                }
+                assert sub.queue.empty()
+            finally:
+                release.set()
+                await gated
+                bridge.subscribers.pop(sub.id, None)
+        await harness.pool.close()
+    ti._reset_for_tests()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "params",
     [
