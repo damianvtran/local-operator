@@ -760,6 +760,386 @@
       },
       "status": "passed",
       "note": "Round-1 fixes rechecked and verified: 43/43 claimed keys byte-verified (F1 … ×4; F2 tắt/bật/hỏi trước; orthography sweep 28→0 open forms, closed kept; host ×2; Trần ×4; 3 NITs); valns OK; NFC clean; no new issues. Ran deepseek-flash (anthropic fallback from pinned sonnet). Rebase-delta: +8 keys at en positions; 747 priors byte-identical; delta re-audited passed (2 NITs recorded); sha 6a4875b6."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit: 7/7 keys; validator OK; plurals rendered 0/1→one, 2/5→other; flagged calls kept with usage evidence (-्स forms, कार्यरत, रिमोट एक्सेस, सेटअप/कनेक्ट); sidecar has no maxCells; no BLOCKER/MAJOR findings."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.transcript",
+      "source_sha256": "bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Wave-3 audit passed: all 10 keys; bytes/key-order/NFC/ZWJ clean; plurals 0/1→one, 2/5→other; strict prefix + esc offer verified; ask states distinct; comms.py vocab match; रनटाइम/कैच-अप endorsed; NIT: record both in hi guide; deepseek-flash fallback (anthropic quota)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.slash",
+      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed: 51 keys; tokens byte-exact (flags/placeholders; नाम localised, pid kept); order/BOM/nukta/em-dash clean; fit: fork 66/stop 62/mcp 58 only >54, none >74. 1 MINOR पूर्णताएँ→पूर्ण हुए सत्र; 1 NIT इंस्टॉल/इंस्टॉलेशन; deepseek-flash (sonnet quota fallback)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "30/30; pool max 56, ex-sub 22/23; nukta base+U+093C; validator OK; calls endorsed. MINOR command_picker + NIT shell fixed; remediation-1 passed. SP polish independently rechecked passed (b88eaf5a); translator/auditor deepseek/deepseek-flash; settings reconciled."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit 12/12; {error} byte-exact ×7; punct mirrors en; nukta base+U+093C. 1 MAJOR fixed (inline_credentials इनलाइन→अंतर्निहित, binds hi wire.settings); recheck remediation-1 passed. क्रेडेंशियल loan kept; deepseek-flash fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content — run ran deepseek-flash (anthropic-credentials fallback from pinned sonnet)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.exec",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "stale",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content — run ran deepseek-flash (anthropic-credentials fallback from pinned sonnet). Original empty-source carry provenance retained at snapshot 56d7a2cf3a; auditor passed only the 3-byte empty source recorded above. Current en source is populated (3274 bytes; sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94). Translation and independent audit of that new source are pending; no approval for new content."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content — run ran deepseek-flash (anthropic-credentials fallback from pinned sonnet)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Empty-namespace carry verified byte-identical to en (sha256 ca3d163b...; 3 bytes '{}'+LF); valns OK; 0 findings; no message content — run ran deepseek-flash (anthropic-credentials fallback from pinned sonnet)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "755/755; 1MAJOR/3MINOR/5NIT fixed: backoff बढ़ता, ख़ुद nukta ×6, shell subject, hours, वॉर्म, टर्न के दौरान, vendor; remediation-1 passed (8add9bae). SP polish independently rechecked passed (c6d9f003); child now उप-एजेंट; translator/auditor deepseek/deepseek-flash fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed: 7/7 keys; other-only plurals; …… per guide; widths ≤en except 个-classifier +2; esc/spacing ruled; no findings; deepseek-flash fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript",
+      "source_sha256": "bc4e3f558a065106dfbe264755001d48008b218124f44334bfed90bb8535dfdd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed: 10/10; strict prefix esc取回 verified; ask states distinct; U+2026=1 cell verified; comms vocab 其他会话; 0 findings; deepseek-flash fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Audit passed 30/30; valns OK; order==en; separators byte-exact; pool max 51<=59 (pin not raised); keyed ex-sub 12/20<=32; 4 cites provisional-pending-reconcile; 0 findings; deepseek-flash fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11",
+        "result": "failed",
+        "findings": 0
+      },
+      "status": "failed",
+      "note": "Independent audit (2nd pass): 12/12; {error} byte-exact x7; order+punct mirror en; 凭据/内嵌/未注册 endorsed; endpoint Latin; valns+check clean. Tool-output [redacted] masks are display-layer, not file content (sha verified). auditor deepseek-flash (fallback; pinned sonnet quota). Prior passed verdict and attribution above apply to the earlier catalogue bytes only. Manager reports one-value semantic remediation in this namespace by translator openai/gpt-6.1-sol on 2026-10-12; independent delta/SP recheck is running read-only. Current whole-namespace approval is pending; failed status is fail-closed, not a claim of a known unresolved meaning defect."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "9377f84856d17c89809a2035e78a3694fe727d2a0459875789d1707228ce0387",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "failed",
+        "findings": 0
+      },
+      "status": "failed",
+      "note": "Initial translator/auditor deepseek/deepseek-flash: 3MAJOR/2MINOR/3NIT. Unified 13-value fix; final translator/auditor openai/gpt-6.1-sol; independent recheck passed0 (96a10cfc). Both rounds 2026-10-11; source current. Prior passed verdict and attribution above apply to the earlier catalogue bytes only. Manager reports one-value semantic remediation in this namespace by translator openai/gpt-6.1-sol on 2026-10-12; independent delta/SP recheck is running read-only. Current whole-namespace approval is pending; failed status is fail-closed, not a claim of a known unresolved meaning defect."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.exec",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "stale",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. Original empty-source carry provenance retained at snapshot 56d7a2cf3a; auditor passed only the 3-byte empty source recorded above. Current en source is populated (3274 bytes; sha256 041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94). Translation and independent audit of that new source are pending; no approval for new content."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-11",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12",
+        "result": "failed",
+        "findings": 0
+      },
+      "status": "failed",
+      "note": "Manager-supplied audit provenance: original translator deepseek/deepseek-flash on 2026-10-11; first substantive independent auditor openai/gpt-6.1-sol on 2026-10-12 (35921534fafa). Unified 9-value remediation by openai/gpt-6.1-sol on 2026-10-12; independent remediation/SP auditor openai/gpt-6.1-sol on 2026-10-12 (c3516b7d9054) passed the remediation delta. Required whole-namespace semantic audit remains incomplete: coverage 50/51; public credential-help value unavailable under ordinary tool-output redaction. No known unresolved major/blocker meaning defect (findings 0), but failed gate until full required coverage; no redaction bypass."
     }
   ]
 }

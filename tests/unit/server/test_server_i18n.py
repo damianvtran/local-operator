@@ -1,6 +1,6 @@
 """The i18n catalogue route, and the capability + language that advertise it.
 
-Waves 1-2 ship `en`, `es`, `fr`, `ru` and `vi`; the shipped-tree assertions are
+Waves 1-3 ship `en`, `es`, `fr`, `ru`, `vi`, `hi` and `zh-CN`; the shipped-tree assertions are
 about shape (map, hash, ETag, 304, 404s) rather than about translated content;
 the fixture test proves a populated catalogue traverses the same path.
 """
@@ -72,7 +72,7 @@ async def test_weak_and_list_validators_still_revalidate_to_304(test_app_client)
 @pytest.mark.parametrize(
     "path",
     [
-        "/v1/i18n/catalogues/hi/wire.errors",  # supported locale, wave not shipped: no file yet
+        "/v1/i18n/catalogues/ur/wire.errors",  # supported locale, final RTL wave has no file yet
         "/v1/i18n/catalogues/en/nope",  # unknown namespace
         "/v1/i18n/catalogues/en/..",  # traversal-shaped component
     ],

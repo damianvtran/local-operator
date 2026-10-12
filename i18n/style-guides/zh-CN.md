@@ -26,7 +26,11 @@ for translators and the auditor.
   **token** for LLM tokens (auth tokens are 令牌 — note the split).
 - Prefer settled Chinese where it exists: 服务器 (server), 文件 (file), 文件夹
   (folder), 网络 (network), 设置 (settings), 设备 (device), 缓存 (cache),
-  提交 (commit), 审批 (approvals), 用量 (usage), 费用 (cost).
+  审批 (approvals), 用量 (usage), 费用 (cost).
+- Git/hub operations `merge`, `pull`, `push`, `commit` remain Latin, including
+  in Chinese prose (glossary §2's shared kept-English set). This preserves one
+  recognizable operation name across prose and machine tokens; `commit` has
+  no translated-prose exception.
 - Avoid 词元 for LLM tokens (new, low recognition); keep the Latin "token".
 
 ## Locale calls (zh-CN)
@@ -35,6 +39,8 @@ for translators and the auditor.
 - tool trace → 轨迹 · transcript → 记录 (会话记录 when the noun stands alone)
 - schedule → 定时 (定时任务 for an item) · monitor → 监控 · relay → 中继
 - workspace → 工作区 · prompt → 提示词 · compaction → 压缩 (上下文压缩)
+- Wave-3 endorsed calls: job → 任务 · credentials → 凭据 · embedded → 内嵌 ·
+  runtime → 运行时 · catch-up → 补收
 
 ## Plurals
 

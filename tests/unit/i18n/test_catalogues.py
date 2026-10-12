@@ -32,8 +32,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     # until their own slices land. The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # Waves 1-2: es/fr then ru/vi trees ship with their waves.
-    assert catalogues.locales() == ("en", "es", "fr", "ru", "vi")
+    # Waves 1-3: es/fr, ru/vi, then hi/zh-CN trees ship with their waves.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.desktop",
@@ -52,6 +52,24 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
+
+
+@pytest.mark.parametrize("locale", ("hi", "zh-CN"))
+def test_wave3_carries_its_audited_namespace_snapshot(locale: str) -> None:
+    # Pin the ten namespaces this wave audited, not the moving en namespace
+    # set: later extraction namespaces legitimately use per-namespace fallback.
+    assert catalogues.namespaces(locale) == (
+        "tui.status",
+        "tui.transcript",
+        "tui.welcome",
+        "wire.errors",
+        "wire.errors.settings",
+        "wire.exec",
+        "wire.incidents",
+        "wire.notices",
+        "wire.settings",
+        "wire.slash",
+    )
 
 
 def test_hash_is_over_file_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
