@@ -200,7 +200,30 @@ _SYSTEM_WRITE_LITERALS: tuple[str, ...] = (
 )
 
 
-def _sandbox_reason_unavailable() -> str | None:
+def _interpreter_subtree() -> Path | None:
+    """The running interpreter's own tree, or ``None`` when unresolvable.
+
+    The frozen ``_SYSTEM_READ_SUBPATHS`` cannot know where THIS process's
+    interpreter lives: a venv keeps it under the worktree, a uv-managed
+    Python under the user's data dir. A shell child that re-enters Python
+    (``python3 -c``, the eval worker, a script's shebang) must be able to
+    read the interpreter it runs, and that is machinery -- not operator
+    data -- wherever it happens to sit on disk. Best-effort by design: an
+    interpreter path that cannot be resolved simply contributes nothing, and
+    the allowlist stays correct for the binaries the system paths already
+    cover.
+    """
+
+    try:
+        executable = Path(sys.executable).resolve()
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+    # ``<venv>/bin/python`` -> ``<venv>``; a bare system interpreter -> its
+    # prefix, which the system paths already cover.
+    return executable.parent.parent
+
+
+def sandbox_unavailable_reason() -> str | None:
     """Why this host cannot sandbox a child, or ``None`` when it can."""
 
     if sys.platform != "darwin":
@@ -208,6 +231,29 @@ def _sandbox_reason_unavailable() -> str | None:
     if not SANDBOX_EXEC.exists():
         return f"{SANDBOX_EXEC} is not present on this host"
     return None
+
+
+def kernel_exposed_read_subtrees() -> tuple[Path, ...]:
+    """Trees a confined child's kernel profile reads BESIDES its root.
+
+    The seatbelt profile allows reads under the confinement root plus
+    ``_SYSTEM_READ_SUBPATHS`` and this interpreter's tree (see ``profile``).
+    A validation pass that accepts a layout MUST consult this list: a
+    controller store INSIDE one of these trees stays readable to the child
+    even though it sits outside the root -- and the profile cannot carve it
+    back out. Measured on the build host: a profile that allows a broad
+    subtree and then a specific DENY of a child path still reached the
+    denied file, in BOTH rule orders; only an allow-free profile refused.
+    Layouts that place controller state in these trees are refused at
+    validation before anything is constructed instead (see
+    ``sdk._resolve_world_root``).
+    """
+
+    subtrees = [Path(path) for path in _SYSTEM_READ_SUBPATHS]
+    interpreter = _interpreter_subtree()
+    if interpreter is not None:
+        subtrees.append(interpreter)
+    return tuple(subtrees)
 
 
 @dataclass(frozen=True)
@@ -298,14 +344,14 @@ class ToolConfinement:
         caller must refuse the command rather than run it unwrapped.
         """
 
-        if _sandbox_reason_unavailable() is not None:
+        if sandbox_unavailable_reason() is not None:
             return None
         return [str(SANDBOX_EXEC), "-p", self.profile(), *argv]
 
     def spawn_refusal(self) -> str:
         """The failure-closed sentence for a host that cannot enforce the root."""
 
-        reason = _sandbox_reason_unavailable() or "an unknown reason"
+        reason = sandbox_unavailable_reason() or "an unknown reason"
         return (
             f"refused: this session is confined to {self.root} and this host "
             f"cannot enforce that boundary for shell children ({reason}); a "
@@ -343,7 +389,7 @@ class ToolConfinement:
         return temp
 
     def _machinery_read_subpaths(self) -> tuple[str, ...]:
-        """The running interpreter's own tree, read-only.
+        """The running interpreter's own tree, read-only (module helper).
 
         The frozen ``_SYSTEM_READ_SUBPATHS`` cannot know where THIS process's
         interpreter lives: a venv keeps it under the worktree, a uv-managed
@@ -356,13 +402,8 @@ class ToolConfinement:
         already cover.
         """
 
-        try:
-            executable = Path(sys.executable).resolve()
-        except (OSError, ValueError):  # pragma: no cover - defensive
-            return ()
-        # ``<venv>/bin/python`` -> ``<venv>``; a bare system interpreter ->
-        # its prefix, which the system paths already cover.
-        return (str(executable.parent.parent),)
+        subtree = _interpreter_subtree()
+        return () if subtree is None else (str(subtree),)
 
     def profile(self) -> str:
         """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.

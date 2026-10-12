@@ -1279,18 +1279,29 @@ def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
 def test_a_status_read_asks_for_the_pass_it_reports(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`status` must not answer from the last cadence tick: it asks for a read.
+    """`status` must not answer from the last completed pass: it asks for a read.
 
-    With the background cadence parked well past this test's lifetime, the only
-    pass that can complete between the dial and the read is the one the read asks
-    for (``RelayServer._fresh_membership_read``); a `status` that merely read
-    ``_membership_reports`` would keep reporting the pre-dial pass, whose table
-    never saw this link.
+    The discriminator is the COMPLETION SEQUENCE, not the emptiness of the
+    cache: a `status` that merely read ``_membership_reports`` would leave
+    ``_membership_seq`` untouched while claiming a fresh row, so the refresh
+    read must bump it and the plain read must not.
+
+    A blank baseline cannot be demanded. The admit-time ``contact_peers`` pass
+    starts on a handshake thread of its own once the joiner's result frame is
+    sent and completes whenever it gets to run — publishing a pass that answers
+    the link. The old version captured `before` immediately after the dial and
+    asserted an empty table; on a starved runner that pass landed first and the
+    assertion failed on state that was merely later (CI shard 4, 2026-10-12;
+    causally reproduced by delaying the admit pass past the dial). So the
+    fixture now QUIESCES every unprompted writer (the sibling test below
+    carries the full derivation of each wait), then FORCES the completed pass
+    it asserts against, and proves the freshness contract structurally.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
     a = _make(devices, "a", mode=HUB)
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
@@ -1298,14 +1309,50 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
         return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
 
-    # Before the read asks: the last completed pass predates the link, so b is not
-    # in `answered` — there is no fresh table for the read to lean on yet.
-    before = _row(a.server.status())["membership"]["table"]  # noqa: SLF001
-    assert before["answered"] == [], before
-    assert before["complete"] is False
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
 
-    # The read asks, and the pass it asked for lands inside the bound.
+    # QUIESCE EVERY UNPROMPTED WRITER BEFORE THE BASELINE IS TAKEN: a's
+    # establishment pull for the inbound link, the admit-time contact_peers
+    # pass, and any inbound handshake still returning (each stage's derivation
+    # lives in the sibling test below). Afterwards the only publisher left is
+    # a pass this fixture or the read itself runs — the cadence is parked for
+    # the whole test lifetime.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+    ), "a's admit-time contact_peers pass never completed"
+
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
+    # THE BASELINE, made deterministic instead of assumed: one completed pass
+    # that really answers the link. The due window is re-opened first so this
+    # pass enters the pull rather than answering from the not-due gate.
+    a_link.member_pulled_at = 0.0
+    baseline = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
+    assert baseline.answered == [b.device_id], baseline
+    seq_before = a.server._membership_seq  # noqa: SLF001
+
+    # Plain `status` reports the completed pass and asks NOTHING: the sequence
+    # is the receipt — a cached answer that never asked cannot have bumped it.
+    before = _row(a.server.status())["membership"]["table"]  # noqa: SLF001
+    assert before["answered"] == [b.device_id], before
+    assert before["complete"] is True, before
+    assert a.server._membership_seq == seq_before, "a plain status ran a pass"  # noqa: SLF001
+
+    # The read asks, and the pass it asked for is the one it reports: the
+    # completion sequence moves, and the table is the pass that moved it.
     after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
+    assert (
+        a.server._membership_seq > seq_before
+    ), "the read reported a cached table without asking"  # noqa: SLF001
     assert after["answered"] == [b.device_id], after
     assert after["complete"] is True
     assert isinstance(after["oldest_answer_age_s"], float), after

@@ -11,6 +11,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path
+
 from local_operator.harness.types import AgentTool
 from local_operator.mcp.tool_cache import McpToolCache
 
@@ -97,6 +100,7 @@ async def discover_and_load_mcp_tools(
     *,
     secret_base=None,
     register_secret=None,
+    boundary: Path | None = None,
 ) -> tuple[McpManager, list[AgentTool], list[dict[str, str]]]:
     """Convenience loader that discovers and loads MCP tools in one pass.
 
@@ -144,6 +148,7 @@ async def discover_and_load_mcp_tools(
         auth_store=auth_store,
         secret_base=secret_base,
         register_secret=register_secret,
+        boundary=boundary,
     )
     try:
         result = await manager.discover_and_connect()
