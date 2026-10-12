@@ -132,8 +132,7 @@ def reminders(session: Session) -> list[Any]:
     return [
         message
         for message in session._context.messages
-        if isinstance(message, CustomMessage)
-        and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
+        if isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
     ]
 
 
@@ -373,9 +372,7 @@ async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> 
     session = make_session(tmp_path, stream)
 
     await session.prompt("deploy")
-    assert session._blocked_reminder_fingerprint == (
-        ("Todos", "get prod credentials", "blocked"),
-    )
+    assert session._blocked_reminder_fingerprint == (("Todos", "get prod credentials", "blocked"),)
     await session.prompt("thanks — anything else?")
 
     # Turn 1: five requests (the reconciliation pass included); turn 2: ONE.
