@@ -13,8 +13,13 @@ import sys
 from typing import Any
 
 from local_operator.exec_startup import apply_startup, report_unresolved_declared_tools
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
 
 logger = logging.getLogger(__name__)
+
+#: RFC §3.1 render point for this slice's copy.
+_t = tr("wire.exec")
 
 
 async def _finish_browser_scope(session: Any, outcome: str) -> None:
@@ -123,8 +128,13 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
             # A raising turn emits no error event, so the renderer has nothing
             # to print. Report the queue's recorded reason on stderr, where the
             # rest of exec's diagnostics go.
-            reason = control.handle.last_prompt_failure or "the turn did not complete"
-            print(f"exec failed: {reason}", file=sys.stderr, flush=True)
+            reason = control.handle.last_prompt_failure or _t(_wd.turn_did_not_complete())
+            print(
+                # i18n: ignore stable prefix + dynamic payload
+                f"exec failed: {reason}",
+                file=sys.stderr,
+                flush=True,
+            )
         return completed
 
     async def continuation() -> bool:
