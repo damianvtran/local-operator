@@ -19,6 +19,39 @@ _LABEL = re.compile(r"\blabel=(['\"])(.*?)\1")
 _JOB = re.compile(r"\bjob=(['\"])(.*?)\1")
 _PREAMBLES = {text: kind for kind, text in TO_CHILD_INSTRUCTIONS.items()}
 
+#: Namespace the producer writes into a persisted user-role row's
+#: ``provider_payload`` when a hub delivery could not stay a CustomMessage.
+#: Namespaced so unrelated provider bookkeeping on the row survives untouched,
+#: and read only as POSITIVE provenance: a malformed or body-less marker is not
+#: a receipt and the caller keeps its ordinary user handling.
+HUB_RECEIPT_MARKER_KEY = "hub_receipt"
+
+
+def hub_receipt_marker(message: object) -> dict[str, Any] | None:
+    """The typed hub facts a producer stored on a user-role row, or ``None``.
+
+    The shape mirrors the facts a ``hub_message`` CustomMessage carries
+    (direction / expects_reply / steer / body, plus advisory label and job_id
+    when a producer had them). Display surfaces classify on this marker rather
+    than re-parsing the model envelope; the envelope-parsing path remains only
+    for rows written before the marker existed.
+    """
+    if isinstance(message, Mapping):
+        # The TUI child fold works on ENCODED transcript payloads (dicts), not
+        # Message objects; the marker lives under the same key either way.
+        payload = message.get("provider_payload")
+    else:
+        payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        return None
+    marker = payload.get(HUB_RECEIPT_MARKER_KEY)
+    if not isinstance(marker, Mapping):
+        return None
+    body = marker.get("body")
+    if not isinstance(body, str) or not body.strip():
+        return None
+    return dict(marker)
+
 
 def hub_receipt_fields(details: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """Return full display bytes and retained optional facts, without guessing IDs.

@@ -2644,7 +2644,25 @@ class SubagentComms:
         # ContinuationCommand id, which the runtime's handle hands back to
         # ``Session.steer`` as ``message_id``, so the correlation survives
         # that path too.
-        record.child.steer_message(Message.user(str(message.details["text"]), id=message.id))
+        steer_message = Message.user(str(message.details["text"]), id=message.id)
+        # The typed facts a CustomMessage would have carried are flattened away
+        # the moment this persists as a user-role row, and re-parsing the model
+        # envelope is the guessing this programme is deleting. A namespaced
+        # provider_payload marker carries the same facts instead; MERGE it so
+        # any other bookkeeping on the row survives, and keep role/content/
+        # identity untouched — only the payload gains a key.
+        payload = dict(getattr(steer_message, "provider_payload", None) or {})
+        payload.setdefault(
+            "hub_receipt",
+            {
+                "direction": "to_child",
+                "expects_reply": False,
+                "steer": True,
+                "body": text,
+            },
+        )
+        steer_message.provider_payload = payload
+        record.child.steer_message(steer_message)
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:

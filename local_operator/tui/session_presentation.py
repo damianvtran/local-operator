@@ -1029,7 +1029,10 @@ def project_settled_rows(
     )
     from local_operator.cross_session import cross_session_hidden
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-    from local_operator.harness.hub_receipts import hub_receipt_fields
+    from local_operator.harness.hub_receipts import (
+        hub_receipt_fields,
+        hub_receipt_marker,
+    )
 
     # ``job_result`` is declared beside the job manager that writes it, not with
     # the harness markers above — imported from its own home so this fold cannot
@@ -1545,6 +1548,30 @@ def project_settled_rows(
             text = getattr(message, "text", "") or ""
             text = text.strip() if isinstance(text, str) else ""
             if role == "user":
+                # A hub steer persists as a user-role row whose text is the
+                # model envelope. The producer marks it with the typed facts in
+                # provider_payload; honour that positive provenance BEFORE any
+                # human-row classification so the receipt paints — never the
+                # envelope, never a fabricated operator turn. Rows without the
+                # marker keep their previous treatment.
+                marker = hub_receipt_marker(message)
+                if marker is not None:
+                    details_dict = dict(marker)
+                    details_dict.setdefault("text", text)
+                    body, facts = hub_receipt_fields(details_dict)
+                    receipt_id = str(getattr(message, "id", ""))
+                    existing = hub_receipts.get(receipt_id) if receipt_id else None
+                    if existing is not None:
+                        if existing.restate_receipt(body, facts):
+                            transcript.restate_quiet_member(existing)
+                            appended = True
+                    else:
+                        block = HubMessageBlock(body, facts, fold_width=fold_width)
+                        self._append_block(block)
+                        if receipt_id:
+                            hub_receipts[receipt_id] = block
+                        appended = True
+                    continue
                 # The live path never paints harness chrome as a user row
                 # (LOOP_PROMPT is registered as a pending echo and consumed;
                 # the auto-continuation prompt is never announced at all).
