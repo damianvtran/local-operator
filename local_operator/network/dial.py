@@ -294,6 +294,9 @@ AUTH_FIELDS: tuple[str, ...] = (
     "display_window",
     "display_history_audit",
     "display_history_entry_times",
+    # The owner's capability AND viewer declaration gate order metadata. This
+    # relay must forward the latter, not silently make a capable peer legacy.
+    "journal_order",
     "supplements",
     "slash_consumers",
     "surface",

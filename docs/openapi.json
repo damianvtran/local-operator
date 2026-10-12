@@ -998,14 +998,20 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "maxItems": 512,
-              "default": [],
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Order Ids"
             }
           }
@@ -1212,14 +1218,20 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "maxItems": 512,
-              "default": [],
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Order Ids"
             }
           }
@@ -2423,14 +2435,20 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "maxItems": 512,
-              "default": [],
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Order Ids"
             }
           }
