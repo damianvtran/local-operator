@@ -44,6 +44,138 @@ from typing import Any
 
 import yaml
 
+# Release/dispatch must inspect the same event target the build consumes, not
+# mutable main or a classifier-selected PR subset.
+RELEASE_TARGET_REF = "${{ github.event.release.tag_name || github.sha }}"
+INVARIANT_JOB = "release-invariants"
+
+
+def _release_invariant_problems(doc: dict[Any, Any]) -> list[str]:
+    jobs = doc["jobs"]
+    gate = jobs.get(INVARIANT_JOB, {})
+    problems = []
+    if not gate or "if" in gate or gate.get("needs") or gate.get("continue-on-error"):
+        problems.append("invariant job can be skipped")
+    steps = gate.get("steps", [])
+    if any("if" in step or step.get("continue-on-error") for step in steps):
+        problems.append("invariant step can be skipped")
+    checkout = [step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")]
+    if not checkout or checkout[0].get("with", {}).get("ref") != RELEASE_TARGET_REF:
+        problems.append("invariant checkout is not the event target")
+    node = [step for step in steps if str(step.get("uses", "")).startswith("actions/setup-node@")]
+    if not node or str(node[0].get("with", {}).get("node-version")) != "24":
+        problems.append("invariant Node is not 24")
+    python = [
+        step for step in steps if str(step.get("uses", "")).startswith("actions/setup-python@")
+    ]
+    if not python or str(python[0].get("with", {}).get("python-version")) != "3.12":
+        problems.append("invariant Python is not 3.12")
+    run = "\n".join(step.get("run", "") for step in steps)
+    commands = ["python scripts/i18n/generate.py --check", "python scripts/i18n/check.py"]
+    if not all(command in run.splitlines() for command in commands):
+        problems.append("invariant commands missing")
+    elif run.index(commands[0]) > run.index(commands[1]):
+        problems.append("invariant commands reordered")
+    if 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' not in run:
+        problems.append("event SHA is not verified")
+    for name in ("release-build", "extension-release"):
+        needs = jobs[name].get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        if INVARIANT_JOB not in needs:
+            problems.append(f"{name} bypasses invariant dependency")
+
+    def ancestors(name: str, visited: set[str]) -> set[str]:
+        if name in visited:
+            return set()
+        visited.add(name)
+        needs = jobs[name].get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        return set(needs).union(*(ancestors(parent, visited) for parent in needs))
+
+    for name in _publishing_jobs(doc):
+        if INVARIANT_JOB not in ancestors(name, set()):
+            problems.append(f"{name} publisher bypasses invariants")
+    for name in ("release-build", "extension-release", "keyagent-macos"):
+        condition = str(jobs[name].get("if", ""))
+        if "always(" in condition or "cancelled(" in condition:
+            problems.append(f"{name} overrides dependency success")
+        for step in jobs[name]["steps"]:
+            if str(step.get("uses", "")).startswith("actions/checkout@"):
+                if step.get("with", {}).get("ref") != RELEASE_TARGET_REF:
+                    problems.append(f"{name} checkout differs from invariant target")
+    return problems
+
+
+def test_release_invariants_guard_both_event_paths() -> None:
+    doc = _workflow()
+    assert {"release", "workflow_dispatch"} <= set(_triggers(doc))
+    assert _release_invariant_problems(doc) == []
+
+
+def test_release_invariants_cannot_be_conditionally_skipped() -> None:
+    doc = copy.deepcopy(_workflow())
+    for condition in ("needs.changes.outputs.i18n == 'true'", "${{ false }}", False):
+        doc["jobs"][INVARIANT_JOB]["if"] = condition
+        assert "invariant job can be skipped" in _release_invariant_problems(doc)
+
+
+def test_release_invariant_steps_cannot_be_skipped() -> None:
+    doc = copy.deepcopy(_workflow())
+    doc["jobs"][INVARIANT_JOB]["steps"][-1]["if"] = "${{ false }}"
+    assert "invariant step can be skipped" in _release_invariant_problems(doc)
+
+
+def test_release_invariant_commands_cannot_be_dropped_or_reordered() -> None:
+    for mutation in ("drop", "reorder"):
+        doc = copy.deepcopy(_workflow())
+        step = doc["jobs"][INVARIANT_JOB]["steps"][-1]
+        generation = "python scripts/i18n/generate.py --check"
+        parity = "python scripts/i18n/check.py"
+        if mutation == "drop":
+            step["run"] = step["run"].replace(parity, "echo parity skipped")
+            expected = "invariant commands missing"
+        else:
+            step["run"] = step["run"].replace(generation, "SWAP").replace(parity, generation)
+            step["run"] = step["run"].replace("SWAP", parity)
+            expected = "invariant commands reordered"
+        assert expected in _release_invariant_problems(doc)
+
+
+def test_release_build_and_extension_cannot_bypass_guard() -> None:
+    for name in ("release-build", "extension-release"):
+        doc = copy.deepcopy(_workflow())
+        doc["jobs"][name]["needs"] = []
+        assert f"{name} bypasses invariant dependency" in _release_invariant_problems(doc)
+
+
+def test_pypi_cannot_drop_transitive_invariant_dependency() -> None:
+    doc = copy.deepcopy(_workflow())
+    doc["jobs"]["pypi-publish"]["needs"] = []
+    assert "pypi-publish publisher bypasses invariants" in _release_invariant_problems(doc)
+
+
+def test_release_guard_cannot_depend_on_pr_classifier() -> None:
+    doc = copy.deepcopy(_workflow())
+    doc["jobs"]["changes"] = {"runs-on": "ubuntu-latest", "steps": []}
+    doc["jobs"][INVARIANT_JOB]["needs"] = ["changes"]
+    assert "invariant job can be skipped" in _release_invariant_problems(doc)
+
+
+def test_release_build_cannot_ignore_guard_failure() -> None:
+    doc = copy.deepcopy(_workflow())
+    doc["jobs"]["release-build"]["if"] = "${{ always() }}"
+    assert "release-build overrides dependency success" in _release_invariant_problems(doc)
+
+
+def test_release_invariant_cannot_check_mutable_main() -> None:
+    doc = copy.deepcopy(_workflow())
+    step = doc["jobs"][INVARIANT_JOB]["steps"][0]
+    step["with"]["ref"] = "main"
+    assert "invariant checkout is not the event target" in _release_invariant_problems(doc)
+
+
 REPO = Path(__file__).resolve().parents[2]
 PUBLISH_YML = REPO / ".github" / "workflows" / "publish.yml"
 
