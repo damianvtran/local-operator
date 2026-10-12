@@ -68,6 +68,25 @@ def _run_rig(
         provider={"provider": "fake", "scripted_score": 1.0},
         interpreter=interpreter,
     )
+    # The session engagement's source pin (blueprint §4): a selector without
+    # ``core_source`` is refused at preflight, so the rig composes one exactly
+    # as a real selector build does -- the pin of the tree that will run the
+    # arm (this checkout, whose local_operator the copied interpreter also
+    # imports through its .pth).
+    from local_operator.evaluation.adapters.api import CoreSourcePin
+    from local_operator.evaluation.source_pin import (
+        compute_core_source_hashes,
+        resolve_core_commit,
+    )
+
+    selector = selector.model_copy(
+        update={
+            "core_source": CoreSourcePin(
+                commit=resolve_core_commit() or "unavailable-test-tree",
+                module_hashes=compute_core_source_hashes(),
+            )
+        }
+    )
     selector_path = selector_dir / "selector.json"
     selector_path.write_text(selector.model_dump_json())
 
@@ -164,13 +183,20 @@ def test_a_whole_episode_runs_offline_and_scores(
     completed, run_root, log = _run_rig(root, adapter_wheel, spawn_interpreter)
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 1
+    # Epochs at ADMISSION (blueprint §3): the wait batch, the challenged
+    # first finish and the accepted re-declared finish -- one apiece.
+    assert outcome["steps"] == 3
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
     assert outcome["rescue_required"] is False
     assert "mcp__episode_actions_apply_actions" in outcome["tool_names"]
 
     kinds = _record_kinds(run_root)
+    assert kinds.count("action_output_epoch") == 3
+    # The request observer's ONE serialized flush (blueprint §2): the real
+    # session tree's request finals land in the record with the two money
+    # figures kept separate, even on this zero-cost rig.
+    assert "requests" in kinds
     for expected in (
         "reset",
         "declaration",
@@ -240,7 +266,10 @@ def test_a_challenged_claim_is_rescued_by_a_corrective_action(
     )
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 2  # the corrective action after the challenge counted
+    # Epochs at admission: wait, challenged finish, corrective wait, accepted
+    # finish -- the corrective action after the challenge counted, and each
+    # finish proposal charged its own.
+    assert outcome["steps"] == 4
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
 
@@ -268,8 +297,9 @@ def test_a_prose_done_claim_is_challenged_and_the_re_declaration_ends_it(
     pre-fix worktree: ``agent_stop``, steps 1, ZERO challenges, two model
     calls) and AFTER it: exactly one challenge -- delivered to the model over
     the real session wire as a harness-injected user row -- and the scripted
-    re-declaration ends the episode ``completed`` with the step count intact
-    (the claim is a decision about the screen, not a step).
+    re-declaration ends the episode ``completed`` -- one wait epoch and one
+    (re-declared tool) finish epoch at admission (blueprint §3; the prose
+    claim itself never reaches the bridge).
     """
 
     from tests.unit.evaluation.adapters.osworld import session_arm_rig
@@ -280,7 +310,10 @@ def test_a_prose_done_claim_is_challenged_and_the_re_declaration_ends_it(
     )
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 1
+    # The opening wait took one epoch; the re-declared tool finish (answered
+    # to the PROSE challenge) took the second -- the prose claim itself never
+    # reaches the bridge.
+    assert outcome["steps"] == 2
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
 
@@ -382,10 +415,11 @@ def test_a_delegated_child_cannot_drive_or_end_the_episode(
     )
 
     outcome = _outcome(completed)
-    # The episode ended because the PARENT finished it: exactly one step (the
-    # parent's wait batch). A child's batch must never count as a step, and a
-    # child's finish must never end the run.
-    assert outcome["steps"] == 1
+    # The episode ended because the PARENT finished it: the parent's epochs
+    # are wait + challenged finish + accepted finish, and the child's refused
+    # calls (rejections before admission) took none of them. A child's batch
+    # must never count as an epoch, and a child's finish must never end the run.
+    assert outcome["steps"] == 3
     assert outcome["terminal_reason"] == "finish"
     kinds = _record_kinds(run_root)
     assert kinds.count("action_batch") == 1

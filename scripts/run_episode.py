@@ -1092,6 +1092,13 @@ async def _run_session_arm(
         _outcome_json as _session_outcome_json,
     )
     from local_operator.evaluation.session_arm import run_session_episode
+
+    # SOURCE-PIN PREFLIGHT (blueprint §4), BEFORE any launch or allocation:
+    # the run must be able to state which core tree it executes. An old
+    # selector -- one built before the native caller composition -- carries no
+    # ``core_source``; it is refused here with a named sentence rather than
+    # launched against a tree whose SDK/loop identity was never asserted.
+    from local_operator.evaluation.source_pin import SourcePinError, verify_core_source
     from local_operator.session.spec import (
         ApprovalPolicy,
         SessionIsolationError,
@@ -1099,6 +1106,22 @@ async def _run_session_arm(
         SessionSpec,
         VolatileRootError,
     )
+
+    if selector.core_source is None:
+        print(
+            "this selector carries no core_source pin: it was built before the "
+            "native caller composition, so the run could neither prove nor record "
+            "which core tree the arm executes. Rebuild the selector against the "
+            "merged head (docs/benchmarks/osworld_2/native-caller-apparatus.md) -- "
+            "refusing before launch/allocation.",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+    try:
+        verify_core_source(selector.core_source)
+    except SourcePinError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
 
     missing = [
         name
