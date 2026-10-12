@@ -12187,6 +12187,26 @@ def refresh_unit_if_stale() -> Any:
                 kind="failed",
                 detail=f"could not read {path}: {exc} — run `{recovery}` to reinstall the unit",
             )
+
+        def reload_unit() -> Any:
+            # DISK-CURRENT IS NOT MANAGER-CURRENT: a prior failed reload leaves
+            # the safe unit on disk but control-group loaded. Another refresh
+            # may also see that disk during a writer's write/reload gap. Each
+            # proven-move caller therefore needs its own successful reload;
+            # neither disk equality nor another caller's attempt proves safety.
+            reloaded = supervisors.systemctl_user("daemon-reload")
+            if reloaded.returncode != 0:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        "rewrote the relay unit but systemctl could not re-read it: "
+                        f"{supervisors.translate_systemctl_error(reloaded.stderr)} — "
+                        f"run `{recovery}` to reinstall it"
+                    ),
+                )
+            return None
+
         if current != rendered:
             try:
                 path.write_text(rendered, encoding="utf-8")
@@ -12199,20 +12219,9 @@ def refresh_unit_if_stale() -> Any:
                         "the unit"
                     ),
                 )
-            reloaded = supervisors.systemctl_user("daemon-reload")
-            if reloaded.returncode != 0:
-                # THE FILE ON DISK IS THE NEW ONE AND THE MANAGER HAS NOT
-                # RE-READ IT, so no restart follows from here: a restart under
-                # an unproven definition is the cgroup kill this slice removes.
-                return launchd.PlistRefresh(
-                    name=name,
-                    kind="failed",
-                    detail=(
-                        "rewrote the relay unit but systemctl could not re-read it: "
-                        f"{supervisors.translate_systemctl_error(reloaded.stderr)} — "
-                        f"run `{recovery}` to reinstall it"
-                    ),
-                )
+            failure = reload_unit()
+            if failure is not None:
+                return failure
         pid = _managed_service_pid()
         if pid is None:
             # No running process, no build to compare — a stopped daemon is the
@@ -12222,6 +12231,13 @@ def refresh_unit_if_stale() -> Any:
         stale = update.stale_generation_of_process(pid)
         if stale is None:
             return launchd.PlistRefresh(name=name, kind="current")
+        if current == rendered:
+            # The rewrite arm already reloaded this caller's new definition.
+            # A byte-current unit needs the same loaded-state guarantee, but
+            # only on a proven move: no-move probes still leave it untouched.
+            failure = reload_unit()
+            if failure is not None:
+                return failure
         result = service_action("restart")
         if not result.get("ok"):
             # Same refusal as the macOS arm's, in this platform's words: the
