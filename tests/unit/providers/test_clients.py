@@ -1026,6 +1026,7 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
                 "properties": {"city": {"type": "string"}},
                 "required": ["city"],
             },
+            "strict": False,
         }
     ]
     assert body["reasoning"] == {"effort": "high"}
@@ -4392,10 +4393,9 @@ def test_codex_5_6_body_no_include_when_reasoning_off() -> None:
     assert body["instructions"] == "a\n\nb"
 
 
-def test_public_5_6_body_keeps_original_shape_plus_include() -> None:
-    """The public Responses path returns its ORIGINAL body plus only defect #2's
-    ``include``: top-level instructions, prompt_cache_key, and the 24h retention
-    are all present, and none of the rejected defect-#3 fields appear."""
+def test_public_5_6_body_uses_documented_cache_defaults_plus_include() -> None:
+    """Modern public cache defaults omit legacy 24h retention without adding
+    options or breakpoints; instructions, routing key and reasoning survive."""
     client = OpenAICompatClient("https://api.openai.com/v1")
     body = client._build_responses_body(
         ChatRequest(
@@ -4406,7 +4406,7 @@ def test_public_5_6_body_keeps_original_shape_plus_include() -> None:
         )
     )
     assert body["prompt_cache_key"] == "pub-1"
-    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in body
     assert body["instructions"] == "Stable.\n\nVolatile."
     assert body["include"] == ["reasoning.encrypted_content"]
     assert "prompt_cache_options" not in body
