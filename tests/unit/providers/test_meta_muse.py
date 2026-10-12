@@ -400,3 +400,97 @@ async def test_default_local_opener_and_visible_failure_remedy(monkeypatch):
     assert opened == ["https://auth.meta.com/oauth/device/"]
     assert warnings[0] == meta_muse.NOTICE
     assert "displayed approval page" in warnings[1]
+
+
+def test_compensating_logout_cannot_resurrect_concurrent_success(tmp_path: Path, monkeypatch):
+    import sqlite3
+    import threading
+
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.store import SecretStore
+
+    first = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    second = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    first_attempt_done, retry_allowed = threading.Event(), threading.Event()
+    result: list[str] = []
+    errors: list[BaseException] = []
+    worker = None
+    try:
+        row = seed(first)
+        second._conn.execute("PRAGMA busy_timeout = 0")
+        original_set = SecretStore.set
+
+        def other_logout():
+            try:
+                try:
+                    second.delete_credential(row.id)
+                    result.append("success before compensation")
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error):
+                        raise
+                    result.append("write reservation held")
+                    first_attempt_done.set()
+                    assert retry_allowed.wait(10), "first logout did not release its reservation"
+                    second.delete_credential(row.id)
+                    result.append("success after compensation")
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                first_attempt_done.set()
+
+        def interleave_set(store, *args, **kwargs):
+            nonlocal worker
+            # Run the second AUTH connection after ownership was checked and
+            # immediately before the compensating secret write. No sleep race:
+            # timeout=0 tells us deterministically whether SQLite serializes it.
+            worker = threading.Thread(target=other_logout, daemon=True)
+            worker.start()
+            assert first_attempt_done.wait(10), "second connection did not attempt deletion"
+            return original_set(store, *args, **kwargs)
+
+        def fail_commit():
+            raise sqlite3.OperationalError("fixture first logout commit failure")
+
+        monkeypatch.setattr(first._conn, "commit", fail_commit)
+        monkeypatch.setattr(SecretStore, "set", interleave_set)
+        with pytest.raises(sqlite3.OperationalError, match="fixture first logout commit failure"):
+            first.delete_credential(row.id)
+        retry_allowed.set()
+        assert worker is not None
+        worker.join(10)
+        assert not worker.is_alive() and not errors
+        assert first.get_credential(row.id) is None
+        assert open_store(tmp_path).list() == []
+        assert result == ["write reservation held", "success after compensation"]
+    finally:
+        retry_allowed.set()
+        if worker is not None:
+            worker.join(10)
+        second.close()
+        first.close()
+
+
+def test_logout_commit_observer_failure_does_not_restore_durable_deletion(
+    tmp_path: Path, monkeypatch
+):
+    import sqlite3
+
+    from local_operator.secrets.access import open_store
+
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = seed(store)
+        commit = store._conn.commit
+
+        def committed_then_failed():
+            commit()
+            raise sqlite3.OperationalError("fixture commit observer failure")
+
+        monkeypatch.setattr(store._conn, "commit", committed_then_failed)
+        with pytest.raises(sqlite3.OperationalError, match="fixture commit observer failure"):
+            store.delete_credential(row.id)
+        assert store.get_credential(row.id) is None
+        assert open_store(tmp_path).list() == []
+        assert not store._conn.in_transaction
+    finally:
+        store.close()
