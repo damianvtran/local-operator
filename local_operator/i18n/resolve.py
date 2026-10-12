@@ -27,6 +27,7 @@ measures 1.8 ms against 290 ms for the subprocess — RFC §12 probe 13).
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import platform
@@ -53,12 +54,15 @@ def _data_path(name: str) -> Path:
     return Path(__file__).with_name("data") / name
 
 
+@functools.lru_cache(maxsize=1)
 def shipped_locales() -> tuple[str, ...]:
     """Locales the ledger has passed, from the generated ``data/shipped.json``.
 
     `en` is always shipped: it is the source locale and every fallback lands on
     it, so a missing or unreadable file degrades to ``("en",)`` rather than to
-    an empty set that would make every resolution fail.
+    an empty set that would make every resolution fail. Package data is immutable
+    in a running generation: cache this hot-path input once; fixture tests that
+    replace it can call ``shipped_locales.cache_clear()``.
     """
     try:
         data: Any = json.loads(_data_path("shipped.json").read_text(encoding="utf-8"))
@@ -68,6 +72,22 @@ def shipped_locales() -> tuple[str, ...]:
         picked = set()
     picked.add("en")
     return tuple(locale for locale in SUPPORTED_LOCALES if locale in picked)
+
+
+def is_shipped(locale: str) -> bool:
+    """Exact generated membership, independent of disk availability or the kill switch."""
+    return locale in shipped_locales()
+
+
+def eligible_locale(locale: str | None) -> str:
+    """Coerce public render/activation requests to English when not eligible.
+
+    The operational kill switch applies even to explicitly pinned callers; it
+    does not rewrite the generated ship set used by offline tooling.
+    """
+    if _kill_switch(None) or not locale or not is_shipped(locale):
+        return "en"
+    return locale
 
 
 def normalise_locale(tag: str | None) -> str | None:
