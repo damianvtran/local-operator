@@ -33,7 +33,7 @@ chat-capable ``PROVIDER_REGISTRY`` id to appear here or in
 must be an explicit decision, not an omission discovered when a user with no
 credit is shown a sentence with no link in it.
 
-PROVENANCE. Every URL was checked 2026-10-09 (as first recorded in the
+PROVENANCE. Original URLs were checked 2026-10-09 (as first recorded in the
 pre-emptive-notice design doc), with ``curl -L`` where the host answered at
 all — some hosts sit behind a bot wall that answers 403 to curl and can only
 be confirmed by a human click, and those are marked ``verified=False``. The
@@ -92,6 +92,21 @@ class BillingLink:
 #: ``radient_recovery.recovery_line``'s sentence — and its "billing" is a
 #: signup-grant/credit-floor system, not a balance or a plan.
 BILLING_LINKS: dict[str, BillingLink] = {
+    "meta-muse": BillingLink(
+        kind="subscription",
+        url="https://accountscenter.meta.com/",
+        dashboard="Meta Accounts Center",
+        # Official Muse Code subscriptions docs name this exact destination
+        # for changing/cancelling plans, payment methods and billing history.
+        # Additional Meta Model API keys are PAYG: its developer billing page
+        # is NOT the remedy for this subscription-only provider.
+        verified=True,
+        note=(
+            "2026-10-12: verified destination against official "
+            "https://dev.meta.ai/docs/muse-code/subscriptions (Change or cancel "
+            "your plan / Billing cycle); no signed-in checkout was exercised"
+        ),
+    ),
     "radient": BillingLink(
         kind="radient",
         url="https://console.radienthq.com/dashboard/billing",

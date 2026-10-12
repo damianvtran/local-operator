@@ -50,6 +50,18 @@ def test_every_chat_provider_has_a_billing_row_or_an_explicit_none() -> None:
     )
 
 
+def test_muse_code_remedy_is_subscription_accounts_center_not_api_topup() -> None:
+    link = billing_link_for("meta-muse")
+    assert link is not None and link.kind == "subscription"
+    assert link.url == "https://accountscenter.meta.com/"
+    assert link.dashboard == "Meta Accounts Center" and link.verified
+    assert "https://dev.meta.ai/docs/muse-code/subscriptions" in link.note
+    # Even a caller's balance hint must not manufacture a PAYG remedy for
+    # this subscription-only provider or route it to Model API billing.
+    assert billing_link_for("meta-muse", kind="balance") is link
+    assert ("meta-muse", "balance") not in _BILLING_VARIANTS
+
+
 def test_no_dead_keys_and_no_overlap() -> None:
     """Every table key belongs to a real chat provider; the two sets are disjoint."""
     chat = _chat_storage_ids()
