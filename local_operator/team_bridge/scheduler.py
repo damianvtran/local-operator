@@ -165,13 +165,20 @@ class AccountScreeningCycle:
         work = asyncio.ensure_future(self._run_body(items, screen, turn))
         keeper = asyncio.ensure_future(self._keep_turn(turn, work, lost))
         try:
-            return await work
+            result = await work
         except asyncio.CancelledError:
             if lost["flag"]:
                 # Ownership moved mid-cycle: no result, no receipt, and the
                 # successor keeps the lease.
                 return None
             raise
+        else:
+            if lost["flag"]:
+                # A callback that SUPPRESSED the cancellation can return a
+                # value while ownership is already lost (R9/Q3-6): refuse
+                # the result — no receipt, no successor release.
+                return None
+            return result
         finally:
             keeper.cancel()
             try:
@@ -233,8 +240,11 @@ def default_status_fetcher(
     ``transport`` is injected only by proof rigs.
     """
 
+    _require_owner_identity(owner)  # fail closed on a missing canonical hub
+
     async def _fetch() -> Mapping[str, Any]:
-        from local_operator.team_bridge.client import TeamBridgeClient
+        from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
+        from local_operator.team_bridge.store import Store
 
         client = TeamBridgeClient(
             config_dir,
@@ -242,11 +252,57 @@ def default_status_fetcher(
             credential_id=owner.credential_id,
             transport=transport,
         )
-        access = await client.current_access()
-        result = await client.status(access=access)
+        # R9/Q3-3: the exact intended AuthStore row and canonical hub are
+        # compared to the native initiating owner BEFORE the GET — a bearer
+        # the owner did not enroll never travels.
+        before = await client.current_access()
+        _require_access_matches_owner(before, owner)
+        result = await client.status(access=before)
+        # ... and AGAIN after the await: a same-credential_id account swap
+        # during the read is a change even while the native g1 stays live.
+        after = await client.current_access()
+        _require_access_matches_owner(after, owner)
+        if (after.credential_id, after.account_id, after.api_endpoint) != (
+            before.credential_id,
+            before.account_id,
+            before.api_endpoint,
+        ):
+            raise BridgeRefusal(
+                "bridge_owner_moved", "the signed-in account changed during the status read"
+            )
+        if not Store(config_dir).current_generation_is_live(owner):
+            raise BridgeRefusal(
+                "bridge_owner_moved", "the native owner generation moved during the status read"
+            )
         return result if isinstance(result, Mapping) else {}
 
     return _fetch
+
+
+def _require_owner_identity(owner: Any) -> None:
+    """The owner must carry a canonical hub for any identity comparison."""
+
+    hub = str(getattr(owner, "canonical_base_url", "") or "").rstrip("/")
+    if not hub:
+        from local_operator.team_bridge.client import BridgeRefusal
+
+        raise BridgeRefusal("bridge_owner_mismatch", "the enrolled owner has no canonical hub")
+
+
+def _require_access_matches_owner(access: Any, owner: Any) -> None:
+    """Credential/account/canonical-hub equality; tokens are never touched."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    endpoint = (getattr(access, "api_endpoint", None) or "").rstrip("/")
+    if (
+        getattr(access, "credential_id", None) != owner.credential_id
+        or getattr(access, "account_id", None) != owner.account_id
+        or endpoint != str(owner.canonical_base_url).rstrip("/")
+    ):
+        raise BridgeRefusal(
+            "bridge_owner_mismatch", "the signed-in credential is not the enrolled owner"
+        )
 
 
 def _owner_frame_digest(owner: Any) -> str:
@@ -258,73 +314,146 @@ def _owner_frame_digest(owner: Any) -> str:
     return _digest(owner)
 
 
-def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any) -> tuple[str, str]:
-    """Strictly normalize the RAW SDK status DTO (R8/Q3).
+def _normalize_accepted_status(
+    status: "Mapping[str, Any]", owner: Any, store: Any
+) -> tuple[str, str]:
+    """Strictly normalize the RAW SDK status DTO against the FROZEN server law.
 
-    The real response nests the selector under ``screening`` and carries
-    eligibility as ``available``/``tenants``/``endpoint``; the LOCAL
-    embedded template hash is the only template authority — server bytes are
-    HASHED and compared, never executed. Every missing, unknown, disabled or
-    mismatched shape is a typed refusal (``policy_stale``), never a default
-    and never an arbitrary flat mapping.
+    The frozen Go DTO (``internal/responses/bridge.go``) is:
+    ``{api_version:"1", available, tenants:[{tenant_id, tenant_name, eligible,
+    endpoint:null|{id,label,state:"active"|"paused"|"disabled"}, counts}],
+    guidance:{version,text}, screening:{version,template}, consent:{version,
+    text}}``. The endpoint lives ONLY on the caller's OWN tenant row: it is
+    ``owner.endpoint_id`` on that row and its state must be exactly
+    ``active``. ``available`` means SOME organization of the account, never
+    the selected owner's grant, so the owner's row is the authority. Served
+    guidance/consent texts are accepted only through the existing bounded
+    :class:`AcceptedTexts` discipline, the screening selector only through
+    the existing local-template comparison, and consent CURRENCY only
+    against the COMMITTED native receipt — never the served version alone.
+    Every miss is a typed ``policy_stale`` refusal before publication, client
+    creation or spend.
     """
 
-    from local_operator.team_bridge.screening import (
-        SCREENING_TEMPLATE_V1_SHA256,
-        SCREENING_VERSION_V1,
+    from local_operator.team_bridge.client import (
+        AcceptedTexts,
+        _api_supported,
+        _screening_is_trusted,
     )
+    from local_operator.team_bridge.screening import SCREENING_TEMPLATE_V1_SHA256
     from local_operator.team_bridge.store import StoreRefused
 
     if not isinstance(status, Mapping):
         raise StoreRefused("policy_stale", "accepted status is not a mapping")
-    if not status.get("available"):
+    # §6.6 compatibility runs through the ONE existing SDK helper: a future,
+    # older or malformed api_version surfaces "update your client" and this
+    # consumer refuses with it rather than guessing.
+    if not _api_supported(status):
+        raise StoreRefused("policy_stale", "unsupported api_version in status")
+    if status.get("available") is not True:
         raise StoreRefused("policy_stale", "messaging is not available for this account")
+    tenants = status.get("tenants")
+    if not isinstance(tenants, Sequence) or isinstance(tenants, (str, bytes)):
+        raise StoreRefused("policy_stale", "tenants missing from status")
+    rows = [
+        entry
+        for entry in tenants
+        if isinstance(entry, Mapping) and entry.get("tenant_id") == owner.tenant_id
+    ]
+    if len(rows) != 1:
+        # EXACTLY one mapping row for the initiating owner tenant; duplicates
+        # or absence are refusals, never a fallback to another organization.
+        raise StoreRefused("policy_stale", "owner tenant row missing or duplicated")
+    row = rows[0]
+    if row.get("eligible") is not True:
+        raise StoreRefused("policy_stale", "owner organization is not eligible")
+    endpoint = row.get("endpoint")
+    if not isinstance(endpoint, Mapping):
+        raise StoreRefused("policy_stale", "owner endpoint absent from the tenant row")
+    if endpoint.get("id") != owner.endpoint_id:
+        raise StoreRefused("policy_stale", "status endpoint is not the enrolled owner endpoint")
+    if endpoint.get("state") != "active":
+        raise StoreRefused("policy_stale", "owner endpoint is not active")
     screening = status.get("screening")
     if not isinstance(screening, Mapping):
         raise StoreRefused("policy_stale", "status carries no screening selector")
     version = screening.get("version")
     template = screening.get("template")
-    if not isinstance(version, str) or not version:
-        raise StoreRefused("policy_stale", "screening version missing")
-    if isinstance(template, str):
-        template_bytes = template.encode("utf-8")
-    elif isinstance(template, (bytes, bytearray)):
-        template_bytes = bytes(template)
-    else:
-        raise StoreRefused("policy_stale", "screening template missing")
-    if version != SCREENING_VERSION_V1:
-        raise StoreRefused("policy_stale", "unknown screening version")
-    digest = hashlib.sha256(template_bytes).hexdigest()
+    # The LOCAL embedded selector is the only template authority (selector-
+    # only acceptance, review round 1 R4): the served bytes are compared to
+    # it, never executed, and a mismatch cannot reuse a stale accepted slot.
+    if not _screening_is_trusted(version, template):
+        raise StoreRefused("policy_stale", "screening selector does not match the local template")
+    # Guidance and consent texts ride the ONE existing bounded acceptance
+    # discipline (2 KiB cap, monotonic versions, idempotent same-version
+    # re-serves, immutable-once-versioned bytes).
+    texts = AcceptedTexts()
+    guidance = status.get("guidance")
+    if not isinstance(guidance, Mapping) or (
+        texts.accept("guidance", version=guidance.get("version"), text=guidance.get("text")) is None
+    ):
+        raise StoreRefused("policy_stale", "guidance text was refused by the acceptance caps")
+    consent = status.get("consent")
+    if not isinstance(consent, Mapping):
+        raise StoreRefused("policy_stale", "status carries no consent section")
+    if texts.accept("consent", version=consent.get("version"), text=consent.get("text")) is None:
+        raise StoreRefused("policy_stale", "consent text was refused by the acceptance caps")
+    # CONSENT CURRENCY (R9/Q3-2): the served version is the CURRENT server
+    # version, NOT proof of acceptance. Acceptance is the COMMITTED native
+    # receipt; currency is that receipt's version matching what the server
+    # serves now. Neither present nor equal -> HOLD (never auto-reconsent).
+    receipt = store.owner_consent_receipt(owner)
+    if receipt is None:
+        raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+    if receipt["consent_version"] != consent.get("version"):
+        raise StoreRefused(
+            "policy_stale", "committed consent is not current for the served version"
+        )
+    import hashlib as _hashlib
+
+    digest = _hashlib.sha256(str(template).encode("utf-8")).hexdigest()
     if digest != SCREENING_TEMPLATE_V1_SHA256:
         raise StoreRefused(
             "policy_stale", "screening template bytes do not match the local selector"
         )
-    # Consent/API versions: when the server sends them they must be strings
-    # (a None/absent pair is not trusted as authority, but the VALUES are
-    # verified upstream by the caller's own compatibility contract).
-    for key in ("consent_version", "api_version"):
-        if key in status and not isinstance(status.get(key), str):
-            raise StoreRefused("policy_stale", f"{key} has an unsupported shape")
-    tenants = status.get("tenants")
-    tenant_ids: set[str] = set()
-    if isinstance(tenants, Sequence) and not isinstance(tenants, (str, bytes)):
-        for entry in tenants:
-            if isinstance(entry, str):
-                tenant_ids.add(entry)
-            elif isinstance(entry, Mapping):
-                tid = entry.get("tenant_id") or entry.get("id")
-                if isinstance(tid, str):
-                    tenant_ids.add(tid)
-    if str(owner.tenant_id) not in tenant_ids:
-        raise StoreRefused("policy_stale", "owner tenant is not an eligible tenant")
-    endpoint = status.get("endpoint")
-    if not isinstance(endpoint, Mapping):
-        raise StoreRefused("policy_stale", "status carries no endpoint")
-    if str(endpoint.get("id") or "") != str(owner.endpoint_id):
-        raise StoreRefused("policy_stale", "status endpoint does not match the owner")
-    if not (endpoint.get("active") is True or endpoint.get("state") == "active"):
-        raise StoreRefused("policy_stale", "endpoint is not active")
-    return version, digest
+    return str(version), digest
+
+
+_CAPTURE_TOKEN = object()
+
+
+class AcceptedCapture:
+    """An INTERNALLY minted proof that a live status read passed the full law.
+
+    R9/Q3-4: a caller-supplied mapping — even one carrying a matching
+    ``owner_frame`` string — cannot certify its own provenance, and QA
+    forged exactly such a negative into a DELIVER. Only this class, minted
+    by the verified fetch path with the module-private token, may authorise
+    reuse, and only while its owner frame, selector AND freshness still
+    hold. ``str(...)`` digests, public dict frames and any Mapping are
+    refused where a capture is required.
+    """
+
+    __slots__ = ("version", "template_hash", "owner_frame", "captured_at")
+
+    def __init__(
+        self,
+        token: Any,
+        *,
+        version: str,
+        template_hash: str,
+        owner_frame: str,
+        captured_at: float,
+    ) -> None:
+        if token is not _CAPTURE_TOKEN:
+            raise ValueError("AcceptedCapture is minted only by the verified status path")
+        self.version = version
+        self.template_hash = template_hash
+        self.owner_frame = owner_frame
+        self.captured_at = captured_at
+
+
+_STATUS_CAPTURE_TTL = 300.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -352,7 +481,7 @@ async def run_screening_cycle(
     settings: Any = None,
     holder: str = "team-bridge-cycle",
     ttl: float = 120.0,
-    accepted_status: "Mapping[str, Any] | None" = None,
+    accepted_capture: "AcceptedCapture | None" = None,
     status_fetcher: "Callable[[], Awaitable[Mapping[str, Any]]] | None" = None,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
@@ -388,24 +517,46 @@ async def run_screening_cycle(
     # source, unknown version, mismatched bytes, disabled/ineligible
     # tenant/endpoint, or an unprovenanced cache is a TYPED REFUSAL — never
     # a default, never an arbitrary flat mapping, never a dispatch.
+    from local_operator.team_bridge.screening import (
+        SCREENING_TEMPLATE_V1_SHA256,
+        SCREENING_VERSION_V1,
+    )
+
     store = Store(config_dir)
-    if status_fetcher is not None:
+    capture = accepted_capture
+    if capture is not None and not isinstance(capture, AcceptedCapture):
+        # R9/Q3-4: a caller-supplied mapping or a public frame string is an
+        # ASSERTION, not provenance — QA forged exactly such a negative into
+        # a DELIVER, so it is refused here as not-authority.
+        raise StoreRefused("policy_stale", "an unverified status mapping is not authority")
+    if capture is not None:
+        if (
+            capture.owner_frame != _owner_frame_digest(owner)
+            or capture.version != SCREENING_VERSION_V1
+            or capture.template_hash != SCREENING_TEMPLATE_V1_SHA256
+            or (time.time() - capture.captured_at) > _STATUS_CAPTURE_TTL
+        ):
+            capture = None
+    if capture is None:
+        if status_fetcher is None:
+            # None is NOT authority: without a status source there is
+            # nothing to accept, so nothing is published and nothing
+            # dispatches.
+            raise StoreRefused("policy_stale", "no verified status source")
         fetched = await status_fetcher()
         if not isinstance(fetched, Mapping):
             raise StoreRefused("policy_stale", "status fetch returned no mapping")
-        status = fetched
-    elif accepted_status is not None:
-        cached = accepted_status
-        if not isinstance(cached, Mapping):
-            raise StoreRefused("policy_stale", "accepted status is not a mapping")
-        if cached.get("owner_frame") != _owner_frame_digest(owner):
-            raise StoreRefused("policy_stale", "cached status provenance does not match the owner")
-        status = cached
-    else:
-        # None is NOT authority (R8/Q3): without a status source there is
-        # nothing to accept, so nothing is published and nothing dispatches.
-        raise StoreRefused("policy_stale", "no accepted status source")
-    version, template_hash = _normalize_accepted_status(status, owner)
+        version, template_hash = _normalize_accepted_status(fetched, owner, store)
+        if not store.current_generation_is_live(owner):
+            raise StoreRefused("policy_stale", "owner generation lost during the status read")
+        capture = AcceptedCapture(
+            _CAPTURE_TOKEN,
+            version=version,
+            template_hash=template_hash,
+            owner_frame=_owner_frame_digest(owner),
+            captured_at=time.time(),
+        )
+    version, template_hash = capture.version, capture.template_hash
     # OWNER PIN (R8/Q3): the awaited fetch may have raced an AuthStore
     # credential-row switch; the owner captured BEFORE the await must still
     # be the live, resolved owner, or nothing publishes and nothing

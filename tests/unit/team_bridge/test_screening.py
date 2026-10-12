@@ -867,74 +867,133 @@ def test_empty_categories_sql_text_is_corrupt_not_cached(tmp_path) -> None:
     assert err.value.code == "proof_corrupt"
 
 
-def test_accepted_status_mismatch_is_a_typed_refusal(tmp_path) -> None:
-    """R7/Q3: a same-version DIFFERENT-SHA accepted status is refused with a
-    typed error and the published authority is left untouched."""
+def test_unverified_status_mappings_are_never_authority(tmp_path) -> None:
+    """R9/Q3-4: a caller-supplied mapping — even one carrying the exact
+    public owner-frame digest — cannot certify its provenance (QA forged
+    such a negative into a DELIVER), and a minted capture whose owner frame,
+    selector or freshness no longer holds is refused too. Nothing publishes."""
+
+    import asyncio as _asyncio
+    import time as _time
 
     from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.scheduler import _CAPTURE_TOKEN, AcceptedCapture
     from local_operator.team_bridge.store import StoreRefused
 
     store, owner = _setup(tmp_path)
     (tmp_path / "config.yml").write_text("values:\n  hosting: openai\n  model_name: gpt-5.4\n")
-    import asyncio as _asyncio
 
-    async def drive():
+    async def drive(capture):
         await _scheduler.run_screening_cycle(
             config_dir=tmp_path,
             owner=owner,
             items=[],
             auth_store=None,
-            accepted_status={
-                "screening_version": SCREENING_VERSION_V1,
-                "template_sha256": "f" * 64,
-            },
+            accepted_capture=capture,
         )
 
+    forged = {
+        "screening_version": SCREENING_VERSION_V1,
+        "template_sha256": SCREENING_TEMPLATE_V1_SHA256,
+        "owner_frame": _scheduler._owner_frame_digest(owner),
+    }
     with pytest.raises(StoreRefused) as err:
-        _asyncio.run(drive())
+        _asyncio.run(drive(forged))
     assert err.value.code == "policy_stale"
+
+    wrong_frame = AcceptedCapture(
+        _CAPTURE_TOKEN,
+        version=SCREENING_VERSION_V1,
+        template_hash=SCREENING_TEMPLATE_V1_SHA256,
+        owner_frame="f" * 64,
+        captured_at=_time.time(),
+    )
+    with pytest.raises(StoreRefused) as err2:
+        _asyncio.run(drive(wrong_frame))
+    assert err2.value.code == "policy_stale"
+
+    stale = AcceptedCapture(
+        _CAPTURE_TOKEN,
+        version=SCREENING_VERSION_V1,
+        template_hash=SCREENING_TEMPLATE_V1_SHA256,
+        owner_frame=_scheduler._owner_frame_digest(owner),
+        captured_at=_time.time() - 3600.0,
+    )
+    with pytest.raises(StoreRefused) as err3:
+        _asyncio.run(drive(stale))
+    assert err3.value.code == "policy_stale"
+
+    # The minting guard itself: no external token may construct a capture.
+    with pytest.raises(ValueError):
+        AcceptedCapture(
+            object(),
+            version=SCREENING_VERSION_V1,
+            template_hash=SCREENING_TEMPLATE_V1_SHA256,
+            owner_frame="x",
+            captured_at=_time.time(),
+        )
     assert store.current_screening_policy(owner) is None  # nothing published
 
 
-def test_strict_status_normalizer_refusal_arms(tmp_path) -> None:
-    """R8/Q3: the RAW nested SDK status is normalized strictly — unknown
-    version, template mismatch, disabled, absent screening, wrong tenant or
-    endpoint all refuse with a typed policy_stale."""
+def test_status_law_normalizer_positive_and_refusal_arms(tmp_path) -> None:
+    """R9/Q3-1: the FROZEN server law — nested per-tenant endpoint, exactly
+    one owner-tenant row, eligibility, active state, local-only template
+    authority, bounded text acceptance and committed-consent currency — is
+    enforced; every arm refuses typed and a lawful DTO normalizes."""
 
+    import copy as _copy
+
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V1
     from local_operator.team_bridge.scheduler import _normalize_accepted_status
     from local_operator.team_bridge.store import StoreRefused
 
     store, owner = _setup(tmp_path)
     base = {
+        "api_version": "1",
         "available": True,
-        "screening": {"version": "bridge-screen-v1", "template": "TEMPLATE"},
-        "tenants": [owner.tenant_id],
-        "endpoint": {"id": owner.endpoint_id, "active": True},
+        "tenants": [
+            {
+                "tenant_id": owner.tenant_id,
+                "tenant_name": "Org",
+                "eligible": True,
+                "endpoint": {"id": owner.endpoint_id, "label": "endpoint", "state": "active"},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+        "guidance": {"version": "bridge_guidance_v1", "text": "Guidance body."},
+        "screening": {"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1},
+        "consent": {"version": "bridge_consent_v1", "text": "Consent body."},
     }
-    arms = []
-    bad = dict(base)
-    bad["screening"] = {"version": "bridge-screen-v9", "template": "TEMPLATE"}
-    arms.append(bad)  # unknown version
-    arms.append(base)  # template bytes do not hash to the frozen selector
-    bad = dict(base)
-    bad["available"] = False
-    arms.append(bad)  # disabled
-    bad = dict(base)
-    bad.pop("screening")
-    arms.append(bad)  # absent screening
-    bad = dict(base)
-    bad["tenants"] = ["someone-else"]
-    arms.append(bad)  # wrong tenant
-    bad = dict(base)
-    bad["endpoint"] = {"id": "bep_other", "active": True}
-    arms.append(bad)  # wrong endpoint
-    bad = dict(base)
-    bad["endpoint"] = {"id": owner.endpoint_id, "active": False}
-    arms.append(bad)  # inactive endpoint
-    for arm in arms:
-        with pytest.raises(StoreRefused) as err:
-            _normalize_accepted_status(arm, owner)
-        assert err.value.code == "policy_stale"
+    version, digest = _normalize_accepted_status(base, owner, store)
+    assert version == SCREENING_VERSION_V1
+    assert digest == SCREENING_TEMPLATE_V1_SHA256
+
+    def refuse(mutate) -> str:
+        arm = _copy.deepcopy(base)
+        mutate(arm)
+        with pytest.raises(StoreRefused) as caught:
+            _normalize_accepted_status(arm, owner, store)
+        assert caught.value.code == "policy_stale"
+        return str(caught.value)
+
+    refuse(lambda a: a.__setitem__("api_version", "9"))
+    refuse(lambda a: a.__setitem__("available", False))
+    refuse(lambda a: a.__setitem__("tenants", []))
+    refuse(lambda a: a["tenants"].append(_copy.deepcopy(a["tenants"][0])))
+    refuse(lambda a: a["tenants"][0].__setitem__("eligible", False))
+    refuse(lambda a: a["tenants"][0].__setitem__("endpoint", None))
+    refuse(lambda a: a["tenants"][0]["endpoint"].__setitem__("id", "bep_other"))
+    refuse(lambda a: a["tenants"][0]["endpoint"].__setitem__("state", "paused"))
+    refuse(lambda a: a.pop("screening"))
+    refuse(lambda a: a["screening"].__setitem__("template", "TEMPLATE"))
+    refuse(lambda a: a["screening"].__setitem__("version", "bridge-screen-v2"))
+    refuse(lambda a: a.pop("guidance"))
+    refuse(lambda a: a["guidance"].__setitem__("text", "x" * 3000))
+    refuse(lambda a: a.pop("consent"))
+    # Served consent moved on while the committed receipt stayed behind: the
+    # served version alone is NOT acceptance (currency cannot be established).
+    message = refuse(lambda a: a["consent"].__setitem__("version", "bridge_consent_v2"))
+    assert "currency" in message or "current" in message
 
 
 def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
@@ -949,7 +1008,10 @@ def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
 
     store, owner = _setup(tmp_path)
     proof = {
-        "owner": "7|acc|tnt|bep|hub|1",
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
         "body": "b" * 64,
         "template": "t" * 64,
         "version": "bridge-screen-v1",
@@ -1060,3 +1122,17 @@ def test_expired_turn_cannot_admit_receipt(tmp_path) -> None:
             turn=turn,
         )
     assert err.value.code == "turn_lost"
+
+
+def test_owner_consent_receipt_reads_committed_rows_only(tmp_path) -> None:
+    """R9/Q3-2: consent acceptance is the COMMITTED enrollment receipt read
+    under the exact live owner; a missing row or a non-live generation is
+    None, never reconstructed from served text."""
+
+    import dataclasses as _dataclasses
+
+    store, owner = _setup(tmp_path)
+    receipt = store.owner_consent_receipt(owner)
+    assert receipt == {"consent_version": "bridge_consent_v1", "consent_ref": "ref-1"}
+    other = _dataclasses.replace(owner, enrollment_generation=9)
+    assert store.owner_consent_receipt(other) is None
