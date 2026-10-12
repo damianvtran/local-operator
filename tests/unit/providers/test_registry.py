@@ -534,6 +534,7 @@ def test_every_registry_brand_is_pinned() -> None:
     from local_operator.providers.registry import provider_brand
 
     assert {definition.id: provider_brand(definition) for definition in PROVIDER_REGISTRY} == {
+        "meta-muse": "Muse Code",
         "openai": "OpenAI",
         "openai-device": "OpenAI",
         "anthropic": "Anthropic",
