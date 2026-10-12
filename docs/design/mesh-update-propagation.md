@@ -85,6 +85,16 @@ primary: lop update, /update         primary relay (mesh-rollout)           memb
 - **The member's relay is rolled by the update it just ran.** The services stage restarts a
   relay left a generation behind (`update.py:6147` → `relay.py:11701`), and RU §4.5 puts the
   executor in that relay. (Derived from those two; Q4.)
+- **The Linux member rolls the relay too, as of 2026-10-11 (stale-relay memo).** The
+  services stage's Linux arm (`network/relay.refresh_unit_if_stale` — migrate the unit,
+  then restart only on a proven build move) makes the bullet above true off macOS; the
+  drill showed a node's install move while its relay kept advertising the previous build.
+  The precondition is the relay unit's `KillMode=process`: a restart no longer kills the
+  member's session runtimes (they reparent to `systemd --user` and re-attach at the
+  relay's next start), and network stop/kill does not kill them at all — sessions are
+  ended through their own verbs. Bootstrap: the running relay executes its own roll, so
+  one manual `lop network restart` per Linux node follows the fix's install (session-safe
+  under the invariant), and every subsequent move is automatic.
 - **Membership, not links.** `DefinitionsSyncer._targets` walks every other `active` member of
   every network (`definitions.py:2236`), because a walk over live links "fired NEVER" on a
   quiet mesh (`:2140-2148`, measured).

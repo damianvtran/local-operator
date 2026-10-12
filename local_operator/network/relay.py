@@ -12042,6 +12042,19 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         exec_start=(
             f"{supervisors.quoted(str(image))} -m local_operator.network.relay " f"--port {port}"
         ),
+        # ``KillMode=process`` IS THE SESSION-SAFETY FIX (2026-10-11), and the
+        # relay is the one unit that must carry it: this device's session
+        # runtimes are children of the relay, so under systemd's default
+        # (``control-group``) ANY relay restart — the manual verb, an update's
+        # roll, the member pass — killed the node's sessions, including the
+        # session that asked. ``process`` kills only the main process and is
+        # macOS parity by design (launchd children survive). A survivor
+        # reparents to ``systemd --user`` and re-attaches when the relay is
+        # back; see ``supervisors.render_systemd_unit`` for the no-reap
+        # decision (an ExecStop reaper would fire on RESTART too and recreate
+        # this defect) and ``refresh_unit_if_stale`` below for the migration
+        # that adds this line to units installed before it existed.
+        kill_mode="process",
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),
@@ -12129,6 +12142,154 @@ def refresh_plist_if_stale() -> Any:
         from local_operator import launchd
 
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
+def refresh_unit_if_stale() -> Any:
+    """The Linux arm of the daemon-refresh seam: migrate the unit, move a stale relay.
+
+    WHY THIS EXISTS (2026-10-11, the rolling-updates drill): the member pass — and
+    ``lop update``'s own tail, and ``lop services restart`` — all reach
+    ``update.refresh_service_daemons_after_upgrade`` to roll the supervised
+    services onto the build the pointer now names, and on Linux that call was an
+    announced no-op (audit A24): the node's install moved while its relay kept
+    serving the previous build, because a relay advertises the build it RUNS and
+    nothing restarted it. This is the systemd sibling of
+    :func:`refresh_plist_if_stale`, sharing its second staleness question and its
+    outcome vocabulary (``launchd.PlistRefresh``, so ``daemon_report`` parsing
+    and the update report are the same for both platforms).
+
+    THE TWO HALVES, in the order that makes the second one safe:
+
+    1. **Migrate the unit file.** A unit whose content differs from
+       :func:`render_systemd`'s is rewritten and ``daemon-reload``ed. This is
+       also how an installed unit grows ``KillMode=process`` — the
+       session-safety fix every pre-existing unit predates — and it must land
+       BEFORE any restart below: under systemd's default ``control-group`` a
+       restart kills every process left in the unit's cgroup, and the session
+       runtimes live there (``supervisors.render_systemd_unit`` carries the
+       semantics and the no-reap decision). A rewrite that cannot be written or
+       re-read is a ``failed`` outcome and the refresh STOPS — restarting on a
+       unit whose kill semantics are unproven is the exact defect this arm
+       removes, so it is refused rather than risked.
+    2. **Move a provably-stale relay.** ``_managed_service_pid`` plus
+       ``update.stale_generation_of_process`` — the same question the macOS arm
+       asks — and only a PROVEN move restarts, through :func:`service_action`,
+       whose wrapper verifies a new pid actually serves before anything claims
+       a move. A rewrite alone restarts nothing: ``daemon-reload`` makes the
+       new definition effective at the next start, and no summary line is
+       printed for it (the launchd ``repaired`` sentence claims a restart,
+       which would be false here).
+
+    GUARDS, all silent declines: a Linux host with its supervisor; the unit
+    exists; the unit is addressable from this run (a sandboxed ``HOME``
+    declines before any manager is reached); and the unit's image names this
+    install's stable shim (``_unit_image``/``_names_the_shim``) — a unit that
+    would restart through some other tree is not this run's to move, and the
+    shim is exactly the generation axis the build question needs. Every path is
+    no-raise: an upgrade that already succeeded is the only caller.
+    """
+    from local_operator import launchd, update
+
+    name = "network relay"
+    recovery = "lop network install"
+    try:
+        if not (sys.platform.startswith("linux") and is_supported()):
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = systemd_path()
+        if not path.exists():
+            return launchd.PlistRefresh(name=name, kind="not-installed")
+        if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        image = _unit_image()
+        if image is None or not _names_the_shim(image):
+            # NOT THIS RUN'S TO MOVE: the unit's image does not resolve the
+            # generation pointer, so there is no proven move to make and a
+            # rewrite could repoint a tree this refresh does not own. The F10
+            # discipline — an unanswered question declines; it does not guess.
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        rendered = render_systemd(_service_port())
+        try:
+            current = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return launchd.PlistRefresh(
+                name=name,
+                kind="failed",
+                detail=f"could not read {path}: {exc} — run `{recovery}` to reinstall the unit",
+            )
+
+        def reload_unit() -> Any:
+            # DISK-CURRENT IS NOT MANAGER-CURRENT: a prior failed reload leaves
+            # the safe unit on disk but control-group loaded. Another refresh
+            # may also see that disk during a writer's write/reload gap. Each
+            # proven-move caller therefore needs its own successful reload;
+            # neither disk equality nor another caller's attempt proves safety.
+            reloaded = supervisors.systemctl_user("daemon-reload")
+            if reloaded.returncode != 0:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        "rewrote the relay unit but systemctl could not re-read it: "
+                        f"{supervisors.translate_systemctl_error(reloaded.stderr)} — "
+                        f"run `{recovery}` to reinstall it"
+                    ),
+                )
+            return None
+
+        if current != rendered:
+            try:
+                path.write_text(rendered, encoding="utf-8")
+            except OSError as exc:
+                return launchd.PlistRefresh(
+                    name=name,
+                    kind="failed",
+                    detail=(
+                        f"could not rewrite {path}: {exc} — run `{recovery}` to reinstall "
+                        "the unit"
+                    ),
+                )
+            failure = reload_unit()
+            if failure is not None:
+                return failure
+        pid = _managed_service_pid()
+        if pid is None:
+            # No running process, no build to compare — a stopped daemon is the
+            # installers' to repair, not this refresh's (same rule as the
+            # macOS arm's "no live pid" decline).
+            return launchd.PlistRefresh(name=name, kind="current")
+        stale = update.stale_generation_of_process(pid)
+        if stale is None:
+            return launchd.PlistRefresh(name=name, kind="current")
+        if current == rendered:
+            # The rewrite arm already reloaded this caller's new definition.
+            # A byte-current unit needs the same loaded-state guarantee, but
+            # only on a proven move: no-move probes still leave it untouched.
+            failure = reload_unit()
+            if failure is not None:
+                return failure
+        result = service_action("restart")
+        if not result.get("ok"):
+            # Same refusal as the macOS arm's, in this platform's words: the
+            # move was proven and did not happen; the sentence names the
+            # installer that can make it.
+            why = "systemctl would not restart it"
+            if str(result.get("reason") or "") == "not_restarted":
+                why = "the restart it accepted did not take"
+            return launchd.build_move_failure(name, recovery, stale, why=why)
+        return launchd.PlistRefresh(
+            name=name,
+            kind="restarted",
+            detail=stale.name,
+            consequence="expect a brief mesh blip",
+        )
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        from local_operator import launchd
+
+        return launchd.PlistRefresh(
+            name=name,
+            kind="failed",
+            detail=f"could not refresh the relay unit: {exc} — run `{recovery}` to reinstall it",
+        )
 
 
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:
