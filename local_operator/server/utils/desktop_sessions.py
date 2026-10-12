@@ -5374,7 +5374,9 @@ class DesktopSessionBridge:
             # split below exact rather than a race: everything at or below the
             # watermark is already inside ``frontend`` and is dropped as
             # superseded, and anything above it is newer than the snapshot and
-            # must be delivered after it.
+            # must be delivered after it. Order corrections are the exception:
+            # they are not frontend state and their IDs may be outside both the
+            # bounded page and order_ids lookup; the drain below preserves them.
             #
             # The frames are drained BEFORE ``open`` is yielded, and ``opened``
             # is set before the first yield of the handshake, so the overflow
@@ -5387,6 +5389,7 @@ class DesktopSessionBridge:
             # trap a reader pays for later. The rename is this branch's, so
             # main's block stays byte-identical.
             pending_frames: list[dict[str, Any]] = []
+            replayed_sequences = {prior["seq"] for prior in replay}
             while True:
                 try:
                     item = sub.queue.get_nowait()
@@ -5397,7 +5400,17 @@ class DesktopSessionBridge:
                     break
                 frame, size = item
                 sub.queued_bytes -= size
-                if frame["seq"] > snapshot["seq"]:
+                # Source metadata is not folded into frontend and a bounded
+                # snapshot need not carry its IDs. Preserve it through cutover
+                # unless this exact frame is already in the initial replay;
+                # ordinary frontend facts retain their existing supersession.
+                order_fact = (
+                    sub.journal_order
+                    and frame.get("type") == "event"
+                    and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                )
+                already_replayed = frame["seq"] in replayed_sequences
+                if frame["seq"] > snapshot["seq"] or (order_fact and not already_replayed):
                     pending_frames.append(frame)
             sub.opened = True
             open_payload: dict[str, Any] = {
