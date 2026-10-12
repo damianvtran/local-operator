@@ -277,6 +277,31 @@ def _record_like(record: QuietGroupRecord) -> QuietGroupRecord:
     )
 
 
+def test_one_incoming_hub_bridges_three_real_tools_without_becoming_an_action() -> None:
+    receipt = QuietGroupRecord(kind="hub", id="h", expects_reply=True, steer=True)
+    tools = [
+        QuietGroupRecord(kind="tool", id=f"t{i}", tool_name="read", tool_state="done")
+        for i in range(3)
+    ]
+    records = [tools[0], receipt, *tools[1:]]
+    groups = quiet_groups_of(records)
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.row_ids == ("t0", "h", "t1", "t2")
+    assert group.count == 1
+    assert group.actions == 3
+    assert group.mixed_actions
+    assert group.reply_requested == 1
+    assert group.steered == 1
+    assert quiet_groups_of(tools) == [], "this slice does not add tool-only condensation"
+    assert quiet_groups_of([tools[0], receipt, tools[1]]) == []
+    assert len(quiet_groups_of([receipt, QuietGroupRecord(kind="hub", id="h2")])) == 1
+    assert (
+        quiet_groups_of([tools[0], receipt, QuietGroupRecord(kind="user", id="u"), *tools[1:]])
+        == []
+    )
+
+
 def test_states_the_family_words_exactly_once_for_every_family() -> None:
     assert quiet_group_label("peer") == "Peer messages"
     assert quiet_group_label("wake") == "Wake messages"

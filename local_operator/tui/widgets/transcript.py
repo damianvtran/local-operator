@@ -3324,6 +3324,79 @@ class PeerMessageBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+class HubMessageBlock(PeerMessageBlock):
+    """An incoming parent/child message using the existing receipt ledger seat.
+
+    Keeping a distinct subtype preserves source/direction and historical reply
+    intent without pretending that a parent is a peer or an operator question.
+    The inherited copy/render infrastructure keeps the complete body selectable.
+    """
+
+    tool_name = "hub"
+
+    def __init__(self, body: str, details: dict[str, object], *, fold_width: int = 0) -> None:
+        self.hub_details = details
+        sender = details.get("sender")
+        super().__init__(body, sender if isinstance(sender, dict) else {}, fold_width=fold_width)
+
+    def restate_receipt(self, body: str, details: dict[str, object]) -> bool:
+        """Adopt richer replay facts without replacing the reader's open row.
+
+        The entry ID owns the receipt; body/sender/reply corrections are not a
+        second delivery. Rebuild the inherited cached preview only when facts
+        change, retaining expansion and source-anchor identity in place.
+        """
+        if self._text == body and self.hub_details == details:
+            return False
+        self._text = body
+        self.hub_details = details
+        sender = details.get("sender")
+        self._sender = sender if isinstance(sender, dict) else {}
+        self._snippet = " ".join(_sanitize_line(body[:_SNIPPET_SOURCE_MAX_CHARS]).split())
+        self._refresh_row()
+        return True
+
+    def _sender_name(self) -> tuple[str, bool]:
+        label = _sanitize_sender_field(self.hub_details.get("label"))
+        job = _sanitize_sender_field(self.hub_details.get("job_id"))
+        if label or job:
+            return label or job, False
+        name, quoted = super()._sender_name()
+        if name:
+            return name, quoted
+        direction = self.hub_details.get("direction")
+        return (
+            "Parent"
+            if direction == "to_child"
+            else "Subagent" if direction == "to_parent" else "Hub"
+        ), False
+
+    def _intent(self) -> str:
+        return " · ".join(
+            word
+            for flag, word in (
+                (self.hub_details.get("expects_reply") is True, "Reply requested"),
+                (self.hub_details.get("steer") is True, "Steered"),
+            )
+            if flag
+        )
+
+    def _summary(self) -> tuple[str, str]:
+        identity, snippet = super()._summary()
+        intent = self._intent()
+        return " · ".join(part for part in (f"From {identity}", intent) if part), snippet
+
+    def _header(self, width: int | None = None) -> str:
+        # Direction and job are advisory display facts, never chronology or a
+        # fabricated parent ID. Reply-requested cannot assert a pending reply.
+        parts = [super()._header(width), self._intent()]
+        for key in ("direction", "job_id"):
+            value = _sanitize_sender_field(self.hub_details.get(key))
+            if value:
+                parts.append(value)
+        return " · ".join(part for part in parts if part)
+
+
 class QuietGroupBlock(ExpandableActionBlock):
     """One bar over a run of consecutive delivery receipts (design
     ``docs/design/quiet-turns.md`` §5, slice S5).
@@ -3525,7 +3598,14 @@ class QuietGroupBlock(ExpandableActionBlock):
         count carries the shared minimum marker when the head is cut.
         """
         count = f"{self.group.count}+" if self.partial else str(self.group.count)
-        return f"messages \u00b7 {count}"
+        parts = [f"messages · {count}"]
+        if self.group.mixed_actions:
+            parts.append(f"{self.group.actions} actions")
+        if self.group.reply_requested:
+            parts.append(f"{self.group.reply_requested} reply requested")
+        if self.group.steered:
+            parts.append(f"{self.group.steered} steered")
+        return " · ".join(parts)
 
     def _build_row(self, width: int) -> Text:
         """The single summary row — the one-row guarantee lives here."""
@@ -3623,6 +3703,17 @@ def quiet_group_record_of(
     anchor = getattr(block, "navigation_anchor_id", "") or ""
     part = getattr(block, "navigation_anchor_part", 0)
     record_id = f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+    if isinstance(block, HubMessageBlock):
+        label, _ = block._sender_name()
+        reply = block.hub_details.get("expects_reply")
+        steer = block.hub_details.get("steer")
+        return QuietGroupRecord(
+            kind="hub",
+            id=record_id,
+            sender={"conversation_name": label},
+            expects_reply=reply if isinstance(reply, bool) else None,
+            steer=steer if isinstance(steer, bool) else None,
+        )
     if isinstance(block, PeerMessageBlock):
         return QuietGroupRecord(kind="peer", id=record_id, sender=block._sender)
     if isinstance(block, MonitorDeltaBlock):
@@ -3659,7 +3750,7 @@ def quiet_group_record_of(
             return QuietGroupRecord(kind="other", id=record_id)
         return QuietGroupRecord(kind="assistant", id=record_id, text=text)
     if isinstance(block, ImageBlock):
-        kind = "inside" if prev_kind == "tool" else "image"
+        kind = "inside" if prev_kind in ("tool", "hub") else "image"
         return QuietGroupRecord(kind=kind, id=record_id)
     return QuietGroupRecord(kind="other", id=record_id)
 
@@ -3961,15 +4052,24 @@ class QuietGroupTracker:
             bar.admit_member(block)
             self._restate(bar)
             return
-        trailing = self._live_trailing()
-        if trailing is not None:
-            trailing.blocks.append(block)
-            return
-        # A tool row between receipts sits INSIDE the span still to come
-        # (design §5), so it OPENS the trailing stretch rather than being
-        # forgotten: with no state yet, the next receipt must see this row as
-        # the span's possible first row.
-        self._trailing = _QuietTrailingSpan(blocks=[block])
+        # Score every internal append through the SAME scanner. A third actual
+        # tool can complete a mixed span after its sole receipt arrived; waiting
+        # for another receipt would leave that span permanently fragmented.
+        # The planner still refuses tool-only spans, so this adds no unrelated
+        # tool-only condensation and keeps the quiet >=2-receipt contract.
+        self._receipt(block)
+
+    def restate_member(self, block: TranscriptBlock) -> None:
+        """A richer same-ID receipt corrects existing facts, not the span's order.
+
+        The existing scanner re-reads the bar, retaining its disclosure and its
+        original open/closed boundary. No replay append or second tracker is
+        allowed to masquerade as a new delivery.
+        """
+        for candidate in self._view.blocks():
+            if isinstance(candidate, QuietGroupBlock) and block in candidate._members:
+                self._restate(candidate, open=candidate.group.open)
+                return
 
     def _close(self) -> None:
         """A splitter landed: the latch. Facts from here on are frozen.
@@ -6377,6 +6477,10 @@ class TranscriptView(ScrollableContainer):
         group nor anchor one.
         """
         self._quiet_groups.note_append(block)
+
+    def restate_quiet_member(self, block: TranscriptBlock) -> None:
+        """Refresh corrected receipt facts without appending a second member."""
+        self._quiet_groups.restate_member(block)
 
     def set_quiet_head_cut(self, cut: bool) -> None:
         """State whether this view's head may continue beyond its first row.

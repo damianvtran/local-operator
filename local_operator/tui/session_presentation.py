@@ -1029,6 +1029,7 @@ def project_settled_rows(
     )
     from local_operator.cross_session import cross_session_hidden
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.hub_receipts import hub_receipt_fields
 
     # ``job_result`` is declared beside the job manager that writes it, not with
     # the harness markers above — imported from its own home so this fold cannot
@@ -1041,6 +1042,7 @@ def project_settled_rows(
         ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
@@ -1086,6 +1088,7 @@ def project_settled_rows(
         is_intermediate_narration,
     )
     from local_operator.tui.settings import settings_get
+    from local_operator.tui.widgets.transcript import HubMessageBlock
 
     # Results are keyed by the call they answer, and a tool message can sit
     # several messages after its call (one assistant turn issues a batch).
@@ -1196,6 +1199,14 @@ def project_settled_rows(
     # blocks are inserted later, and an empty batch still schedules a
     # settle pass that would race the insert's own settle.
     batch = nullcontext() if self._block_sink is not None else transcript.batch_append()
+    # Mounted source-entry IDs are the identity authority on this surface. Read
+    # once per pass (including hidden grouped members); a same-ID live/reconnect
+    # replay cannot add a second receipt, and a reset/cleared view starts fresh.
+    hub_receipts = {
+        block.navigation_anchor_id: block
+        for block in transcript.blocks()
+        if isinstance(block, HubMessageBlock) and block.navigation_anchor_id
+    }
     with batch:
         for message in history:
             self._projection_message_id = str(getattr(message, "id", ""))
@@ -1208,6 +1219,23 @@ def project_settled_rows(
             # user-attributed, so replaying it too would put a raw
             # '(alarm) The session resumed…' line in the transcript as if
             # the user had typed it.
+            if getattr(message, "custom_type", None) == HUB_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                body, facts = hub_receipt_fields(details if isinstance(details, dict) else {})
+                receipt_id = str(getattr(message, "id", ""))
+                if body.strip():
+                    existing = hub_receipts.get(receipt_id) if receipt_id else None
+                    if existing is not None:
+                        if existing.restate_receipt(body, facts):
+                            transcript.restate_quiet_member(existing)
+                            appended = True
+                    else:
+                        block = HubMessageBlock(body, facts, fold_width=fold_width)
+                        self._append_block(block)
+                        if receipt_id:
+                            hub_receipts[receipt_id] = block
+                        appended = True
+                continue
             if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 # A HIDDEN delivery (a patience fire) paints NOTHING: not a

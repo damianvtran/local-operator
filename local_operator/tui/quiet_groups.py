@@ -79,7 +79,7 @@ class QuietGroup:
     key: str
     #: The family the trigger rows compose; ``mixed`` when more than one.
     family: QuietGroupFamily
-    #: Trigger rows in the group (>= 2 by construction).
+    #: Internal trigger count; one receipt requires at least three real tools.
     count: int
     #: First trigger's instant; null when the span's head is cut OR the rows
     #: carry no times (this surface's state — see the module doc).
@@ -100,6 +100,10 @@ class QuietGroup:
     open: bool
     #: Every row of the group, in order.
     row_ids: tuple[str, ...]
+    # Mixed summaries describe actual tool work separately from receipt count.
+    mixed_actions: bool = False
+    reply_requested: int = 0
+    steered: int = 0
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,8 @@ class QuietGroupRecord:
     sender: Mapping[str, Any] = field(default_factory=dict)
     tool_name: str = ""
     tool_state: str = ""
+    expects_reply: bool | None = None
+    steer: bool | None = None
 
 
 def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
@@ -140,7 +146,7 @@ def quiet_family_of(record: QuietGroupRecord) -> QuietGroupFamily | None:
     a peer message, a wake receipt, a monitor delta. ``job`` exists in the
     shared union above but no row reaches it here (see the module doc).
     """
-    if record.kind == "peer":
+    if record.kind in ("peer", "hub"):
         return "peer"
     if record.kind == "wake":
         return "wake"
@@ -166,7 +172,7 @@ def group_splitter_of(record: QuietGroupRecord) -> bool:
     would miss: an empty or still-streaming assistant row, and this surface's
     ``inside`` kind (an image a folded tool row produced).
     """
-    if record.kind in ("tool", "peer", "wake", "monitor", "inside"):
+    if record.kind in ("tool", "peer", "hub", "wake", "monitor", "inside"):
         return False
     if record.kind == "assistant":
         return bool(record.text.strip())
@@ -270,7 +276,14 @@ def quiet_group_of_segment(
     triggers = [
         records[i] for i in range(span_from, span_to + 1) if is_quiet_group_trigger(records[i])
     ]
-    if len(triggers) < 2:
+    # Mixed internal work may fold with one incoming receipt only when three
+    # REAL tools are present. Receipt-only groups retain their existing minimum;
+    # a tool-only span is never eligible as a side effect of this extension.
+    real_actions = sum(
+        records[i].kind == "tool" and not is_quiet_turn_call(records[i])
+        for i in range(span_from, span_to + 1)
+    )
+    if len(triggers) < 2 and not (triggers and real_actions >= 3):
         return None
     first = triggers[0]
     last = triggers[-1]
@@ -285,7 +298,7 @@ def quiet_group_of_segment(
             if is_failed_call(record):
                 failed += 1
             continue
-        if record.kind == "peer":
+        if record.kind in ("peer", "hub"):
             label = quiet_sender_label(record.sender)
             sender_counts[label] = sender_counts.get(label, 0) + 1
     family: QuietGroupFamily | None = None
@@ -318,6 +331,10 @@ def quiet_group_of_segment(
         failed=failed,
         open=open if open is not None else (span_to == len(records) - 1),
         row_ids=tuple(records[i].id for i in range(span_from, span_to + 1)),
+        mixed_actions=real_actions >= 3
+        and (len(triggers) < 2 or any(record.kind == "hub" for record in triggers)),
+        reply_requested=sum(record.expects_reply is True for record in triggers),
+        steered=sum(record.steer is True for record in triggers),
     )
 
 

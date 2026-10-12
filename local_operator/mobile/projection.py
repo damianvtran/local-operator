@@ -33,6 +33,7 @@ from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
+from local_operator.harness.hub_receipts import hub_receipt_fields
 
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
@@ -1361,9 +1362,9 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
                 # is what leaked raw XML onto the attach seed.
-                body = str(message.details.get("body") or "").strip()
-                direction = message.details.get("direction")
-                if body:
+                body, facts = hub_receipt_fields(message.details)
+                direction = facts.get("direction")
+                if body.strip():
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
@@ -1371,6 +1372,7 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                                 "parent_message" if direction == "to_child" else "subagent_message"
                             ),
                             text=body,
+                            details=facts,
                         )
                     )
                 continue

@@ -66,7 +66,7 @@ export type QuietGroup = {
 	key: string;
 	/** The family the trigger rows compose; `mixed` when more than one. */
 	family: QuietGroupFamily;
-	/** Trigger rows in the group (>= 2 by construction). */
+	/** Internal triggers; one receipt requires at least three real tools. */
 	count: number;
 	/** First trigger's instant; null when the span's head is cut OR the
 	 * records carry no times (this wire's state — see the module doc). */
@@ -86,6 +86,9 @@ export type QuietGroup = {
 	open: boolean;
 	/** Every row of the group, in order. */
 	rowIds: string[];
+	mixedActions?: boolean;
+	replyRequested?: number;
+	steered?: number;
 };
 
 /**
@@ -111,8 +114,22 @@ export type SegmentSpan = { from: number; to: number };
  * starts nothing. On this wire only two kinds are triggers: an inbound peer
  * message and a wake receipt.
  */
+const HUB_LABEL_SPACE = /\s+/g;
+const HUB_LABEL_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g;
+
+/** Advisory sender identity only; no invented parent/session coordinate. */
+export function hubReceiptLabel(record: Pick<TranscriptEntry, "kind" | "details">): string {
+	const fields = [record.details?.label, record.details?.job_id, record.details?.sender?.conversation_name, record.details?.sender?.session_id];
+	for (const field of fields) {
+		if (typeof field !== "string") continue;
+		const clean = field.replace(HUB_LABEL_CONTROLS, "").replace(HUB_LABEL_SPACE, " ").trim().slice(0, 120);
+		if (clean) return clean;
+	}
+	return record.kind === "parent_message" ? "Parent" : "Subagent";
+}
+
 function quietFamilyOf(record: QuietGroupRecord): QuietGroupFamily | null {
-	if (record.kind === "peer_message") return "peer";
+	if (record.kind === "peer_message" || record.kind === "parent_message" || record.kind === "subagent_message") return "peer";
 	if (record.kind === "notice" && record.details?.notice_kind === "wake") return "wake";
 	return null;
 }
@@ -140,6 +157,8 @@ function groupSplitterOf(record: QuietGroupRecord): boolean {
 		case "reasoning":
 			return false;
 		case "peer_message":
+		case "parent_message":
+		case "subagent_message":
 			return false;
 		case "notice":
 			return record.details?.notice_kind !== "wake";
@@ -248,7 +267,11 @@ export function quietGroupOfSegment(
 	for (let i = span.from; i <= span.to; i += 1) {
 		if (isQuietGroupTrigger(records[i])) triggers.push(records[i]);
 	}
-	if (triggers.length < 2) return null;
+	// Extend this scanner, not a second grouping pass. Only a receipt-bearing
+	// span with three actual tools gets the new mixed mode; tool-only runs and
+	// the >=2 receipt-only contract are unchanged.
+	const realActions = records.slice(span.from, span.to + 1).filter(r => r.kind === "tool" && !isQuietTurnCall(r)).length;
+	if (triggers.length < 2 && !(triggers.length > 0 && realActions >= 3)) return null;
 	const first = triggers[0];
 	const last = triggers[triggers.length - 1];
 	let actions = 0;
@@ -262,8 +285,8 @@ export function quietGroupOfSegment(
 			if (isFailedCall(record)) failed += 1;
 			continue;
 		}
-		if (record.kind === "peer_message") {
-			const label = quietSenderLabel(record.details?.sender ?? {});
+		if (record.kind === "peer_message" || record.kind === "parent_message" || record.kind === "subagent_message") {
+			const label = record.kind === "peer_message" ? quietSenderLabel(record.details?.sender ?? {}) : hubReceiptLabel(record);
 			senderCounts.set(label, (senderCounts.get(label) ?? 0) + 1);
 		}
 	}
@@ -308,6 +331,9 @@ export function quietGroupOfSegment(
 		failed,
 		open: options.open ?? (span.to === records.length - 1),
 		rowIds,
+		...(realActions >= 3 && (triggers.length < 2 || triggers.some(r => r.kind === "parent_message" || r.kind === "subagent_message")) ? {mixedActions: true} : {}),
+		...(triggers.some(r => r.details?.expects_reply === true) ? {replyRequested: triggers.filter(r => r.details?.expects_reply === true).length} : {}),
+		...(triggers.some(r => r.details?.steer === true) ? {steered: triggers.filter(r => r.details?.steer === true).length} : {}),
 	};
 }
 
