@@ -1331,7 +1331,7 @@ def test_mcp_names_are_seeded_before_deferred_connection(monkeypatch) -> None:
     hooks = session_factory._KnowledgeHooks()
     monkeypatch.setattr(
         "local_operator.mcp.config.load_all_mcp_configs",
-        lambda cwd: ({"slack": object()}, {"slack": "config"}),
+        lambda cwd, boundary=None: ({"slack": object()}, {"slack": "config"}),
     )
 
     session_factory._seed_mcp_routing(hooks, "/workspace")
