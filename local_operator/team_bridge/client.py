@@ -167,16 +167,19 @@ ACCOUNT_MISMATCH_SENTENCE = (  # i18n: ignore local guard, one client sentence
     "This action was prepared for a different Radient account. Sign in again."
 )
 
-#: §5.6 state F's two sentences, verbatim from the §2.5 closed table. A plan
-#: lapse reads "Plan ended — reading only"; a CONFIRMED kill (the member
-#: tenants-state read returns effective) reads the neutral "Agent messages are
-#: turned off" — neutral across the admin and ops actors by design (D21). The
-#: client never invents a third reading for F: when the kill cannot be
-#: confirmed (a lapse, a scope-excluded organization, or an unreadable
-#: confirmation) the lapse sentence is the F reading, which is also the only
-#: non-oracle choice (S-1).
+#: §5.6 state F's sentences, verbatim from the §2.5 closed table. v1 emits
+#: ONLY the neutral one — "Agent messages are turned off" — for every F: the
+#: payload's ``eligible:false`` rows are byte-identical across a plan lapse,
+#: an admin/ops kill and a scope-excluded organization (§5.5/S-1), and no v1
+#: wire answer POSITIVELY evidences a lapse, so "Plan ended — reading only"
+#: stays in the set for a future positive-evidence path and is deliberately
+#: unreachable here: attributing a lapse from eligibility alone misreads
+#: scope exclusions and races as billing, and the round-1 confirmation read
+#: invented it on refused, malformed or unreachable answers (review round 2,
+#: R9 — QA rendered it falsely from an ops-killed status and a transport
+#: failure).
 STATE_NOTE_LAPSED = "Plan ended — reading only"  # i18n: ignore §2.5 (state.lapsed)
-STATE_NOTE_KILL = "Agent messages are turned off"  # i18n: ignore §2.5 (state.kill)
+STATE_NOTE_NEUTRAL = "Agent messages are turned off"  # i18n: ignore §2.5 (state.kill)
 
 #: §6.6's version.update string, verbatim: the whole sentence a surface shows when
 #: the server's contract is newer than this client satisfies.
@@ -1132,10 +1135,11 @@ class StatusCheck:
     #: reads this to offer a refresh instead of rendering bytes that were
     #: refused (review round 1, R3).
     rejected: tuple[str, ...] = ()
-    #: §5.6 F's sentence — "Plan ended — reading only" or the confirmed-kill
-    #: "Agent messages are turned off" — and ``None`` in every other state.
-    #: Only a status answer that PROVES F carries it; nothing upstream of F
-    #: asserts either reading (review round 1, Q3 / design round 1, D3).
+    #: §5.6 F's sentence — v1 emits the NEUTRAL "Agent messages are turned
+    #: off" — and ``None`` in every other state. Only a status answer that
+    #: PROVES F carries it; "Plan ended — reading only" is reserved for a
+    #: future answer that positively evidences a lapse and is unreachable in
+    #: v1 (review round 2, R9).
     state_note: str | None = None
 
     @property
@@ -1478,37 +1482,17 @@ class StatusDiscipline:
             rejected=tuple(texts.rejected),
         )
         if _surface_state(check) == "F":
-            # The F sentence needs the member-readable kill confirmation: one
-            # extra read at this same boundary (§5.6 F, review round 1, Q3).
-            check = replace(check, state_note=await self._f_state_note(check, access))
+            # §5.6 F's sentence, the NEUTRAL closed-set member: the v1 payload
+            # cannot tell a lapse, a kill and a scope exclusion apart and
+            # carries no positive plan oracle (review round 2, R9). The
+            # round-1 tenants-state confirmation read is gone with the
+            # variation — it decided nothing once the sentence stopped
+            # varying, and removing it drops one request from a fail-closed
+            # path. "Plan ended — reading only" is reserved for a future
+            # positively-evidenced lapse.
+            check = replace(check, state_note=STATE_NOTE_NEUTRAL)
         self._states[key] = _AccountState(last_attempt=time.monotonic(), check=check, texts=texts)
         return check
-
-    async def _f_state_note(self, check: StatusCheck, access: OAuthAccess) -> str:
-        """F's sentence: the kill one when CONFIRMED, the lapse one otherwise.
-
-        §5.5 renders a plan lapse, an admin/ops kill and a scope-excluded
-        organization as byte-identical ``eligible:false`` rows, so the status
-        answer alone cannot tell the readings apart. The member-readable
-        confirmation is the tenants-state read — booleans only, never reasons
-        (S-22) — so this is ONE extra GET at the SAME boundary, only while the
-        answer IS F, only for the retained tenant the selection already chose,
-        and it rides the SAME pinned access as the status read itself. A
-        refusal, a malformed body or no selection reads lapse: the F sentence
-        set has exactly two members, and telling a scope-excluded organization
-        apart from a lapse is what S-1 forbids.
-        """
-
-        tenant_id = selected_tenant_id(check.payload)
-        if tenant_id is None:
-            return STATE_NOTE_LAPSED
-        try:
-            state = await self._client.tenant_state(tenant_id, access=access)
-        except (BridgeSignInRequired, BridgeRefusal):
-            return STATE_NOTE_LAPSED
-        if isinstance(state, Mapping) and state.get("effective") is True:
-            return STATE_NOTE_KILL
-        return STATE_NOTE_LAPSED
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.

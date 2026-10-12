@@ -25,8 +25,9 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import SettingsView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-LAPSED = "Plan ended — reading only"
-KILLED = "Agent messages are turned off"
+#: The F sentence v1 emits for EVERY cause (review round 2, R9): a lapsed
+#: plan, a confirmed kill and an unreadable confirmation all read it.
+NEUTRAL = "Agent messages are turned off"
 
 
 @pytest.fixture(autouse=True)
@@ -73,14 +74,14 @@ async def test_f_shows_the_state_sentence_and_refuses_every_editing_key() -> Non
             state="ready",
             checked_at=1.0,
             read_only=True,
-            note=LAPSED,
+            note=NEUTRAL,
         )
         index = _bridge_row_index(view, "team_bridge.enabled")
         _select(view, index)
 
         # The row explains the STATE — the contract's own sentence — instead of
         # the generic prerequisites help.
-        assert view._detail_text.plain == LAPSED
+        assert view._detail_text.plain == NEUTRAL
         # No editing key is advertised for it.
         assert view._current_is_readonly() is True
 
@@ -88,22 +89,22 @@ async def test_f_shows_the_state_sentence_and_refuses_every_editing_key() -> Non
         # `r` rewrites nothing.
         await pilot.press("enter")
         assert view._editing is None and view._expanded is None
-        assert view._error == LAPSED
+        assert view._error == NEUTRAL
 
         setting = settings_io.BY_KEY["team_bridge.enabled"]
         before = settings_io.read_setting(view._manager, setting)
         await pilot.press("space")
         after = settings_io.read_setting(view._manager, setting)
         assert before is False and after is False
-        assert view._error == LAPSED
+        assert view._error == NEUTRAL
 
         await pilot.press("r")
         assert settings_io.read_setting(view._manager, setting) is False
-        assert view._error == LAPSED
+        assert view._error == NEUTRAL
 
 
 @pytest.mark.asyncio
-async def test_the_kill_sentence_renders_when_that_is_what_was_confirmed() -> None:
+async def test_the_neutral_sentence_renders_for_a_confirmed_kill() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -116,10 +117,10 @@ async def test_the_kill_sentence_renders_when_that_is_what_was_confirmed() -> No
             state="ready",
             checked_at=1.0,
             read_only=True,
-            note=KILLED,
+            note=NEUTRAL,
         )
         _select(view, _bridge_row_index(view, "team_bridge.enabled"))
-        assert view._detail_text.plain == KILLED
+        assert view._detail_text.plain == NEUTRAL
 
 
 @pytest.mark.asyncio

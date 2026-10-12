@@ -181,7 +181,7 @@
   },
   {
     "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
-    "state": "F_lapse",
+    "state": "F_unknown",
     "size": [
       80,
       24
@@ -210,7 +210,7 @@
     "scroll_y": 245,
     "config_session": "",
     "selected": "team_bridge.enabled",
-    "detail_plain": "Plan ended \u2014 reading only",
+    "detail_plain": "Agent messages are turned off",
     "detail_two_line": false,
     "row_value": "  \u203a Enabled on this machine       off \u25b8",
     "readonly": true,
@@ -222,7 +222,7 @@
   },
   {
     "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
-    "state": "F_lapse",
+    "state": "F_unknown",
     "size": [
       80,
       24
@@ -251,7 +251,43 @@
     "scroll_y": 245,
     "config_session": "",
     "selected": "team_bridge.enabled",
-    "detail_plain": "Plan ended \u2014 reading only",
+    "detail_plain": "Agent messages are turned off",
+    "detail_two_line": false,
+    "row_value": "  \u203a Enabled on this machine       off \u25b8",
+    "readonly": true
+  },
+  {
+    "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
+    "state": "F_unknown",
+    "size": [
+      60,
+      20
+    ],
+    "theme_requested": "dark",
+    "theme_effective": "dark",
+    "muted": "#b5afa2",
+    "faint": "#4a4539",
+    "dim": "#837c6d",
+    "surface": "#1e1a14",
+    "contrast_muted_surface": 7.929074698978415,
+    "contrast_faint_surface": 1.8148269685744147,
+    "app_size": [
+      60,
+      20
+    ],
+    "body_size": [
+      56,
+      4
+    ],
+    "body_virtual_size": [
+      55,
+      259
+    ],
+    "rows": 259,
+    "scroll_y": 249,
+    "config_session": "",
+    "selected": "team_bridge.enabled",
+    "detail_plain": "Agent messages are turned off",
     "detail_two_line": false,
     "row_value": "  \u203a Enabled on this machine       off \u25b8",
     "readonly": true

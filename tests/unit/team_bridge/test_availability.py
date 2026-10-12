@@ -54,12 +54,12 @@ def test_the_record_carries_the_f_posture(tmp_path: Path) -> None:
         state="ready",
         checked_at=3.0,
         read_only=True,
-        note="Plan ended — reading only",
+        note="Agent messages are turned off",
     )
     observed = availability.observed(tmp_path)
     assert observed is not None
     assert observed["read_only"] is True
-    assert observed["note"] == "Plan ended — reading only"
+    assert observed["note"] == "Agent messages are turned off"
     # A non-string note normalises to None rather than leaking a raw object.
     # Deliberate type violation: proves the runtime normalisation guard.
     availability.record(

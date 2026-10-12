@@ -9,7 +9,10 @@ and effective theme are logged per case, never inferred from filenames.
 
 from __future__ import annotations
 
-import asyncio, json, os, sys
+import asyncio
+import json
+import os
+import sys
 from pathlib import Path
 
 SCRATCH = Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"])
@@ -25,8 +28,14 @@ home = SCRATCH / "frames-home-r1"
 cfg = home / ".local-operator"
 home.mkdir(exist_ok=True)
 cfg.mkdir(exist_ok=True)
-os.environ.update(HOME=str(home), LOCAL_OPERATOR_CONFIG_DIR=str(cfg), TERM="xterm-256color",
-                  LOCAL_OPERATOR_NO_SHIMMER="1", LOCAL_OPERATOR_NO_NOTIFICATIONS="1", LOCAL_OPERATOR_NO_DESKTOP_LAUNCH="1")
+os.environ.update(
+    HOME=str(home),
+    LOCAL_OPERATOR_CONFIG_DIR=str(cfg),
+    TERM="xterm-256color",
+    LOCAL_OPERATOR_NO_SHIMMER="1",
+    LOCAL_OPERATOR_NO_NOTIFICATIONS="1",
+    LOCAL_OPERATOR_NO_DESKTOP_LAUNCH="1",
+)
 os.environ.pop("NO_COLOR", None)
 
 from local_operator import settings_io  # noqa: E402
@@ -47,8 +56,13 @@ def posture(name: str) -> dict:
     if name == "absent":
         return {"visible": False, "state": "A", "checked_at": 1.0, "read_only": False, "note": None}
     r = CAP[name]["result"]
-    return {"visible": r["visibility"]["settings"], "state": r["surface_state"], "checked_at": 1.0,
-            "read_only": r["read_only"], "note": r["state_note"]}
+    return {
+        "visible": r["visibility"]["settings"],
+        "state": r["surface_state"],
+        "checked_at": 1.0,
+        "read_only": r["read_only"],
+        "note": r["state_note"],
+    }
 
 
 results = []
@@ -57,7 +71,9 @@ results = []
 async def capture(name, size, theme_name, key, *, configured=False, press_space=False):
     cm = ConfigManager(cfg)
     settings_io.write_setting(cm, settings_io.BY_KEY["tui.theme"], theme_name)
-    settings_io.write_setting(cm, settings_io.BY_KEY["team_bridge.session"], LONG_SESSION if configured else "")
+    settings_io.write_setting(
+        cm, settings_io.BY_KEY["team_bridge.session"], LONG_SESSION if configured else ""
+    )
     settings_reload()
     theme.set_theme(theme_name)
     availability.record(cfg, **posture(name))
@@ -73,7 +89,8 @@ async def capture(name, size, theme_name, key, *, configured=False, press_space=
             await pilot.pause()
             row = view._rows[index]
             row_info = {
-                "selected": key, "detail_plain": view._detail_text.plain,
+                "selected": key,
+                "detail_plain": view._detail_text.plain,
                 "detail_two_line": bool(getattr(view, "_detail_two_line", False)),
                 "row_value": view._row_text(row, index, view._list.size.width).plain,
                 "readonly": bool(view._current_is_readonly()),
@@ -89,17 +106,29 @@ async def capture(name, size, theme_name, key, *, configured=False, press_space=
         tokens = theme.get_tokens()
         surface = tokens.get("surface") or tokens.get("background") or tokens.get("bg")
         detail = {
-            "state_source": "LIVE wire capture replayed into availability (wireproof-captures.json)",
-            "state": name, "size": list(size), "theme_requested": theme_name,
+            "state_source": (
+                "LIVE wire capture replayed into availability (wireproof-captures.json)"
+            ),
+            "state": name,
+            "size": list(size),
+            "theme_requested": theme_name,
             "theme_effective": theme.current_theme(),
-            "muted": theme.semantic_color("muted"), "faint": theme.semantic_color("faint"),
+            "muted": theme.semantic_color("muted"),
+            "faint": theme.semantic_color("faint"),
             "dim": theme.semantic_color("dim"),
             "surface": surface,
-            "contrast_muted_surface": theme.contrast(theme.semantic_color("muted"), surface) if surface else None,
-            "contrast_faint_surface": theme.contrast(theme.semantic_color("faint"), surface) if surface else None,
-            "app_size": list(app.size), "body_size": list(view._body.size),
-            "body_virtual_size": list(view._body.virtual_size), "rows": len(view._rows),
-            "scroll_y": view._body.scroll_y, "config_session": ConfigManager(cfg).get_nested_value(("team_bridge", "session")),
+            "contrast_muted_surface": (
+                theme.contrast(theme.semantic_color("muted"), surface) if surface else None
+            ),
+            "contrast_faint_surface": (
+                theme.contrast(theme.semantic_color("faint"), surface) if surface else None
+            ),
+            "app_size": list(app.size),
+            "body_size": list(view._body.size),
+            "body_virtual_size": list(view._body.virtual_size),
+            "rows": len(view._rows),
+            "scroll_y": view._body.scroll_y,
+            "config_session": ConfigManager(cfg).get_nested_value(("team_bridge", "session")),
             **row_info,
         }
         if press_space:
@@ -121,8 +150,9 @@ async def main():
     await capture("B", (80, 24), "dark", "team_bridge.session", configured=True)
     await capture("B", (60, 20), "dark", "team_bridge.enabled")
     await capture("B", (60, 20), "light", "team_bridge.enabled")
-    await capture("F_lapse", (80, 24), "dark", "team_bridge.enabled", press_space=True)
-    await capture("F_lapse", (80, 24), "light", "team_bridge.enabled")
+    await capture("F_unknown", (80, 24), "dark", "team_bridge.enabled", press_space=True)
+    await capture("F_unknown", (80, 24), "light", "team_bridge.enabled")
+    await capture("F_unknown", (60, 20), "dark", "team_bridge.enabled")
     await capture("F_kill", (80, 24), "dark", "team_bridge.enabled", press_space=True)
     await capture("absent", (80, 24), "dark", None)
     print("FRAMES DONE", len(results), flush=True)
