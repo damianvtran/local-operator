@@ -179,7 +179,7 @@ CROSS_SESSION_TOOL_NAME = "send"
 #: 5: all-row journal ordinals and their equality domain. Earlier caches only
 #: cover the search/rail subsets; they cannot prove a visible custom row's
 #: position. Rebuilding on version mismatch is preferable to fabricating it.
-TRANSCRIPT_INDEX_VERSION = 5
+TRANSCRIPT_INDEX_VERSION = 6
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -565,6 +565,9 @@ class TranscriptIndex:
     #: ALL complete rows by entry id, not just search/rail rows. Derived during
     #: the scan already paid for those views; page readers do indexed lookups.
     journal_rows: dict[str, int] = field(default_factory=dict)
+    # PROTOTYPE: offsets come from the same scanner/witness as ordinals. They
+    # retain no payload and do not certify settled replay projection semantics.
+    journal_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     version: int = TRANSCRIPT_INDEX_VERSION
 
 
@@ -641,6 +644,28 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     messages = raw.get("messages")
     if not isinstance(checkpoints, list) or not isinstance(messages, list):
         return None
+    raw_ranges = raw.get("journal_ranges")
+    raw_rows = raw.get("journal_rows")
+    if (
+        not isinstance(raw_ranges, dict)
+        or not isinstance(raw_rows, dict)
+        or raw_ranges.keys() != raw_rows.keys()
+    ):
+        return None
+    if any(
+        not isinstance(id_, str) or type(seq) is not int or seq < 0 for id_, seq in raw_rows.items()
+    ):
+        return None
+    size = sig.get("size")
+    if type(size) is not int or any(
+        not isinstance(id_, str)
+        or not isinstance(span, (list, tuple))
+        or len(span) != 2
+        or any(type(n) is not int for n in span)
+        or not 0 <= span[0] < span[1] <= size
+        for id_, span in raw_ranges.items()
+    ):
+        return None
     parsed_checkpoints = [c for c in (Checkpoint.from_payload(c) for c in checkpoints) if c]
     parsed_messages = [m for m in (MessageDoc.from_payload(m) for m in messages) if m]
     raw_runs = raw.get("runs")
@@ -660,6 +685,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         journal_generation=(
             raw["journal_generation"] if isinstance(raw.get("journal_generation"), str) else ""
         ),
+        journal_ranges={id_: tuple(span) for id_, span in raw_ranges.items()},
         journal_rows=(
             {
                 str(key): value
@@ -701,6 +727,7 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
         "journal_rows": index.journal_rows,
+        "journal_ranges": index.journal_ranges,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2053,9 +2080,11 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
     reader = _RowReader(path, 0, 0)
     state = _Derivation()
     journal_rows: dict[str, int] = {}
+    journal_ranges: dict[str, tuple[int, int]] = {}
     for row in reader:
         if row.id:
             journal_rows[row.id] = row.ordinal
+            journal_ranges[row.id] = (row.offset, row.end)
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(prior_checkpoints=[], prior_messages=[], turn_base=0)
@@ -2077,6 +2106,7 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
         },
         journal_generation=uuid4().hex,
         journal_rows=journal_rows,
+        journal_ranges=journal_ranges,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2119,9 +2149,13 @@ def _scan_incremental(
     # before the reader's ordinal resume point; derive suffix ids in this same
     # verified view so stale suffix mappings cannot survive a re-derivation.
     journal_rows = {id_: seq for id_, seq in previous.journal_rows.items() if seq < window_rows}
+    journal_ranges = {
+        id_: span for id_, span in previous.journal_ranges.items() if id_ in journal_rows
+    }
     for row in reader:
         if row.id:
             journal_rows[row.id] = row.ordinal
+            journal_ranges[row.id] = (row.offset, row.end)
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(
@@ -2148,6 +2182,7 @@ def _scan_incremental(
         },
         journal_generation=previous.journal_generation,
         journal_rows=journal_rows,
+        journal_ranges=journal_ranges,
         naming=naming,
         runs=runs,
         scan=ScanState(

@@ -3475,6 +3475,72 @@ def _replay_row(
     return message
 
 
+def read_indexed_raw_rows(
+    directory: Path,
+    index: Any,
+    ids: list[str],
+    *,
+    max_bytes: int = 512 * 1024,
+) -> dict[str, Any] | None:
+    """PROTOTYPE bounded raw read, NOT an arbitrary settled-body projector.
+
+    The same index's offsets and ordinals share a source witness. A complete
+    line/identity check and FD/path recheck refuse rewrites while reading. This
+    does not detect preserved-stat external mutation or discover prune/call/
+    injection dependencies; callers must not label these raw bodies projected.
+    None means source unavailable, never an absence partition.
+    """
+    if (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise ValueError("bounded raw ids required")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("positive byte budget required")
+    source = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
+    path = directory / "transcript.jsonl"
+    rows, missing, remaining = [], [], []
+    used = 0
+
+    def witness(st: Any) -> tuple[int, int, float]:
+        return st.st_ino, st.st_size, st.st_mtime
+
+    try:
+        with path.open("rb") as handle:
+            if witness(os.fstat(handle.fileno())) != source:
+                return None
+            for id_ in dict.fromkeys(ids):
+                span = index.journal_ranges.get(id_)
+                if span is None:
+                    missing.append(id_)
+                    continue
+                start, end = span
+                if (
+                    type(start) is not int
+                    or type(end) is not int
+                    or not 0 <= start < end <= source[1]
+                ):
+                    return None
+                if end - start > max_bytes - used:
+                    remaining.append(id_)
+                    continue
+                handle.seek(start)
+                raw = handle.read(end - start)
+                if len(raw) != end - start or not raw.endswith(b"\n"):
+                    return None
+                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                if entry is None or entry.id != id_:
+                    return None
+                rows.append(entry)
+                used += len(raw)
+            if witness(os.fstat(handle.fileno())) != source or witness(path.stat()) != source:
+                return None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return {"rows": rows, "missing": missing, "remaining": remaining, "bytes": used}
+
+
 def replay_entries(
     entries: Sequence[TranscriptEntry],
     attachments: AttachmentStore | None,
