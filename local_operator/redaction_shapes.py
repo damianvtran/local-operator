@@ -5243,9 +5243,11 @@ def scrub_secrets_with_hits(
 # not a decoder. A value put through a transform the list does not enumerate
 # (rot13, a double base64, a byte-wise Caesar shift, an escape form nobody
 # prints) still passes, and a value SHORTER than the floor below gets its
-# permutations skipped entirely. Both residuals have the same shape as the shape
-# table's own (see the module docstring): the pass narrows the gap, it does not
-# close it.
+# permutations skipped entirely (its JSON escaping is still enumerated, under
+# the second and separate SPELLING-length bound — see
+# :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN`). Both residuals have the same shape as
+# the shape table's own (see the module docstring): the pass narrows the gap, it
+# does not close it.
 
 #: The shortest value whose TRANSFORMED spellings are masked at all.
 #:
@@ -5263,8 +5265,45 @@ def scrub_secrets_with_hits(
 #: worth registering is far longer. What the floor costs is bounded and
 #: understood — a six-character registered value still has its verbatim spelling
 #: masked by the pre-existing rule, unchanged; only its permutations are
-#: skipped, so a value under the floor keeps exactly the coverage it has today.
+#: skipped, so a value under the floor keeps its permutations unenumerated. One
+#: family is NOT a permutation and is enumerated for it anyway, under a separate
+#: bound: the JSON escaping of the value — see
+#: :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` for that bound and for why the two
+#: cannot be one number.
 _TRANSFORM_MIN_VALUE_LEN = 12
+
+#: The shortest JSON-ESCAPED spelling a value BELOW the floor above may contribute.
+#:
+#: A second bound rather than a lowering of the first, because it answers a
+#: different question. ``_TRANSFORM_MIN_VALUE_LEN`` is about a PERMUTATION of the
+#: value colliding with ordinary output; this one is about how much escaped text a
+#: collision would have to be before it is a plausible run in someone else's
+#: document. One escape is a plausible run inside any JSON body (``\\u00e9`` is six
+#: characters), so it never qualifies on its own; twelve characters is two escapes
+#: at minimum, which is the shortest and weakest spelling this admits.
+#:
+#: **A bound is not a guarantee, and the risk it leaves is real rather than a
+#: rounding-off.** These are VALUE-SPECIFIC sequences, so a collision means
+#: ordinary output that happens to carry THIS value's escaping. Whether that
+#: happens is a property of the corpus being read and of how short the needle is,
+#: so no zero-collision claim is made at any length, and the shortest spelling this
+#: bound admits is the one most likely to collide by construction. It is reachable
+#: on the real path — a two-character registered value masked an unrelated escaped
+#: document, one marker where the unpatched base produced none. The consequence is
+#: OVER-masking, never a release, and it is strictly narrower than what the same
+#: value already had: its verbatim spelling has no floor at all, so two adjacent
+#: characters of ordinary text were already being rewritten before this family
+#: existed. The sampled rates behind that reading are review evidence on the pull
+#: request, deliberately not restated here — a product comment quoting a
+#: simulation figure invites it to be read as a probability guarantee.
+#:
+#: The bound is on the SPELLING, not on the value, and the two are far apart: an
+#: eight-character CJK value escapes to forty-eight characters. The COVERAGE
+#: residual it leaves is stated rather than implied: a value whose escaping is
+#: shorter than this keeps its verbatim spelling alone, so a one-character CJK
+#: value (``\\u79d8``, six characters) is still unclosed here. The OVER-MASKING
+#: residual is the at-the-bound collision above.
+_SHORT_ESCAPE_MIN_SPELLING_LEN = 12
 
 #: The separators a "characters spread out" spelling may be built from.
 #:
@@ -5283,6 +5322,12 @@ _SEPARATOR_RUN_SEPARATORS = (" ", "-", ".", ":", "\n")
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9A-Fa-f]{4}")
 
+#: The same escape with its introducer and its four hex digits in separate groups,
+#: for the one rewrite that has to touch the digits and leave the ``\u`` alone —
+#: see :func:`_uppercased_json_escape_digits` for what uppercasing the whole match
+#: produces (it is not a JSON escape).
+_UNICODE_ESCAPE_DIGITS_RE = re.compile(r"(\\u)([0-9A-Fa-f]{4})")
+
 
 def _lowered_escape_digits(text: str) -> str:
     """``text`` with every escape's HEX DIGITS lowercased, and nothing else.
@@ -5296,14 +5341,124 @@ def _lowered_escape_digits(text: str) -> str:
 
 
 def _uppered_unicode_digits(text: str) -> str:
-    """``text`` with every ``\\uXXXX`` escape's hex digits uppercased.
+    """``text`` with every ``\\uXXXX`` escape uppercased, introducer included.
 
     The same discipline as :func:`_lowered_escape_digits` and for the same
     reason: ``json.dumps`` writes ``\\n``, ``\\"`` and ``\\\\`` with lowercase
     letters that are part of the escape's SPELLING, and uppercasing those would
     yield a string no encoder emits.
+
+    **It uppercases the ``\\u`` as well as the digits, so what it returns is not a
+    JSON escape** (``\\u00e9`` becomes ``\\U00E9``, which a decoder refuses). The
+    family list below carries that string as a needle and is deliberately left as
+    it is — those spellings are the floor's own and must not move — while the
+    below-floor family, whose candidates have to decode back to their value, uses
+    :func:`_uppercased_json_escape_digits` instead.
+
+    **A TEXTUAL rule, so it is correct only where the ``\\u`` introducers it sees
+    are real escapes.** A value carrying a LITERAL backslash-u sequence is escaped
+    by ``json.dumps`` to ``\\\\uXXXX``, and the introducer this regex then finds is
+    the SECOND backslash — the rewrite yields the escape of a different scalar.
     """
     return _UNICODE_ESCAPE_RE.sub(lambda match: match.group(0).upper(), text)
+
+
+def _uppercased_json_escape_digits(text: str) -> str:
+    """``text`` with every ``\\uXXXX`` escape's HEX DIGITS uppercased, ``\\u`` intact.
+
+    The sibling of :func:`_uppered_unicode_digits`, and the reason it exists
+    rather than that one being reused: that helper uppercases the whole match, so
+    it rewrites the introducer too and emits ``\\U00E9`` — which is not a JSON
+    escape, so no decoder accepts it and it is not a spelling of the value it was
+    derived from. No encoder in this tree produces that form either, so where it
+    is already used it is a needle that can only match text already carrying it;
+    the floor's family list keeps it, because those spellings must not move, while
+    the below-floor family — whose candidates have to decode back to their value —
+    uses this function instead.
+    """
+    return _UNICODE_ESCAPE_DIGITS_RE.sub(
+        lambda match: match.group(1) + match.group(2).upper(), text
+    )
+
+
+def _decodes_to_value(candidate: str, value: str) -> bool:
+    """Whether ``candidate`` is a JSON string BODY that decodes to ``value``.
+
+    The guard that stops a TEXTUAL rewrite being trusted as a spelling:
+    ``json.loads`` is the decoder a reader of that output would use, so asking it
+    is the same question the mask is answering. A candidate it refuses (a form no
+    encoder produces) is not a spelling, and neither is one that decodes to a
+    different string — masking that would rewrite text no session registered.
+    """
+    try:
+        return json.loads('"' + candidate + '"') == value
+    except ValueError:  # a candidate the decoder refuses is not a spelling
+        return False
+
+
+def _json_escape_spellings(value: str) -> list[str]:
+    """The JSON-string spellings of ``value``, each verified to decode back to it.
+
+    Both spellings an encoder emits for one scalar: the default ASCII-escaped
+    interior (``json.dumps`` writes everything outside ASCII as ``\\uXXXX``) and
+    the same with every escape's hex digits uppercased, which is what a
+    hand-rolled encoder or an upper-casing tool leaves behind and is the same
+    scalar either way (``\\u00E9`` and ``\\u00e9`` decode identically).
+
+    The uppercased candidate is offered only when it SURVIVES the round trip.
+    Two ways it can fail, both textual-rule failures rather than decoder ones:
+    :func:`_uppercased_json_escape_digits` only ever rewrites digits, but a value
+    carrying a LITERAL backslash-u sequence has that sequence rewritten instead of
+    an escape (``json.dumps`` escapes the value's own backslash first, so the
+    ``\\u`` the regex finds is content, not an introducer), which yields the
+    escape of a DIFFERENT scalar; and the decoder refuses anything that is not an
+    escape at all. Either would be a needle for text this session never
+    registered — masking it is the over-masking defect — so a candidate that does
+    not decode to ``value`` is dropped.
+
+    Deliberately narrower than the family list at or over the floor: the
+    ``ensure_ascii=False`` interior is not here (for a value needing no escaping
+    it IS the value, and for one that does it is a spelling no producer in this
+    tree emits), nor are the reversal, base64, hex, percent or separator-spread
+    families, whose PERMUTATIONS stay behind the value floor.
+    """
+    escaped = json.dumps(value)[1:-1]
+    candidates = [escaped, _uppercased_json_escape_digits(escaped)]
+    return [candidate for candidate in candidates if _decodes_to_value(candidate, value)]
+
+
+def _below_floor_forms(value: str) -> tuple[str, ...]:
+    """The spellings a value BELOW the transform floor gets, longest first.
+
+    Every family behind the floor stays skipped — a short value's reversal,
+    base64, hex, percent and spread spellings are strings ordinary output already
+    contains, which is the whole reason the floor exists. ONE family is a
+    different kind of thing and is enumerated anyway: the JSON ESCAPING of the
+    value, which is not a permutation but the value's own bytes written the way
+    every JSON producer writes them. It is the case the floor left open where a
+    short value still travels — a multi-byte value (CJK, Cyrillic, Devanagari), a
+    newline, a quote — arriving in a tool result as a ``\\uXXXX`` run while the
+    session holds only the verbatim bytes.
+
+    Two bounds hold that widening back, neither of them a guarantee: only a
+    spelling of at least :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters is
+    offered, and each one must decode back to the value
+    (:func:`_json_escape_spellings`). What the spelling bound still admits — an
+    unrelated document carrying this value's escaping — is measured beside that
+    constant rather than claimed away. The verbatim spelling is always masked,
+    unchanged.
+    """
+    forms = [value]
+    forms += [
+        spelling
+        for spelling in _json_escape_spellings(value)
+        if len(spelling) >= _SHORT_ESCAPE_MIN_SPELLING_LEN
+    ]
+    # The same de-duplication and longest-first rule as the full family list
+    # below, for the same reasons (a shorter spelling that is a prefix of a longer
+    # one must not run first and leave the longer one's tail on screen).
+    unique = dict.fromkeys(form for form in forms if form)
+    return tuple(sorted(unique, key=len, reverse=True))
 
 
 def credential_forms(value: str) -> tuple[str, ...]:
@@ -5337,10 +5492,15 @@ def credential_forms(value: str) -> tuple[str, ...]:
       choice: ``urllib`` uses upper, hand-rolled encoders use lower);
     * JSON string escaping, both the ASCII-escaped form (``\\u00e9``) and the
       raw-Unicode form, the first also with its digits uppercased;
-    * the characters of the value spread by one uniform separator.
+    * the characters of the value spread by one uniform separator;
+    * **below the floor, only the JSON ESCAPING of the value** — the families
+      above stay behind the floor, and that one is enumerated under the separate
+      SPELLING-length bound (:data:`_SHORT_ESCAPE_MIN_SPELLING_LEN`).
 
-    A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets the verbatim
-    spelling only — see that constant for why.
+    A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets its verbatim
+    spelling, plus its JSON escaping when that escaping is at least
+    :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters and decodes back to the
+    value — see both constants for why the two bounds are separate numbers.
 
     **What the families still do not reach, stated rather than implied.** A hex
     dump of a value longer than one ``xxd`` line (16 bytes) is broken by the
@@ -5355,7 +5515,7 @@ def credential_forms(value: str) -> tuple[str, ...]:
         # direct caller put the marker between every character of every text.
         return ()
     if len(value) < _TRANSFORM_MIN_VALUE_LEN:
-        return (value,)
+        return _below_floor_forms(value)
     raw = value.encode("utf-8")
     forms = [value, value[::-1]]
     standard = base64.b64encode(raw).decode("ascii")
@@ -5660,9 +5820,11 @@ def _is_word_like(value: str) -> bool:
     letters a reader can meet in prose: the verbatim value and its reversal — a
     letters-only value reverses to letters-only, so the reversal is the same case
     whenever it exists. It exists only at or over ``_TRANSFORM_MIN_VALUE_LEN``:
-    below that floor ``credential_forms`` returns the verbatim spelling alone, so
-    the stock pair (``stressed``/``desserts``, 8 letters each) illustrates the shape
-    without being reachable. Every ENCODED spelling (base64, hex, percent, escaped,
+    a letters-only value's JSON escaping IS the value (``json.dumps`` escapes no
+    ASCII letter) and every other family stays behind the floor, so below it
+    ``credential_forms`` offers no spelling beside the verbatim one and the stock
+    pair (``stressed``/``desserts``, 8 letters each) illustrates the shape without
+    being reachable. Every ENCODED spelling (base64, hex, percent, escaped,
     separator-spread) keeps the substring match even when it happens to be all
     letters: it is an opaque string that is not ordinary vocabulary, and a base64
     spelling glued into a longer base64 blob is a leak, so that side fails toward
