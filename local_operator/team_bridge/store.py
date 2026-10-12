@@ -55,7 +55,7 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Ack intent lifecycle: exactly one of these states, no others.
 ACK_PENDING = "pending"
@@ -151,6 +151,35 @@ CREATE TABLE IF NOT EXISTS ack_intents (
     retry_after REAL,
     created_at REAL NOT NULL,
     UNIQUE (owner_key, message_id, target)
+);
+CREATE TABLE IF NOT EXISTS screening_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    account_scope TEXT NOT NULL,
+    owner_key TEXT NOT NULL,
+    at REAL NOT NULL,
+    state TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_screening_attempts_scope_at
+    ON screening_attempts (account_scope, at);
+CREATE TABLE IF NOT EXISTS screening_receipts (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    categories TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
+CREATE TABLE IF NOT EXISTS screening_holds (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    hold_code TEXT NOT NULL,
+    retry_at REAL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
 );
 CREATE TABLE IF NOT EXISTS feed_refs (
     owner_key TEXT NOT NULL,
@@ -849,6 +878,172 @@ class Store:
                 "WHERE owner_key = ? AND intent_id = ?",
                 (state, error_code, retry_after, _owner_key(owner), intent_id),
             )
+
+    # -- H3 screening: budget, receipts, holds -------------------------------
+
+    #: The frozen §8 budget: 40 actual model attempts per rolling hour per
+    #: Radient ACCOUNT, aggregated across every tenant/endpoint/credential/
+    #: generation namespace for that account in the hub.
+    SCREENING_BUDGET_PER_HOUR = 40
+
+    @staticmethod
+    def _account_scope(owner: OwnerSnapshot) -> str:
+        # The budget key is the ACCOUNT within its hub, deliberately NOT the
+        # namespace: a new endpoint or a re-enrollment must not reset spend.
+        return f"{owner.canonical_base_url}|{owner.account_id}"
+
+    def reserve_screening_attempt(self, owner: OwnerSnapshot) -> str:
+        """Durably charge ONE actual inference attempt BEFORE the wire call.
+
+        Reservation IS spend: an uncertain send keeps its row (never refunded),
+        the rolling window is counted from each row's own timestamp, so a
+        clock rollback cannot erase reservations (a rolled-back clock makes
+        the window MORE inclusive, which fails closed). Missing/corrupt
+        schema or contention surfaces as a refusal — never a reset to 40.
+        """
+
+        now = time.time()
+        attempt_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            scope = self._account_scope(owner)
+            spent = conn.execute(
+                "SELECT COUNT(*) FROM screening_attempts WHERE account_scope = ? AND at > ?",
+                (scope, now - 3600.0),
+            ).fetchone()[0]
+            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
+                raise StoreRefused("budget_exhausted", "40 attempts/hour/account exhausted")
+            conn.execute(
+                "INSERT INTO screening_attempts (attempt_id, account_scope, owner_key, at, state) "
+                "VALUES (?,?,?,?, 'spent')",
+                (attempt_id, scope, _owner_key(owner), now),
+            )
+            return attempt_id
+
+    def find_screening_receipt(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+    ) -> dict[str, Any] | None:
+        """Reuse cache, keyed by the EXACT fingerprint. Metadata only.
+
+        A changed body/template/model misses (never replays a stale allow);
+        the cache holds no body, reason or reply text — only the closed
+        receipt fields and the hashes that identify them.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? "
+                    "AND body_sha256 = ? AND template_sha256 = ? AND model = ?",
+                    (_owner_key(owner), body_sha256, template_sha256, model),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "message_id": row["message_id"],
+                    "body_sha256": row["body_sha256"],
+                    "template_sha256": row["template_sha256"],
+                    "prompt_version": row["prompt_version"],
+                    "model": row["model"],
+                    "verdict": row["verdict"],
+                    "categories": json.loads(row["categories"]),
+                }
+        except sqlite3.Error:
+            return None
+
+    def finish_screening(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        attempt_id: str,
+        receipt: ScreeningReceipt | None = None,
+        hold_code: str | None = None,
+    ) -> None:
+        """Record THIS outcome, atomically under the live authority fence.
+
+        Exactly one of ``receipt``/``hold_code`` is recorded. A receipt is
+        validated (full immutable tuple) before persistence; a hold records
+        its closed code durably so a refreshed inbox projection cannot erase
+        it. Nothing here can race an invalidation: check and write share the
+        transaction, exactly like the ack path.
+        """
+
+        if (receipt is None) == (hold_code is None):
+            raise StoreRefused("invalid_outcome", "exactly one of receipt/hold_code")
+        if receipt is not None:
+            try:
+                receipt.validated()
+            except TeamBridgeTypeError as error:
+                raise StoreRefused("invalid_receipt", str(error)) from error
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            spent = conn.execute(
+                "SELECT 1 FROM screening_attempts WHERE attempt_id = ? AND owner_key = ?",
+                (attempt_id, _owner_key(owner)),
+            ).fetchone()
+            if spent is None:
+                # An outcome for an attempt this owner never reserved would
+                # fabricate spend evidence; refuse instead.
+                raise StoreRefused("unknown_attempt", attempt_id)
+            if receipt is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
+                    "body_sha256, template_sha256, prompt_version, model, verdict, "
+                    "categories, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        _owner_key(owner),
+                        message_id,
+                        receipt.body_sha256,
+                        receipt.template_sha256,
+                        receipt.prompt_version,
+                        receipt.model,
+                        receipt.verdict,
+                        json.dumps(sorted(receipt.categories)),
+                        time.time(),
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), message_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, "
+                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+                    (_owner_key(owner), message_id, hold_code, None, time.time()),
+                )
+
+    def screening_hold(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The durable hold row, if any (H4 surfaces it; H3 only writes it)."""
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT hold_code, retry_at, created_at FROM screening_holds "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), message_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "hold_code": row["hold_code"],
+                    "retry_at": row["retry_at"],
+                    "created_at": row["created_at"],
+                }
+        except sqlite3.Error:
+            return None
 
     # -- claims (CAS lease) --------------------------------------------------
 
