@@ -5531,6 +5531,130 @@ def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
     return ""
 
 
+#: How many ancestors :func:`_internal_url_for_path` may climb looking for a
+#: ``SKILL.md``/``GUIDE.md`` body (R5). The resource layout is shallow
+#: (``<root>/<name>/...``, grouped libraries add a level or two); sixteen
+#: covers every real layout with margin while bounding the per-read stat
+#: cost and the stray-ancestor shaping surface. See that function's docstring.
+_INTERNAL_URL_ANCESTOR_LIMIT = 16
+
+
+def _internal_url_for_path(path: Path) -> str | None:
+    """The ``skill://``/``guide://`` URL a filesystem path IS, or ``None``.
+
+    WHY THIS EXISTS (Fix A, measured 2026-10): the internal-URL branch shapes
+    an 82 KB skill to ~7 KB (head + complete heading outline), but the same
+    bytes reached by their on-disk path bypassed shaping entirely. The file
+    path is the instinctive spelling — transcripts show agents reading
+    ``~/.claude/skills/<name>/SKILL.md`` directly after a shaped
+    ``skill://`` read, paying the 8 KiB clamp instead of the outline and,
+    worse, losing the outline's guarantee that every operative heading stays
+    visible. Deriving the URL here lets the filesystem branch reuse the
+    internal shape instead of growing a second one.
+
+    The name comes from the body file's own frontmatter (``name:``) when it
+    declares one, falling back to the resource directory name — the same
+    fallback discovery uses. An ancestor walk bounded to
+    :data:`_INTERNAL_URL_ANCESTOR_LIMIT` levels finds the body file for a
+    reference file; reference files map to ``<url>/<relative path>`` so the
+    shaped footer advertises the same expansion the resolver would serve.
+
+    WHY the bound (R5): the resource layout is ``<root>/<name>/...`` — a
+    body file lives in the resource directory itself or a shallow grouping
+    parent, never arbitrarily deep. An unbounded walk to ``/`` would pay two
+    stats per level on every qualifying read and, worse, let a stray
+    ``SKILL.md``/``GUIDE.md`` in any distant ancestor (home dir, repo root)
+    silently shape — and skill/guide-exempt — an unrelated ``.md`` read
+    beneath it. Sixteen levels covers grouped libraries
+    (``<root>/<group>/<name>/references/...``) with wide margin while keeping
+    that stray-ancestor surface small; it does not eliminate it, so callers
+    must not treat a hit as proof of membership — only as the naming the
+    on-disk layout claims.
+
+    WHY case-insensitive matching (R3): detection folds case, so the body
+    file actually FOUND on disk (its real path, exactly as listed) is the
+    file whose frontmatter is read. Reconstructing a name — the old
+    ``body_file.upper()`` — opens ``SKILL.MD`` for an on-disk ``skill.md``:
+    that resolves only on case-insensitive filesystems and silently loses
+    the declared ``name:`` (and, for a reference, the whole resource) on
+    case-sensitive ones such as Linux CI. Ancestor probing is likewise
+    case-insensitive, listing each ancestor once instead of probing
+    exact-case names.
+
+    CONSTRAINT: this only NAMES the document for shaping and for the
+    pruning exemption (``skill://`` and ``guide://`` are both exempt — see
+    ``compaction/pruning.py:_is_prunable``). The result still carries
+    ``details['path']`` (the real path compaction supersedes on);
+    ``url`` is additive.
+    """
+    name_folded = path.name.casefold()
+    body_kind = (
+        "skill" if name_folded == "skill.md" else "guide" if name_folded == "guide.md" else None
+    )
+    body_path: Path | None = None
+    resource_dir: Path | None = None
+    scheme: str | None = None
+    if body_kind is not None:
+        # The file itself is the body: read ITS frontmatter, by its real path.
+        body_path = path
+        resource_dir = path.parent
+        scheme = body_kind
+    else:
+        # A reference file: its resource is the nearest ancestor holding a
+        # body file. One directory listing per level (bounded above) finds
+        # either kind case-insensitively and yields the body's real path.
+        for ancestor in list(path.parents)[:_INTERNAL_URL_ANCESTOR_LIMIT]:
+            try:
+                entries = list(ancestor.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                folded = entry.name.casefold()
+                if folded not in ("skill.md", "guide.md"):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                body_path = entry
+                resource_dir = ancestor
+                scheme = "skill" if folded == "skill.md" else "guide"
+                break
+            if body_path is not None:
+                break
+        if body_path is None or resource_dir is None or scheme is None:
+            return None
+    assert body_path is not None and resource_dir is not None and scheme is not None
+    declared: str | None = None
+    try:
+        head = body_path.read_bytes()[:4096].decode("utf-8", errors="replace")
+    except OSError:
+        head = ""
+    if head.startswith("---"):
+        for line in head.splitlines()[1:]:
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "name" and value.strip():
+                declared = value.strip().strip('"').strip("'")
+                break
+    resource_name = declared or resource_dir.name
+    if not resource_name:
+        return None
+    url = f"{scheme}://{resource_name}"
+    if path.parent != resource_dir:
+        try:
+            url += "/" + path.relative_to(resource_dir).as_posix()
+        except ValueError:
+            return None
+    elif body_kind is None:
+        # A sibling of the body file (same directory, different file): it is
+        # part of the resource but is not the body itself.
+        url += f"/{path.name}"
+    return url
+
+
 def _shape_internal_document(
     content: str, target: str, context: ToolContext | None
 ) -> tuple[str, dict[str, Any] | None]:
@@ -8545,6 +8669,29 @@ async def _read_path(
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
+
+    # A skill/guide file read by its ON-DISK path gets the internal shape,
+    # not the plain 8 KiB clamp (Fix A; see _internal_url_for_path). Only a
+    # whole-file, non-raw read qualifies — a range or raw=true is the
+    # caller explicitly asking for exact bytes, and shaping it would break
+    # the expansion calls the shaped footer itself advertises. The shaped
+    # body spills the full text, so nothing becomes unreachable: the footer
+    # names a range into the spill handle, exactly like a skill:// read.
+    if not params.range and not params.raw:
+        internal_url = _internal_url_for_path(path)
+        if internal_url is not None:
+            body, spill_details = _shape_internal_document(text, internal_url, context)
+            if spill_details is not None or body != text:
+                return _text(
+                    tool_call_id,
+                    "read",
+                    body,
+                    details={
+                        "path": str(path),
+                        "url": internal_url,
+                        **(spill_details or {}),
+                    },
+                )
 
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
