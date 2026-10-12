@@ -129,7 +129,15 @@ async def test_nine_same_turn_sends_make_one_real_peer_row_and_wake(tmp_path, mo
         assert all(not result.is_error for result in results)
         assert len(_peer_rows(session)) == 1
         assert len(stream.requests) == 1
-        ids = [result.details["delivery"]["message_id"] for result in results]
+        for result in results[1:]:
+            assert "delivery" not in result.details and "wake" not in result.details
+            assert result.details["original_receipt"]["details"]["delivery"]["state"] == "delivered"
+        ids = [
+            (result.details["original_receipt"]["details"] if i else result.details)["delivery"][
+                "message_id"
+            ]
+            for i, result in enumerate(results)
+        ]
         assert len(set(ids)) == 1
         assert [result.tool_call_id for result in results] == [f"send-{i}" for i in range(9)]
         assert "duplicate suppressed" not in results[0].text
