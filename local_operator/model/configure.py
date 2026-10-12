@@ -3464,8 +3464,11 @@ class SessionStreamFn:
         # Optional narrow seams for dedicated one-shot streams (H3 screening):
         # ordinary session callers pass neither, so the default-None contract
         # keeps them byte-identical. ``http_client`` supplies the dedicated
-        # transport; ``wrap_client`` guards EVERY ``.stream`` the stream fn
-        # makes — the only place nested/resend attempts are visible.
+        # transport; ``wrap_client`` decorates each client the fn builds. The
+        # wire decorator is a sanitization/entry seam, NOT the spend boundary:
+        # nested sends, redirect hops and mounts inside httpx never re-enter
+        # it, so physical reservation lives on a transport proxy UNDER the
+        # client (team_bridge.model_boundary._ChargingAsyncTransport).
         self._wrap_client = wrap_client
         self._transport = _transport or _SessionTransport(
             http_client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))

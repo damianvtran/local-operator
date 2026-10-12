@@ -581,7 +581,50 @@ def _persist_hold(
         pass
 
 
+#: Per-account dispatch locks, keyed by (state db path, credential/account/
+#: tenant/endpoint). The frozen contract allows ONE screening in flight per
+#: account: concurrent callers WAIT here (in-process), and the native
+#: screen_turn lease in store.py is the cross-process equivalent. This is
+#: deliberately a plain lock — no daemon, no queue, no fan-out.
+_ACCOUNT_LOCKS: dict[tuple[str, object], asyncio.Lock] = {}
+
+
+def _account_lock(config_dir: Path, owner: OwnerSnapshot) -> asyncio.Lock:
+    key = (
+        str(config_dir),
+        (owner.credential_id, owner.account_id, owner.tenant_id, owner.endpoint_id),
+    )
+    lock = _ACCOUNT_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ACCOUNT_LOCKS[key] = lock
+    return lock
+
+
 async def screen_message_async(
+    owner: OwnerSnapshot,
+    item: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    policy: ScreeningPolicy,
+    runner: ScreenRunner | None = None,
+    nonce: str | None = None,
+) -> ScreenResult:
+    """One account's serialized screening entry (ONE in flight per account).
+
+    Concurrent callers for the same account wait on the in-process lock —
+    the cross-process equivalent is the native screen_turn lease; the frozen
+    contract allows exactly one screening in flight per account, and a
+    parallel screening amplifier is a defect, not a feature.
+    """
+
+    async with _account_lock(config_dir, owner):
+        return await _screen_core(
+            owner, item, config_dir=config_dir, policy=policy, runner=runner, nonce=nonce
+        )
+
+
+async def _screen_core(
     owner: OwnerSnapshot,
     item: Mapping[str, Any],
     *,
@@ -716,14 +759,22 @@ async def screen_message_async(
         # ONE atomic native consumption (A2/A3): owner generation, current
         # published policy, receipt epoch and creator generation all verified
         # inside a single transaction; the live object is re-read LAST.
-        cached = store.consume_screening_receipt(
-            owner,
-            body_sha256=envelope.body_sha256,
-            template_sha256=snapshot.template_sha256,
-            model=snapshot.default_model,
-            admission_revision=snapshot.admission_revision,
-            envelope_digest=envelope.envelope_digest,
-        )
+        try:
+            cached = store.consume_screening_receipt(
+                owner,
+                body_sha256=envelope.body_sha256,
+                template_sha256=snapshot.template_sha256,
+                model=snapshot.default_model,
+                admission_revision=snapshot.admission_revision,
+                envelope_digest=envelope.envelope_digest,
+            )
+        except StoreRefused:
+            # The consumption could not be LINEARIZED (an interleaved writer
+            # or damaged store left the authority unverified): this is a
+            # refusal exactly like a stale policy — never a silent cache
+            # miss that lets a stale caller re-screen behind the change.
+            _persist_hold(store, owner, message_id, "policy_stale")
+            return ScreenResult("hold", hold_code="policy_stale")
         if cached is not None and not snapshot.matches_live(policy):
             _persist_hold(store, owner, message_id, "policy_stale")
             return ScreenResult("hold", hold_code="policy_stale")
@@ -807,7 +858,7 @@ async def screen_message_async(
     #     durable breaker; nothing of the exception's prose is kept.
     try:
         reply, actual_model = await _maybe_await(
-            runner(rendered.private_text(), default_model=snapshot.default_model)
+            _invoke_runner(runner, rendered.private_text(), snapshot.default_model)
         )
     except Exception:  # noqa: BLE001 - sanitized hold; never prose
         retry_at = _record_failure(store, owner)
@@ -946,6 +997,22 @@ def _commit_hold(
         )
     except StoreRefused:
         _persist_hold(store, owner, message_id, hold_code)
+
+
+def _invoke_runner(runner: Any, prompt: str, default_model: str) -> Any:
+    """Call the runner through its PUBLIC async interface when it has one.
+
+    The production runner is a ScreenModelRunner whose sync ``__call__``
+    cannot drive a loop — inside the async core that returned the unevidenced
+    ("", None) hold without ever dispatching (QA Q10). A controlled
+    synchronous fixture (a plain callable) is called directly; both shapes
+    are awaited through ``_maybe_await``.
+    """
+
+    acall = getattr(runner, "acall", None)
+    if callable(acall):
+        return acall(prompt, default_model=default_model)
+    return runner(prompt, default_model=default_model)
 
 
 async def _maybe_await(value: Any) -> Any:

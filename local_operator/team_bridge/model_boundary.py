@@ -65,6 +65,35 @@ class _ScreeningStreamRefused(Exception):
         self.reason = reason
 
 
+def _owner_key_text(owner: OwnerSnapshot) -> str:
+    """Stable owner text for the no-fingerprint fallback (never NULL ledgers)."""
+
+    return f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}|{owner.endpoint_id}"
+
+
+def _payload_has_tool_content(payload: Any, depth: int = 0) -> bool:
+    """Whether a terminal/provider payload carries function/tool content.
+
+    The normal Responses decoder usually maps a terminal function_call to
+    ``stop_reason='toolUse'``, but QA observed a real final-only call whose
+    end event kept ``stop_reason='stop'`` with the marker visible only in
+    the payload. A screening verdict must never ride tool content, so the
+    payload is scanned (bounded) regardless of the stop reason.
+    """
+
+    if depth > 4 or payload is None:
+        return False
+    if isinstance(payload, dict):
+        if payload.get("type") == "function_call" or payload.get("function_call"):
+            return True
+        if isinstance(payload.get("tool_calls"), list) and payload["tool_calls"]:
+            return True
+        return any(_payload_has_tool_content(value, depth + 1) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_payload_has_tool_content(item, depth + 1) for item in payload)
+    return False
+
+
 @dataclass
 class DefaultSelection:
     """The captured canonical default, with its approved identity set."""
@@ -73,6 +102,13 @@ class DefaultSelection:
     model_id: str
     spec: Any  # a real ModelSpec; Any keeps this module import-light
     approved_identities: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        # A selection ALWAYS approves its own resolved identity: callers that
+        # construct one directly (tests, adapters) must not accidentally
+        # disable evidence matching by leaving the set empty.
+        if not self.approved_identities:
+            object.__setattr__(self, "approved_identities", frozenset({self.model_id}))
 
     @property
     def default_model(self) -> str:
@@ -131,9 +167,15 @@ class _ChargingAsyncTransport:
     caller-supplied client's own retries are a documented residual limit.
     """
 
-    def __init__(self, inner: Any, charge: Callable[[], None]) -> None:
+    def __init__(
+        self, inner: Any, charge: Callable[[], None], owner_token: object | None = None
+    ) -> None:
         self._inner = inner
         self._charge = charge
+        # Identity of the guard that installed this proxy: a second guard
+        # meeting an existing proxy can tell "mine" from "foreign" and must
+        # never wrap again (double-charge) or adopt a foreign job's guard.
+        self.owner_token = owner_token
 
     async def handle_async_request(self, request: Any) -> Any:
         self._charge()
@@ -200,21 +242,135 @@ class ScreeningWireGuard:
         message_id: str,
         fingerprint: str | None = None,
         http_client: Any | None = None,
+        expected_epoch: int | None = None,
     ) -> None:
         self._client = client
         self._store = store
         self._owner = owner
         self._message_id = message_id
-        self._fingerprint = fingerprint
+        self._guard_token = object()
+        # A physical reservation must NEVER ride anonymous: when no full job
+        # fingerprint was supplied, a deterministic owner/message-scoped one
+        # still binds the charge to this job (never NULL).
+        self._fingerprint = fingerprint or f"job|{_owner_key_text(owner)}|{message_id}"
+        self._expected_epoch = expected_epoch
         self._transport_patched = False
+        # Pin the job's policy identity where the guard is BUILT: a trusted
+        # publisher moving the row afterwards (any direction) refuses every
+        # later charge with zero handler calls, and a missing/unreadable row
+        # at build time can never be silently adopted mid-stream.
+        try:
+            self._pinned_policy = store.current_screening_policy(owner)
+        except Exception:  # noqa: BLE001 - an unreadable store pins NOTHING
+            self._pinned_policy = None
+        self._proxies: list[_ChargingAsyncTransport] = []
         http = http_client if http_client is not None else getattr(client, "_http", None)
         if http is not None:
-            transport = getattr(http, "_transport", None)
-            if transport is not None and not isinstance(transport, _ChargingAsyncTransport):
-                http._transport = _ChargingAsyncTransport(transport, self._charge)
-                self._transport_patched = True
+            patched_any = self._patch_transport(http, "_transport")
+            # Mounted transports are SEPARATE send paths (an https:// mount
+            # bypasses _transport entirely): every non-None mount must be
+            # guarded too, or the client is opaque and every send refuses.
+            mounts = getattr(http, "_mounts", None)
+            if isinstance(mounts, dict):
+                for pattern, transport in list(mounts.items()):
+                    if transport is not None:
+                        patched_any = self._patch_mount_transport(http, pattern) or patched_any
+            self._transport_patched = patched_any and self._all_proxies_current(http)
+
+    def _patch_transport(self, http: Any, attr: str) -> bool:
+        transport = getattr(http, attr, None)
+        if transport is None:
+            return False
+        if isinstance(transport, _ChargingAsyncTransport):
+            # Already proxied: never wrap twice (that would double-charge);
+            # the proxy is adopted only if it is THIS job's own guard.
+            if transport.owner_token is self._guard_token:
+                self._proxies.append(transport)
+                return True
+            return False
+        proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
+        setattr(http, attr, proxy)
+        self._proxies.append(proxy)
+        return True
+
+    def _patch_mount_transport(self, http: Any, pattern: Any) -> bool:
+        mounts = getattr(http, "_mounts", None)
+        if not isinstance(mounts, dict):
+            return False
+        transport = mounts.get(pattern)
+        if transport is None:
+            return False
+        if isinstance(transport, _ChargingAsyncTransport):
+            if transport.owner_token is self._guard_token:
+                self._proxies.append(transport)
+                return True
+            return False
+        proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
+        mounts[pattern] = proxy
+        self._proxies.append(proxy)
+        return True
+
+    def _all_proxies_current(self, http: Any) -> bool:
+        if not self._proxies:
+            return False
+        transport = getattr(http, "_transport", None)
+        if (
+            isinstance(transport, _ChargingAsyncTransport)
+            and transport.owner_token is self._guard_token
+        ):
+            pass
+        mounts = getattr(http, "_mounts", None)
+        if isinstance(mounts, dict):
+            for transport in mounts.values():
+                if transport is not None and not (
+                    isinstance(transport, _ChargingAsyncTransport)
+                    and transport.owner_token is self._guard_token
+                ):
+                    return False
+        return True
+
+    def _verify_job(self) -> None:
+        """The immutable CURRENT job re-checked before EVERY physical send.
+
+        Owner generation must still be live, the pinned policy row must be
+        byte-equal to the current one (a trusted publisher advancing the
+        revision/epoch between construction and dispatch refuses with ZERO
+        handler calls), and — when the caller supplied one — the charged
+        epoch must still be the published one.
+        """
+
+        from local_operator.providers.failover import ProviderError
+
+        refusal = None
+        try:
+            live = self._store.active_owner(credential_id=self._owner.credential_id)
+            if live != self._owner:
+                refusal = "owner_changed"
+            else:
+                current = self._store.current_screening_policy(self._owner)
+                if current != self._pinned_policy:
+                    refusal = "policy_stale"
+                elif self._expected_epoch is not None and (
+                    current is None or int(current["epoch"]) != int(self._expected_epoch)
+                ):
+                    refusal = "policy_stale"
+        except Exception:  # noqa: BLE001 - unreadable authority = refuse
+            refusal = "owner_changed"
+        if refusal is not None:
+            hold = ProviderError(
+                409,
+                f"screening job refused before send ({refusal})",
+                retryable=False,
+                kind="request",
+                request_sent=False,
+                fail_closed=True,
+            )
+            hold.__cause__ = None
+            hold.__context__ = None
+            raise hold
 
     def _charge(self) -> None:
+        self._verify_job()
         try:
             self._store.reserve_http_attempt(
                 self._owner, message_id=self._message_id, fingerprint=self._fingerprint
@@ -237,10 +393,24 @@ class ScreeningWireGuard:
         self, request: Any, api_key: str | None, oauth_access: Any = None
     ) -> AsyncIterator[Any]:
         if not self._transport_patched:
-            # No reachable transport: this charge may UNDER-COUNT nested
-            # sends. The factory always patches; this branch is the
-            # documented best-effort for bare wire objects.
-            self._charge()
+            # OPAQUE ROUTE: nothing we can charge at the send boundary.
+            # Best-effort per-stream charging is forbidden fallback authority
+            # (it cannot see nested sends), so the stream refuses BEFORE any
+            # I/O — a bare wire object with no patchable transport must not
+            # screen at all.
+            from local_operator.providers.failover import ProviderError
+
+            opaque = ProviderError(
+                409,
+                "screening route is not chargeable (no interceptable transport)",
+                retryable=False,
+                kind="request",
+                request_sent=False,
+                fail_closed=True,
+            )
+            opaque.__cause__ = None
+            opaque.__context__ = None
+            raise opaque
         pending: BaseException | None = None
         try:
             # The CALL itself sits inside the scrub: a client that raises at
@@ -306,11 +476,14 @@ class ScreenModelRunner:
     async def acall(self, prompt: str, *, default_model: str) -> tuple[str, str | None]:
         """The PUBLIC async entry: bounded wall time, owned cleanup in finally."""
 
-        if self._selection.default_model != default_model:
-            return "", None
         try:
+            if self._selection.default_model != default_model:
+                return "", None
             return await asyncio.wait_for(self._drive(prompt), timeout=self._deadline_s)
         finally:
+            # One-shot by contract: owned resources close on EVERY completion
+            # — identity hold, deadline, cancel, error, success alike (QA: an
+            # open client after an early hold is a leak).
             await self._close_owned()
 
     async def aclose(self) -> None:
@@ -348,16 +521,31 @@ class ScreenModelRunner:
         )
         parts: list[str] = []
         consumed = 0
-        serving: str | None = None
+        completed = False
+        candidates: list[tuple[str, str]] = []
+
+        def _consider_usage(usage: Any) -> None:
+            # The failover stamps usage.provider/model_id from the spec that
+            # ACTUALLY went on this request's wire (_stamp_serving_spec).
+            # That stamp is request-local provenance; the provider BODY's
+            # model string is never read for identity.
+            if usage is None:
+                return
+            provider = getattr(usage, "provider", None)
+            mid = getattr(usage, "model_id", None)
+            if isinstance(mid, str) and mid:
+                candidates.append((str(provider or ""), mid))
+
         async for event in self._stream_fn(request, None):
             etype = str(getattr(event, "type", "") or "")
             if etype == "model":
                 model = getattr(event, "model", None)
                 mid = getattr(model, "model_id", None)
+                provider = getattr(model, "provider", None)
                 if isinstance(mid, str) and mid:
-                    # Request-local serving metadata, from the normal failover
-                    # path — evidence, never a configured-selection guess.
-                    serving = mid
+                    candidates.append((str(provider or ""), mid))
+            elif etype == "usage":
+                _consider_usage(getattr(event, "usage", None))
             elif etype == "text_delta":
                 text = getattr(event, "delta", None)
                 if isinstance(text, str) and text:
@@ -369,15 +557,34 @@ class ScreenModelRunner:
                 continue  # consumed and discarded
             elif etype == "end":
                 stop_reason = str(getattr(event, "stop_reason", "") or "")
-                if stop_reason not in ("stop", ""):
-                    # length / toolUse / refusal / error / aborted can NEVER
-                    # admit (the typed terminal contract).
-                    raise _ScreeningStreamRefused(stop_reason)
-            elif "tool" in etype:
+                if stop_reason != "stop":
+                    # length / toolUse / refusal / error / aborted (and a
+                    # blank/missing stop) can NEVER admit.
+                    raise _ScreeningStreamRefused(stop_reason or "missing_stop")
+                if _payload_has_tool_content(getattr(event, "provider_payload", None)):
+                    # Final-only function content with stop='stop' (QA's
+                    # observed decoder shape) still refuses.
+                    raise _ScreeningStreamRefused("tool_use")
+                _consider_usage(getattr(event, "usage", None))
+                completed = True
+            elif etype == "tool_call_delta":
                 # A tool call in a screening reply is never invoked and can
                 # never ride a verdict.
                 raise _ScreeningStreamRefused("tool_use")
-        return "".join(parts), serving
+        if not completed:
+            # Generator exhaustion is NOT completion (Q13): an authoritative
+            # end event with a clean stop is required.
+            raise _ScreeningStreamRefused("missing_end")
+        if not candidates:
+            return "".join(parts), None
+        distinct = {(provider, mid) for provider, mid in candidates}
+        if len(distinct) != 1:
+            # Conflicting request-local provenance can never be averaged.
+            return "", None
+        provider, mid = distinct.pop()
+        if mid != self._selection.model_id and mid not in self._selection.approved_identities:
+            return "", None
+        return "".join(parts), mid
 
 
 def make_screening_runner(
@@ -388,6 +595,8 @@ def make_screening_runner(
     message_id: str,
     auth_store: Any,
     settings: Any = None,
+    fingerprint: str | None = None,
+    expected_epoch: int | None = None,
 ) -> "ScreenModelRunner | None":
     """The production builder: canonical default + a fresh GUARDED transport.
 
@@ -419,7 +628,9 @@ def make_screening_runner(
             store=store,
             owner=owner,
             message_id=message_id,
+            fingerprint=fingerprint,
             http_client=dedicated,
+            expected_epoch=expected_epoch,
         )
 
     try:
