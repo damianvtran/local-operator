@@ -105,6 +105,47 @@ class TestConfigDirContainment:
         assert launchd.config_lives_in_real_home(home / ".local-operator") is True
 
 
+@pytest.mark.parametrize(
+    "rc,body,state,pid",
+    [
+        (0, "state = running\npid = 12345\n", launchd.JobState.LIVE, 12345),
+        (0, "state = not running\n", launchd.JobState.ABSENT, None),
+        (113, "", launchd.JobState.ABSENT, None),
+        (124, "", launchd.JobState.UNKNOWN, None),
+        (5, "", launchd.JobState.UNKNOWN, None),
+        (0, "state = running\n", launchd.JobState.UNKNOWN, None),
+        (0, "", launchd.JobState.UNKNOWN, None),
+    ],
+)
+def test_observe_job_is_one_coherent_guarded_snapshot(tmp_path, monkeypatch, rc, body, state, pid):
+    """No second successful print may be projected as owner loss."""
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "synthetic-owned-observation"
+    path = tmp_path / "Library" / "LaunchAgents" / f"{label}.plist"
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, rc, body, "")
+
+    observed = launchd.observe_job(label=label, path=path, run=run)
+    assert observed.state is state and observed.pid == pid
+    assert calls == [("print", f"{launchd.job_domain()}/{label}")]
+    calls.clear()
+    assert launchd.job_pid(label=label, path=path, run=run) == pid
+    assert len(calls) == 1
+
+
+def test_unaddressable_job_stays_unknown_without_calling_supervisor(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path / "real")
+
+    def run(*args):
+        pytest.fail("unverified supervisor address called")
+
+    observed = launchd.observe_job(label="fixture", path=tmp_path / "other.plist", run=run)
+    assert observed.state is launchd.JobState.UNKNOWN and observed.pid is None
+
+
 class TestArgValue:
     """Reading a plist's argv for its ARGUMENTS, never for an interpreter."""
 

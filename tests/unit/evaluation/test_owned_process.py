@@ -9,6 +9,7 @@ addressed).
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -130,6 +131,158 @@ def test_forged_admission_is_refused_with_the_mismatch_named(tmp_path: Path) -> 
         actual_source_pin="pin",
     )
     assert record["owner_id"] == "ep-forged"
+    with pytest.raises(owned_process.OwnedProcessRefused, match="actual supervisor"):
+        owned_process.verify_owned_admission(
+            run_root=tmp_path,
+            owner_id="ep-forged",
+            backend="detached",
+            job_label=None,
+            actual_source_pin="pin",
+            required_guarantee=owned_process.OwnershipGuarantee.MANAGED_RETENTION,
+        )
+
+
+@pytest.mark.parametrize(
+    "case", ["valid", "unavailable", "wrong_pid", "restart", "wrong_source", "trigger"]
+)
+def test_managed_guarantee_derives_supervisor_and_no_restart_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """A backend label alone is not stronger lifetime evidence."""
+    import plistlib
+
+    from local_operator import launchd
+
+    owner = "ep-required-guarantee"
+    label = owned_process.job_label_for(owner)
+    paths = owned_process.owner_paths(tmp_path, owner)
+    paths.prepare()
+    pid = os.getpid()
+    paths.lease_path.write_text(
+        json.dumps(
+            {
+                "owner_id": owner,
+                "backend": "launchd",
+                "job_label": label,
+                "pid": pid,
+                "birth_scheme": "fixture",
+                "birth": "fixture",
+                "source_pin": "pin",
+            }
+        )
+    )
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setattr(launchd, "real_home", lambda: home)
+    monkeypatch.setattr(procstate, "same_birth", lambda *args: True)
+    plist = {
+        "Label": label,
+        "KeepAlive": case == "restart",
+        "EnvironmentVariables": {
+            owned_process.ENV_OWNER_ID: owner,
+            owned_process.ENV_SOURCE_PIN: "other" if case == "wrong_source" else "pin",
+            owned_process.ENV_LEASE_PATH: str(paths.lease_path),
+        },
+    }
+    if case == "trigger":
+        plist["StartInterval"] = 10
+    (agents / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+    calls = []
+
+    def runner(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args,
+            124 if case == "unavailable" else 0,
+            f"state = running\npid = {pid + 1 if case == 'wrong_pid' else pid}\n",
+            "",
+        )
+
+    def admit():
+        return owned_process.verify_owned_admission(
+            run_root=tmp_path,
+            owner_id=owner,
+            backend="launchd",
+            job_label=label,
+            actual_source_pin="pin",
+            runner=runner,
+            required_guarantee=owned_process.OwnershipGuarantee.MANAGED_RETENTION,
+        )
+
+    if case == "valid":
+        assert admit()["pid"] == pid
+    else:
+        with pytest.raises(owned_process.OwnedProcessRefused):
+            admit()
+    assert calls == [("print", f"{launchd.job_domain()}/{label}")]
+
+
+@pytest.mark.parametrize("channel", ["secret", "secret_env", "infra_ref"])
+@pytest.mark.asyncio
+async def test_programmatic_refs_refuse_before_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    channel: str,
+) -> None:
+    """Namespace callers cannot bypass argparse's payload-free pure type."""
+
+    from scripts import run_episode
+
+    marker = "synthetic-invalid-name-marker"
+    args = argparse.Namespace(
+        secret=[], secret_env=[], infra_ref=[], infra_purpose="benchmark_compute"
+    )
+    setattr(args, channel, ["INPUT=" + marker] if channel == "infra_ref" else [marker])
+    monkeypatch.setattr(
+        owned_process, "start_owned_process", lambda *a, **k: pytest.fail("owner started")
+    )
+    assert await run_episode.run(args) == 2
+    assert marker not in capsys.readouterr().err
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "field,value", [("secret_env", "VALID_ENV_REF"), ("infra", "INPUT=synthetic-inline-value")]
+)
+@pytest.mark.asyncio
+async def test_direct_host_and_frontend_share_transport_refusal(
+    tmp_path, monkeypatch, capsys, field, value
+):
+    from scripts import run_episode
+
+    for host in (False, True):
+        args = argparse.Namespace(
+            secret=[],
+            secret_env=[],
+            infra_ref=[],
+            infra_purpose="benchmark_compute",
+            infra=[],
+            engagement="session",
+            owned_host=host,
+            in_process_host=False,
+        )
+        setattr(args, field, [value])
+        monkeypatch.setattr(
+            run_episode, "_owned_host_refusal", lambda *a: pytest.fail("reached owning admission")
+        )
+        assert await run_episode.run(args) == 2
+        assert value not in capsys.readouterr().err
+        assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("name", ["A", "VALID_NAME_123", "A" * 256])
+def test_secret_ref_type_and_default_inputs_share_existing_contract(name: str) -> None:
+
+    from scripts import run_episode
+
+    assert run_episode._parse_secret_ref_name(name) == name
+    run_episode._validate_ref_inputs(
+        argparse.Namespace(
+            secret=None, secret_env=[], infra_ref=[], infra_purpose="benchmark_compute"
+        )
+    )
 
 
 def test_no_secret_channel_exists_on_the_managed_path(tmp_path: Path) -> None:

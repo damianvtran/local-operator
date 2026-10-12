@@ -70,6 +70,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -475,6 +476,19 @@ def launchctl_runner(*args: str) -> "subprocess.CompletedProcess[str]":
         )
 
 
+class OwnershipGuarantee(str, Enum):
+    """Caller requirement; evidence is derived, never supplied as a capability.
+
+    A genuine detached PID/source/birth lease identifies a process but cannot
+    retain a production SDK host under a supervisor. Keep that weak generic
+    use unchanged; callers needing managed lifetime must ask for the stronger
+    proof at this SAME admission boundary, not rely on public CLI flag syntax.
+    """
+
+    IDENTIFIED_PROCESS = "identified_process"
+    MANAGED_RETENTION = "managed_retention"
+
+
 def verify_owned_admission(
     *,
     run_root: Path,
@@ -483,6 +497,7 @@ def verify_owned_admission(
     job_label: str | None,
     actual_source_pin: str,
     runner: Any = launchctl_runner,
+    required_guarantee: OwnershipGuarantee = OwnershipGuarantee.IDENTIFIED_PROCESS,
 ) -> dict[str, Any]:
     """The OWNER-side admission check: identity from the record, not a flag.
 
@@ -499,6 +514,8 @@ def verify_owned_admission(
     Returns the parsed lease (provenance for the status channel). Raises
     :class:`OwnedProcessRefused` with the remedy named on any mismatch.
     """
+    if not isinstance(required_guarantee, OwnershipGuarantee):
+        raise OwnedProcessRefused("unknown required ownership guarantee; refusing")
     paths = owner_paths(run_root, owner_id)
     lease = _read_lease(paths.lease_path)
     if lease is None:
@@ -557,10 +574,11 @@ def verify_owned_admission(
             f"the lease's birth token does not identify this process at pid {pid} "
             "(a reused pid or an unreadable process table); refusing"
         )
-    if backend == "launchd":
+    if backend == "launchd" or required_guarantee is OwnershipGuarantee.MANAGED_RETENTION:
         if not job_label:
             raise OwnedProcessRefused(
-                "the launchd backend requires its job label; refusing before any work"
+                "managed retention requires an actual supervisor registration; "
+                "an identified detached process is not sufficient"
             )
         from local_operator import launchd
 
@@ -571,13 +589,49 @@ def verify_owned_admission(
                 "is unverifiable; refusing"
             )
         plist_path = home.joinpath("Library", "LaunchAgents", f"{job_label}.plist")
-        running_pid = launchd.job_pid(label=job_label, path=plist_path, run=runner)
-        if running_pid != os.getpid():
+        observed = launchd.observe_job(label=job_label, path=plist_path, run=runner)
+        running_pid = observed.pid
+        if observed.state is not launchd.JobState.LIVE or running_pid != os.getpid():
             raise OwnedProcessRefused(
                 f"launchd does not report job {job_label} running under this pid "
                 f"({running_pid!r} != {os.getpid()}); a --owned-host flag alone does "
                 "not admit a process"
             )
+        if required_guarantee is OwnershipGuarantee.MANAGED_RETENTION:
+            # Match the real owned registration to this lease/source; backend
+            # tags and a requested guarantee are NOT evidence. The utility's
+            # no-restart contract is KeepAlive=False with no trigger keys.
+            # This proves managed retention, not arbitrary split-tree death.
+            import plistlib
+
+            try:
+                plist = plistlib.loads(plist_path.read_bytes())
+                env = plist.get("EnvironmentVariables", {})
+                matches = (
+                    job_label == job_label_for(owner_id)
+                    and plist.get("Label") == job_label
+                    and plist.get("KeepAlive") is False
+                    and env.get(ENV_OWNER_ID) == owner_id
+                    and env.get(ENV_SOURCE_PIN) == actual_source_pin
+                    and env.get(ENV_LEASE_PATH) == str(paths.lease_path)
+                    and not any(
+                        key in plist
+                        for key in (
+                            "StartInterval",
+                            "StartCalendarInterval",
+                            "WatchPaths",
+                            "QueueDirectories",
+                            "StartOnMount",
+                            "OtherJobEnabled",
+                        )
+                    )
+                )
+            except (OSError, ValueError, TypeError, AttributeError):
+                matches = False
+            if not matches:
+                raise OwnedProcessRefused(
+                    "managed retention registration/source/no-restart proof is unverified"
+                )
     return lease
 
 
@@ -940,6 +994,7 @@ __all__ = [
     "OwnedProcessRefused",
     "OwnedProcessSpec",
     "OwnedProcessStatus",
+    "OwnershipGuarantee",
     "PHASE_ADMITTED",
     "PHASE_CLOSING",
     "PHASE_PROVISIONAL",

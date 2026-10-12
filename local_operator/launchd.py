@@ -88,6 +88,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -522,6 +523,51 @@ def _pid_from_print(printed: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+class JobState(str, Enum):
+    """The supervisor's ONE observation, not an inference from missing PID data."""
+
+    LIVE = "live"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class JobObservation:
+    state: JobState
+    pid: int | None
+    reason: str
+
+
+def observe_job(*, label: str, path: Path, run: Callable[..., object]) -> JobObservation:
+    """One guarded launchctl snapshot: live, positively absent, or unknown.
+
+    A failed PID reading is NOT death. A caller that probes twice can combine
+    the first unavailable answer with a second running answer and still call
+    the owner lost (the native-caller review reproduced exactly that). Keep
+    state/PID/reason together from ONE call; legacy boolean/PID APIs below
+    merely project it. Refusal, timeout and incomplete output remain unknown,
+    never permission to tear down an owner or a physical descendant tree.
+    """
+    if not is_own_plist(path, label):
+        return JobObservation(JobState.UNKNOWN, None, "job address is not verified")
+    result, _ = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None:
+        return JobObservation(JobState.UNKNOWN, None, "supervisor did not answer")
+    code = getattr(result, "returncode", None)
+    if code == 113:
+        return JobObservation(JobState.ABSENT, None, "registration is absent")
+    if code != 0:
+        return JobObservation(JobState.UNKNOWN, None, "supervisor reading is unavailable")
+    body = _text(getattr(result, "stdout", ""))
+    pid = _pid_from_print(body)
+    if pid is not None and pid > 0:
+        return JobObservation(JobState.LIVE, pid, "supervisor reports a running PID")
+    state = re.search(r"(?m)^\s*state\s*=\s*([^\r\n]+)$", body)
+    if state is not None and state.group(1).strip() in ("not running", "exited"):
+        return JobObservation(JobState.ABSENT, None, "supervisor reports a stopped job")
+    return JobObservation(JobState.UNKNOWN, None, "supervisor output has no conclusive PID/state")
+
+
 def job_pid(*, label: str, path: Path, run: Callable[..., object]) -> int | None:
     """The pid launchd is running for ``label``, or ``None``.
 
@@ -550,14 +596,7 @@ def job_pid(*, label: str, path: Path, run: Callable[..., object]) -> int | None
     ``None`` on a refusal, which sends callers down the path they took before this
     existed. Never raises: an unanswerable supervisor has no pid.
     """
-    if not is_own_plist(path, label):
-        return None
-    result, _ = _call(run, "print", f"{job_domain()}/{label}")
-    if result is None:
-        return None
-    if getattr(result, "returncode", 1) != 0:
-        return None
-    return _pid_from_print(_text(getattr(result, "stdout", "")))
+    return observe_job(label=label, path=path, run=run).pid
 
 
 def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:

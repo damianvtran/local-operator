@@ -104,6 +104,7 @@ from local_operator.evaluation.runner.secrets import (
     MissingSecret,
     SecretResolver,
 )
+from local_operator.launchd import JobObservation, JobState
 from local_operator.update import BuildStamp
 
 EXIT_OK = 0
@@ -839,6 +840,7 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
     parser.add_argument("--episode-id", default=None, help="default: ep-<12 hex>")
     parser.add_argument(
         "--secret",
+        type=_parse_secret_ref_name,
         action="append",
         default=None,
         metavar="NAME",
@@ -846,6 +848,7 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
     )
     parser.add_argument(
         "--secret-env",
+        type=_parse_secret_ref_name,
         action="append",
         default=[],
         metavar="NAME",
@@ -1382,7 +1385,7 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
         return (
             "--owned-host runs only as the process a managed lease started (this "
             "environment carries no owner identity); start the episode through the "
-            "frontend, or use --in-process-host in the offline rig"
+            "managed frontend"
         )
     from local_operator.evaluation.source_pin import resolve_core_commit
 
@@ -1394,6 +1397,7 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
             backend=backend,
             job_label=job_label,
             actual_source_pin=pin,
+            required_guarantee=owned_process.OwnershipGuarantee.MANAGED_RETENTION,
         )
     except owned_process.OwnedProcessRefused as error:
         return str(error)
@@ -1402,6 +1406,49 @@ def _owned_host_refusal(args: argparse.Namespace) -> str | None:
     # The owner resolves its refs from the sealed credential store through the
     # isolated config root it inherited; the managed frontend refuses env-only
     # overrides before it starts an owner at all.
+    return None
+
+
+def _parse_secret_ref_name(name: str) -> str:
+    """Validate ALL name-only channels using the existing SecretRef contract.
+
+    A late build_spec validation already lost: raw argv reached a launchd
+    plist and owner stderr before it failed. Argparse and programmatic/default
+    startup inputs must use this same pure type BEFORE persistence or lookup.
+    Never expose Pydantic input/repr in a refusal. Syntax is not payload
+    detection: a valid uppercase NAME is solely a reference, even when an
+    arbitrary secret could happen to have that spelling.
+    """
+    try:
+        return SecretRef(name=name).name
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(
+            "secret refs require a valid uppercase NAME (1..256); values omitted"
+        ) from None
+
+
+def _validate_ref_inputs(args: argparse.Namespace) -> None:
+    """Argparse is not the only entry: defaults and Namespace callers also bind.
+
+    Do not simplify this to build_spec's late validation; managed relaunch and
+    direct owning entry must fail before status/plist/auth artifacts exist.
+    No lookup is allowed here: syntactic admission never proves a ref exists.
+    """
+    names = getattr(args, "secret", None)
+    for name in (
+        *(_DEFAULT_SECRET_REFS if names is None else names),
+        *getattr(args, "secret_env", ()),
+    ):
+        _parse_secret_ref_name(name)
+    _parse_infra_refs(getattr(args, "infra_ref", ()), args.infra_purpose)
+
+
+def _managed_input_refusal(args: argparse.Namespace) -> str | None:
+    """The same unsupported-transport policy holds at BOTH owning entries."""
+    if args.secret_env:
+        return "managed owners refuse --secret-env overrides; use sealed --secret NAME refs"
+    if args.infra:
+        return "managed owners refuse inline --infra values; use sealed --infra-ref NAME=STORE_REF"
     return None
 
 
@@ -1417,8 +1464,8 @@ def _parse_infra_refs(values: Sequence[str], purpose: str) -> tuple[ScopedInfraV
     refs = _parse_infra(values, purpose)
     try:
         for ref in refs:
-            SecretRef(name=ref.value)
-    except ValueError:
+            _parse_secret_ref_name(ref.value)
+    except argparse.ArgumentTypeError:
         raise ValueError(
             "--infra-ref requires a valid uppercase STORE_REF name; values omitted"
         ) from None
@@ -1496,42 +1543,14 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
         )
         return EXIT_PREFLIGHT
 
-    if args.secret_env:
-        # ENV-ONLY OVERRIDES CANNOT CROSS A MANAGED BOUNDARY (R3-S3). The value
-        # exists only in THIS process's environment; the owner is a different
-        # process, and the plaintext channel that used to carry such values is
-        # REMOVED (0600 is access control, not encryption, and it left a durable
-        # artifact for crashed starts). Refuse BEFORE anything is allocated
-        # rather than launch an owner whose promised secret resolves empty. The
-        # sealed store IS a transport that survives the boundary -- the owner
-        # reads it through the config root it inherits -- so the remedy is a
-        # ``--secret NAME`` ref (or the reply arm, which runs no owner at all).
-        print(
-            "--secret-env is unsupported for a managed session owner: the value "
-            "lives only in this process's environment and cannot cross into the "
-            "owner without a plaintext artifact (removed). Store it in the "
-            "credential store and reference it with --secret NAME instead; "
-            "refusing before prepare (nothing was allocated).",
-            file=sys.stderr,
-        )
-        return EXIT_PREFLIGHT
-
-    # The frontend cannot classify arbitrary inline values as non-secret
-    # (the guest password was one such value). It therefore persists NONE of
-    # them in ProgramArguments. Name-only sealed refs are resolved by the
-    # owner AFTER source verification; no credential is read by this branch.
-    if args.infra:
-        print(
-            "managed owners refuse inline --infra values: use --infra-ref "
-            "[purpose:]NAME=STORE_REF for sealed name-only transport. "
-            "Refusing before preparation, credentials or allocation.",
-            file=sys.stderr,
-        )
+    refusal = _managed_input_refusal(args)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return EXIT_PREFLIGHT
 
     try:
-        _parse_infra_refs(args.infra_ref, args.infra_purpose)
-    except ValueError as error:
+        _validate_ref_inputs(args)
+    except (ValueError, argparse.ArgumentTypeError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
     raw = _owner_relaunch_argv(list(getattr(args, "_raw_argv", [])))
@@ -1589,15 +1608,16 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
         # verifiable things is true. The lease and status records are the
         # authority, and either way the retained state stays UNVERIFIED until
         # something proves otherwise.
-        lost = _owner_lost(lease, None)
+        observed = _owner_observation(lease)
+        lost = observed.state is JobState.ABSENT
         detail = (
             "the owner exited without admitting: no terminal status and no live holder "
             "were observable. Its retained state is UNVERIFIED (it may have admitted "
             "before dying); read the lease and status records before any teardown."
             if lost
             else "the owner's admission could not be read within "
-            f"{args.owner_startup_timeout_s:g}s and a live holder is not provable from "
-            "here: nothing was reaped, and a failed status write is indistinguishable "
+            f"{args.owner_startup_timeout_s:g}s. Owner liveness is {observed.state.value}; "
+            "nothing was reaped, and a failed status write is indistinguishable "
             "from no admission. The lease and status records are the authority."
         )
         print(
@@ -1608,6 +1628,7 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
                     "owner_id": lease.owner_id,
                     "owner_pid": lease.pid,
                     "owner_backend": lease.backend,
+                    "owner_liveness": observed.state.value,
                     "job_label": lease.job_label,
                     "lease_path": str(paths.lease_path),
                     "status_path": str(paths.status_path),
@@ -1629,7 +1650,8 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
         status = owner_status() or status
         if status is not None and status.phase in owned_process.TERMINAL_PHASES:
             return _report_owner_outcome(lease, status)
-        if _owner_lost(lease, status):
+        observed = _owner_observation(lease)
+        if observed.state is JobState.ABSENT:
             print(
                 json.dumps(
                     {
@@ -1665,6 +1687,8 @@ async def _run_managed_frontend(args: argparse.Namespace) -> int:
                 "job_label": lease.job_label,
                 "status_path": str(paths.status_path),
                 "lease_path": str(paths.lease_path),
+                "owner_liveness": observed.state.value,
+                "owner_liveness_reason": observed.reason,
                 "owner_phase": None if status is None else status.phase,
                 "detail": (
                     "no terminal receipt was observed; this frontend stopped "
@@ -1704,60 +1728,47 @@ def _retire_owned_registration_if_launchd() -> None:
         owned_process.retire_owned_job(job_label=job_label)
 
 
-def _owner_lost(lease: Any, status: Any) -> bool:
-    """Whether the SUPERVISOR says the owner is gone without a terminal status.
+def _owner_observation(lease: Any) -> JobObservation:
+    """Read one owner snapshot, retaining UNKNOWN rather than inventing life.
 
-    launchd only: ``job_pid`` is the supervisor's own answer, so a label with
-    no pid means the process exited -- and with ``KeepAlive=false`` it will not
-    come back. The detached backend has no supervisor to answer, so this stays
-    False there (doubt is not death: the frontend keeps waiting).
+    The boolean compatibility projection is insufficient for a frontend:
+    not-proved-lost is NOT positively alive. Combine a single guarded supervisor
+    snapshot with exact birth/zombie checks, not a second print or elapsed age.
+    Losing the owner still says nothing about arbitrary physical descendants.
     """
-    if lease.backend == "detached":
-        # No supervisor answers for the detached backend, but the kernel can
-        # still prove DEATH: pid_liveness False (no holder), a ZOMBIE probe,
-        # or a birth-token mismatch (a different holder) all mean this owner
-        # is gone. Doubt (None) is not death -- the frontend keeps waiting.
-        from local_operator import procstate
+    from local_operator import launchd, owned_process, procstate
 
-        if procstate.pid_liveness(lease.pid) is False:
-            return True
-        # A CORPSE IS NOT A LIVE OWNER (R3-F1). Signal 0 succeeds against an
-        # exited-but-unreaped process, and the detached owner is THIS
-        # process's own child, whose corpse lingers until reaped -- so without
-        # this the frontend reported a dead owner as "retained and still
-        # running" for the whole grace window (measured: `ps` showed state Z
-        # while the report said admitted/alive). ``is_zombie`` is the existing
-        # fails-closed probe for exactly this question.
-        if procstate.is_zombie(lease.pid):
-            return True
-        return procstate.same_birth(lease.birth_scheme, lease.birth, lease.pid) is False
-    if lease.job_label is None:
-        return False
-    # launchd: the OS answers. A FRESH provisional write means the owner was
-    # writing moments ago and the pid read is the startup/exit race, never
-    # read as death; a STALE one (no write for the grace) with no job pid is
-    # a settled exit whose retained state stays unverified.
-    if status is not None and status.phase == "provisional":
-        if time.time() * 1000.0 - float(status.updated_ms or 0) < 30_000.0:
-            return False
-    try:
-        from local_operator import launchd, owned_process
-
+    if lease.backend == "launchd":
         home = launchd.real_home()
-        if home is None:
-            return False
-        plist = home.joinpath("Library", "LaunchAgents", f"{lease.job_label}.plist")
-        pid = launchd.job_pid(label=lease.job_label, path=plist, run=owned_process.launchctl_runner)
-        if pid is not None:
-            return False
-        # job_pid(None) also covers a supervisor timeout/refusal. That is
-        # uncertainty, not proof of death. Confirm an actual absent or stopped
-        # registration before naming owner loss; never turn missing telemetry
-        # into an ownership verdict (the same startup/status-loss rule).
-        probe = owned_process.launchctl_runner("print", f"{launchd.job_domain()}/{lease.job_label}")
-        return probe.returncode in (0, 113)
-    except Exception:  # noqa: BLE001 - an unanswerable supervisor has no verdict
-        return False
+        if home is None or not lease.job_label:
+            return JobObservation(JobState.UNKNOWN, None, "supervisor address is unverified")
+        observed = launchd.observe_job(
+            label=lease.job_label,
+            path=home / "Library" / "LaunchAgents" / f"{lease.job_label}.plist",
+            run=owned_process.launchctl_runner,
+        )
+        if observed.state is not JobState.LIVE:
+            return observed
+        if observed.pid != lease.pid:
+            return JobObservation(
+                JobState.ABSENT, None, "registration no longer identifies this owner"
+            )
+    elif lease.backend != "detached":
+        return JobObservation(JobState.UNKNOWN, None, "owner backend is unverified")
+    alive = procstate.pid_liveness(lease.pid)
+    birth = procstate.same_birth(lease.birth_scheme, lease.birth, lease.pid)
+    if alive is False or birth is False or procstate.is_zombie(lease.pid):
+        return JobObservation(JobState.ABSENT, None, "exact owner process is gone or settled")
+    if alive is not True or birth is not True:
+        return JobObservation(
+            JobState.UNKNOWN, None, "owner process identity/liveness is unreadable"
+        )
+    return JobObservation(JobState.LIVE, lease.pid, "exact owner process is live")
+
+
+def _owner_lost(lease: Any, status: Any) -> bool:
+    """Legacy projection: uncertainty is not owner loss or cleanup proof."""
+    return _owner_observation(lease).state is JobState.ABSENT
 
 
 def _report_owner_outcome(lease: Any, status: Any) -> int:
@@ -1797,6 +1808,16 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    try:
+        _validate_ref_inputs(args)
+    except (ValueError, argparse.ArgumentTypeError) as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
+    if args.engagement == "session" and (args.owned_host or not args.in_process_host):
+        refusal = _managed_input_refusal(args)
+        if refusal is not None:
+            print(refusal, file=sys.stderr)
+            return EXIT_PREFLIGHT
     if args.engagement == "session":
         from local_operator.evaluation.source_pin import (
             SourcePinError,

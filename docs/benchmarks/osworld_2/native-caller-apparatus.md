@@ -130,6 +130,30 @@ abort semantics are unchanged: first-Esc child continuation, TUI
 cancellation and the wall kill switch behave exactly as before; the explicit
 shutdown is the OWNING CALLER's terminal, not a keybinding.
 
+### Admission, reference syntax and uncertain supervisor readings
+
+The production owner requires `OwnershipGuarantee.MANAGED_RETENTION` at the
+shared `verify_owned_admission` seam. A genuine detached lease is still valid
+for the generic utility's default `IDENTIFIED_PROCESS`, but process identity
+alone cannot admit this caller. Strong admission derives the real guarded
+supervisor domain/registration/PID, exact lease birth/source and the matching
+owned no-restart plist contract. Unknown proof refuses before config/auth/MCP
+or preparation. This is retention, **not** proof of forced descendant death.
+
+All three name-only channels (`--secret`, `--secret-env`, infrastructure
+`STORE_REF`) use the existing `SecretRef` syntax before relaunch/persistence
+or lookup; default and programmatic Namespace inputs take the same pure path.
+Malformed values are never echoed. Syntax cannot detect a secret that happens
+to look like a valid uppercase NAME: valid syntax is solely an opaque ref, not
+proof the ref exists. Env-only/literal infrastructure transport remains
+unsupported by both production frontend and direct owning entry.
+
+Supervisor diagnostics project ONE typed `launchd.observe_job` reading plus
+exact owner process checks: live, positively absent, or unknown. Timeout or
+incomplete output is unknown, not death **or** positive life; the frontend
+reports that uncertainty without tearing down or claiming cleanup. Normal
+SDK/UI operation requires neither a managed owner nor this observation path.
+
 ## The selector's core-source pin
 
 The arm's correctness lives in the core tree, so the selector now carries

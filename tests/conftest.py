@@ -51,6 +51,12 @@ _AMBIENT_VARS = (
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
     "LOP_OPEN_TRACE",
+    # Managed ownership descriptors address real processes/resources. Inherited
+    # values can identify an operator's lease, not a fixture; scrub rather than
+    # declaring them harmless. Tests opt in with their OWN bound owner values.
+    "LOP_OWNED_LEASE_PATH",
+    "LOP_OWNED_OWNER_ID",
+    "LOP_OWNED_SOURCE_PIN",
     # The click ladder's launch rung looks for `local-operator-ui` on PATH,
     # which on a machine that has the app installed FINDS IT. A test that drives
     # `open_session` without doubling the rung therefore starts the operator's
