@@ -29,6 +29,8 @@ THREE PIECES, all narrow:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -63,6 +65,71 @@ class _ScreeningStreamRefused(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class AdmissionJob:
+    """The ONE immutable admission proof for a screening dispatch.
+
+    Minted by the pipeline AFTER the logical attempt reservation and the
+    native account turn claim, bound into the runner before dispatch, and
+    re-validated by the native reservation transaction before EVERY actual
+    send: its ``digest`` is the canonical full-job fingerprint carried by
+    the logical row, every physical row and the finish/receipt binding.
+    Nothing here is a caller-supplied name or a fallback.
+    """
+
+    owner_generation: int
+    credential_id: int
+    account_id: str
+    tenant_id: str
+    endpoint_id: str
+    hub_url: str
+    message_id: str
+    attempt_id: str
+    body_sha256: str
+    template_sha256: str
+    template_version: str
+    provider: str
+    model: str
+    approved: tuple[str, ...]
+    envelope_digest: str
+    request_digest: str
+    display_digest: str
+    revision: str
+    epoch: int
+    turn: str
+
+    @property
+    def digest(self) -> str:
+        """The canonical full-job digest (stable field order, no defaults)."""
+
+        payload = json.dumps(
+            [
+                self.owner_generation,
+                self.credential_id,
+                self.account_id,
+                self.tenant_id,
+                self.endpoint_id,
+                self.hub_url,
+                self.message_id,
+                self.attempt_id,
+                self.body_sha256,
+                self.template_sha256,
+                self.template_version,
+                self.provider,
+                self.model,
+                list(self.approved),
+                self.envelope_digest,
+                self.request_digest,
+                self.display_digest,
+                self.revision,
+                self.epoch,
+                self.turn,
+            ],
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _owner_key_text(owner: OwnerSnapshot) -> str:
@@ -243,7 +310,12 @@ class ScreeningWireGuard:
         fingerprint: str | None = None,
         http_client: Any | None = None,
         expected_epoch: int | None = None,
+        job_ref: dict[str, Any] | None = None,
     ) -> None:
+        # The shared job cell the runner binds the minted AdmissionJob into:
+        # the dispatch reservation REQUIRES it — a factory acall with no
+        # logical job refuses BEFORE any I/O (R5).
+        self._job_ref = job_ref if job_ref is not None else {}
         self._client = client
         self._store = store
         self._owner = owner
@@ -264,6 +336,7 @@ class ScreeningWireGuard:
         except Exception:  # noqa: BLE001 - an unreadable store pins NOTHING
             self._pinned_policy = None
         self._proxies: list[_ChargingAsyncTransport] = []
+        self._installed: list[tuple[Any, Any, _ChargingAsyncTransport]] = []
         http = http_client if http_client is not None else getattr(client, "_http", None)
         if http is not None:
             patched_any = self._patch_transport(http, "_transport")
@@ -291,6 +364,7 @@ class ScreeningWireGuard:
         proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
         setattr(http, attr, proxy)
         self._proxies.append(proxy)
+        self._installed.append((http, attr, proxy))
         return True
 
     def _patch_mount_transport(self, http: Any, pattern: Any) -> bool:
@@ -308,6 +382,7 @@ class ScreeningWireGuard:
         proxy = _ChargingAsyncTransport(transport, self._charge, owner_token=self._guard_token)
         mounts[pattern] = proxy
         self._proxies.append(proxy)
+        self._installed.append((mounts, pattern, proxy))
         return True
 
     def _all_proxies_current(self, http: Any) -> bool:
@@ -327,6 +402,15 @@ class ScreeningWireGuard:
                     and transport.owner_token is self._guard_token
                 ):
                     return False
+        return True
+
+    def _guard_current(self) -> bool:
+        """Whether every recorded transport is still THIS guard's proxy."""
+
+        for entry in self._installed:
+            http, attr, proxy = entry
+            if getattr(http, attr, None) is not proxy:
+                return False
         return True
 
     def _verify_job(self) -> None:
@@ -370,24 +454,30 @@ class ScreeningWireGuard:
             raise hold
 
     def _charge(self) -> None:
-        self._verify_job()
+        job = self._job_ref.get("job")
+        if job is None:
+            raise self._refuse("screening job not bound; refusing to send")
+        if not self._guard_current():
+            # The selected transport is no longer the proxy THIS guard
+            # installed (replaced/mounted/reused foreign): a send could
+            # escape uncharged — refuse before I/O, every request.
+            raise self._refuse("screening route changed after guard installation")
         try:
-            self._store.reserve_http_attempt(
-                self._owner, message_id=self._message_id, fingerprint=self._fingerprint
+            self._store.reserve_screening_dispatch(
+                self._owner, message_id=self._message_id, job=job, turn=job.turn
             )
-        except StoreRefused:
-            from local_operator.providers.failover import ProviderError
+        except StoreRefused as failure:
+            raise self._refuse(f"screening dispatch refused ({failure.code})") from None
 
-            refusal = ProviderError(
-                429,
-                "screening HTTP budget exhausted",
-                retryable=False,
-                kind="quota",
-                request_sent=False,  # provably before any dispatch
-            )
-            refusal.__cause__ = None
-            refusal.__context__ = None
-            raise refusal from None
+    def _refuse(self, reason: str) -> BaseException:
+        from local_operator.providers.failover import ProviderError
+
+        hold = ProviderError(
+            409, reason, retryable=False, kind="request", request_sent=False, fail_closed=True
+        )
+        hold.__cause__ = None
+        hold.__context__ = None
+        return hold
 
     async def stream(  # pragma: no cover - thin delegation, driven by tests
         self, request: Any, api_key: str | None, oauth_access: Any = None
@@ -451,12 +541,24 @@ class ScreenModelRunner:
         deadline_s: float = _SCREEN_WALL_DEADLINE_S,
         owned_http: Any | None = None,
         owned_stream_fn: Any | None = None,
+        job_ref: dict[str, Any] | None = None,
     ) -> None:
         self._stream_fn = stream_fn
         self._selection = selection
         self._deadline_s = deadline_s
         self._owned_http = owned_http
         self._owned_stream_fn = owned_stream_fn
+        self._job_ref = job_ref if job_ref is not None else {}
+
+    def bind_job(self, job: AdmissionJob) -> None:
+        """Bind the minted AdmissionJob for the enclosing dispatch (R5).
+
+        The guard's native reservation REQUIRES it; binding happens after
+        the logical attempt and the native account turn are held, right
+        before the public dispatch, so no send can ride an unbound job.
+        """
+
+        self._job_ref["job"] = job
 
     def __call__(self, prompt: str, *, default_model: str) -> tuple[str, str | None]:
         if self._selection.default_model != default_model:
@@ -622,6 +724,8 @@ def make_screening_runner(
         follow_redirects=False,
     )
 
+    job_state: dict[str, Any] = {}
+
     def _guard(client: Any) -> Any:
         return ScreeningWireGuard(
             client,
@@ -631,6 +735,7 @@ def make_screening_runner(
             fingerprint=fingerprint,
             http_client=dedicated,
             expected_epoch=expected_epoch,
+            job_ref=job_state,
         )
 
     try:
@@ -642,13 +747,22 @@ def make_screening_runner(
             http_client=dedicated,
         )
     except BaseException:
-        import asyncio as _asyncio
-
-        _asyncio.new_event_loop().run_until_complete(dedicated.aclose())
+        # Cleanup must never nest a loop (a constructor failure inside an
+        # ACTIVE loop raised RuntimeError and left the client open): a
+        # running loop closes it as a task, a bare context closes it inline.
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None:
+            running.create_task(dedicated.aclose())
+        else:
+            asyncio.run(dedicated.aclose())
         raise
     return ScreenModelRunner(
         stream_fn,
         selection,
         owned_http=dedicated,
         owned_stream_fn=stream_fn,
+        job_ref=job_state,
     )

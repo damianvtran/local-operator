@@ -47,6 +47,7 @@ import inspect
 import json
 import re
 import secrets
+import weakref as _weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -581,23 +582,30 @@ def _persist_hold(
         pass
 
 
-#: Per-account dispatch locks, keyed by (state db path, credential/account/
-#: tenant/endpoint). The frozen contract allows ONE screening in flight per
-#: account: concurrent callers WAIT here (in-process), and the native
-#: screen_turn lease in store.py is the cross-process equivalent. This is
-#: deliberately a plain lock — no daemon, no queue, no fan-out.
-_ACCOUNT_LOCKS: dict[tuple[str, object], asyncio.Lock] = {}
+#: Per-account dispatch locks, keyed by (state db path, HUB, account id) —
+#: the SAME account scope as the native turn and the aggregate budget, and
+#: held by LOOP lifetime (a WeakKeyDictionary keyed by the running loop): a
+#: lock is an asyncio primitive bound to the loop that contended it, so a
+#: permanent module-global map hands a dead loop's lock to a fresh loop and
+#: raises "bound to a different event loop" (QA's actual two-loop control).
+#: Cross-call/cross-process exclusion is the NATIVE account turn; this lock
+#: only serializes same-loop contenders so they queue rather than race the
+#: claim.
+_ACCOUNT_LOCKS: "_weakref.WeakKeyDictionary[Any, dict[tuple[str, str, str], asyncio.Lock]]"
+_ACCOUNT_LOCKS = _weakref.WeakKeyDictionary()
 
 
 def _account_lock(config_dir: Path, owner: OwnerSnapshot) -> asyncio.Lock:
-    key = (
-        str(config_dir),
-        (owner.credential_id, owner.account_id, owner.tenant_id, owner.endpoint_id),
-    )
-    lock = _ACCOUNT_LOCKS.get(key)
+    loop = asyncio.get_running_loop()
+    per_loop = _ACCOUNT_LOCKS.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _ACCOUNT_LOCKS[loop] = per_loop
+    key = (str(config_dir), owner.canonical_base_url, owner.account_id)
+    lock = per_loop.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _ACCOUNT_LOCKS[key] = lock
+        per_loop[key] = lock
     return lock
 
 
@@ -618,10 +626,63 @@ async def screen_message_async(
     parallel screening amplifier is a defect, not a feature.
     """
 
+    import os as _os
+    import time as _time
+
+    from local_operator.team_bridge import scheduler as _scheduler
+
     async with _account_lock(config_dir, owner):
-        return await _screen_core(
-            owner, item, config_dir=config_dir, policy=policy, runner=runner, nonce=nonce
-        )
+        store = Store(config_dir)
+        scope = f"{owner.canonical_base_url}|{owner.account_id}"
+        existing = _scheduler.current_turn()
+        turn: str | None = None
+        reuse = False
+        if (
+            existing is not None
+            and existing[0] == scope
+            and store.screen_turn_matches(owner, turn=existing[1], now=_time.time())
+        ):
+            # A cycle (or enclosing scope) already holds THIS account's turn:
+            # reuse the exact token, never claim a competing second turn.
+            turn = existing[1]
+            reuse = True
+        if turn is None:
+            # The native account turn is INSEPARABLE from admitted dispatch
+            # (R5): without it, another worker/process owns this account and
+            # a direct public call must HOLD, not race past the lease.
+            try:
+                turn = store.claim_screen_turn(
+                    owner, holder_prefix=f"pid{_os.getpid()}", now=_time.time(), ttl=90.0
+                )
+            except StoreRefused as failure:
+                # A damaged/unreadable schedule store fails CLOSED as a typed
+                # hold — never an uncaught refusal escaping the public entry.
+                return ScreenResult(
+                    "hold", hold_code=_HOLD_FOR_SCHEMA.get(failure.code, "retry_later")
+                )
+        if turn is None:
+            return ScreenResult("hold", hold_code="retry_later")
+        try:
+            return await _screen_core(
+                owner,
+                item,
+                config_dir=config_dir,
+                policy=policy,
+                runner=runner,
+                nonce=nonce,
+                turn=turn,
+            )
+        finally:
+            # Whole-ENTRY lifetime (R5): the runner's owned client/stream fn
+            # close on success, every hold, deadline, cancellation and a
+            # cancelled account-lock wait alike — one-shot by contract.
+            aclose = getattr(runner, "aclose", None)
+            if callable(aclose):
+                closed = aclose()
+                if inspect.isawaitable(closed):
+                    await closed
+            if not reuse:
+                store.release_screen_turn(owner, turn=turn)
 
 
 async def _screen_core(
@@ -632,6 +693,7 @@ async def _screen_core(
     policy: ScreeningPolicy,
     runner: ScreenRunner | None = None,
     nonce: str | None = None,
+    turn: str = "",
 ) -> ScreenResult:
     """The ONE screening pipeline. At most one runner dispatch per call.
 
@@ -833,6 +895,47 @@ async def _screen_core(
         _persist_hold(store, owner, message_id, code)
         return ScreenResult("hold", hold_code=code)
 
+    # 9b. MINT the immutable AdmissionJob (R5): the logical row is bound to
+    #     its canonical digest, the runner binds it, and the native dispatch
+    #     reservation re-validates owner/policy/attempt/turn before EVERY
+    #     actual send. The digest is the ONE fingerprint shared by the
+    #     logical row, every physical row and the finish/receipt binding.
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id=message_id,
+        attempt_id=attempt_id,
+        body_sha256=envelope.body_sha256,
+        template_sha256=snapshot.template_sha256,
+        template_version=snapshot.screening_version,
+        provider=getattr(snapshot, "provider", ""),
+        model=snapshot.default_model or "",
+        approved=tuple(sorted(snapshot.approved_serving_identities)),
+        envelope_digest=envelope.envelope_digest,
+        request_digest=hashlib.sha256(envelope.type_label.encode("utf-8")).hexdigest(),
+        display_digest=hashlib.sha256(
+            f"{envelope.sender_display}|{envelope.organization}".encode("utf-8")
+        ).hexdigest(),
+        revision=snapshot.admission_revision,
+        epoch=int(epoch),
+        turn=turn,
+    )
+    fingerprint = job.digest
+    try:
+        store.bind_attempt_fingerprint(owner, attempt_id=attempt_id, fingerprint=fingerprint)
+    except StoreRefused:
+        _persist_hold(store, owner, message_id, "retry_later")
+        return ScreenResult("hold", hold_code="retry_later")
+    bind = getattr(runner, "bind_job", None)
+    if callable(bind):
+        bind(job)
+
     # 10. Fresh nonce render. A polluted token or a changed delimiter
     #     contract refuses; regeneration is bounded (H3 hostile-input control).
     rendered: RenderedPrompt | None = None
@@ -937,6 +1040,7 @@ async def _screen_core(
             expected_epoch=epoch,
             receipt=receipt,
             envelope_digest=envelope.envelope_digest,
+            admission_revision=snapshot.admission_revision,
             verify=lambda: snapshot.matches_live(policy),
         )
     except StoreRefused as failure:
