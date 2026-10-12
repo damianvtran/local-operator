@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import copy
 import gzip
+import html
 import json
 import logging
 import os
@@ -59,7 +60,10 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n import catalogues
 from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.keys import relay_login
+from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
@@ -4515,7 +4519,7 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
+        return HTMLResponse(await asyncio.to_thread(_render_login_html))
 
     async def login_submit(request: Request) -> Response:
         denied = cross_origin_mutation(request)
@@ -4525,9 +4529,7 @@ def build_app(daemon: MobileDaemon):
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
             return HTMLResponse(
-                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
-                    "<!--ERROR-->", _LOGIN_ERROR
-                ),
+                await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
             )
         response = RedirectResponse("/", status_code=303)
@@ -7967,16 +7969,60 @@ def _list_models() -> list[dict[str, Any]]:
 #: a bad POST re-renders this page with the field refocused and cleared, and
 #: without a live region a screen-reader user was told nothing about the
 #: failed attempt (measured: `role` null, parent `aria-live` null).
-_LOGIN_ERROR = '<p class="error" role="alert">Wrong password.</p>'
+def _render_login_html(*, error: bool = False) -> str:
+    """Resolve at the request boundary, not import time or browser preferences.
+
+    The gate precedes the SPA/bootstrap and must work without JavaScript.
+    Escape catalogue output even in text nodes: translator-supplied markup must
+    never execute on the authentication surface. One-pass substitution prevents
+    translated text resembling a token from being substituted twice.
+    """
+    locale = resolve_language()
+    messages: dict[str, Msg] = {
+        "TITLE": relay_login.page_title(),
+        "PASSWORD": relay_login.password_label(),
+        "SUBMIT": relay_login.submit_label(),
+        "ERROR": relay_login.error_password(),
+    }
+    # Language-of-page describes the copy actually rendered, not preference.
+    # A shipped locale may lack this newly extracted namespace; select its
+    # English fallback once so assistive pronunciation and direction agree
+    # with every message. Never probe any locale the backend did not resolve.
+    try:
+        source = catalogues.load_catalogue(locale, "relay.login")
+        # A valid map can still be empty/partial. Include the refusal even on
+        # GET so a failed attempt cannot switch languages or silently mix
+        # English per-key fallback under non-English page metadata.
+        if not {message.code for message in messages.values()}.issubset(source):
+            locale = "en"
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        locale = "en"
+
+    def text(message: Msg) -> str:
+        return html.escape(render(message.code, message.params, locale=locale))
+
+    values = {
+        "LANG": html.escape(locale, quote=True),
+        "DIR": "rtl" if locale == "ur" else "ltr",
+        "MARK_DATA_URI": html.escape(_mark_data_uri(), quote=True),
+        "TITLE": text(messages["TITLE"]),
+        "PASSWORD": text(messages["PASSWORD"]),
+        "SUBMIT": text(messages["SUBMIT"]),
+        "ERROR": (
+            '<p class="error" role="alert">' + text(messages["ERROR"]) + "</p>" if error else ""
+        ),
+    }
+    return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
+
 
 _LOGIN_HTML = """<!doctype html>
-<html lang="en">
+<html lang="__LANG__" dir="__DIR__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110c">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>local operator — sign in</title>
+<title>__TITLE__</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
      page is server-rendered so the auth gate has zero client-side surface,
@@ -8081,13 +8127,13 @@ _LOGIN_HTML = """<!doctype html>
     <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
-  <!--ERROR-->
+  __ERROR__
   <div class="field">
-    <label for="password">password</label>
+    <label for="password">__PASSWORD__</label>
     <input id="password" type="password" name="password"
            autocomplete="current-password" autofocus required>
   </div>
-  <button type="submit">sign in</button>
+  <button type="submit">__SUBMIT__</button>
 </form>
 <script>
   /* U2: clear private authenticated state (uncertain command envelopes and
