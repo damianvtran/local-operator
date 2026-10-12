@@ -2708,6 +2708,18 @@ def _fold_state_record(blocks: list[str], record: Mapping[str, Any]) -> None:
             blocks[index] = str(value)
 
 
+def _dispose_hook_failure_label(hook: object, exc: BaseException) -> str:
+    """One bounded, sanitized line naming a cleanup hook that raised.
+
+    WHY a module helper and not a Session method: two loop sites build it,
+    and the failure list it feeds is read by ``shutdown_owned_work``, which
+    states it verbatim on the owning receipt. Kept short and structured so a
+    receipt stays readable and no hook payload is copied wholesale.
+    """
+    name = getattr(hook, "__qualname__", None) or getattr(hook, "__name__", None) or "anonymous"
+    return f"dispose hook {name} failed: {type(exc).__name__}: {str(exc)[:200]}"
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -3961,17 +3973,41 @@ class Session:
         # latches in _run_turn_pipeline.
         self._turn_tool_calls = 0
 
+        # ``_disposed`` is the ADMISSION latch and liveness marker every gate
+        # reads -- never a completion receipt. Completion is the canonical
+        # disposal task below, and only that task settling says cleanup ran.
         self._disposed = False
+        # -- The ONE canonical disposal (review round 1, R2/R3/R7).
+        #
+        # Ordinary ``dispose()``, the SDK context exit and
+        # ``shutdown_owned_work`` all coalesce onto this single retained task.
+        # WHY it must be shared state rather than a per-caller coroutine: a
+        # second entrant that merely re-ran "dispose" used to return as soon
+        # as ``_disposed`` was set, i.e. while the FIRST disposal was still
+        # awaiting its hooks -- a shutdown receipt built from that shape
+        # reported success over pending cleanup. Join the SAME task or the
+        # join is a lie. It is retained (never cancelled) across a timed-out
+        # waiter: Python cannot forcibly stop cancellation-resistant code, so
+        # the bound on a truly stuck cleanup belongs to the supervising
+        # process group, not to a pretend-stop here.
+        self._disposal_task: "asyncio.Task[None] | None" = None
+        # Cleanup-hook failures, in the order the hooks ran. Ordinary disposal
+        # deliberately logs-and-continues past a failing hook (teardown must
+        # not mask); this list is how the owning shutdown receipt refuses to
+        # read that policy as evidence the resource was released (R7). Empty
+        # for a session whose hooks all returned.
+        self._disposal_hook_failures: list[str] = []
         # -- Explicit owned-work shutdown (``shutdown_owned_work``).
         #
         # ``_owned_work_closing`` is the ADMISSION latch: set synchronously by
         # ``shutdown_owned_work`` BEFORE its first await, so a task/grandchild
         # launch racing the shutdown fails fast instead of escaping the
         # teardown snapshot (see ``_launch_subagent``). ``_owned_shutdown_task``
-        # RETAINS the unbounded cleanup coroutine across a timed-out call --
-        # the shutdown still lands; it is never cancelled to make the wrapper
-        # look finished. ``_owned_shutdown_result`` caches a COMPLETE result so
-        # repeat calls are the same receipt, not a second shutdown.
+        # RETAINS the canonical disposal task across a timed-out call -- the
+        # cleanup still lands; it is never cancelled to make the wrapper look
+        # finished. ``_owned_shutdown_result`` caches a COMPLETE result so
+        # repeat calls are the same receipt, not a second shutdown; a
+        # cancelled or timed-out cleanup is NEVER cached (R3).
         self._owned_work_closing = False
         self._owned_shutdown_task: "asyncio.Task[None] | None" = None
         self._owned_shutdown_result: "OwnedShutdownResult | None" = None
@@ -24832,10 +24868,16 @@ class Session:
         * Handlers run synchronously on the model loop as each request
           finishes; they must append or enqueue and return -- no I/O, no
           pricing, no heavy serialization.
-        * The subscription belongs to the SESSION TREE: it covers child and
-          grandchild requests too, including children forked before this call.
+        * The subscription's scope is the ORIGINAL OWNING ROOT TREE, including
+          ancestors and siblings: installing it through ANY owning session --
+          the root, a child, a grandchild -- observes requests from the whole
+          root tree, not just that session's branch. ``tree_id`` on every
+          record names that root. A consumer wanting subtree scope filters by
+          session lineage itself.
         * Keep the subscription until shutdown settles to capture
-          cancellation-final usage. The returned unsubscribe is idempotent.
+          cancellation-final usage. The returned unsubscribe is idempotent
+          and can only ever remove ITS OWN registration -- a stale handle
+          cannot uninstall a later subscription of the same handler.
         """
         subscribe = getattr(self._stream_fn, "subscribe_requests", None)
         if not callable(subscribe):
@@ -24854,29 +24896,35 @@ class Session:
 
         The explicit terminal for an owning caller (a benchmark run, a
         one-shot host): close delegation admission, abort this session's
-        turn, then run the existing disposal path -- which cancels and awaits
-        every owned job, and each child's finalization joins its own disposal
-        recursively, so grandchildren and their process groups are reached
-        through the same chain ``dispose`` already owns. ``dispose`` is
-        idempotent, so a later SDK context exit is a no-op.
+        turn, then JOIN the canonical disposal -- the same retained task
+        ordinary ``dispose`` and the SDK context exit use, so a shutdown that
+        races an already-running disposal waits for THAT cleanup instead of
+        starting a second one that can return early. The disposal cancels and
+        awaits every owned job, and each child's finalization joins its own
+        disposal recursively, so grandchildren and their process groups are
+        reached through the same chain.
 
         NOT a change to :meth:`abort` or :meth:`cancel_subagents`: the
         keyboard's first-Esc semantics stay exactly as they are (children keep
         working), and no other session's jobs are touched.
 
-        ``complete=True`` requires ALL of: the cleanup joined inside
-        ``timeout_s``, every owned job settled, no descendant provider stream
-        in flight, and no cleanup error. Anything less is ``complete=False``
-        with the pending ids and reasons attached -- a timeout is UNVERIFIED,
-        not success, and no caller may score or delete while it holds. The
-        cleanup task is RETAINED on a timeout (never cancelled), because
-        Python cannot forcibly stop cancellation-resistant code; the bound on
-        a truly stuck run belongs to the supervising process group outside
-        this session, and pretending it happened here is the failure this
-        result type exists to prevent.
+        ``complete=True`` requires ALL of: the canonical cleanup joined inside
+        ``timeout_s`` without being cancelled and without raising, every
+        cleanup hook returned (a hook failure recorded by the disposal is
+        reported, never read as success -- R7), every owned job settled, no
+        descendant provider stream in flight, and no cleanup error. Anything
+        less is ``complete=False`` with the pending ids and reasons attached
+        -- a timeout is UNVERIFIED, not success, and no caller may score or
+        delete while it holds. The cleanup task is RETAINED on a timeout
+        (never cancelled), because Python cannot forcibly stop
+        cancellation-resistant code; the bound on a truly stuck run belongs
+        to the supervising process group outside this session, and pretending
+        it happened here is the failure this result type exists to prevent.
 
-        Idempotent: the first call creates the cleanup; later calls await the
-        same task and a COMPLETE result is returned as the same receipt.
+        Idempotent: the first call joins (or starts) the one canonical
+        disposal; later calls await the same task, and only a COMPLETE result
+        is returned as the same receipt -- a cancelled or timed-out cleanup
+        is never cached (R3).
         """
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
@@ -24887,26 +24935,39 @@ class Session:
         task = self._owned_shutdown_task
         if task is None:
             # Close admission BEFORE the first await (see the latch comment in
-            # __init__); abort then dispose, exactly the existing chain.
+            # __init__); abort, then join the canonical disposal shared with
+            # ordinary ``dispose`` and the SDK context exit. Never a fresh
+            # coroutine per call: a second disposal would return early while
+            # the first is still cleaning up (R2).
             self._owned_work_closing = True
             self.abort(reason)
-            task = asyncio.ensure_future(self.dispose())
+            task = self._canonical_disposal()
             self._owned_shutdown_task = task
         done, _pending = await asyncio.wait({task}, timeout=timeout_s)
         errors: list[str] = []
-        complete = False
+        cancelled = False
+        failure: BaseException | None = None
         if task in done:
-            try:
-                failure = task.exception()
-            except asyncio.CancelledError:
-                failure = None
-                errors.append("cleanup task was cancelled; owned work state unverified")
-            if failure is not None:
-                errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
+            if task.cancelled():
+                cancelled = True
             else:
-                complete = True
-        else:
+                failure = task.exception()
+        complete = task in done and not cancelled and failure is None
+        if task not in done:
             errors.append(f"timeout after {timeout_s:g}s: owned cleanup still running (unverified)")
+        if cancelled:
+            # Cancellation proves NOTHING about resource state: keep it
+            # incomplete and uncached (R3).
+            errors.append("cleanup task was cancelled; owned work state unverified")
+        if failure is not None:
+            errors.append(f"cleanup failed: {type(failure).__name__}: {str(failure)[:200]}")
+        hook_failures = tuple(self._disposal_hook_failures)
+        if complete and hook_failures:
+            # Ordinary disposal logs-and-continues past a failing hook; the
+            # receipt must NOT read that non-masking policy as evidence the
+            # resource was released (R7).
+            complete = False
+            errors.extend(hook_failures)
         pending_jobs = tuple(job.id for job in self.jobs.list() if job.status == "running")
         in_flight = bool(getattr(self._stream_fn, "child_model_requests_in_flight", False))
         if complete and pending_jobs:
@@ -24915,7 +24976,14 @@ class Session:
         if complete and in_flight:
             complete = False
             errors.append("a descendant provider stream was still in flight after cleanup")
-        holder = getattr(self._stream_fn, "_request_observers", None)
+        # The observer holder lives on the ROOT stream; a child's stream only
+        # REFERENCES it. Reading the child's own attribute would report a
+        # local zero while subscriptions and delivery count on the shared
+        # root -- resolve the same holder they do (R6), read-only so the
+        # unobserved path allocates nothing.
+        stream = self._stream_fn
+        root_stream = getattr(stream, "_observation_root", None) or stream
+        holder = getattr(root_stream, "_request_observers", None)
         result = OwnedShutdownResult(
             complete=complete,
             reason=reason,
@@ -24930,6 +24998,55 @@ class Session:
         return result
 
     async def dispose(self) -> None:
+        """Dispose the session, JOINING the one canonical cleanup.
+
+        This is the entry every existing caller uses (the SDK context exit,
+        the runtime's own teardown): it closes admission synchronously and
+        then joins the canonical disposal task -- the same task
+        ``shutdown_owned_work`` joins, so no entrant can observe a "finished"
+        dispose while another entrant's cleanup is still running (R2). A
+        reentrant call from INSIDE the cleanup (a disposal hook, a wrapper)
+        returns immediately: awaiting the task from within itself would
+        deadlock, and the cleanup it is asking for is the one already running.
+        """
+        task = self._disposal_task
+        if task is not None and task is asyncio.current_task():
+            return
+        try:
+            await self._canonical_disposal()
+        except asyncio.CancelledError:
+            # Two distinct cases hide behind one exception type. The WAITER
+            # was cancelled: re-raise, cancellation stays honest. Or the
+            # canonical cleanup ITSELF ended cancelled (a hook raised
+            # CancelledError, or an external cancel): ordinary entrants keep
+            # the historical non-raising behaviour -- the owning receipt is
+            # where that state is reported truthfully (R3), and raising it
+            # into an SDK context exit would blame the body that merely asked
+            # for disposal. The `cancelling()` check is what keeps the two
+            # apart.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+            return
+
+    def _canonical_disposal(self) -> "asyncio.Task[None]":
+        """Start (once) or return the canonical disposal task.
+
+        The single retention point shared by ordinary ``dispose``, the SDK
+        context exit and ``shutdown_owned_work``. Sets ``_disposed`` (the
+        admission latch) synchronously with the FIRST entrant, exactly as the
+        old entry-side set did, so liveness gates see the close at the same
+        moment they always did -- but completion is now this task settling,
+        which every entrant can actually join.
+        """
+        task = self._disposal_task
+        if task is None:
+            self._disposed = True
+            task = asyncio.ensure_future(self._dispose_impl())
+            self._disposal_task = task
+        return task
+
+    async def _dispose_impl(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
         transcript, then run dispose hooks.
@@ -24937,11 +25054,9 @@ class Session:
         Order matters: the running turn is aborted and AWAITED (bounded)
         before anything is torn down, so its persistence and event emission
         complete against live objects; background wake deliveries and aside
-        writes are cancelled next; the task group is closed last.
+        writes are cancelled next; the task group is closed last. Runs ONCE
+        per session, behind ``_canonical_disposal``.
         """
-        if self._disposed:
-            return
-        self._disposed = True
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -25302,7 +25417,14 @@ class Session:
                     outcome = hook()
                     if inspect.isawaitable(outcome):
                         await outcome
-                except Exception:
+                except Exception as exc:
+                    # Recorded as well as logged: ordinary disposal must keep
+                    # logging-and-continuing (teardown cannot mask), but the
+                    # owning shutdown receipt must be able to say the resource
+                    # was NOT confirmed released (R7). A future simplification
+                    # that drops this append turns that receipt into a false
+                    # success again -- the list is load-bearing.
+                    self._disposal_hook_failures.append(_dispose_hook_failure_label(hook, exc))
                     logger.warning("session dispose hook failed", exc_info=True)
             # ...and the late hooks LAST, after every one of those has had its
             # turn: they are the resources the ordinary hooks still need (see
@@ -25313,5 +25435,9 @@ class Session:
                     outcome = hook()
                     if inspect.isawaitable(outcome):
                         await outcome
-                except Exception:
+                except Exception as exc:
+                    # Same capture as the ordinary loop: the LAST hooks are
+                    # the resources the others wait on, so a failure here is
+                    # exactly what the receipt must not round up to success.
+                    self._disposal_hook_failures.append(_dispose_hook_failure_label(hook, exc))
                     logger.warning("session dispose hook failed", exc_info=True)

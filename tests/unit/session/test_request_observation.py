@@ -293,24 +293,74 @@ async def test_handler_failure_is_counted_surfaced_and_never_raised(caplog) -> N
     assert holder is not None and holder.callback_errors == 1
 
 
-def test_viewer_facade_refuses_owning_methods_clearly(tmp_path) -> None:
-    """AttachedSession refuses with the owning-runtime remedy, never an inert
-    subscriber or a fake shutdown receipt."""
+def test_protocol_split_keeps_viewers_non_owning() -> None:
+    """The owning surface lives on its own protocol extension (review round 1,
+    R1): the shared ``SessionProtocol`` and every structural conformer built
+    against it stay unchanged, a real ``Session`` carries the methods, and a
+    viewer facade simply is NOT an owner -- no stub is grown anywhere."""
+    from typing import _get_protocol_attrs  # type: ignore[attr-defined]
+
     from local_operator.session.attached import AttachedSession
-
-    viewer = AttachedSession(
-        config_dir=tmp_path / "cfg",
-        session_id="viewer-session",
-        takeover_factory=lambda: None,
+    from local_operator.session.protocol import (
+        OwningSessionProtocol,
+        SessionProtocol,
+        ViewerSessionProtocol,
     )
-    with pytest.raises(RuntimeError, match="OWNING runtime"):
-        viewer.subscribe_requests(lambda _row: None)
+    from local_operator.session.session import Session
 
-    async def drive() -> None:
-        with pytest.raises(RuntimeError, match="OWNING runtime"):
-            await viewer.shutdown_owned_work("test")
+    own_attrs = set(_get_protocol_attrs(OwningSessionProtocol))
+    assert {"subscribe_requests", "shutdown_owned_work"} <= own_attrs
+    shared_attrs = set(_get_protocol_attrs(SessionProtocol))
+    assert not (
+        {"subscribe_requests", "shutdown_owned_work"} & shared_attrs
+    ), "the shared protocol must not grow owning members: every FakeSession would need stubs"
+    viewer_attrs = set(_get_protocol_attrs(ViewerSessionProtocol))
+    assert not ({"subscribe_requests", "shutdown_owned_work"} & viewer_attrs)
+    # Real Session carries them; the viewer never pretends to.
+    assert callable(Session.subscribe_requests)
+    assert callable(Session.shutdown_owned_work)
+    assert not hasattr(AttachedSession, "subscribe_requests")
+    assert not hasattr(AttachedSession, "shutdown_owned_work")
 
-    asyncio.run(drive())
+
+@pytest.mark.asyncio
+async def test_unsubscribe_is_registration_exact_and_idempotent() -> None:
+    """A stale unsubscribe cannot remove a LATER registration of the same
+    callable, and a repeated call removes nothing: the handle matches its own
+    registration identity once (review round 1, R4)."""
+    stream = _stream()
+    seen: list[ro.RequestFinalObservation] = []
+    old = stream.subscribe_requests(seen.append)
+    old()  # remove the first registration
+    new = stream.subscribe_requests(seen.append)
+    old()  # MUST NOT remove the new registration
+    holder = stream._request_observers
+    assert holder is not None and holder.subscriber_count == 1
+    await _drain(stream, _request(), _wire(Usage(usd_cost=0.1, provider="p", model_id="m")))
+    assert len(seen) == 1, "the surviving registration must still be delivered to"
+    new()  # now remove it for real
+    assert holder.subscriber_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_error_from_handler_is_isolated_and_counted() -> None:
+    """An observer-raised CancelledError is a callback failure: counted, the
+    remaining start-time subscriber still receives, and the request path
+    completes normally -- a handler must never cancel a COMPLETED request
+    (review round 1, R5)."""
+    stream = _stream()
+    good: list[ro.RequestFinalObservation] = []
+
+    def cancelling(_row: ro.RequestFinalObservation) -> None:
+        raise asyncio.CancelledError("observer tried to cancel a finished request")
+
+    stream.subscribe_requests(cancelling)
+    stream.subscribe_requests(good.append)
+
+    await _drain(stream, _request(), _wire(Usage(usd_cost=0.1, provider="p", model_id="m")))
+    assert len(good) == 1, "the healthy subscriber must still be delivered to"
+    holder = stream._request_observers
+    assert holder is not None and holder.callback_errors == 1
 
 
 @pytest.mark.asyncio

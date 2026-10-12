@@ -46,6 +46,7 @@ observation after a failed subscriber.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,7 +61,9 @@ logger = logging.getLogger("local_operator.session.request_observation")
 REQUEST_OBSERVATION_SCHEMA_VERSION = "request-final-observation-v1"
 
 #: One observer: called once per finished request, synchronously, with an
-#: immutable record. It must return promptly; it must not await.
+#: immutable record. It must return promptly; it must not await. A handler
+#: that raises is isolated and counted -- including ``CancelledError``, which
+#: is treated as a callback failure, never as cancellation of the request.
 RequestObserver = Callable[["RequestFinalObservation"], None]
 
 
@@ -176,7 +179,14 @@ class OwnedShutdownResult:
 
 @dataclass
 class _SubscriberState:
-    handlers: list[RequestObserver] = field(default_factory=list)
+    #: Registration TOKEN -> handler. Keyed by a per-subscription ``object()``
+    #: identity, never by handler equality: the same callable may be
+    #: registered twice, and an unsubscribe must remove ITS OWN registration
+    #: once -- a stale handle must not be able to remove a later one
+    #: (review round 1, R4). The dict spelling also keeps the removal out of
+    #: the source-deletion guard's call-shape set honestly: this is a
+    #: registry pop by unique identity, not a filesystem ``remove``.
+    registrations: dict[object, RequestObserver] = field(default_factory=dict)
     callback_errors: int = 0
 
 
@@ -188,18 +198,21 @@ class RequestSubscriberHolder:
     tree) is the whole fast path -- no allocation, no callback, no per-delta
     check, no extra clock on the ordinary path.
 
-    ``subscribe`` returns an idempotent unsubscribe: calling it twice, or from
-    any thread of the event loop, is safe and removes the registration once.
-    Unsubscribing does NOT retroactively drop requests already in flight --
-    their handler set was snapshotted at request start, so a request begun
-    while subscribed is delivered even if the caller unsubscribes before it
-    finishes. That is what lets a caller hold the subscription until shutdown
-    settles to capture cancellation-final usage.
+    ``subscribe`` returns an idempotent unsubscribe bound to THAT ONE
+    registration: calling it twice removes nothing the second time, and it
+    can never remove a later registration of the same callable (the token
+    identity, not handler equality, is what it matches). Unsubscribing does
+    NOT retroactively drop requests already in flight -- their handler set
+    was snapshotted at request start, so a request begun while subscribed is
+    delivered even if the caller unsubscribes before it finishes. That is
+    what lets a caller hold the subscription until shutdown settles to
+    capture cancellation-final usage.
 
     Delivery is synchronous and per-request bounded (one record; one call per
-    handler). Handler exceptions are logged and counted, never raised out: an
+    handler). Handler exceptions -- including a handler-raised
+    ``CancelledError`` -- are logged and counted, never raised out: an
     observer bug must not mask the provider's outcome or erase a completed
-    request.
+    request (review round 1, R5).
     """
 
     __slots__ = ("_state",)
@@ -210,13 +223,14 @@ class RequestSubscriberHolder:
     def subscribe(self, handler: RequestObserver) -> Callable[[], None]:
         """Register ``handler``; returns the idempotent unsubscribe closure."""
         state = self._state
-        state.handlers.append(handler)
+        registration = object()
+        state.registrations[registration] = handler
 
         def unsubscribe() -> None:
-            try:
-                state.handlers.remove(handler)
-            except ValueError:  # already removed -- idempotent by contract
-                pass
+            # By TOKEN, once: a second call finds nothing (idempotent), and a
+            # stale closure from an earlier registration can never touch a
+            # later one (R4).
+            state.registrations.pop(registration, None)
 
         return unsubscribe
 
@@ -227,7 +241,7 @@ class RequestSubscriberHolder:
 
     @property
     def subscriber_count(self) -> int:
-        return len(self._state.handlers)
+        return len(self._state.registrations)
 
     def snapshot(self) -> tuple[RequestObserver, ...]:
         """The handler set for ONE request, captured at its start.
@@ -236,7 +250,17 @@ class RequestSubscriberHolder:
         while this request is in flight cannot change what this request
         delivers to -- the request-start snapshot is the recorded contract.
         """
-        return tuple(self._state.handlers)
+        return tuple(self._state.registrations.values())
+
+    def note_delivery_failure(self, what: str) -> None:
+        """Count a delivery failure the per-handler loop could not see.
+
+        Used by the stream wrapper's belt for a ``CancelledError`` escaping
+        the build path; the holder is the one place the count lives so the
+        owning session's shutdown receipt reports it.
+        """
+        self._state.callback_errors += 1
+        logger.warning("request observation delivery failed: %s", what, exc_info=True)
 
     def notify(
         self, handlers: tuple[RequestObserver, ...], observation: RequestFinalObservation
@@ -256,6 +280,19 @@ class RequestSubscriberHolder:
             view = observation if len(handlers) == 1 else _with_detached_usage(observation)
             try:
                 handler(view)
+            except asyncio.CancelledError:
+                # OBSERVER-originated, isolated explicitly (R5): the delivery
+                # loop is synchronous, so a CancelledError raised here came
+                # from the handler itself -- it must not cancel the model
+                # loop that is merely unwinding a COMPLETED request, must not
+                # skip the remaining start-time subscribers, and must not
+                # mask the provider's successful result. Counted like any
+                # other handler failure and swallowed at this boundary only.
+                state.callback_errors += 1
+                logger.warning(
+                    "request observation handler raised CancelledError; counted and isolated",
+                    exc_info=True,
+                )
             except Exception:  # noqa: BLE001 -- a subscriber must never break a turn
                 state.callback_errors += 1
                 logger.warning("request observation handler failed", exc_info=True)

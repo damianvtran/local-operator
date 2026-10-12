@@ -895,7 +895,7 @@ async def test_cancellation_resistant_cleanup_times_out_honestly(
         async def stubborn() -> None:
             await asyncio.sleep(0.5)
 
-        monkeypatch.setattr(session, "dispose", stubborn)
+        monkeypatch.setattr(session, "_dispose_impl", stubborn)
         receipt = await session.shutdown_owned_work("test-stubborn", timeout_s=0.05)
         assert receipt.complete is False
         assert any("timeout" in error for error in receipt.errors), receipt.errors
@@ -947,3 +947,267 @@ async def test_observer_failure_does_not_mask_outcome_and_surfaces_on_receipt(
         receipt.observer_callback_errors == 3
     ), "every failed delivery is counted on the receipt (bad raised once per request)"
     assert receipt.complete is True, receipt
+
+
+# ---------------------------------------------------------------------------
+# Canonical disposal join, cancellation truth, hook-failure truth (R2/R3/R7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_an_already_running_disposal_and_reports_truthfully(
+    scratch: Any, wire: Wire
+) -> None:
+    """Ordinary ``dispose`` and ``shutdown_owned_work`` share ONE cleanup
+    (R2): a shutdown racing a disposal-in-progress waits for THAT cleanup -- it
+    must not start a second (early-returning) one, must NOT cache an incomplete
+    receipt, and returns the completed receipt once the shared cleanup settles."""
+    async with _opened(scratch) as session:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        runs: list[str] = []
+
+        async def teardown() -> None:
+            runs.append("hook")
+            entered.set()
+            await release.wait()
+
+        session.add_dispose_hook(teardown, last=True)
+        ordinary = asyncio.create_task(session.dispose())
+        await asyncio.wait_for(entered.wait(), 10)
+
+        receipt = await session.shutdown_owned_work("join-existing-dispose", timeout_s=0.03)
+        assert receipt.complete is False, "the shared cleanup is still pending"
+        assert any("timeout" in error for error in receipt.errors), receipt.errors
+        assert session._owned_shutdown_result is None, "an incomplete receipt is never cached"
+        assert not ordinary.done(), "the ordinary disposal still owns the pending cleanup"
+
+        release.set()
+        await ordinary
+        again = await session.shutdown_owned_work("join-existing-dispose", timeout_s=10)
+        assert again.complete is True, again.errors
+        third = await session.shutdown_owned_work("anything", timeout_s=10)
+        assert third is again, "a complete receipt is the same object on repeat calls"
+        assert runs == ["hook"], "simultaneous entrants run the cleanup ONCE"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cleanup_is_incomplete_unverified_and_never_cached(
+    scratch: Any, wire: Wire, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3: a cancelled cleanup is UNVERIFIED -- never success, never cached --
+    whether the cancellation came from a raising hook or from outside, and the
+    ordinary dispose entry stays non-raising for it (historical behaviour)."""
+    # A: the cleanup task ends cancelled because a hook raised CancelledError.
+    async with _opened(scratch) as session:
+
+        async def cancelled_teardown() -> None:
+            raise asyncio.CancelledError("scripted host cleanup cancellation")
+
+        session.add_dispose_hook(cancelled_teardown, last=True)
+        receipt = await session.shutdown_owned_work("cancelled-cleanup", timeout_s=5)
+        assert receipt.complete is False, "cancellation proves nothing about resources"
+        assert any("cancelled" in error for error in receipt.errors), receipt.errors
+        task = session._owned_shutdown_task
+        assert task is not None and task.cancelled()
+        assert session._owned_shutdown_result is None, "a cancelled cleanup must never cache"
+
+        again = await session.shutdown_owned_work("cancelled-cleanup", timeout_s=5)
+        assert again.complete is False
+        assert session._owned_shutdown_result is None
+        await session.dispose()  # joining a cancelled canonical cleanup is quiet
+
+    # B: an EXTERNAL cancel of the retained canonical cleanups reports the same truth.
+    async with _opened(scratch) as session:
+
+        async def stubborn() -> None:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(session, "_dispose_impl", stubborn)
+        first = await session.shutdown_owned_work("external-cancel", timeout_s=0.05)
+        assert first.complete is False
+        task = session._owned_shutdown_task
+        assert task is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        second = await session.shutdown_owned_work("external-cancel", timeout_s=5)
+        assert second.complete is False
+        assert any("cancelled" in error for error in second.errors), second.errors
+        assert session._owned_shutdown_result is None
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_hook_is_reported_never_read_as_success(
+    scratch: Any, wire: Wire
+) -> None:
+    """R7: a disposal hook that raises is logged-and-continued by ordinary
+    disposal (pre-existing policy) but the owning receipt must NOT read that
+    as success -- incomplete, the hook failure named, and never cached."""
+    async with _opened(scratch) as session:
+
+        async def failed_teardown() -> None:
+            raise RuntimeError("scripted resource close failed before release")
+
+        session.add_dispose_hook(failed_teardown, last=True)
+        receipt = await session.shutdown_owned_work("failed-hook", timeout_s=5)
+        assert receipt.complete is False
+        assert any("failed_teardown" in error for error in receipt.errors), receipt.errors
+        assert any("RuntimeError" in error for error in receipt.errors), receipt.errors
+        assert session._owned_shutdown_result is None
+        # Ordinary disposal itself remains non-raising, exactly as before.
+        await session.dispose()
+        again = await session.shutdown_owned_work("failed-hook", timeout_s=5)
+        assert again.complete is False and session._owned_shutdown_result is None
+
+
+# ---------------------------------------------------------------------------
+# Observer-originated CancelledError on the REAL session (R5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_observer_cancelled_error_is_isolated_on_the_real_session(
+    scratch: Any, wire: Wire
+) -> None:
+    """A subscriber raising CancelledError must not surface as a cancellation
+    of a COMPLETED request: the turn returns its text, the helper returns its
+    text, the healthy subscriber still receives, and the count lands on the
+    receipt (R5)."""
+    wire.script("parent", text_turn("still fine"))
+    wire.script("helper", text_turn("HELP"))
+    async with _opened(scratch) as session:
+        good: list[RequestFinalObservation] = []
+
+        def cancelling(_row: RequestFinalObservation) -> None:
+            raise asyncio.CancelledError("observer tried to cancel a finished request")
+
+        session.subscribe_requests(cancelling)
+        session.subscribe_requests(good.append)
+        await session.prompt(f"{_PARENT_MARKER}: cancellation isolation")
+        helper = await session._one_shot_complete("system", "helper after observer cancellation")
+        assert helper == "HELP", "the helper call must return its text, not raise CancelledError"
+        assert "still fine" in _transcript_text(session)
+        assert len(good) == 2
+        receipt = await session.shutdown_owned_work("test-done", timeout_s=15)
+    assert receipt.complete is True, receipt
+    assert receipt.observer_callback_errors == 2
+
+
+# ---------------------------------------------------------------------------
+# Root-tree scope of a child-installed subscription + child receipt (R6/R8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_child_subscription_is_root_scoped_and_child_receipt_reports_tree_errors(
+    scratch: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R8/R6 on a REAL native tree: a subscription installed through a CHILD
+    observes the whole original root tree -- ancestors and siblings, every
+    ``tree_id`` naming the root -- and the child's shutdown receipt reports the
+    SHARED root holder's callback-error count, not a local zero."""
+    from types import MethodType
+
+    from local_operator.harness import subagent as subagent_module
+    from local_operator.providers.clients import MockClient
+
+    release = asyncio.Event()
+    both_parked = asyncio.Event()
+    state: dict[str, Any] = {"children": [], "parked": 0, "parent_calls": 0}
+    original_construct = subagent_module._construct_child_session
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        child = await original_construct(*args, **kwargs)
+        state["children"].append(child)
+        return child
+
+    monkeypatch.setattr(subagent_module, "_construct_child_session", capture)
+
+    async def stream(
+        _bound: Any, request: ChatRequest, api_key: Any = None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+        text = str(getattr(last_user, "text", "") or "")
+        if "CHILD-HOLD" in text:
+            state["parked"] += 1
+            if state["parked"] >= 2:
+                both_parked.set()
+            yield StreamTextDelta(delta="child-started")
+            await release.wait()
+            yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=2))
+            return
+        if "HELPER-" in text:
+            yield StreamTextDelta(delta="helper-ok")
+            yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=2))
+            return
+        if "background job" in text:
+            yield StreamTextDelta(delta="delivery noted")
+            yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=2))
+            return
+        # The parent's launch turn, then its follow-up after the tool results.
+        state["parent_calls"] += 1
+        if state["parent_calls"] == 1:
+            for index, child_id in enumerate(("a", "b")):
+                yield StreamToolCallDelta(index=index, id=f"call-{child_id}", name="task")
+                yield StreamToolCallDelta(
+                    index=index,
+                    argument_delta=json.dumps(
+                        {"label": f"kid-{child_id}", "prompt": "CHILD-HOLD: wait for the test"}
+                    ),
+                )
+            yield StreamEndEvent(
+                stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=2)
+            )
+        else:
+            yield StreamTextDelta(delta="parent done")
+            yield StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=2))
+
+    monkeypatch.setattr(MockClient, "stream", MethodType(stream, object()))
+
+    async with _opened(scratch) as session:
+        await session.prompt("PARENT-LAUNCH: start two children")
+        await asyncio.wait_for(both_parked.wait(), 20)
+        assert len(state["children"]) == 2
+        child, sibling = state["children"]
+        assert child.session_id != sibling.session_id
+
+        seen: list[RequestFinalObservation] = []
+
+        def failing(_row: RequestFinalObservation) -> None:
+            raise ValueError("native child observer callback failed")
+
+        child.subscribe_requests(seen.append)
+        child.subscribe_requests(failing)
+
+        # Helpers through the parent, the subscribing child, and its SIBLING:
+        # all three rows must land on the child-installed subscription (R8),
+        # and every row must name the ROOT tree.
+        helpers = (
+            await session._one_shot_complete("system", "HELPER-PARENT"),
+            await child._one_shot_complete("system", "HELPER-CHILD"),
+            await sibling._one_shot_complete("system", "HELPER-SIBLING"),
+        )
+        assert helpers == ("helper-ok",) * 3
+        observed_sessions = {row.session_id for row in seen}
+        assert {
+            session.session_id,
+            child.session_id,
+            sibling.session_id,
+        } <= observed_sessions, "a child-installed subscription covers ancestors and siblings"
+        assert all(row.tree_id == session.session_id for row in seen), "tree_id names the ROOT"
+
+        root_holder = session._stream_fn._request_observers
+        assert root_holder is not None and root_holder.callback_errors >= 3
+
+        release.set()
+        child_receipt = await child.shutdown_owned_work("child-local-cleanup", timeout_s=20)
+        # R6: the child receipt reads the SHARED root holder, not a local zero.
+        assert child_receipt.observer_callback_errors == root_holder.callback_errors
+        assert child_receipt.observer_callback_errors >= 3
+        assert child_receipt.complete is True, child_receipt.errors
+
+        root_receipt = await session.shutdown_owned_work("tree-cleanup", timeout_s=20)
+        assert root_receipt.complete is True, root_receipt.errors
+        await _settle(session)

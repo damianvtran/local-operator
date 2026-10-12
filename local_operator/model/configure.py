@@ -17,6 +17,7 @@ and dispatching to the right wire client through
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
 import inspect
@@ -4012,6 +4013,22 @@ class SessionStreamFn:
                 duration_ms=duration_ms,
             )
             holder.notify(handlers, observation)
+        except asyncio.CancelledError:
+            # Belt for an OBSERVER-originated CancelledError escaping the
+            # build/delivery path (the per-handler loop in ``notify`` isolates
+            # its own): the block above is synchronous, so a CancelledError
+            # raised here came from observer code — an ambient cancellation of
+            # the request is delivered at awaits, and there is none. Counted
+            # like any callback failure and never allowed to mask the
+            # provider's successful result (review round 1, R5). The request's
+            # OWN cancellation accounting is untouched: that is ``ok`` /
+            # ``outcome`` on the record, set by the caller.
+            try:
+                holder, _handlers = target
+            except Exception:  # noqa: BLE001 -- counting must not become the failure
+                holder = None
+            if holder is not None:
+                holder.note_delivery_failure("CancelledError escaped the delivery block")
         except Exception:  # noqa: BLE001 -- observation never breaks a turn
             logger.warning("request observation delivery failed", exc_info=True)
 
