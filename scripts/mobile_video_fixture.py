@@ -6,8 +6,9 @@ Login at http://127.0.0.1:<port>. The password is NOT fixed and never printed:
 pass it as the second argument (or set ``LOP_MOBILE_FIXTURE_PASSWORD``) — see
 the sibling fixtures' note on why a literal here would be a reusable credential.
 
-Seven sessions, one per state the video card ships in round 1 of the surfaces
-programme — tap each from the list with the shot script beside this file:
+Ten sessions, one per state the video card ships in round 1 of the surfaces
+programme plus the two player states of the bounded follow-up (§3.2) — tap
+each from the list with the shot script beside this file:
 
 * ``Video gen queued``           — announced, nothing started, no datum: the
   state line alone. The card must NOT offer the cancel control (a video job is
@@ -33,6 +34,13 @@ programme — tap each from the list with the shot script beside this file:
   custom row (the frozen §5.1 receipt text ``Session._job_result_message``
   writes) folded through the production fold into the notice entry the relay
   renders — the completion's v1 presence, photographed rather than argued.
+* ``Video gen player``          — the follow-up's READY state: a done row whose
+  video ref resolves through the PRODUCTION attachment route to a real,
+  decodable clip (``_seed_player_transcript``) — the browser's own media
+  stack ranges the bytes in, so the frame is a player over real bytes.
+* ``Video gen player missing``  — the follow-up's FAILURE state: the same ref
+  with nothing behind it (no transcript seeded), so the route answers 404
+  and the card states ``video unavailable`` — photographed, not argued.
 
 The canonical live-detail bag (``stage``/``queue_position``/
 ``progress_fraction``/``log_lines``/``error``/``error_type``) is read from
@@ -84,6 +92,87 @@ RECEIPT = (
 #: structured category beside it.
 PROVIDER_ERROR = "This generation failed before producing output."
 PROVIDER_ERROR_TYPE = "media_rejected"
+
+
+#: A real, decodable, TINY test clip (1 s, 128x72, H.264 baseline, ~4 KB),
+#: EMBEDDED because the rig's fixture must serve REAL bytes through the
+#: production attachment route for the browser to decode — a stubbed body
+#: would prove nothing about the player or its Range requests. Clearly a test
+#: asset: generated once with ffmpeg's own test source, not a user recording.
+TEST_VIDEO_MP4_B64 = (
+    "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAANNbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+"
+    "gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAgAAAnd0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAA"
+    "AAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAIAAAABIAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAA"
+    "AAEAAAPoAAAAAAABAAAAAAHvbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAAKABVxAAAAAAALWhkbHIAAAAAAA"
+    "AAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABmm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5m"
+    "AAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAVpzdGJsAAAAunN0c2QAAAAAAAAAAQAAAKphdmMxAAAAAAAAAA"
+    "EAAAAAAAAAAAAAAAAAAAAAAIAASABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAA"
+    "GP//AAAAMGF2Y0MBQsAe/+EAGGdCwB7ZAgv5cBEAAAMAAQAAAwAUDxYuSAEABWjLgOSyAAAAEHBhc3AAAAABAAAAAQ"
+    "AAABRidHJ0AAAAAAAAZpgAAAAAAAAAGHN0dHMAAAAAAAAAAQAAAAoAAAQAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAAAc"
+    "c3RzYwAAAAAAAAABAAAAAQAAAAoAAAABAAAAPHN0c3oAAAAAAAAAAAAAAAoAAAVjAAAA8gAAALMAAAC6AAAAwQAAAP"
+    "kAAACwAAABAgAAAL0AAADoAAAAFHN0Y28AAAAAAAAAAQAAA30AAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAA"
+    "AAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYyLjEyLjEwMg"
+    "AAAAhmcmVlAAAM221kYXQAAAJxBgX//23cRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYw"
+    "NWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2"
+    "xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgx"
+    "OjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MT"
+    "YgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBj"
+    "aHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MiBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbn"
+    "I9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJh"
+    "bWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xMCBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPT"
+    "AgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9NDAuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9"
+    "NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAupliIQn+IrBgQh+KMuF4Tf19x/XtyRSbGq0lY"
+    "kjtA+8IhMobgEgCbOSHAaGmEUVkSRQqWHpXF4JojERg/6eNL/DfBql6Tw3KPLI8Ihoctv2DcwAZM51EpfJ+waY1YiJ"
+    "uImNihGvlqFrIN9LyCuDn6m+8T4cYdp7L69/FaDbVQdadQCbVi/saZJ1IWWKyviF3iMBEIbYjH/NkymZ5VJlNKECGa"
+    "yuWVFy3MKATcSSBjEqKy6f28cQKO17RypvjjiDCEAgyGiiFL2SZWyDUx2/IdyHb8bbXJhamOOPUYTGEJM1o6Q5TShV"
+    "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"
+)
+
+#: The clip's length, carried on the ref like any artifact's duration.
+TEST_VIDEO_DURATION_S = 1.0
+
+
+def _video_bytes() -> bytes:
+    """The embedded test clip, decoded per call (fixture lifetime only)."""
+    import base64
+
+    return base64.b64decode(TEST_VIDEO_MP4_B64)
 
 
 def required_password(args: list[str]) -> str:
@@ -326,6 +415,81 @@ def _receipt_projection() -> SessionProjection:
     )
 
 
+def _player_projection() -> SessionProjection:
+    """The done card carrying a REAL video ref: the player's bytes are served
+    by the production attachment route from the seeded transcript (see
+    ``_seed_player_transcript``), so the frame a player over real bytes, not
+    a stub."""
+    return _projection(
+        "videogen-player",
+        "Video gen player",
+        900309,
+        _video_card_entry(
+            tool_state="done",
+            elapsed_s=8.0,
+            videos=[
+                {
+                    "index": 0,
+                    "mime_type": "video/mp4",
+                    "duration_s": TEST_VIDEO_DURATION_S,
+                }
+            ],
+        ),
+        running=False,
+    )
+
+
+def _player_missing_projection() -> SessionProjection:
+    """The done card whose ref resolves to NOTHING: no transcript is seeded for
+    this session, so the production route answers 404 and the card states
+    ``video unavailable`` — the designed failure state, photographed rather
+    than argued."""
+    return _projection(
+        "videogen-player-missing",
+        "Video gen player missing",
+        900310,
+        _video_card_entry(
+            tool_state="done",
+            elapsed_s=8.0,
+            videos=[{"index": 0, "mime_type": "video/mp4"}],
+        ),
+        running=False,
+    )
+
+
+async def _seed_player_transcript(session_id: str) -> None:
+    """Write the artifact the production attachment route serves.
+
+    ``daemon._attachment_bytes(kind="video")`` resolves bytes from the
+    ON-DISK transcript by message id — or tool call id, the row id
+    ``tc-call-vid`` recovered to its call — so this seeds a real
+    ``transcript.jsonl`` through the real ``Transcript`` API into the
+    isolated config root and registers the clip through the real
+    ``cache_media`` store call: the capture exercises the production route
+    end to end (lazy fetch, Range/206, immutable caching), not a stub of it.
+    """
+    from local_operator.harness.types import Message, TextContent, ToolResult
+    from local_operator.paths import config_dir
+    from local_operator.session.attachments import cache_media
+    from local_operator.session.transcript import Transcript
+
+    artifact = cache_media(
+        _video_bytes(), "video/mp4", kind="video", duration_s=TEST_VIDEO_DURATION_S
+    )
+    if artifact is None:
+        raise SystemExit("the embedded test clip could not be registered in the store")
+    message = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-vid",
+            tool_name="generate_video",
+            content=[TextContent(text="Video ready"), artifact],
+        )
+    )
+    directory = config_dir() / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    await Transcript(directory).append_message(message)
+
+
 def _ensure_session_dir(session_id: str) -> None:
     """Create the conversation directory the session LISTING requires.
 
@@ -352,6 +516,8 @@ async def main() -> None:
         _failed_projection(),
         _already_finished_projection(),
         _receipt_projection(),
+        _player_projection(),
+        _player_missing_projection(),
     ):
         record = SessionRecord(
             pid=projection.pid,
@@ -368,6 +534,10 @@ async def main() -> None:
         _ensure_session_dir(projection.session_id)
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
+    # The player's bytes: the real clip behind the real route for the READY
+    # session; the MISSING session is deliberately left unseeded so its ref
+    # resolves to nothing.
+    await _seed_player_transcript("videogen-player")
     app = build_app(daemon)
     print(f"Fixture mobile: http://127.0.0.1:{port}", flush=True)
     await uvicorn.Server(

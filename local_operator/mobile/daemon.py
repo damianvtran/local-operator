@@ -42,7 +42,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -2624,14 +2624,28 @@ def _history_page(
 
 
 def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:
-    """Decode the ``index``-th image block of message ``entry_id`` from the
-    session's on-disk transcript into raw bytes plus mime type.
+    """The image family's resolution: ``_attachment_bytes`` with ``kind="image"``.
+
+    Kept as its own name because the image route and its tests read through
+    it; the split changed no image semantics — the walk below still counts
+    inline images and store-backed artifacts of kind ``image`` on one shared
+    index.
+    """
+    return _attachment_bytes(record, entry_id, index, "image")
+
+
+def _attachment_bytes(
+    record: SessionRecord, entry_id: str, index: int, kind: str
+) -> tuple[bytes, str] | None:
+    """Decode the ``index``-th block of ``kind`` on message ``entry_id`` from
+    the session's on-disk transcript into raw bytes plus mime type.
 
     Reads from disk (not the live fold) so it serves attachments from history
     the projection tail dropped as well as recent ones, and reuses the
-    transcript's own attachment resolution — the same base64 the model saw.
-    Returns ``None`` for any miss (unknown message, out-of-range index, a
-    reference that no longer resolves) so the caller answers a clean 404.
+    transcript's own attachment resolution — the same bytes the model saw (or
+    the store digest it referenced). Returns ``None`` for any miss (unknown
+    message, out-of-range index, an unknown kind, a reference that no longer
+    resolves) so the caller answers a clean 404.
 
     Runs off the event loop (``asyncio.to_thread`` at the call site): building
     the history rehydrates every message and is not loop-safe work.
@@ -2679,18 +2693,29 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
             )
     if message is None or not isinstance(message.content, list):
         return None
-    # ``index`` is the position among IMAGE blocks (what _image_refs emits),
-    # not among all content blocks — text blocks do not count. THE WALK IS THE
-    # CONTRACT with ``projection._image_refs``: both count inline image blocks
-    # and output artifacts of kind ``image`` (``AttachmentContent``) on one
-    # shared index, in content order; either side changing alone fetches the
-    # wrong bytes for every later block.
-    blocks = [
-        block
-        for block in message.content
-        if isinstance(block, ImageContent)
-        or (isinstance(block, AttachmentContent) and block.kind == "image")
-    ]
+    # ``index`` is the position among blocks of ``kind`` (what the family's
+    # refs walk emits), not among all content blocks — text blocks do not
+    # count. THE WALK IS THE CONTRACT with the projection: ``kind="image"``
+    # (``projection._image_refs``) counts inline image blocks and output
+    # artifacts of kind ``image`` on one shared index; ``kind="video"``
+    # (``projection._video_refs``) counts ONLY output artifacts of kind
+    # ``video``, in its own index space. Either side changing alone fetches
+    # the wrong bytes for every later block.
+    if kind == "image":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, ImageContent)
+            or (isinstance(block, AttachmentContent) and block.kind == "image")
+        ]
+    elif kind == "video":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, AttachmentContent) and block.kind == "video"
+        ]
+    else:
+        return None
     if index < 0 or index >= len(blocks):
         return None
     block = blocks[index]
@@ -2704,7 +2729,8 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         if resolved is None:
             return None
         raw, sidecar_mime = resolved
-        return raw, block.content_type or sidecar_mime or "image/png"
+        fallback = "image/png" if kind == "image" else "video/mp4"
+        return raw, block.content_type or sidecar_mime or fallback
     data = block.data
     if not data:
         return None
@@ -2714,6 +2740,52 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         logger.warning("image fetch: undecodable base64 for %s[%d]", entry_id, index)
         return None
     return raw, block.mime_type or "image/png"
+
+
+#: A single byte-range (RFC 9110 ``bytes=`` forms): an optional first byte
+#: with an optional inclusive last, or the suffix form (``bytes=-N``).
+#: Anchored, so a malformed or MULTI-range header (``bytes=0-1,5-6``) does
+#: not match and the caller serves the full 200 — the spec's remedy for a
+#: Range the server does not honour.
+_SINGLE_RANGE = re.compile(r"bytes=(\d*)-(\d*)", re.ASCII)
+
+
+def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisfiable"] | None:
+    """Resolve one ``Range`` header against ``size``.
+
+    Three answers, and each has a different HTTP shape on purpose: the
+    inclusive ``(first, last)`` window to serve as 206; ``None`` when there
+    is no single satisfiable range to honour (absent, malformed, multi, or
+    an inverted pair like ``bytes=5-3`` — all ignored, full 200), and
+    ``"unsatisfiable"`` for the one case the spec answers differently: a
+    start at or past EOF is a 416, so a media client learns its request was
+    refused instead of receiving a whole body it did not ask for.
+    """
+    match = _SINGLE_RANGE.fullmatch(header.strip())
+    if match is None:
+        return None
+    first_txt, last_txt = match.groups()
+    if not first_txt and not last_txt:
+        return None  # ``bytes=-``: not one of the grammar's forms; ignore.
+    if first_txt:
+        first = int(first_txt)
+        if first >= size:
+            return "unsatisfiable"
+        if not last_txt:
+            return (first, size - 1)
+        last = int(last_txt)
+        if last < first:
+            return None  # An inverted pair is invalid; ignore the header.
+        return (first, min(last, size - 1))
+    # Suffix form: the LAST N bytes. A suffix at or past EOF is the whole
+    # representation (206 with everything), never an error; ``-0`` selects
+    # nothing and is unsatisfiable by definition.
+    length = int(last_txt)
+    if length == 0:
+        return "unsatisfiable"
+    if length >= size:
+        return (0, size - 1) if size > 0 else "unsatisfiable"
+    return (size - length, size - 1)
 
 
 def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
@@ -5506,6 +5578,75 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    async def api_session_attachment(request: Request) -> Response:
+        """One attachment's bytes, with byte-Range (206) support.
+
+        The generalization of ``api_session_image`` the video player needs:
+        same on-disk transcript resolution, laziness and cache semantics,
+        but keyed by the artifact ``kind`` and answering HTTP Range
+        requests — phone Safari will not play a <video> that arrives as a
+        full-body 200, and a media element asking for a byte window is the
+        normal case, not an exotic one.
+
+        ``kind`` scopes the index: each family (image, video) counts only
+        its own blocks, exactly the walk its refs emitter writes, so a
+        request answers the bytes its ref meant or nothing (404). An
+        unknown kind is a 404 too — nothing of that family exists on this
+        surface.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id:
+            return JSONResponse({"error": "entry id is required"}, status_code=400)
+        kind = request.query_params.get("kind", "")
+        if kind not in ("image", "video"):
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        try:
+            index = int(request.query_params.get("i", "0"))
+        except ValueError:
+            return JSONResponse({"error": "bad attachment index"}, status_code=400)
+        found = await asyncio.to_thread(_attachment_bytes, entry.record, entry_id, index, kind)
+        if found is None:
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        data, mime_type = found
+        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
+        window = _range_window(request.headers.get("range", ""), len(data))
+        if isinstance(window, str):
+            # "unsatisfiable": the spec's own answer for a range set nothing
+            # can satisfy (a start at or past EOF).
+            return Response(
+                content=b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        if window is not None:
+            first, last = window
+            return Response(
+                content=data[first : last + 1],
+                status_code=206,
+                media_type=mime_type,
+                headers={
+                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={"Accept-Ranges": "bytes", **cache},
+        )
+
     # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
     #
     # The response policy and the journal-reference check are shared by the two routes
@@ -7222,6 +7363,7 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
+        Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
         Route(
             "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
             api_session_supplement_document,
