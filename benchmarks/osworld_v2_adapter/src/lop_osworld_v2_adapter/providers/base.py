@@ -258,3 +258,20 @@ class EnvironmentProvider(Protocol):
     async def respond(self, prompt: str) -> str | None:
         """The task's user_simulator answer, or None when the task has none."""
         ...
+
+
+class InstructionUnavailable(RuntimeError):
+    """The environment could not supply a usable task instruction.
+
+    A REFUSAL, not a fallback: it is raised at the reset seam (the
+    post-setup accessor read in ``providers/aws.py``) and at the adapter's
+    initial-text gate, both BEFORE any model request, so an episode that
+    cannot honestly show the model its task fails as an apparatus error with
+    its owned cleanup, instead of starting a billed run against absent,
+    stale or fabricated task text. It must never be softened into a default
+    value: there is no correct default for "what am I supposed to do".
+
+    It lives here, beside the provider protocol, because both sides of that
+    seam raise it -- an environment backend that cannot read the text, and
+    the adapter that refuses a reset observation carrying none.
+    """

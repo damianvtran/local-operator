@@ -727,3 +727,129 @@ async def test_the_surfaced_cause_is_bounded_by_the_wire(tmp_path: Path, episode
 
     cause_line = next(line for line in text.splitlines() if line.startswith("cause[2]: "))
     assert len(cause_line) <= len("cause[2]: ObservationCauseError: ") + MAX_DETAIL_MESSAGE
+
+
+# ---------------------------------------------------------------------------
+# The initial instruction: observe RPC text is the task the model first sees
+# ---------------------------------------------------------------------------
+
+
+class _InstructedProvider(FakeProvider):
+    """A FakeProvider whose reset observation carries a CHOSEN instruction.
+
+    Stands in for the environment's post-setup accessor read: the provider
+    layer decides the text, and this class lets a runner-level test assert
+    WHICH text the first model request actually receives.
+    """
+
+    def __init__(self, instruction: str | None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._instruction_override = instruction
+
+    async def observe(self) -> dict[str, Any]:
+        raw = await super().observe()
+        if self._instruction_override is None:
+            raw.pop("instruction", None)
+        else:
+            raw["instruction"] = self._instruction_override
+        return raw
+
+
+class _RecordingModel(ScriptedModel):
+    """A ScriptedModel that keeps every observation handed to ``decide``."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.observed: list[Any] = []
+
+    async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
+        self.observed.append(observation)
+        return await super().decide(observation, history, **kwargs)
+
+
+FULL_INSTRUCTION = "Neutral task: open the neutral editor, then finish the profile-governed flow."
+
+
+@pytest.mark.asyncio
+async def test_the_full_runtime_instruction_reaches_the_first_model_request(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The observe RPC's text IS the task the first model request receives.
+
+    The reset observation is the only frame that carries text, so this is the
+    whole task delivery path: provider observe -> adapter observation -> the
+    runner's first request. Equality against the FULL string (which differs
+    from the fake's default) is the discriminating evidence -- a prefix, the
+    stale cache or None would all fail it.
+    """
+
+    provider = _InstructedProvider(FULL_INSTRUCTION, scripted_score=1.0)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    model = _RecordingModel(["finish"])
+
+    runner = EpisodeRunner(
+        _spec_with_task(episode_id),
+        build_config(tmp_path),
+        selector=selector,
+        model=model,
+        launch=lambda _selector: _AdapterSupervisorShim(adapter, selector),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert len(model.observed) == 1
+    assert model.observed[0].text == FULL_INSTRUCTION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instruction", [None, "   "])
+async def test_a_reset_without_instruction_text_fails_before_the_model_runs(
+    instruction: str | None, tmp_path: Path, episode_id: str
+) -> None:
+    """Absent (or blank) task text: apparatus refusal, no model call, no score.
+
+    The adapter's initial-text gate must stop the episode BEFORE the first
+    model request -- the model is never asked to act on nothing -- and the
+    sealed bundle must name the refusal rather than record a scored 0. The
+    blank spelling exercises the gate's own normalization (the builder turns
+    whitespace into None); the absent spelling is the provider that ships no
+    instruction key at all.
+    """
+
+    provider = _InstructedProvider(instruction, scripted_score=1.0)
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    model = _RecordingModel(["finish"])
+
+    runner = EpisodeRunner(
+        _spec_with_task(episode_id),
+        build_config(tmp_path),
+        selector=selector,
+        model=model,
+        launch=lambda _selector: _AdapterSupervisorShim(adapter, selector),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed", outcome.diagnostic
+    assert model.observed == []
+    assert model.calls == 0
+    # NOT a score: the sealed artifact must be an unscored crash with
+    # ``binary=None`` -- the distinction this gate exists to preserve (a 0
+    # would claim the task was run and failed; it never ran).
+    assert outcome.score is not None
+    assert outcome.score.status == "unscored"
+    assert outcome.score.binary is None
+    assert outcome.score.reason == "crash"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    detail = fatal[0].detail_artifact
+    assert detail is not None
+    text = (root / "artifacts" / detail.sha256).read_bytes().decode()
+    assert "InstructionUnavailable" in text

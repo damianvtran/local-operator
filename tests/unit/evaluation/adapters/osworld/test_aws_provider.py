@@ -45,6 +45,7 @@ from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
     MAX_OBSERVATION_CAUSE,
+    InstructionUnavailable,
     guest_deadline_for,
 )
 
@@ -356,6 +357,22 @@ class _UpstreamProviderShape:
         return "i-untagged"
 
 
+def _official_task_get(task_config: Any, key: str, default: Any = None) -> Any:
+    # Upstream desktop_env.py:222-231, VERBATIM shape: mapping ``get`` (both
+    # arities -- upstream wraps the one-argument fallback), else attribute
+    # lookup. The provider reads the instruction through this exact contract
+    # against the real pinned class, so the fakes must answer identically or
+    # they test a contract no real environment has.
+    if task_config is None:
+        return default
+    if hasattr(task_config, "get") and callable(getattr(task_config, "get")):
+        try:
+            return task_config.get(key, default)
+        except TypeError:
+            return task_config.get(key)
+    return getattr(task_config, key, default)
+
+
 class _FakeEnv:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -366,8 +383,30 @@ class _FakeEnv:
         self.provider = _UpstreamProviderShape()
         self.manager = self.provider
         self.is_environment_used = False
+        # Upstream keeps the task_config and caches its instruction in
+        # ``_set_task_info`` (desktop_env.py:471-477, called at :370) -- BEFORE
+        # task setup. Modelling that cache is what lets the provider tests
+        # distinguish the post-reset accessor read from the STALE value
+        # ``_get_obs`` serves (:455-460).
+        self.task_config: Any = None
+        self.instruction: str | None = None
         self.path_to_vm: str = str(kwargs.get("path_to_vm", ""))
         self.snapshot_name: str = str(kwargs.get("snapshot_name", ""))
+
+    def _task_get(self, task_config: Any, key: str, default: Any = None) -> Any:
+        # The official accessor's behaviour, shape for shape (see
+        # ``_official_task_get``). An INSTANCE method rather than upstream's
+        # staticmethod only so tests can subclass the read (counting it,
+        # scripting failures); every call site passes the same arguments.
+        return _official_task_get(task_config, key, default)
+
+    def _set_task_info(self, task_config: Any) -> None:
+        # Upstream desktop_env.py:471-477, condensed to the member these tests
+        # can observe: the instruction cache. The rest of ``_set_task_info``
+        # (cache_dir, config, user_simulator, evaluator) is defused into the
+        # attributes ``_FakeEnv`` already carries.
+        self.task_config = task_config
+        self.instruction = self._task_get(task_config, "instruction")
 
     def _revert_to_snapshot(self) -> None:
         # Upstream desktop_env.py:202-212, condensed.
@@ -382,9 +421,14 @@ class _FakeEnv:
             self._revert_to_snapshot()
         self.is_environment_used = True
         self.reset_calls.append(task_config)
+        self._set_task_info(task_config)
 
     def _get_obs(self) -> dict[str, Any]:
-        return {"screenshot": b"png", "instruction": "do it"}
+        # The CACHED instruction, exactly as upstream's ``_get_obs`` returns
+        # it (:455-460). For a task whose mapping value changes during setup
+        # this is the stale pre-setup text, which is the whole reason the
+        # provider re-reads through the accessor after reset.
+        return {"screenshot": b"png", "instruction": self.instruction}
 
     def execute_python_command(self, command: str) -> None:
         self.kwargs.setdefault("executed", []).append(command)
@@ -422,7 +466,7 @@ async def test_allocate_launches_with_client_token_and_both_tag_specs(
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
@@ -434,7 +478,7 @@ async def test_allocate_launches_with_client_token_and_both_tag_specs(
     assert envs[0].kwargs["provider_name"] == "aws"
     assert envs[0].kwargs["region"] == REGION
     assert envs[0].kwargs["use_public_ip"] is True
-    assert envs[0].reset_calls == [{"id": "task_plain"}]
+    assert envs[0].reset_calls == [{"id": "task_plain", "instruction": "do it"}]
     # Readiness probed the guest's control port on the public IP.
     assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
 
@@ -470,7 +514,7 @@ async def test_an_instance_type_override_reaches_the_real_run_instances_call(
             stubs,
             monkeypatch,
             desktop_env_factory=_FakeEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
@@ -511,7 +555,7 @@ async def test_proxy_policy_reaches_desktop_env_construction(
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id, "proxy": t.proxy},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it", "proxy": t.proxy},
         )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
@@ -544,7 +588,7 @@ async def test_desktop_env_cache_dir_is_absolute_and_outside_the_workspace(
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         cache_root = _cache_root(tmp_path)
         await provider.allocate(_plan(), _task(), cache_root=cache_root)
@@ -595,7 +639,7 @@ async def _allocate_with_guest(
         stubs,
         monkeypatch,
         desktop_env_factory=_FakeEnv,
-        task_factory=lambda t: {"id": t.task_id},
+        task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
     )
     root = _cache_root(tmp_path)
     await provider.allocate(_plan(), _task(), cache_root=root)
@@ -645,7 +689,7 @@ async def test_allocate_reclaims_a_tight_guest_before_upstream_resets(
             stubs,
             monkeypatch,
             desktop_env_factory=_ResetRecordingEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         root = _cache_root(tmp_path)
         await provider.allocate(_plan(), _task(), cache_root=root)
@@ -763,7 +807,7 @@ async def test_a_rejected_client_password_refuses_the_episode_before_the_environ
             stubs,
             monkeypatch,
             desktop_env_factory=_ResetRecordingEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         with pytest.raises(AllocationError) as excinfo:
             await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
@@ -926,7 +970,10 @@ async def _allocated(
         return env
 
     provider = _provider(
-        stubs, monkeypatch, desktop_env_factory=factory, task_factory=lambda t: {"id": t.task_id}
+        stubs,
+        monkeypatch,
+        desktop_env_factory=factory,
+        task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
     )
     await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
     stubs.ec2_stub.assert_no_pending_responses()
@@ -952,12 +999,12 @@ async def test_a_second_reset_on_a_used_env_is_refused_before_any_boto3_call(
 
     with _Stubs() as stubs:
         provider, env = await _allocated(stubs, monkeypatch, tmp_path)
-        assert env.reset_calls == [{"id": "task_plain"}]
+        assert env.reset_calls == [{"id": "task_plain", "instruction": "do it"}]
         assert env.is_environment_used is True
         with pytest.raises(aws_mod.UpstreamAllocationRefused, match="_revert_to_snapshot"):
             env.reset(task_config={"id": "again"})
         assert env.provider.reached == []
-        assert env.reset_calls == [{"id": "task_plain"}]
+        assert env.reset_calls == [{"id": "task_plain", "instruction": "do it"}]
         # The direct provider paths are sealed too, not just the DesktopEnv entry.
         with pytest.raises(aws_mod.UpstreamAllocationRefused, match="revert_to_snapshot"):
             env.provider.revert_to_snapshot("i-x", "ami-x")
@@ -1057,6 +1104,10 @@ class _RetryingFakeEnv(_FakeEnv):
                 self.is_environment_used = False
             if task_config is not None:
                 self.is_environment_used = True
+                # Upstream calls ``_set_task_info(task_config)`` here (:370),
+                # before ``_setup_task``; the cache it leaves behind is the
+                # stale value the provider's post-reset read exists to see past.
+                self._set_task_info(task_config)
                 if controller is not None and not controller.ensure_ready(False):
                     continue
                 try:
@@ -1092,7 +1143,10 @@ async def _allocated_retrying(
         return env
 
     provider = _provider(
-        stubs, monkeypatch, desktop_env_factory=factory, task_factory=lambda t: {"id": t.task_id}
+        stubs,
+        monkeypatch,
+        desktop_env_factory=factory,
+        task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
     )
     await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
     stubs.ec2_stub.assert_no_pending_responses()
@@ -1122,7 +1176,7 @@ async def test_a_transient_first_setup_failure_retries_instead_of_dying_on_the_s
         provider, env = await _allocated_retrying(stubs, monkeypatch, tmp_path, setup_failures=1)
     assert env.setup_calls == 2, "the retry must actually re-run setup"
     assert env.start_emulator_calls == 0, "nothing was reverted, so nothing needs starting"
-    assert env.reset_calls == [{"id": "task_plain"}]
+    assert env.reset_calls == [{"id": "task_plain", "instruction": "do it"}]
     assert env.provider.reached == [], "the skip performs no boto3 call"
     # The trigger is persisted, not swallowed: the first attempt's error is
     # recoverable from the provider's record AND from the skip warning.
@@ -1190,7 +1244,7 @@ async def test_a_reset_that_never_succeeds_names_the_first_attempt_it_was_retryi
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         with pytest.raises(_TransientSetupError) as excinfo:
             await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
@@ -1272,7 +1326,7 @@ async def test_the_first_failure_note_leads_the_reset_error_within_the_wire_boun
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         with pytest.raises(_TransientSetupError) as excinfo:
             await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
@@ -1346,7 +1400,7 @@ async def test_a_second_environment_on_one_provider_re_arms_the_reset_window(
             stubs,
             monkeypatch,
             desktop_env_factory=factory,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
         await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
@@ -2580,7 +2634,7 @@ async def test_a_resolved_root_volume_override_reaches_run_instances(
             stubs,
             monkeypatch,
             desktop_env_factory=_FakeEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
@@ -2611,7 +2665,7 @@ async def test_a_root_volume_smaller_than_the_ami_snapshot_is_refused_before_lau
             stubs,
             monkeypatch,
             desktop_env_factory=_FakeEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         with pytest.raises(AllocationError) as excinfo:
             await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
@@ -2644,7 +2698,7 @@ async def test_a_root_volume_equal_to_the_ami_snapshot_is_accepted(
             stubs,
             monkeypatch,
             desktop_env_factory=_FakeEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
@@ -2674,7 +2728,238 @@ async def test_the_default_path_still_applies_osworlds_forty_gib_floor(
             stubs,
             monkeypatch,
             desktop_env_factory=_FakeEnv,
-            task_factory=lambda t: {"id": t.task_id},
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
         )
         await provider.allocate(plan, task, cache_root=_cache_root(tmp_path))
         stubs.ec2_stub.assert_no_pending_responses()
+
+
+# ---------------------------------------------------------------------------
+# the post-reset instruction read (the reset seam)
+# ---------------------------------------------------------------------------
+
+
+class _RuntimeInstructionEnv(_FakeEnv):
+    """A fake whose mapping instruction CHANGES during setup.
+
+    This is the shape the pinned DesktopEnv creates for a profile-dependent
+    task: ``_set_task_info`` caches the mapping value BEFORE task setup
+    (desktop_env.py:370 vs :375), the setup then updates the state the
+    mapping computes from, and ``_get_obs`` keeps serving the cached -- now
+    stale -- text. The provider must serve the POST-setup accessor value.
+    """
+
+    STALE = "Neutral task: open the app"
+    FULL = "Neutral task: open the app, then finish the profile-governed flow"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.instruction_reads = 0
+        self.instruction_value = self.STALE
+
+    def _task_get(self, task_config: Any, key: str, default: Any = None) -> Any:
+        if key == "instruction":
+            self.instruction_reads += 1
+            return self.instruction_value
+        return _FakeEnv._task_get(task_config, key, default)
+
+    def reset(self, task_config: Any) -> None:
+        self.instruction_value = self.STALE
+        super().reset(task_config)  # caches STALE: upstream's own read
+        # The "setup" this reset just ran updated the profile the mapping
+        # computes from; post-setup reads now see the full text.
+        self.instruction_value = self.FULL
+
+
+class _UnusableInstructionEnv(_FakeEnv):
+    """The post-setup accessor read fails: None, blank, or an exception.
+
+    The FIRST instruction read (upstream's own cache read inside reset)
+    always succeeds; only the SECOND read -- the provider's post-reset one --
+    hits the mode. That ordering is what makes these cases test the seam
+    rather than upstream's reset.
+    """
+
+    def __init__(self, *, mode: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mode = mode
+        self.instruction_reads = 0
+        self.instruction_value = "neutral pre-setup placeholder"
+
+    def _task_get(self, task_config: Any, key: str, default: Any = None) -> Any:
+        if key == "instruction":
+            self.instruction_reads += 1
+            if self.instruction_reads == 1:
+                return self.instruction_value
+            if self.mode == "missing":
+                return None
+            if self.mode == "blank":
+                return "   \n  "
+            raise RuntimeError("profile exploded while reading the instruction")
+        return _FakeEnv._task_get(task_config, key, default)
+
+
+class _NoAccessorEnv:  # pragma: no cover - see the helper-level test
+    """A build without the official accessor: the seam refuses, never guesses.
+
+    Deliberately NOT a ``_FakeEnv``: the whole point is that the attribute a
+    provider looks for is absent, and subclassing would inherit it. This
+    carries only what ``allocate`` touches before the seam read.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.provider = _UpstreamProviderShape()
+        self.manager = self.provider
+        self.is_environment_used = False
+        self.path_to_vm: str = str(kwargs.get("path_to_vm", ""))
+        self.snapshot_name: str = str(kwargs.get("snapshot_name", ""))
+
+    def reset(self, task_config: Any) -> None:
+        self.is_environment_used = True
+
+
+def _instruction_provider(
+    stubs: _Stubs,
+    monkeypatch: pytest.MonkeyPatch,
+    env_type: type[Any],
+    envs: list[Any],
+) -> AwsProvider:
+    def factory(**kwargs: Any) -> Any:
+        env = env_type(**kwargs)
+        envs.append(env)
+        return env
+
+    return _provider(
+        stubs,
+        monkeypatch,
+        desktop_env_factory=factory,
+        task_factory=lambda t: {"id": t.task_id, "instruction": "neutral pre-setup placeholder"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_reset_observation_carries_the_post_setup_instruction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The frame the model first sees carries the FULL post-setup text.
+
+    Upstream's cache is the pre-setup value; the observation must carry the
+    accessor's post-setup read instead -- never the cache, never a prefix,
+    never None. Also pins the READ COUNT: one seam read total, no matter how
+    many frames are observed.
+    """
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        envs: list[Any] = []
+        provider = _instruction_provider(stubs, monkeypatch, _RuntimeInstructionEnv, envs)
+
+        await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+        first = await provider.observe()
+        second = await provider.observe()
+        stubs.ec2_stub.assert_no_pending_responses()
+
+    assert first["instruction"] == _RuntimeInstructionEnv.FULL
+    assert second["instruction"] == _RuntimeInstructionEnv.FULL
+    # Equality is the discriminating evidence: the stale cache and the full
+    # text differ, so this cannot be a prefix or the cached value.
+    assert first["instruction"] != _RuntimeInstructionEnv.STALE
+    assert envs[0].instruction == _RuntimeInstructionEnv.STALE
+    # ONE accessor read at the seam, on top of upstream's own cache read; the
+    # two observes above added none.
+    assert envs[0].instruction_reads == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_fragment"),
+    [("missing", "got NoneType"), ("blank", "got str")],
+)
+async def test_an_unusable_instruction_refuses_before_any_observation(
+    mode: str, expected_fragment: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absent or blank post-setup text: refuse at the seam, not later.
+
+    The refusal lands inside ``allocate`` -- before any observation exists,
+    therefore before any model request -- and the provider keeps no env,
+    because a half-set-up environment must not be served from.
+    """
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+
+        def factory(**kwargs: Any) -> _FakeEnv:
+            return _UnusableInstructionEnv(mode=mode, **kwargs)
+
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {
+                "id": t.task_id,
+                "instruction": "neutral pre-setup placeholder",
+            },
+        )
+        with pytest.raises(InstructionUnavailable) as excinfo:
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+
+    assert expected_fragment in str(excinfo.value)
+    assert provider._env is None
+
+
+@pytest.mark.asyncio
+async def test_a_getter_exception_is_chained_into_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A raising accessor is an apparatus error with its cause, not a default."""
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+
+        def factory(**kwargs: Any) -> _FakeEnv:
+            return _UnusableInstructionEnv(mode="raises", **kwargs)
+
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {
+                "id": t.task_id,
+                "instruction": "neutral pre-setup placeholder",
+            },
+        )
+        with pytest.raises(InstructionUnavailable) as excinfo:
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, RuntimeError)
+    assert "profile exploded" in str(cause)
+
+
+@pytest.mark.asyncio
+async def test_a_build_without_the_accessor_refuses_rather_than_guessing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``_task_get`` at all: the seam cannot read the text, so it refuses."""
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        envs: list[Any] = []
+        provider = _instruction_provider(stubs, monkeypatch, _NoAccessorEnv, envs)
+        with pytest.raises(InstructionUnavailable) as excinfo:
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+
+    assert "_task_get" in str(excinfo.value)

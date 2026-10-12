@@ -620,7 +620,15 @@ class ProviderController:
     def has_any_credential(self, provider: str) -> bool:
         """Whether ``provider`` (or its storage id) has a stored credential."""
         storage = credential_provider_id(provider)
-        return any(c.provider == storage for c in self.auth_store.list_credentials(provider=None))
+        rows = self.auth_store.list_credentials(provider=None)
+        if storage == "meta-muse":
+            try:
+                extractor_factory = getattr(self.auth_store, "_oauth_key_fn", None)
+                extractor = extractor_factory(storage) if extractor_factory is not None else None
+                return any(c.provider == storage and extractor and extractor(c.data) for c in rows)
+            except Exception:  # noqa: BLE001 - locked/inaccessible is not usable
+                return False
+        return any(c.provider == storage for c in rows)
 
     def is_usable(self, provider: str) -> bool:
         """Whether ``provider`` has a credential the session could actually run on.
@@ -685,6 +693,8 @@ class ProviderController:
         try:
             stored_rows = self.auth_store.list_credentials(provider=None)
             stored = {row.provider for row in stored_rows}
+            if "meta-muse" in stored and not self.has_any_credential("meta-muse"):
+                stored.discard("meta-muse")
             oauth_providers = {
                 row.provider for row in stored_rows if row.credential_type == "oauth"
             }
@@ -753,6 +763,8 @@ class ProviderController:
         try:
             stored_rows = self.auth_store.list_credentials(provider=None)
             stored = {row.provider for row in stored_rows}
+            if "meta-muse" in stored and not self.has_any_credential("meta-muse"):
+                stored.discard("meta-muse")
             oauth_providers = {
                 row.provider for row in stored_rows if row.credential_type == "oauth"
             }
@@ -1009,9 +1021,13 @@ class ProviderController:
         callbacks = factory(definition)
         # Desktop hosts hand the URL to their own main-process browser opener.
         # Inject it per flow: changing webbrowser globally would steal another
-        # session's concurrent login. Device flows only publish their URL.
+        # session's concurrent login. Muse's device flow also owns an opener;
+        # its desktop injection must survive this layer to avoid duplicate
+        # browser launches. Other device flows still only publish their URL.
         options: dict[str, Any] = {}
-        if open_browser is not None and definition.callback_port is not None:
+        if open_browser is not None and (
+            definition.callback_port is not None or provider_id == "meta-muse"
+        ):
             options["open_browser"] = open_browser
         # Passed UNCONDITIONALLY, including when it is None, so there is exactly
         # one call shape. Every login callable in the registry takes it: the
@@ -2714,7 +2730,13 @@ class ProviderController:
         credential_id = credential_provider_id(provider)
         access = await self.auth_store.get_oauth_access(credential_id)
         if access is not None and access.kind == "oauth" and access.access_token:
-            return access.access_token, True, access.account_id or access.org_id
+            return (
+                access.access_token,
+                True,
+                access.account_id
+                or access.org_id
+                or (access.email if credential_id == "meta-muse" else None),
+            )
         if access is not None and access.access_token:
             return access.access_token, False, None
         try:
