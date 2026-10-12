@@ -13690,6 +13690,13 @@ class SendParams(BaseModel):
         default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
     )
+    repeat: bool = Field(
+        default=False,
+        description=(
+            "Deliver again even after an identical confirmed send this turn. "
+            "Use only when the user explicitly requested a deliberate repeat."
+        ),
+    )
     model: str | None = Field(
         default=None,
         description=(
@@ -14325,9 +14332,40 @@ async def execute_send(
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
+    target_sid = record.session_id if record is not None else cold_session_id
+    receipt_key = None
+    if context is not None and context.send_turn_id and target_sid and not params.repeat:
+        # Resolve WHO before lookup: raw names/pids can refer to different
+        # sessions. Exact body and effective mode are intent, not fuzzy matches.
+        # Patience is also an act; changing it must not silently reuse an old wait.
+        receipt_key = (
+            context.send_turn_id,
+            context.session_id or "",
+            target_sid,
+            message,
+            mode,
+            bool(params.wake) if not params.now else False,
+            patience_ms,
+        )
+        previous = context.confirmed_send_receipts.get(receipt_key)
+        if previous is not None:
+            return _text(
+                tool_call_id,
+                "send",
+                "duplicate suppressed — no new delivery, wake or patience wait. "
+                f"Original confirmed receipt: {previous.text}",
+                details={
+                    **(previous.model_copy(deep=True).details or {}),
+                    "duplicate_suppressed": True,
+                    "original_tool_call_id": previous.tool_call_id,
+                },
+            )
     sender = await _send_sender_identity(context)
 
-    from local_operator.mobile.peer_send import deliver_peer_message_outcome
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        deliver_peer_message_outcome,
+    )
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
@@ -14428,7 +14466,13 @@ async def execute_send(
         clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
-    return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    result = _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    # Only the confirmed state is reusable. Partial/uncertain receipts and
+    # refusals must allow a real retry; model switches and mesh calls bypass
+    # this local boundary entirely. Send is exclusive in the tool executor.
+    if receipt_key is not None and context is not None and outcome.state == DELIVERY_DELIVERED:
+        context.confirmed_send_receipts[receipt_key] = result.model_copy(deep=True)
+    return result
 
 
 async def _arm_send_patience(
