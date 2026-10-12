@@ -3138,6 +3138,10 @@ async def snapshot(
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: int = Query(default=0, ge=0, le=1),
+    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
+        default=[], max_length=512
+    ),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3186,7 +3190,13 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts), open_frame=bool(open_frame)))
+        return reply(
+            await bridge.snapshot(
+                entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+            )
+        )
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3238,6 +3248,10 @@ async def history(
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: int = Query(default=0, ge=0, le=1),
+    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
+        default=[], max_length=512
+    ),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3279,6 +3293,7 @@ async def history(
                 limit=limit,
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             )
         )
 
@@ -5325,6 +5340,10 @@ async def events(
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
     open_frame: int = Query(default=0, ge=0),
+    journal_order: int = Query(default=0, ge=0, le=1),
+    order_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Query(
+        default=[], max_length=512
+    ),
     supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
@@ -5351,7 +5370,9 @@ async def events(
             # themselves are journaled either way; this gates the live carriage,
             # not the record.
             sub = bridge.subscribe(
-                frontend_replace=bool(frontend_replace), supplements=bool(supplements)
+                frontend_replace=bool(frontend_replace),
+                supplements=bool(supplements),
+                journal_order=bool(journal_order),
             )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
@@ -5411,6 +5432,7 @@ async def events(
                     after_seq=after_seq,
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 )
             ) as frames:
                 try:

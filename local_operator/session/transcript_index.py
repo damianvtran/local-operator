@@ -2202,11 +2202,12 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             return None
         raw = _read_raw(config_dir, session_id)
         previous = _index_from_raw(raw)
-        if previous is not None and _sig_matches(previous.sig, st):
+        if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
             return previous
         try:
             if (
                 previous is not None
+                and bool(previous.journal_generation)
                 and st.st_ino == previous.sig.get("inode")
                 and st.st_size > previous.scan.offset
                 and _verify_tail(path, previous.scan.offset, str(previous.sig.get("last_id", "")))

@@ -648,6 +648,10 @@ class HistoryEntry(BaseModel):
     #: ``extra`` on this model is pydantic's ``ignore``, so an older renderer drops
     #: the key and keeps today's behaviour. See ``HistoryTsSource``.
     ts_source: HistoryTsSource
+    # Source position is distinct from time and only emitted for an opted-in
+    # reader with a verified page/index view. None must not add strict DTO keys
+    # to legacy responses (the same exclude_if policy as open-frame facts).
+    journal_seq: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
 
 
 class RunFacts(BaseModel):
@@ -700,6 +704,19 @@ class RunFacts(BaseModel):
 
 
 class HistoryPage(BaseModel):
+    journal_generation: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    journal_order_state: Literal["ready", "building", "unsupported", "unavailable"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Bounded same-session lookup for already-loaded rows outside this page:
+    # in particular a cached send that aged out before the viewer subscribed.
+    # Missing ids are named, not assigned fabricated ordinals.
+    journal_ordinals: dict[str, int] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    journal_missing_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool

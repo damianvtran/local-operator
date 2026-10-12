@@ -980,6 +980,34 @@
               "default": 0,
               "title": "Entry Ts"
             }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "maxItems": 512,
+              "default": [],
+              "title": "Order Ids"
+            }
           }
         ],
         "responses": {
@@ -1165,6 +1193,34 @@
               "minimum": 0,
               "default": 0,
               "title": "Entry Ts"
+            }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "maxItems": 512,
+              "default": [],
+              "title": "Order Ids"
             }
           }
         ],
@@ -2348,6 +2404,34 @@
               "minimum": 0,
               "default": 0,
               "title": "Entry Ts"
+            }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "maxItems": 512,
+              "default": [],
+              "title": "Order Ids"
             }
           }
         ],
@@ -16377,6 +16461,18 @@
               "served"
             ],
             "title": "Ts Source"
+          },
+          "journal_seq": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Seq"
           }
         },
         "type": "object",
@@ -16417,6 +16513,62 @@
               }
             ],
             "title": "Has Newer"
+          },
+          "journal_ordinals": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Ordinals"
+          },
+          "journal_generation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Generation"
+          },
+          "journal_missing_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Missing Ids"
+          },
+          "journal_order_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "building",
+                  "unsupported",
+                  "unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Order State"
           }
         },
         "type": "object",

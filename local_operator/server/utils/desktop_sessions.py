@@ -141,6 +141,7 @@ from local_operator.session.retention import (
     session_activity,
 )
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -1228,6 +1229,7 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    journal_order: bool = False
     expires: float = 0.0
     overflow: bool = False
     #: False until ``events`` has finished the OPEN handshake -- i.e. until the
@@ -1309,6 +1311,8 @@ class DesktopSessionBridge:
         #: slow-client overflow uses, so the cause is not recoverable from the
         #: subscription alone. No behaviour reads it.
         self._closing = False
+        self._order_pending: dict[str, tuple[dict[str, Any], tuple[int, int, float] | None]] = {}
+        self._order_correction: asyncio.Task[Any] | None = None
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
@@ -2111,6 +2115,9 @@ class DesktopSessionBridge:
 
     async def close(self) -> None:
         self._closing = True
+        self._order_pending.clear()
+        if self._order_correction is not None:
+            self._order_correction.cancel()
         for sub in self.subscribers.values():
             self._disconnect(sub)
         self._cancel_dwells()
@@ -2348,6 +2355,12 @@ class DesktopSessionBridge:
             # ``supplements`` must not meet the family at all: an older renderer
             # would paint the unknown event visibly (memo §2.7).
             if not sub.supplements and supplement_event_frame(frame):
+                continue
+            if (
+                not sub.journal_order
+                and frame.get("type") == "event"
+                and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+            ):
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
                 if sub.opened:
@@ -3176,7 +3189,12 @@ class DesktopSessionBridge:
         return task
 
     async def snapshot(
-        self, *, entry_times: bool = False, open_frame: bool = False
+        self,
+        *,
+        entry_times: bool = False,
+        open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3246,7 +3264,11 @@ class DesktopSessionBridge:
         # pays a second round trip (``/history``) for the transcript the click had
         # already asked for. Merging is by row id on both sides, which is the rule a
         # live local owner's snapshot already relies on.
-        if cursor or (remote is not None and (remote.is_cold or self.remote_row is not None)):
+        if (
+            journal_order
+            or cursor
+            or (remote is not None and (remote.is_cold or self.remote_row is not None))
+        ):
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
             # read of the TRANSCRIPT, while ``history_cursor`` is a FRONTEND
@@ -3281,6 +3303,7 @@ class DesktopSessionBridge:
             history = await self.history(
                 entry_times=entry_times,
                 open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3326,6 +3349,8 @@ class DesktopSessionBridge:
         limit: int = 100,
         entry_times: bool = False,
         open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -3391,6 +3416,28 @@ class DesktopSessionBridge:
         leaves the wire reader exactly as it was, serve-stamp included.
         """
         validate_page_request(before_id, through_id, around_id, before, after, limit)
+        if order_ids is not None and (
+            len(order_ids) > 512
+            or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in order_ids)
+        ):
+            raise ValueError("order_ids must contain at most 512 entry ids of 1..128 characters")
+        if self.remote_row is not None and journal_order:
+            # The receiver's journal/index can never order the peer's rows.
+            # Until the owner transport negotiates this field, state unsupported.
+            answer = await self.history(
+                before_id=before_id,
+                through_id=through_id,
+                around_id=around_id,
+                before=before,
+                after=after,
+                limit=limit,
+                entry_times=entry_times,
+                open_frame=open_frame,
+                deadline=deadline,
+            )
+            if answer.get("journal_generation"):
+                return answer
+            return {**answer, "journal_order_state": "unsupported"}
         if open_frame:
             # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
             # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
@@ -3441,6 +3488,7 @@ class DesktopSessionBridge:
                     after=after,
                     limit=limit,
                     entry_times=entry_times,
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 )
                 return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
             return await self._open_frame_history(
@@ -3451,6 +3499,8 @@ class DesktopSessionBridge:
                 after=after,
                 limit=limit,
                 entry_times=entry_times,
+                journal_order=journal_order,
+                order_ids=order_ids,
                 deadline=(
                     deadline
                     if deadline is not None
@@ -3502,7 +3552,7 @@ class DesktopSessionBridge:
                 "has_more": False,
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
-        return {
+        answer = {
             # EVERY ROW HERE IS A JOURNAL ENTRY, so its ``ts`` is the entry time by
             # construction — the ``entry`` value of the closed vocabulary, and the
             # reason a LOCAL page needs no negotiation to be honest. Stamped here
@@ -3515,6 +3565,7 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
+        return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
     async def _open_frame_history(
         self,
@@ -3527,6 +3578,8 @@ class DesktopSessionBridge:
         limit: int,
         entry_times: bool,
         deadline: float,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -3622,9 +3675,10 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
-            return answer
+            return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
+        order_pages: list[Any] = []
         has_more = False
         cursor_missing = False
         cursor = before_id
@@ -3667,6 +3721,7 @@ class DesktopSessionBridge:
             if not collected:
                 cursor_missing = page.reconciled
             has_more = page.has_more
+            order_pages.append(page)
             rows = self._wire_rows(page.entries)
             if not rows:
                 break
@@ -3771,7 +3826,7 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        return answer
+        return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
     def _wire_rows(entries: Any) -> list[dict[str, Any]]:
@@ -3829,6 +3884,115 @@ class DesktopSessionBridge:
         except Exception:  # noqa: BLE001 — a failed scan is an absent fact, not an error
             logger.debug("open frame: refresh failed", exc_info=True)
             return None
+
+    @staticmethod
+    def _order_descriptor(entry: dict[str, Any]) -> dict[str, Any]:
+        payload = entry.get("payload") or {}
+        details = payload.get("details") or {}
+        return {
+            "id": entry["id"],
+            "type": entry.get("type"),
+            "role": payload.get("role"),
+            "tool_call_id": payload.get("tool_call_id"),
+            "anchor": details.get("anchor") if isinstance(details, dict) else None,
+        }
+
+    def _apply_journal_order(
+        self, answer: dict[str, Any], source: tuple[int, int, float] | None, ids: list[str]
+    ) -> bool:
+        from local_operator.session import transcript_index
+
+        index = transcript_index.fresh_resident(self.root, self.session_id)
+        if index is None or not index.journal_generation or source is None:
+            return False
+        if source != (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime")):
+            return False
+        if any(row["id"] not in index.journal_rows for row in answer["entries"]):
+            return False
+        answer["entries"] = [
+            {**row, "journal_seq": index.journal_rows[row["id"]]} for row in answer["entries"]
+        ]
+        answer["journal_order_state"] = "ready"
+        answer["journal_generation"] = index.journal_generation
+        answer["journal_ordinals"] = {
+            id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
+        }
+        answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
+        return True
+
+    def _journal_page(
+        self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+    ) -> dict[str, Any]:
+        """Opt-in source facts, from a single verified page/index view only.
+
+        A cold/stale index starts the existing background singleflight and a
+        coalesced metadata correction. No scan blocks a page or live callback.
+        Extra ids name already-loaded rows outside this page, never a new read
+        service; their count/string bounds cap the response and source remains
+        THIS session. Missing ids are explicitly unknown.
+        """
+        from local_operator.session import transcript_index
+
+        ids = list(dict.fromkeys(ids))
+        sources = [page.source_signature for page in pages]
+        source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        if self._apply_journal_order(answer, source, ids):
+            return answer
+        answer["journal_order_state"] = "building" if source is not None else "unavailable"
+        for row in answer["entries"]:
+            self._order_pending[row["id"]] = (self._order_descriptor(row), source)
+        for id_ in ids:
+            self._order_pending.setdefault(id_, ({"id": id_}, source))
+        if len(self._order_pending) > 4096:
+            self._order_pending.clear()
+            self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+            return answer
+        if self._order_correction is None or self._order_correction.done():
+
+            async def correct() -> None:
+                try:
+                    task, _ = transcript_index.start_refresh(self.root, self.session_id)
+                    await asyncio.shield(task)
+                    if self._closing:
+                        return
+                    index = transcript_index.fresh_resident(self.root, self.session_id)
+                    rows = []
+                    pending, self._order_pending = self._order_pending, {}
+                    if index is None or not index.journal_generation:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                        return
+                    expected = (
+                        index.sig.get("inode"),
+                        index.sig.get("size"),
+                        index.sig.get("mtime"),
+                    )
+                    mismatch = False
+                    for id_, (descriptor, original) in pending.items():
+                        if original != expected:
+                            mismatch = True
+                            continue
+                        seq = index.journal_rows.get(id_)
+                        if seq is not None:
+                            rows.append({**descriptor, "journal_seq": seq})
+                    for at in range(0, len(rows), 128):
+                        self.publish(
+                            "event",
+                            {
+                                "type": JOURNAL_ORDER_EVENT,
+                                "journal_generation": index.journal_generation,
+                                "rows": rows[at : at + 128],
+                            },
+                        )
+                    if mismatch:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                except Exception:  # noqa: BLE001 - source failure is no authority
+                    logger.debug("desktop journal-order correction failed", exc_info=True)
+                    self._order_pending.clear()
+                    if not self._closing:
+                        self.publish("event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+
+            self._order_correction = asyncio.create_task(correct())
+        return answer
 
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
@@ -5054,7 +5218,11 @@ class DesktopSessionBridge:
         await remote.withdraw_desktop_watch()
 
     def subscribe(
-        self, *, frontend_replace: bool = False, supplements: bool = False
+        self,
+        *,
+        frontend_replace: bool = False,
+        supplements: bool = False,
+        journal_order: bool = False,
     ) -> DesktopSubscription:
         """Register one event subscriber.
 
@@ -5080,7 +5248,9 @@ class DesktopSessionBridge:
                 "A working-directory move is in progress; this viewer cannot follow it. "
                 "Update the desktop app, then reconnect."
             )
-        sub = DesktopSubscription(frontend_replace=frontend_replace, supplements=supplements)
+        sub = DesktopSubscription(
+            frontend_replace=frontend_replace, supplements=supplements, journal_order=journal_order
+        )
         self.subscribers[sub.id] = sub
         return sub
 
@@ -5092,6 +5262,8 @@ class DesktopSessionBridge:
         after_seq: int,
         entry_times: bool = False,
         open_frame: bool = False,
+        journal_order: bool = False,
+        order_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         try:
             cutoff = self.sequence
@@ -5103,11 +5275,20 @@ class DesktopSessionBridge:
                     for f, _ in self.replay
                     if after_seq < f["seq"] <= cutoff
                     and (sub.supplements or not supplement_event_frame(f))
+                    and (
+                        sub.journal_order
+                        or f.get("type") != "event"
+                        or f.get("payload", {}).get("type") != JOURNAL_ORDER_EVENT
+                    )
                 ]
                 if not gap
                 else []
             )
-            snapshot = await self.snapshot(entry_times=entry_times, open_frame=open_frame)
+            snapshot = await self.snapshot(
+                entry_times=entry_times,
+                open_frame=open_frame,
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+            )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()``'s state and sequence are its last reads with nothing
             # awaiting between them, so no frame can have been published after
