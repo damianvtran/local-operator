@@ -242,7 +242,28 @@ def serving_model_access_here(
                 for row in controller.auth_store.list_credentials()
                 if row.disabled_cause is None
             }
-            return model_access_claim(selector, usable, saved=saved)
+            claim = model_access_claim(selector, usable, saved=saved)
+            if claim is None:
+                return None
+            from local_operator.network.credentials.effective import effective_access
+
+            access = effective_access(provider, root=config_dir, local=provider in (usable or ()))
+            # Preserve the old coarse wire state for older desktop readers. The
+            # additive state names the real reason; new UI must use it rather
+            # than treating holder permission as an authenticated login.
+            effective_state = (
+                "pending"
+                if access.state == "absent" and claim.state == "temporarily_unavailable"
+                else access.state
+            )
+            state = (
+                "ok"
+                if access.usable
+                else claim.state if effective_state == "absent" else "temporarily_unavailable"
+            )
+            return claim.model_copy(
+                update={"state": state, "effective_state": effective_state, **access.context()}
+            )
     except sqlite3.ProgrammingError:
         raise
     except (sqlite3.Error, OSError):

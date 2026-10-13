@@ -1007,20 +1007,25 @@ def test_model_access_publishes_and_clears_a_claim() -> None:
     claim = FrontendModelAccess(state="signed_out", provider="anthropic", label="Anthropic")
     update = store.refresh_model_access(claim)
     assert update is not None
-    assert update.changes["model_access"] == {
+    # Context is additive and keyless. Exact emitted-shape coverage belongs to
+    # the NEW writer; older readers retain the same state/provider/label fields.
+    expected = {
         "state": "signed_out",
         "provider": "anthropic",
         "label": "Anthropic",
+        "effective_state": None,
+        "owner_device": "",
+        "owner_label": "",
+        "observed_at": None,
+        "last_grant_at": None,
+        "last_grant_expires_at": None,
     }
+    assert update.changes["model_access"] == expected
     assert store.state.model_access is not None
     assert store.state.model_access.state == "signed_out"
     # A LIVE claim serialises into the wire shape (R2-2): the pop in the state
     # serializer is scoped to the idle state, not to the field.
-    assert store.state.model_dump(mode="json")["model_access"] == {
-        "state": "signed_out",
-        "provider": "anthropic",
-        "label": "Anthropic",
-    }
+    assert store.state.model_dump(mode="json")["model_access"] == expected
     # The same claim twice is not a frame.
     assert store.refresh_model_access(claim) is None
     # Clearing a claim IS a frame: absence is an answer here.
