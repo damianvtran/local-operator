@@ -177,6 +177,14 @@ class ConsentDocument:
             )
         except (ValueError, OSError):
             refuse("consent_invalid")
+        return self._validate(data)
+
+    def _validate(self, data: Any) -> dict[str, Any]:
+        """The SAME complete schema gate for reads and unpublished candidates.
+
+        Authority is not recoverable by validating after rename: a rejected
+        candidate must never replace the last readable policy/tombstone set.
+        """
         row = _exact(
             data,
             {"schema", "network_id", "owner_device", "revision", "recipients"},
@@ -235,8 +243,19 @@ class ConsentDocument:
         current = self.load()
         if current["revision"] != expected:
             refuse("consent_conflict")
-        row["revision"] = _revision(expected + 1)
-        store._write_private_json(self.path, row)
+        # Build separately: even a failed validation must preserve the caller's
+        # snapshot/revision, not only the durable bytes. Serialization matches
+        # the existing private writer exactly; no staged file exists yet.
+        try:
+            candidate = copy.deepcopy(row)
+            candidate["revision"] = _revision(expected + 1)
+            self._validate(candidate)
+            raw = json.dumps(candidate, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(raw) > 262144:
+                refuse("consent_invalid")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            refuse("consent_invalid")
+        store._write_private_json(self.path, candidate)
         # The shared writer fsyncs the staged file; authority also needs the
         # renamed directory entry durable before placement can be reduced.
         import os
@@ -248,8 +267,11 @@ class ConsentDocument:
             os.close(fd)
         # Read back through the same strict reader; a write is not evidence of
         # successful authority publication until the actual persisted shape holds.
-        if self.load() != row:
+        if self.load() != candidate:
             refuse("consent_write_unconfirmed")
+        # Existing callers use the successful revision for their next CAS; do
+        # not advance it until publication, durability and strict readback hold.
+        row["revision"] = candidate["revision"]
 
 
 def check_borrow(

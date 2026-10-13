@@ -995,6 +995,30 @@ class MeshCredentialBroker:
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
 
+    def _github_scope_refusal(self, key: str, by: str) -> BrokerError | None:
+        """No forge source supplies a verified read-only account identity today.
+
+        App/config labels, a PAT, gh login and a peer's account_ref cannot prove
+        it. With an account-specific deny, refuse ambiguity BEFORE resolving a
+        source, extracting its key/token, or queueing an upstream mint. Never
+        hold the consent flock while network/subprocess work awaits; current
+        denial is checked again at boundaries and before the grant is emitted.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            consent.check_borrow(self.network_id, self.self_device, by, key, {}, self.root)
+        except MeshRefusal as exc:
+            return BrokerError(
+                code=exc.code,
+                message=str(exc),
+                key=key,
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+            )
+        return None
+
     async def _resolve_github(
         self,
         *,
@@ -1028,6 +1052,9 @@ class MeshCredentialBroker:
                 message="this key is device-scoped; the placement row that asked is not",
                 **common,
             )
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         source = github_app.resolve_source(self.root)
         if source == github_app.SOURCE_APP:
             return await self._serve_github_app(key=key, provider=provider, by=by, common=common)
@@ -1046,6 +1073,9 @@ class MeshCredentialBroker:
                 **common,
             )
         if source in (github_app.SOURCE_TOKEN, github_app.SOURCE_GH):
+            scope_refusal = self._github_scope_refusal(key, by)
+            if scope_refusal is not None:
+                return scope_refusal
             try:
                 if source == github_app.SOURCE_TOKEN:
                     token = github_app.read_token_secret(self.root)
@@ -1072,6 +1102,11 @@ class MeshCredentialBroker:
                     else github_app.CODE_GH_UNUSABLE
                 )
                 return BrokerError(code=code, message=str(exc), **common)
+            # Extraction already in flight cannot be undone, but a newly
+            # persisted reduction must prevent constructing/emitting its grant.
+            scope_refusal = self._github_scope_refusal(key, by)
+            if scope_refusal is not None:
+                return scope_refusal
             return self._grant_from_owner_token(
                 token=token, key=key, provider=provider, common=common
             )
@@ -1092,6 +1127,9 @@ class MeshCredentialBroker:
         loop through the broker's executor — a stuck GitHub must not stall the
         relay (the same reason the MCP refresh leaves the loop for its lock).
         """
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         try:
             app = github_app.read_app_key(self.root)
         except github_app.GithubAppKeyError as exc:
@@ -1113,6 +1151,13 @@ class MeshCredentialBroker:
                 ),
                 **common,
             )
+        # Recheck after local configuration reads, immediately before external
+        # work. A revoke racing an already-started mint cannot retract that
+        # request; registration still arranges cleanup and final grant() denial
+        # prevents emission. That in-flight limit is not a zero-mint claim.
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         lender = self._lender()
         try:
             minted = await asyncio.get_running_loop().run_in_executor(

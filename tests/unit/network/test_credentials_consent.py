@@ -542,3 +542,145 @@ def test_stale_revision_cannot_drop_another_writer_deny(rig: Any) -> None:
     with doc.locked(), pytest.raises(MeshRefusal, match="consent_conflict"):
         doc.save(old, old["revision"])
     assert doc.load()["recipients"][rig.peer.device_id]["denies"]
+
+
+def test_257th_denial_refusal_preserves_readable_authority(rig: Any) -> None:
+    document = consent.ConsentDocument(N, rig.own.device_id, rig.root)
+    row = document.load()
+    row["recipients"][rig.peer.device_id] = {
+        "public_key_fingerprint": "",
+        "enabled": False,
+        "denies": [
+            {
+                "selector": {"credential_key": P},
+                "revision": 1,
+                "reason": "withdrawn",
+                "approval_ref": "capacity-" + str(i),
+            }
+            for i in range(256)
+        ],
+    }
+    with document.locked():
+        document.save(row, row["revision"])
+    before = document.path.read_bytes()
+    snapshot = document.load()
+    with pytest.raises(MeshRefusal, match="consent_invalid"):
+        consent.restrict_and_revoke(
+            N, rig.own.device_id, rig.peer.device_id, {"credential_key": P}, "new-257", rig.root
+        )
+    assert document.path.read_bytes() == before
+    assert document.load() == snapshot
+    assert len(document.load()["recipients"][rig.peer.device_id]["denies"]) == 256
+
+
+@pytest.mark.parametrize("bad", ["recipients", "serialized_bytes", "context", "depth"])
+def test_rejected_candidate_preserves_bytes_revision_snapshot_and_tombstones(
+    rig: Any, bad: str
+) -> None:
+    consent.restrict_and_revoke(
+        N,
+        rig.own.device_id,
+        rig.peer.device_id,
+        {"credential_key": P},
+        "preserved-denial",
+        rig.root,
+    )
+    document = consent.ConsentDocument(N, rig.own.device_id, rig.root)
+    before = document.path.read_bytes()
+    persisted = document.load()
+    candidate = copy.deepcopy(persisted)
+    if bad == "recipients":
+        candidate["recipients"] = {
+            "d_" + format(i, "032x"): {"public_key_fingerprint": "", "enabled": False, "denies": []}
+            for i in range(257)
+        }
+    elif bad == "serialized_bytes":
+        candidate["recipients"][rig.peer.device_id]["public_key_fingerprint"] = "λ" * 140000
+    elif bad == "context":
+        candidate["network_id"] = "n_" + "f" * 24
+    else:
+        candidate["recipients"][rig.peer.device_id]["denies"][0]["selector"]["credential_key"] = [
+            [[[P]]]
+        ]
+    untouched = copy.deepcopy(candidate)
+    names = sorted(p.name for p in document.path.parent.iterdir())
+    with document.locked(), pytest.raises(MeshRefusal):
+        document.save(candidate, candidate["revision"])
+    assert candidate == untouched
+    assert document.path.read_bytes() == before
+    assert document.load() == persisted
+    assert sorted(p.name for p in document.path.parent.iterdir()) == names
+
+
+@pytest.mark.parametrize("source", ["app", "token", "gh"])
+def test_github_account_ambiguity_refuses_before_any_source_extract_mint_register(
+    rig: Any, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    from local_operator.network.credentials import github as github
+
+    monkeypatch.setattr(github, "_resolve_program", lambda *a, **kw: None)
+    doc = placement.PlacementDocument.load(N, rig.root, self_device=rig.own.device_id)
+    doc.declare(
+        github.GITHUB_KEY,
+        owner_device=rig.own.device_id,
+        owner_device_name="synthetic",
+        provider=github.GITHUB_KEY,
+        kind=github.GITHUB_KIND,
+        by=rig.own.device_id,
+    )
+    doc.grant(github.GITHUB_KEY, rig.peer.device_id, scope="device", by=rig.own.device_id)
+    doc.save()
+    consent.restrict_and_revoke(
+        N,
+        rig.own.device_id,
+        rig.peer.device_id,
+        {"credential_key": github.GITHUB_KEY, "account_ref": "unknown-forge-account"},
+        "forge-account-denial",
+        rig.root,
+    )
+    doc = placement.PlacementDocument.load(N, rig.root, self_device=rig.own.device_id)
+    doc.grant(github.GITHUB_KEY, rig.peer.device_id, scope="device", by=rig.own.device_id)
+    doc.save()
+    calls = []
+
+    def touch(name: str, value: Any) -> Any:
+        calls.append(name)
+        return value
+
+    class Lender:
+        def mint(self, *args: Any) -> Any:
+            return touch(
+                "mint",
+                SimpleNamespace(
+                    token="synthetic-unused", expires_at_ms=int((time.time() + 600) * 1000)
+                ),
+            )
+
+        def register(self, **kwargs: Any) -> None:
+            touch("register", None)
+
+    mode = {"app": github.SOURCE_APP, "token": github.SOURCE_TOKEN, "gh": github.SOURCE_GH}[source]
+    monkeypatch.setattr(github, "resolve_source", lambda *a: touch("source", mode))
+    monkeypatch.setattr(github, "read_app_key", lambda *a: touch("app-key", SimpleNamespace()))
+    monkeypatch.setattr(
+        github, "read_token_secret", lambda *a: touch("PAT-extract", "synthetic-unused")
+    )
+    monkeypatch.setattr(github, "read_gh_token", lambda: touch("gh-extract", "synthetic-unused"))
+    monkeypatch.setattr(github, "repositories_for", lambda *a: ["synthetic/repo"])
+    monkeypatch.setattr(rig.broker, "_lender", lambda: Lender())
+    link = SimpleNamespace(device_id=rig.peer.device_id, network_id=N, epoch=1)
+    # A caller cannot turn a denied/unknown owner account into a different one.
+    frame = dict(
+        op="net_broker",
+        kind="grant",
+        req=1,
+        key=github.GITHUB_KEY,
+        provider=github.GITHUB_KEY,
+        from_device=rig.peer.device_id,
+        for_session="same-synthetic-session",
+        account_ref="guessed-other-account",
+    )
+    reply = rig.broker.on_broker(link, frame)["detail"]
+    assert reply["kind"] == "error" and reply["code"] == "scope_unknown"
+    assert calls == []
+    assert "access_token" not in reply

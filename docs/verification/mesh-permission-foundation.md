@@ -91,6 +91,47 @@ Scoped flake8 is the reused interpreter's installed tool. CI remains authoritati
 for full automated coverage/formatter-version parity; no full local suite or new
 venv/dependency tree is created. Branch pyproject remains base version0.70.21.
 
+## Round-1 unified remediation — candidate publication and forge ambiguity
+
+Independent R1-1/Q1-1 and R1-2/Q1-2 were reproduced here at immutable PR head8c:
+actual256→257 denial refusal **changed authority bytes and made load unreadable**;
+actual GitHub account-denial request returned scope_unknown **after mint/register**.
+Each producer used the real consent writer/broker entrypoint with only external
+forge boundaries synthetic; no live material or upstream mint.
+
+The corrected writer validates the entire separately copied candidate, all existing
+schema/cardinality/context constraints and exact UTF-8 writer serialization bound
+BEFORE any staging/replacement. Failed candidates preserve current bytes,
+readability, denial/revision and caller in-memory snapshot; post-write durability
+and strict readback remain required. No denial pruning is used to fit capacity.
+
+GitHub presently supplies no genuine read-only native account identity before its
+source ladder. Existing account-specific denies therefore refuse scope_unknown
+BEFORE resolving a source or reading App/PAT/gh private material, minting or
+registering. No app/config/name/caller account_ref is invented as identity. Current
+denial is rechecked at asynchronous boundaries and before grant emission; no file
+lock spans network/subprocess work. A mint/extraction already in flight at a later
+withdrawal cannot be retracted by this preflight: final denial prevents emission,
+and existing registration/revocation cleanup remains. **No blanket zero-in-flight
+mint/extraction or upstream bearer retraction claim.**
+
+Actual exact after-control output:
+
+```text
+257th refusal: consent_invalid; bytes_changed=false; unreadable=false
+GitHub account ambiguity: scope_unknown; external_boundary_calls=[];
+material_response_present=false
+```
+
+Eight additional regression controls cover denial/recipient capacities, serialized
+bytes, malformed/deep context and unchanged snapshots/tombstones; App/PAT/gh source
+preflight zero boundaries, ignoring forged caller account_ref. Bounded existing
+real encrypted-TCP/control fixture retained: authenticated grant with1 synthetic
+loopback refresh; forged recipient identity_mismatch with no added refresh;
+actual CLI revoke then SAME session not_a_holder with0 added refreshes. Legacy
+forge mint/audit and missing-source ladder tests pass. These are isolated source
+fixtures, not live owner adoption, external provider or native UI acceptance.
+
 ## Explicit deferrals / activation holds
 
 - **Deferred — next reviewed lifecycle slice:** positive inventory reconciliation,
