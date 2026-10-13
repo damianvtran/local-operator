@@ -704,6 +704,49 @@ class RunFacts(BaseModel):
 
 
 class HistoryPage(BaseModel):
+    #: THE COMPLETE PEER-SOURCE FACTS (docs/DESKTOP_API.md "Complete peer-source
+    #: contract"), each ABSENT unless the request declared
+    #: ``peer_journal_source`` and the authenticated owner ACKed: an old
+    #: renderer's page therefore carries no new key at all. ``exclude_if``
+    #: (rather than a default) keeps today's bytes for every legacy answer,
+    #: exactly as the open-frame and journal-order fields already do.
+    #:
+    #: ``peer_journal_source`` IS THE PER-RESPONSE ACK: true only when this
+    #: answer is a complete result under the negotiated contract. A client
+    #: must treat its absence as ``unsupported`` — never infer completeness
+    #: from the presence of any other key.
+    peer_journal_source: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: The expected-generation mismatch correction: the caller's loaded bodies
+    #: belong to another domain, the answer names the current generation so a
+    #: re-read is owed, and the generation is NOT an authority to install.
+    reconcile: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: The payload purpose's per-ID partition over the requested set, plus the
+    #: named companion dependencies (bodies carry the requested rows; companion
+    #: conversation payloads ride ``dependency_entries`` and are named here so
+    #: no consumer confuses them with requested rows). ``source_retry_ids`` is
+    #: the explicit smaller-batch retry, never a silent truncation.
+    source_present_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_missing_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_unavailable_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_remaining_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_retry_ids: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_dependency_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    #: Companion bodies for the named dependencies, same row shape as entries
+    #: (see ``_wire_entry`` on the owner): only ever present on a payload
+    #: answer, and only for ids that ``source_dependency_ids`` names.
+    dependency_entries: list["HistoryEntry"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     journal_generation: str | None = Field(default=None, exclude_if=lambda value: value is None)
     journal_order_state: Literal["ready", "building", "unsupported", "unavailable"] | None = Field(
         default=None, exclude_if=lambda value: value is None

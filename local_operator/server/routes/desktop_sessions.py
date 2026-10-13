@@ -3147,6 +3147,7 @@ async def snapshot(
         list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
         Query(max_length=512),
     ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
@@ -3201,6 +3202,7 @@ async def snapshot(
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=bool(peer_journal_source),
                 **supplement_read_options(bool(supplements)),
             )
         )
@@ -3260,11 +3262,25 @@ async def history(
         list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
         Query(max_length=512),
     ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
+    source_read: Annotated[str | None, Query(max_length=32)] = None,
+    expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
     # returns one for a directory that does not exist), not a 404.
+    #
+    # ``peer_journal_source=1`` IS THE COMPLETE CONTRACT'S DECLARATION (the
+    # matching feature key is ``peer_journal_source`` in ``GET /v1/capabilities``
+    # ``features``): a renderer that sends it, together with ``journal_order``,
+    # is served the owner's own source state for a PEER session — including
+    # ``building``, which an availability wake settles — and its answers carry
+    # the per-response ACK. Without it every answer is byte-for-byte today's.
+    # ``source_read`` selects one typed purpose (``metadata``/``payload``;
+    # ``availability`` is the bridge's internal lane and is refused here like
+    # any other value on a non-peer session), and ``expected_journal_generation``
+    # is the payload purpose's REQUIRED domain fence.
     #
     # ``around_id``/``before``/``after`` are the anchored mode (design §D4): one
     # page centred on an entry id, for the renderer's far jump. The reader's own
@@ -3303,6 +3319,13 @@ async def history(
                 entry_times=bool(entry_ts),
                 open_frame=bool(open_frame),
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=bool(peer_journal_source),
+                # Passed explicitly rather than unpacked: ``None`` IS "absent"
+                # for both (the bridge tests ``is not None``), and a str-valued
+                # unpack beside the bool-valued ones makes the whole kwargs
+                # block one inferred union type under pyright.
+                source_read=source_read,
+                expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
             )
         )
@@ -5355,6 +5378,7 @@ async def events(
         list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
         Query(max_length=512),
     ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
@@ -5384,6 +5408,7 @@ async def events(
                 frontend_replace=bool(frontend_replace),
                 supplements=bool(supplements),
                 journal_order=bool(journal_order),
+                peer_journal_source=bool(peer_journal_source),
             )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
@@ -5444,6 +5469,7 @@ async def events(
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    peer_journal_source=bool(peer_journal_source),
                 )
             ) as frames:
                 try:

@@ -3087,6 +3087,21 @@ class ServingSessionHandle(SessionHandle):
         )
         return isinstance(transcript, Transcript)
 
+    @property
+    def peer_journal_source_supported(self) -> bool:
+        """Whether this runtime serves the COMPLETE peer-source vocabulary.
+
+        The peers' STORED read is served by the relay, not this runtime, so
+        this advertisement gates the runtime RECORD's half of the contract
+        (docs/DESKTOP_API.md "Complete peer-source contract"): an attaching
+        peer viewer declares ``peer_journal_source`` only against a runtime
+        that advertises this string, and the recovery envelope's source facts
+        plus their strict omission for old viewers ride the same negotiation.
+        It is a SEPARATE string from ``journal-order-v1`` because the two are
+        different promises — see ``PEER_JOURNAL_SOURCE_CAPABILITY``.
+        """
+        return self.journal_order_supported
+
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
 

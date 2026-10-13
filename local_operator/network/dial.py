@@ -297,6 +297,15 @@ AUTH_FIELDS: tuple[str, ...] = (
     # The owner's capability AND viewer declaration gate order metadata. This
     # relay must forward the latter, not silently make a capable peer legacy.
     "journal_order",
+    # THE COMPLETE CONTRACT'S OWN DECLARATION, named here because the
+    # allowlist guard refused to let it ship silently: the client declares it
+    # beside ``journal_order`` (projection.py) as the viewer's half of the
+    # four-part gate, and a declaration this copy dropped would have made the
+    # peer-source contract inert on the attach path exactly as the
+    # entry-times join once shipped inert (agent review round 1, Q2a — the
+    # guard's literal-key fix surfaced it; the fix is to name it, never to
+    # widen the copy).
+    "peer_journal_source",
     "supplements",
     "slash_consumers",
     "surface",
