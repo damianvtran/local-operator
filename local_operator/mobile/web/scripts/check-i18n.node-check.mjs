@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { ENFORCED, scanSource, fingerprints, NONTRANSLATABLE } from "./check-i18n.mjs";
+const script = fileURLToPath(new URL("./check-i18n.mjs", import.meta.url));
+const root = dirname(dirname(script));
+function fixture(source, baselineSource = source, scope = "src/store.ts") {
+	const directory = mkdtempSync(join(process.env.LOCAL_OPERATOR_SCRATCHPAD ?? tmpdir(), "relay-i18n-mutation-"));
+	for (const path of ENFORCED) { mkdirSync(dirname(join(directory, path)), { recursive: true }); writeFileSync(join(directory, path), path === scope ? source : ""); }
+	writeFileSync(join(directory, "i18n-baseline.json"), JSON.stringify({ schema: 1, enforced: ENFORCED, legacy: { [scope]: fingerprints(scanSource(baselineSource, scope)) } }));
+	return { directory, run: () => spawnSync(process.execPath, [script, "--root", directory], { encoding: "utf8" }) };
+}
+test("template substitutions, JSX and DOM copy assignments fail actual mandatory gate", () => {
+	for (const source of [
+		'const message = `${"New visible copy"}`;',
+		'const view = <span>{`${"New visible copy"}`}</span>;',
+		'const message = `${["New visible copy"].join("")}`;',
+		'const message = `${decorate("New visible copy")}`;',
+		'document.title = "New visible copy";',
+		'document.body.textContent = `${"New visible copy"}`;',
+		'document.body.setAttribute("aria-label", "New visible copy");',
+	]) {
+		const rig = fixture(source, "", "src/main.tsx");
+		try { const result = rig.run(); assert.equal(result.status, 1, source); assert.match(result.stderr, /New visible copy/); }
+		finally { rmSync(rig.directory, { recursive: true, force: true }); }
+	}
+});
+test("exact sink/literal multiset rejects equal-count replacement through actual gate", () => {
+	const rig = fixture('const label = "Changed visible copy";', 'const label = "Legacy visible copy";');
+	try { const result = rig.run(); assert.equal(result.status, 1); assert.match(result.stderr, /Changed visible copy/); }
+	finally { rmSync(rig.directory, { recursive: true, force: true }); }
+});
+test("same-count sink reassignment and duplicate literal growth fail", () => {
+	for (const source of ['const message = "Legacy visible copy";', 'const label = "Legacy visible copy"; function second() { const label = "Legacy visible copy"; }']) {
+		const rig = fixture(source, 'const label = "Legacy visible copy";');
+		try { assert.equal(rig.run().status, 1); } finally { rmSync(rig.directory, { recursive: true, force: true }); }
+	}
+});
+test("JSX, accessible attributes, template copy and errors are scanned; keys/comments/types are technical", () => {
+	const source = 'const view = <><button aria-label="Accessible name">Visible copy</button>{`Count ${count} items`}</>; throw new Error("Visible refusal");';
+	const findings = scanSource(source, "src/main.tsx");
+	for (const text of ["Accessible name", "Visible copy", "Count", "items", "Visible refusal"]) assert(findings.some(item => item.text === text));
+	assert.deepEqual(scanSource('/* Developer prose */ const key = "wire.exec.error_line"; type Status = "technical";', "src/store.ts"), []);
+	assert.deepEqual(scanSource('throw new Error("catalogue response limit")', "src/i18n/wire-cache.ts"), []);
+	assert(NONTRANSLATABLE.every(item => item.reason));
+	assert.deepEqual(scanSource('const view = <span>{t("wire.exec.error_line", {error: value})}</span>;', "src/main.tsx"), []);
+	assert.deepEqual(scanSource('const view = <span className="technical-css-token"/>;', "src/main.tsx"), []);
+});
+test("legacy exact match passes; outside-scope source is advisory, not exempted from inventory", () => {
+	const rig = fixture('const label = "Legacy visible copy";');
+	try { writeFileSync(join(rig.directory, "src/advisory.ts"), 'const message = "Unextracted app copy";'); const result = rig.run(); assert.equal(result.status, 0); assert.match(result.stdout, /1 advisory/); }
+	finally { rmSync(rig.directory, { recursive: true, force: true }); }
+});
+test("build/check/test scripts all execute the mandatory gate", () => {
+	const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
+	for (const mode of ["build", "check", "test"]) assert(scripts[mode].startsWith("node scripts/check-i18n.mjs &&"));
+	assert(scripts.test.includes("node --test scripts/check-i18n.node-check.mjs && vitest run"));
+	assert(!/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(fileURLToPath(import.meta.url)), "Node-only checks must not match Vitest default discovery");
+});

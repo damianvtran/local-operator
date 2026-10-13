@@ -10,6 +10,8 @@
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { supplementsFromWire } from "./lib/supplement";
+import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
+import { createWireLoader } from "./i18n/wire-cache";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -77,13 +79,32 @@ let sessionsConnected = false;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
-/* The RELAY's resolved language, off the ``config`` stream
-   (``/api/config/events``, wave-5 slice D): the same frame semantics the
-   desktop feed publishes — ``{changed_keys, language}`` — and ``null`` until
-   the first frame lands (or forever, on a daemon without the route: absence,
-   not an error). Also mirrored onto ``<html lang>`` so assistive tech and
-   future catalogues read one value. */
-let language: string | null = null;
+/* Backend preference and actual UI copy language are different facts. Until
+   C bundles own copy, the SPA remains English/LTR under every backend frame.
+   No OS/device/storage guess is allowed to impersonate backend authority. */
+let localeSnapshot: LocaleSnapshot = Object.freeze({
+	backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0,
+});
+export const messageRuntime = createMessageRuntime(() => localeSnapshot, () => publishLocaleSnapshot());
+export const wireCatalogueLoader = createWireLoader({
+	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
+	capabilities: () => capabilities,
+	activate: (namespace, locale, messages) => { messageRuntime.registerWire(namespace, locale, messages); },
+	deactivate: (namespace, locale) => { messageRuntime.unregisterWire(namespace, locale); },
+});
+export function initializeLocaleMetadata(): void {
+	if (typeof document === "object") {
+		document.documentElement.lang = localeSnapshot.uiLocale;
+		document.documentElement.dir = localeSnapshot.direction;
+	}
+}
+function publishLocaleSnapshot(backendLocale = localeSnapshot.backendLocale): void {
+	const uiLocale = messageRuntime.uiLocaleFor(backendLocale);
+	localeSnapshot = Object.freeze({ backendLocale, uiLocale, direction: directionFor(uiLocale), revision: localeSnapshot.revision + 1 });
+	wireCatalogueLoader.invalidateContext();
+	initializeLocaleMetadata();
+	emit(); // one existing notification channel, including same-locale registration
+}
 /* The pins the user has ASKED FOR and the daemon has not answered for yet,
    held as the value that was asked for. An overlay on the server's list, never
    a rewrite of it, and the distinction is the whole point.
@@ -213,7 +234,10 @@ export function useCapabilities(): Capabilities | null {
 }
 
 export function useLanguage(): string | null {
-	return useSyncExternalStore(subscribe, () => language);
+	return useSyncExternalStore(subscribe, () => localeSnapshot.backendLocale);
+}
+export function useLocaleSnapshot(): LocaleSnapshot {
+	return useSyncExternalStore(subscribe, () => localeSnapshot);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -338,6 +362,7 @@ export function retainSessionListStream(): () => void {
 					};
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
+					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = true;
 					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
@@ -387,15 +412,8 @@ function applyConfigFrame(data: string): void {
 			changed_keys?: string[];
 			language?: string;
 		};
-		if (typeof payload.language !== "string" || !payload.language) return;
-		language = payload.language;
-		/* The daemon serves the shell with lang="en"; the resolved language is
-		   the authoritative one from the moment it arrives. Guarded because the
-		   store also runs under vitest's node environment. */
-		if (typeof document !== "undefined") {
-			document.documentElement.lang = payload.language;
-		}
-		emit();
+		if (!isResolvedLocale(payload.language)) return;
+		publishLocaleSnapshot(payload.language);
 	} catch {
 		/* A malformed frame is dropped; the next one repaints. */
 	}
