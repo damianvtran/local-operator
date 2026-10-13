@@ -27,11 +27,15 @@ conftest installs, and every entry written is this test's own fixture.
 from __future__ import annotations
 
 import json
+import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from starlette.testclient import TestClient
 
+from local_operator.mobile import schedules
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 
@@ -39,6 +43,24 @@ SESSION_A = "aaa111222333"
 SESSION_B = "bbb444555666"
 FUTURE = int(time.time() * 1000) + 3_600_000
 PAST = int(time.time() * 1000) - 60_000
+
+
+@pytest.fixture(autouse=True)
+def _schedule_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the wire's relative times tied to execution, not shard collection.
+
+    CI can collect this module ten minutes before executing it; import-time
+    deadlines then cross the due-time assertion despite correct production
+    arithmetic. Refresh both sides of that geometry per test, and freeze only
+    the schedules reader's clock (not cookies, asyncio or pytest's timers).
+    """
+    _pin_schedule_clock(monkeypatch, time.time())
+
+
+def _pin_schedule_clock(monkeypatch: pytest.MonkeyPatch, now_s: float) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "FUTURE", int(now_s * 1000) + 3_600_000)
+    monkeypatch.setattr(sys.modules[__name__], "PAST", int(now_s * 1000) - 60_000)
+    monkeypatch.setattr(schedules, "time", SimpleNamespace(time=lambda: now_s))
 
 
 def _client() -> TestClient:
@@ -219,6 +241,22 @@ def test_an_absent_store_is_an_empty_list_and_not_an_error() -> None:
     assert body["monitors"]["entries"] == []
     assert body["monitors"]["read_error"] is False
     assert "supervisor" not in body["monitors"]
+
+
+@pytest.mark.parametrize("collection_age_s", [0, 610, 1200])
+def test_schedule_deadlines_are_relative_to_execution_not_collection(
+    monkeypatch: pytest.MonkeyPatch, collection_age_s: int
+) -> None:
+    # Advance the test's execution clock without sleeping through a whole CI
+    # shard. Future and overdue rows must retain their original boundaries.
+    execution_s = time.time() + collection_age_s
+    _pin_schedule_clock(monkeypatch, execution_s)
+    _monitor_entry(SESSION_A, rows=[_monitor_row("future"), _monitor_row("past", due=PAST)])
+    body = _body(_client())
+    rows = {row["id"]: row for row in body["monitors"]["entries"][0]["monitors"]}
+    assert body["monitors"]["generated_at"] == int(execution_s * 1000)
+    assert rows["future"]["due_in_s"] == 3600
+    assert rows["past"]["due_in_s"] == -60
 
 
 def test_the_index_answers_without_a_runtime_and_names_each_row_s_own_session() -> None:
