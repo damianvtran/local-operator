@@ -6,6 +6,13 @@ export type MessageParams = {
   "relay.login.page.title": undefined;
   "relay.login.password.label": undefined;
   "relay.login.submit.label": undefined;
+  "relay.shell.list.connecting": undefined;
+  "relay.shell.list.empty": undefined;
+  "relay.shell.list.section.active": undefined;
+  "relay.shell.list.section.previous": undefined;
+  "relay.shell.list.theme": undefined;
+  "relay.shell.session.connecting": undefined;
+  "relay.shell.session.waiting": undefined;
   "wire.errors.agents.agent_not_found": undefined;
   "wire.errors.agents.agent_not_found_id": { "agent_id": string };
   "wire.errors.agents.agent_not_found_wrapped": { "error": string };
