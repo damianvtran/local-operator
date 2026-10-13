@@ -33,6 +33,11 @@ from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
+from local_operator.harness.hub_receipts import (
+    hub_receipt_fields,
+    hub_receipt_marker,
+    hub_receipt_stamped,
+)
 
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
@@ -1361,9 +1366,9 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
                 # is what leaked raw XML onto the attach seed.
-                body = str(message.details.get("body") or "").strip()
-                direction = message.details.get("direction")
-                if body:
+                body, facts = hub_receipt_fields(message.details)
+                direction = facts.get("direction")
+                if body.strip():
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
@@ -1371,6 +1376,7 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                                 "parent_message" if direction == "to_child" else "subagent_message"
                             ),
                             text=body,
+                            details=facts,
                         )
                     )
                 continue
@@ -1560,11 +1566,48 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
-            parent_message = extract_parent_message(message.text)
+            marker = hub_receipt_marker(message)
+            if marker is not None:
+                # Positive producer provenance: the typed facts ride the row
+                # itself (``comms.py``), so the receipt classification no longer
+                # re-parses the model envelope. ``text`` stays the envelope for
+                # the facts record; the body comes from the marker.
+                body, facts = hub_receipt_fields({**marker, "text": message.text})
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind=(
+                            "subagent_message"
+                            if facts.get("direction") == "to_parent"
+                            else "parent_message"
+                        ),
+                        text=body,
+                        details=facts,
+                        # The row's own attachments ride the receipt the same
+                        # way they ride an unmarked prompt row: references
+                        # with their ORIGINAL message id and index, resolved
+                        # lazily by the client. Classifying the row as a
+                        # receipt must never drop media the row carries
+                        # (review round 3, R3-3) — the unmarked-image control
+                        # beside it already does exactly this.
+                        images=_image_refs(message),
+                    )
+                )
+                continue
+            # A modern producer's stamp that FAILED validation must not be
+            # re-guessed from the row's envelope: this legacy parse is
+            # compatibility for rows the modern producer never stamped, and a
+            # malformed stamp is still a claim on the row (review round 3,
+            # R3-1 acceptance). Stamped-but-invalid rows stay human; an
+            # id-correlated typed fact would vouch for the row in its own
+            # entry and is handled above.
+            parent_message = (
+                None if hub_receipt_stamped(message) else extract_parent_message(message.text)
+            )
             if parent_message is not None:
-                # A persisted hub steer: model-facing XML around the parent's
-                # own words. The phone shows the body the parent authored,
-                # never the envelope.
+                # Legacy rows written before the marker existed: model-facing
+                # XML around the parent's own words. The phone shows the body
+                # the parent authored, never the envelope.
                 entries.append(
                     TranscriptEntry(id=message.id, kind="parent_message", text=parent_message.body)
                 )
@@ -2552,13 +2595,38 @@ class ProjectionFold:
                 ):
                     entry = candidate
                     break
-        parent_message = extract_parent_message(text)
+        marker = hub_receipt_marker(message)
+        marker_body: str | None = None
+        marker_facts: dict[str, Any] | None = None
+        if marker is not None:
+            marker_body, marker_facts = hub_receipt_fields({**marker, "text": text})
+        # Stamped-but-INVALID markers stay human, for the durable fold's
+        # reason (review round 3, R3-1 acceptance): the legacy envelope parse
+        # below only ever runs for rows the modern producer never touched.
+        # A VALID marker keeps this branch exactly as it was — only the
+        # malformed case is withheld from the body guess.
+        parent_message = (
+            None
+            if marker is None and hub_receipt_stamped(message)
+            else extract_parent_message(text)
+        )
         if entry is not None:
             # Adopt the persisted identity either way: the row was keyed by the
             # command id (or a synthetic one), and the message id is what later
             # history folds and the web client's list reconciliation agree on.
             entry.id = message.id
-            if parent_message is not None:
+            if marker_body is not None and marker_facts is not None:
+                # The echo captured the envelope verbatim; the marker carries
+                # the typed provenance, so the reconciled row matches what the
+                # durable fold will render for it later — body AND facts.
+                entry.kind = (
+                    "subagent_message"
+                    if marker_facts.get("direction") == "to_parent"
+                    else "parent_message"
+                )
+                entry.text = marker_body
+                entry.details = marker_facts
+            elif parent_message is not None:
                 # The echo captured the model-facing envelope verbatim. Rewrite
                 # it in place to the parent's own words so the reconciled row
                 # matches what the durable folds will render for it later.
@@ -2567,9 +2635,33 @@ class ProjectionFold:
             if refs and not entry.images:
                 entry.images = refs
             return False
-        if parent_message is not None:
+        if marker_body is not None and marker_facts is not None:
             # A hub steer delivered mid-turn announces itself as a user
-            # MessageStartEvent whose text is the model-facing envelope. The
+            # MessageStartEvent; the marker is the positive provenance the
+            # producer wrote, so the live fold and its later history page agree
+            # about kind, body and facts without either re-reading the XML.
+            self._append(
+                TranscriptEntry(
+                    id=message.id,
+                    kind=(
+                        "subagent_message"
+                        if marker_facts.get("direction") == "to_parent"
+                        else "parent_message"
+                    ),
+                    text=marker_body,
+                    details=marker_facts,
+                    final=True,
+                    # Same rule as the durable fold above and the echoed row
+                    # beside it: the receipt keeps the source's image refs
+                    # (original id/index) rather than dropping them on
+                    # reclassification (review round 3, R3-3).
+                    images=refs,
+                )
+            )
+            return True
+        if parent_message is not None:
+            # Legacy rows written before the marker existed: a hub steer
+            # delivered mid-turn whose text is the model-facing envelope. The
             # phone renders the parent's own words, never the XML — the same
             # rule the durable folds apply, so a live delivery and its later
             # history page agree about the row.
