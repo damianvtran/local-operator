@@ -129,16 +129,15 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     """
     from local_operator.providers.auth_store import AuthStore
 
-    # Placement is mutable while a session is alive. Capturing its absence here
-    # permanently stranded pre-login sessions on the local-only resolver. Keep
-    # the local tiers unchanged, but defer broker construction to the first read
-    # that can actually borrow; no network client exists on a zero-peer device.
-    return MeshAwareAuthStore(
-        AuthStore(db_path=db_path, config_dir=config_dir),
-        mesh=None,
-        config_dir=config_dir,
-        discover_mesh=True,
-    )
+    # Already-bridged sessions must survive a later owner login/placement; a
+    # truly zero-peer device retains the actual plain class and no broker. The
+    # existing relay bootstrap seam recognizes an active remote member without
+    # minting identity, dialing, or weakening bearer authorization.
+    client = MeshCredentialClient.for_this_device(config_dir, include_bridged=True)
+    local = AuthStore(db_path=db_path, config_dir=config_dir)
+    if client is None:
+        return local
+    return MeshAwareAuthStore(local, mesh=client, config_dir=config_dir)
 
 
 class MeshAwareAuthStore:

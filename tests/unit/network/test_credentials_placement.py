@@ -390,9 +390,7 @@ def test_build_auth_store_returns_the_plain_store_with_nothing_borrowable(
     root.mkdir()
     _point_config_at(monkeypatch, root)
     store = mesh_store.build_auth_store(root)
-    assert type(store.local) is AuthStore
-    assert store.mesh_client is None
-    store.close()
+    assert type(store) is AuthStore
 
     # A document we own entirely is still not borrowable: the broker rung could only
     # ever delegate to ourselves, so the wrapper would be a layer with no work to do.
@@ -404,8 +402,7 @@ def test_build_auth_store_returns_the_plain_store_with_nothing_borrowable(
     own.entries["openai"].owner_device = identity.device_id
     own.save()
     plain = mesh_store.build_auth_store(root)
-    assert type(plain.local) is AuthStore
-    assert plain.mesh_client is None
+    assert type(plain) is AuthStore
     plain.close()
 
 
@@ -426,7 +423,7 @@ def test_build_auth_store_passes_the_db_path_through_and_keeps_the_default(
     _point_config_at(monkeypatch, root)
     default = mesh_store.build_auth_store(root)
     try:
-        assert type(default.local) is AuthStore
+        assert type(default) is AuthStore
         assert default.db_path == root / "auth.db"
     finally:
         default.close()
@@ -434,7 +431,7 @@ def test_build_auth_store_passes_the_db_path_through_and_keeps_the_default(
     elsewhere.mkdir()
     explicit = mesh_store.build_auth_store(root, db_path=elsewhere / "auth.db")
     try:
-        assert type(explicit.local) is AuthStore
+        assert type(explicit) is AuthStore
         assert explicit.db_path == elsewhere / "auth.db"
     finally:
         explicit.close()
@@ -518,6 +515,16 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
         store.close()
 
 
+def _bridge_before_placement(root: Path, device: str) -> None:
+    """Model a securely admitted peer before its first provider login arrives."""
+    from local_operator.network import store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id=NETWORK, name="synthetic-bridge", self_device_id=device)
+    record.members.append(MemberRecord(device_id=OWNER, name="synthetic-owner"))
+    store.save(record, root)
+
+
 def test_a_session_built_before_the_first_share_promotes_without_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -530,6 +537,7 @@ def test_a_session_built_before_the_first_share_promotes_without_restart(
     _point_config_at(monkeypatch, root)
     identity = mint(root, name="borrower")
 
+    _bridge_before_placement(root, identity.device_id)
     predating = mesh_store.build_auth_store(root)
     assert type(predating.local) is AuthStore
 
