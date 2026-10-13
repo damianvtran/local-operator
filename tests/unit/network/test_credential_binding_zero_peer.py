@@ -45,7 +45,8 @@ def test_u8_no_placement_document_means_no_recorder_and_no_writes(tmp_path: Path
     root = tmp_path / "bare"
     root.mkdir()
     store = mesh_store.build_auth_store(root)
-    assert type(store) is AuthStore
+    assert type(store.local) is AuthStore
+    assert store.mesh_client is None
     store.close()
 
     transcript = Transcript(root / "sess")

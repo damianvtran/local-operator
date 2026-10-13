@@ -722,6 +722,8 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help="Can peers complete offloaded work? Readiness with remedies",
     )
     ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
+    ready.add_argument("--model", default="", help="Also check this selected provider/model")
+    ready.add_argument("--session", default="", help="Session context for the selected model")
     ready.add_argument("--json", action="store_true")
 
     # `lop network update <peer>`: the single-peer half of mesh rolling updates
@@ -7352,7 +7354,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     from local_operator.network import readiness as readiness_mod
 
     live = _relay_call(
-        "peer_readiness", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
+        "peer_readiness",
+        peer=args.peer,
+        selector=getattr(args, "model", ""),
+        session_id=getattr(args, "session", ""),
+        timeout=_listing_timeout(),
+        allow_no_answer=True,
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
