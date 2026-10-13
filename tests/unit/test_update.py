@@ -371,22 +371,27 @@ def test_answered_not_ready_does_not_fall_back_to_stale_cache(tmp_path: Path) ->
     assert not cache.exists()
 
 
-def test_cached_latest_ignores_unready_entries(tmp_path: Path) -> None:
-    """B2: /info's behind flag must not derive from a pre-gate cache entry."""
-    from local_operator.update import cached_latest
+def test_cached_ready_version_ignores_unready_entries(tmp_path: Path) -> None:
+    """B2, at the layer QA round 3 proved correct: the diagnostic reader
+    (cached_latest, contract pinned in test_collect.py) still returns a
+    bare pre-gate entry — it is "the last answer known", not a claim —
+    while the ready-only reader a behind claim derives from refuses it.
+    """
+    from local_operator.update import cached_latest, cached_ready_version
 
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
         json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
         encoding="utf-8",
     )
-    assert cached_latest(cache_dir=tmp_path) == (None, None)
+    version, _age = cached_latest(cache_dir=tmp_path)
+    assert version == "0.28.0"
+    assert cached_ready_version(cache_dir=tmp_path) is None
     cache.write_text(
         json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
         encoding="utf-8",
     )
-    version, _age = cached_latest(cache_dir=tmp_path)
-    assert version == "0.28.0"
+    assert cached_ready_version(cache_dir=tmp_path) == "0.28.0"
 
 
 def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:

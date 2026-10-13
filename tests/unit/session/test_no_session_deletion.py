@@ -1834,6 +1834,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         1,
     ),
     (
+        "local_operator/update.py::check_latest",
+        "<path>.unlink",
+        "The PyPI version cache file (_cache_path: <cache>/pypi-local-operator.json), "
+        "dropped when an answered read proves the cached release not downloadable; "
+        "a fixed basename under the cache dir — never a session path",
+    ),
+    (
         "local_operator/update.py::flip_pointer",
         "<path>.unlink",
         "<stable>/current.tmp-<pid> — this call's own staged SYMLINK",
