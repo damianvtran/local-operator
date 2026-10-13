@@ -171,6 +171,38 @@ def test_invalid_manifest_never_returns_partial_success(mutation) -> None:
         SkillDocument.from_json(value)
 
 
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["scripts/run", "scripts/run/file.py"],
+        ["scripts/run/file.py", "scripts/run"],
+        ["references/A", "references/a/file.md"],
+        ["references/a/file.md", "references/A"],
+        ["references/é", "references/e\u0301/file.md"],
+        ["references/e\u0301/file.md", "references/é"],
+    ],
+)
+def test_file_and_ancestor_directory_paths_collide_before_install(paths) -> None:
+    with pytest.raises(SkillValidationError) as refusal:
+        SkillDocument.from_json(
+            manifest(files=[{"path": path, "content": "text"} for path in paths])
+        )
+    assert refusal.value.code == "skill-validation"
+
+
+@pytest.mark.parametrize("value", ["[" * 1100 + "1" + "]" * 1100, "9" * 400])
+def test_deep_yaml_and_unrepresentable_number_fail_by_name(value) -> None:
+    with pytest.raises(SkillValidationError) as refusal:
+        SkillDocument.from_json(manifest(f"metadata:\n  value: {value}\n"))
+    assert refusal.value.code == "skill-validation"
+
+
+def test_deep_json_fails_by_name() -> None:
+    with pytest.raises(SkillValidationError) as refusal:
+        SkillDocument.from_bytes(("[" * 1100 + "1" + "]" * 1100).encode())
+    assert refusal.value.code == "skill-validation"
+
+
 def test_wire_duplicate_keys_and_size_refused() -> None:
     with pytest.raises(SkillValidationError):
         SkillDocument.from_bytes(
