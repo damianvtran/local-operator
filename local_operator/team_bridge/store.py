@@ -798,6 +798,89 @@ class Store:
             f"state.sqlite3 schema {version!r} != {SCHEMA_VERSION}",
         )
 
+    @staticmethod
+    def _floor_key(owner: OwnerSnapshot) -> str:
+        """The FLOOR version namespace: ACCOUNT + hub + kind (R11/3).
+
+        Accepted text versions are global to the ACCOUNT's serving hub; the
+        credential/tenant/endpoint/generation are authorization guards, not
+        ways to reset them (a new organization must not accept an older
+        served version the account already moved past). The consent RECEIPT
+        stays exact-owner-specific.
+        """
+
+        return f"acct:{owner.account_id}"
+
+    def _floor_row(self, conn: Any, owner: OwnerSnapshot, kind: str) -> tuple[str, str] | None:
+        """Current floor value: account scope first, then the legacy
+        owner-scoped row CONSERVATIVELY (known V5 metadata is reconciled, not
+        erased; a carried legacy floor keeps authorising until advanced)."""
+
+        row = conn.execute(
+            "SELECT version, sha256 FROM text_floors WHERE owner_key = ? AND hub = ? AND kind = ?",
+            (self._floor_key(owner), owner.canonical_base_url, kind),
+        ).fetchone()
+        if row is not None:
+            return str(row["version"]), str(row["sha256"])
+        legacy = conn.execute(
+            "SELECT version, sha256 FROM text_floors WHERE owner_key = ? AND hub = ? AND kind = ?",
+            (_owner_key(owner), owner.canonical_base_url, kind),
+        ).fetchone()
+        if legacy is not None:
+            return str(legacy["version"]), str(legacy["sha256"])
+        return None
+
+    def advance_text_floors(self, owner: OwnerSnapshot, staged: list[tuple[str, str, str]]) -> None:
+        """Advance accepted floors ATOMICALLY as one staged set (R11/3).
+
+        ONE native transaction: live-owner/generation authorization, then for
+        EVERY staged candidate re-read the CURRENT floor (account+hub+kind)
+        and validate monotonic version + same-version immutable bytes. All
+        floors advance ONLY when every candidate validates — a refused
+        candidate (stale version, changed bytes, refused currency/raw origin
+        upstream) leaves EVERY floor untouched, so nothing untrusted can be
+        made durable. The compare and the write live INSIDE this transaction,
+        not in a Python precheck a competing writer can invalidate.
+        """
+
+        from local_operator.team_bridge.client import version_number
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            resolved: list[tuple[str, str, str]] = []
+            for kind, version, sha in staged:
+                number = version_number(version)
+                if number is None:
+                    raise StoreRefused("policy_stale", f"{kind} version does not parse")
+                prior = self._floor_row(conn, owner, kind)
+                if prior is not None:
+                    prior_number = version_number(prior[0])
+                    if prior_number is None or number < prior_number:
+                        raise StoreRefused("policy_stale", f"{kind} version moved backwards")
+                    if number == prior_number and sha != prior[1]:
+                        raise StoreRefused(
+                            "policy_stale", f"{kind} bytes differ for an accepted version"
+                        )
+                resolved.append((kind, version, sha))
+            for kind, version, sha in resolved:
+                conn.execute(
+                    "INSERT INTO text_floors (owner_key, hub, kind, version, sha256, updated_at) "
+                    "VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(owner_key, hub, kind) DO UPDATE SET "
+                    "version = excluded.version, sha256 = excluded.sha256, "
+                    "updated_at = excluded.updated_at",
+                    (
+                        self._floor_key(owner),
+                        owner.canonical_base_url,
+                        kind,
+                        version,
+                        sha,
+                        time.time(),
+                    ),
+                )
+
     def text_floor(self, owner: OwnerSnapshot, kind: str) -> tuple[str, str] | None:
         """The contentless accepted floor for one served-text kind.
 
@@ -810,38 +893,13 @@ class Store:
 
         with self._connect() as conn:
             self._init(conn)
-            row = conn.execute(
-                "SELECT version, sha256 FROM text_floors "
-                "WHERE owner_key = ? AND hub = ? AND kind = ?",
-                (_owner_key(owner), owner.canonical_base_url, kind),
-            ).fetchone()
-            if row is None:
-                return None
-            return str(row["version"]), str(row["sha256"])
+            return self._floor_row(conn, owner, kind)
 
     def set_text_floor(self, owner: OwnerSnapshot, kind: str, version: str, sha256: str) -> None:
         """Advance the contentless floor (same-version identical bytes is a
         no-op by construction). The database never sees served text."""
 
-        with self._connect() as conn:
-            self._init(conn)
-            self._begin_write(conn)
-            self._require_live(conn, owner)
-            conn.execute(
-                "INSERT INTO text_floors (owner_key, hub, kind, version, sha256, updated_at) "
-                "VALUES (?,?,?,?,?,?) "
-                "ON CONFLICT(owner_key, hub, kind) DO UPDATE SET "
-                "version = excluded.version, sha256 = excluded.sha256, "
-                "updated_at = excluded.updated_at",
-                (
-                    _owner_key(owner),
-                    owner.canonical_base_url,
-                    kind,
-                    version,
-                    sha256,
-                    time.time(),
-                ),
-            )
+        self.advance_text_floors(owner, [(kind, version, sha256)])
 
     def owner_consent_receipt(self, owner: OwnerSnapshot) -> dict[str, str] | None:
         """The COMMITTED human consent receipt for the exact live owner.
@@ -2135,10 +2193,53 @@ class Store:
                     raise StoreRefused("attempt_mismatch", "bound digest changed before finish")
                 if registered.get("message") != message_id:
                     raise StoreRefused("proof_corrupt", "retained proof names another message")
-                if receipt is not None and registered.get("body") != receipt.body_sha256:
+                # FULL closed comparison against the NATIVE authority the
+                # finish actually has (R11/1): owner namespace, tenant, the
+                # served model/template/version the receipt carries, approval
+                # agreement, revision and current policy epoch. Without this,
+                # a valid closed record whose NON-body fields were altered
+                # after the POST committed an allow receipt.
+                owner_expected = (
+                    f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+                    f"|{owner.endpoint_id}|{owner.canonical_base_url}"
+                    f"|{owner.enrollment_generation}"
+                )
+                if registered.get("owner") != owner_expected:
                     raise StoreRefused(
-                        "proof_corrupt", "retained proof body does not match the receipt"
+                        "proof_corrupt", "retained proof owner does not match the finishing owner"
                     )
+                if registered.get("tenant") != owner.tenant_id:
+                    raise StoreRefused(
+                        "proof_corrupt", "retained proof tenant does not match the finishing owner"
+                    )
+                if registered.get("epoch") != int(expected_epoch):
+                    raise StoreRefused(
+                        "policy_stale", "retained proof epoch is not the finishing epoch"
+                    )
+                if receipt is not None:
+                    if registered.get("body") != receipt.body_sha256:
+                        raise StoreRefused(
+                            "proof_corrupt", "retained proof body does not match the receipt"
+                        )
+                    # (The served model is checked by APPROVED-MAP
+                    # membership below, never by equality to the registered
+                    # default: a legitimate resolver alias serves an
+                    # approved identity that need not be the default string.)
+                    if registered.get("template") != receipt.template_sha256:
+                        raise StoreRefused(
+                            "proof_corrupt",
+                            "retained proof template does not match the verdict's template",
+                        )
+                    if registered.get("version") != receipt.prompt_version:
+                        raise StoreRefused(
+                            "proof_corrupt",
+                            "retained proof version does not match the verdict's prompt version",
+                        )
+                    if receipt.model not in list(registered.get("approved") or []):
+                        raise StoreRefused(
+                            "proof_corrupt",
+                            "the served model is not in the retained approved map",
+                        )
                 if (
                     receipt is not None
                     and envelope_digest is not None
@@ -2146,6 +2247,14 @@ class Store:
                 ):
                     raise StoreRefused(
                         "proof_corrupt", "retained proof envelope does not match the receipt"
+                    )
+                if (
+                    admission_revision is not None
+                    and registered.get("revision") != admission_revision
+                ):
+                    raise StoreRefused(
+                        "proof_corrupt",
+                        "retained proof revision is not the committed admission revision",
                     )
             policy_row = conn.execute(
                 "SELECT epoch FROM screening_policy WHERE owner_key = ?", (key,)
