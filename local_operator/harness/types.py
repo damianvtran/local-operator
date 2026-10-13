@@ -2402,6 +2402,12 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     ``message_id`` lets a front end dedup this live receipt against the
     persisted ``peer_message`` row on a later history replay, so a resumed
     session does not double-paint the same delivery.
+
+    ``custom_type`` carries the DELIVERY's provenance kind (H4e-render): the
+    persisted ``CustomMessage``'s ``custom_type``, so a live front end paints
+    the same card the history replay will (a ``team_bridge_message`` is its own
+    card, never a generic peer one — §13.4). Empty on events a pre-carriage
+    build emitted, which reads as the legacy peer kind.
     """
 
     type: Literal["peer_message_delivered"] = "peer_message_delivered"
@@ -2411,6 +2417,8 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     sender: dict[str, Any] = Field(default_factory=dict)
     #: Transcript entry id of the persisted peer message, for replay dedup.
     message_id: str = ""
+    #: The persisted row's ``custom_type`` (provenance kind), empty = peer.
+    custom_type: str = ""
 
 
 class SteeringDeliveredEvent(AgentEvent[Literal["steering_delivered"]]):
