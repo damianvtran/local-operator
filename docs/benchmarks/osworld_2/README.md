@@ -1567,3 +1567,17 @@ $PY ~/local-operator/scripts/run_episode.py \
 
 Such a bundle verifies like any other but seals `synthetic_model` and can
 never be mistaken for a result.
+
+### Native session caller (v2.1, 2026-10-12)
+
+The v2.1 native caller's declared protocol — the four clocks and the exact
+epoch mapping (one epoch per ADMITTED output decision, charged before the
+guest await), the request observer's all-actor cost accounting (recorded vs
+estimated vs unknown; recorded totals are lower bounds while fallback
+invoices are unreported), the explicit owned-work shutdown that gates
+scoring, and the selector's `core_source` pin that refuses a pre-composition
+selector before any allocation — is specified in
+[`native-caller-apparatus.md`](native-caller-apparatus.md). The prospective
+20-task cohort (frozen, digest `ee5f560d416961df1259caf5eecb25b456724fea97292ba96cc7a7c9eabc369e`)
+lives in [`offline20-v21-candidate.json`](offline20-v21-candidate.json);
+neither is a readiness claim.
