@@ -4083,7 +4083,7 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     # an aggregator whose upstream host died, where the machine's network is
     # fine.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert any("response stream interrupted mid-answer" in text for text in notices)
+    assert any("response stream cut mid-answer" in text for text in notices)
 
     # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
     # partial answer as HISTORY, so the model writes the remainder instead of
@@ -4113,7 +4113,7 @@ def _interrupted_events(
     served: ModelSpec | None = None,
     partial: str = "The answer is ",
     call: StreamToolCallDelta | None = None,
-) -> list:
+) -> list[StreamEvent]:
     """One failed turn for the interrupted-end family: the REAL wire shape.
 
     A wordless ``finish_reason 'error'`` is not an exception on this path -- it
@@ -4124,7 +4124,7 @@ def _interrupted_events(
     """
     from local_operator.harness.types import StreamModelEvent
 
-    events: list = []
+    events: list[StreamEvent] = []
     if served is not None:
         events.append(StreamModelEvent(model=served))
     events.append(StreamTextDelta(delta=partial))
@@ -4189,15 +4189,17 @@ async def test_a_bare_error_end_continues_the_turn_on_the_same_route() -> None:
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert any("same route" in t and "(1/3)" in t for t in notices)
     history = [f"{m.role}:{m.text}" for m in script.requests[2].messages]
-    # FINDING-R4 (open, for the review round): on THIS end-event family the
-    # committed continuation-turn message lands with EMPTY text although the
-    # user saw the partial (on_screen above). The exception arm commits the
-    # partial text; this arm does not yet, so the re-ask prompt refers to a
-    # turn whose text is absent from the wire transcript. Asserted honestly
-    # here rather than papered over: the shapes above (same-route pin, single
-    # re-ask, notice, rendered text once) are the contract; transcript-text
-    # parity with the exception arm is the follow-up.
-    assert history[:2] == ["user:go", "assistant:"]
+    # The FULL continuation transcript, asserted (round-1 Q-2): the pre-fault
+    # turn is a call-only assistant message plus its committed tool result;
+    # the interrupted turn commits the partial the user saw; the re-ask prompt
+    # is the trailing user message. The earlier two-entry slice checked the
+    # PRE-FAULT turn and hid exactly the part under test.
+    assert len(history) == 5
+    assert history[0] == "user:go"
+    assert history[1] == "assistant:"  # call-only turn: no prose
+    assert "tool:ok:{'text': 'x'}" in history[2]
+    assert history[3] == "assistant:The answer is "  # the committed partial
+    assert history[4].startswith("user:")  # the continuation prompt
 
 
 @pytest.mark.asyncio
@@ -4460,16 +4462,15 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     # its position, rather than three identical claims of a reconnection.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert notices == [
-        "response stream interrupted mid-answer — resuming the turn on the same route "
+        "response stream cut mid-answer — resuming the turn "
         f"({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
-    # The terminal names its own history too (round-1 Q-1): attempts made and
-    # the spent budget are readable off `agent_end.error` alone, not only off
-    # the notices.
+    # The terminal names its own history too (round-1 Q-1/D-1): retries used
+    # and the exact budget — never a bare count that reads like total requests.
     assert (
         f"the continuation budget is spent ({MAX_CONNECTIVITY_CONTINUATIONS}/"
-        f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)" in ends[0].error
+        f"{MAX_CONNECTIVITY_CONTINUATIONS} retries used)" in ends[0].error
     )
 
 
@@ -4798,11 +4799,11 @@ async def test_aggregator_upstream_cut_budget_surfaces_a_bounded_error() -> None
     assert "Upstream error from Together" in ends[0].error
     # Bounded: the initial attempt plus exactly the continuation budget.
     assert gateway.calls == MAX_CONNECTIVITY_CONTINUATIONS + 1
-    # And the terminal names its own history (round-1 Q-1): attempts made and
-    # the spent budget are readable off `agent_end.error` alone.
+    # And the terminal names its own history (round-1 Q-1/D-1): retries used
+    # and the exact budget — never a bare count that reads like total requests.
     assert (
         f"the continuation budget is spent ({MAX_CONNECTIVITY_CONTINUATIONS}/"
-        f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)" in ends[0].error
+        f"{MAX_CONNECTIVITY_CONTINUATIONS} retries used)" in ends[0].error
     )
 
 

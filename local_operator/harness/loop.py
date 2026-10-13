@@ -1763,9 +1763,16 @@ class AgentLoop:
                                 call for call in assistant.tool_calls if call.arguments
                             ]
                             current = self._current_model(config)
+                            # The pin is the route this turn ATTEMPTED -- its
+                            # request model. ``StreamModelEvent`` may refine it,
+                            # but it is NOT required: the measured OpenRouter
+                            # route never publishes one (QA w1 discriminator),
+                            # and requiring it made this whole gate inert on
+                            # the very route that motivated the fix. A user
+                            # model switch since the fault still cancels the
+                            # recovery choice.
                             interrupted_gates_ok = (
                                 not complete_calls
-                                and turn_served_model is not None
                                 and turn_model is not None
                                 and current.provider == turn_model.provider
                                 and current.model_id == turn_model.model_id
@@ -2022,19 +2029,27 @@ class AgentLoop:
                             # three times that the machine had reconnected and
                             # then ended the run. Naming the budget also shows it
                             # being spent rather than repeating one identical line.
-                            # SAME ROUTE is stated because the recovery pins
-                            # the serving spec (see ``_InterruptedRecovery``):
-                            # the listener deserves to know the next attempt
-                            # goes back to the same machine, not a substitute.
-                            yield NoticeEvent(
-                                text=(
+                            # SAME ROUTE is only true of the interrupted-end
+                            # family: its recovery pins the route the failed
+                            # turn attempted (``_InterruptedRecovery``). The
+                            # legacy connectivity cut re-asks through the
+                            # ordinary router, which may legitimately land on a
+                            # substitute, so it keeps the general wording --
+                            # one message, two honest variants.
+                            if turn_retryable_interruption:
+                                notice_text = (
                                     "response stream interrupted mid-answer — "
-                                    f"resuming the turn on the same route "
+                                    "resuming the turn on the same route "
                                     f"({connectivity_continuations}/"
                                     f"{MAX_CONNECTIVITY_CONTINUATIONS})"
-                                ),
-                                kind="warning",
-                            )
+                                )
+                            else:
+                                notice_text = (
+                                    "response stream cut mid-answer — "
+                                    f"resuming the turn ({connectivity_continuations}/"
+                                    f"{MAX_CONNECTIVITY_CONTINUATIONS})"
+                                )
+                            yield NoticeEvent(text=notice_text, kind="warning")
                             has_more_tool_calls = True
                             continue
                         # Budget spent and still offline: fall through to the
@@ -2275,7 +2290,7 @@ class AgentLoop:
                                 f"{stream_error} — the response stream was cut "
                                 f"mid-answer and the continuation budget is spent "
                                 f"({connectivity_continuations}/"
-                                f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)"
+                                f"{MAX_CONNECTIVITY_CONTINUATIONS} retries used)"
                             )
                         placeholder_details = {FAULT_KEY: FAULT_ABORTED} if aborted else None
                         placeholders = [
@@ -2995,23 +3010,25 @@ class AgentLoop:
             # already-open provider stream does.
             preparing_at = time.monotonic()
             model = self._current_model(config)
-            # Same-route recovery pin: re-ask the interrupted turn on the spec
-            # that actually SERVED the failed attempt. PINNED ONLY when the
-            # host's resolution still matches the failed turn's requested spec
-            # -- ``same_route_retry`` would otherwise force a model the host
-            # (or the user) has since switched AWAY from, which is a rewrite
-            # the flag must never perform. A mismatch cancels the choice and
-            # the turn proceeds ordinary; the continuation gate in ``_run``
-            # already refused to CONTINUE when no served spec was known, so an
-            # unknown spec cannot reach here as a pin.
+            # Same-route recovery pin: re-ask the interrupted turn on the
+            # route that turn actually ATTEMPTED. That route is the failed
+            # request's model; a ``StreamModelEvent`` REFINES the pin when the
+            # provider publishes one, but the measured OpenRouter route never
+            # does, so absence must fall back to the attempted route instead
+            # of disabling the pin -- a serving event is provenance, never a
+            # precondition. PINNED ONLY when the host's resolution still
+            # matches the failed turn's requested spec -- ``same_route_retry``
+            # would otherwise force a model the host (or the user) has since
+            # switched AWAY from, which is a rewrite the flag must never
+            # perform. A mismatch cancels the choice and the turn proceeds
+            # ordinary.
             same_route_retry = False
             if recovery is not None:
                 if (
-                    recovery.served is not None
-                    and model.provider == recovery.requested.provider
+                    model.provider == recovery.requested.provider
                     and model.model_id == recovery.requested.model_id
                 ):
-                    model = recovery.served
+                    model = recovery.served or recovery.requested
                     same_route_retry = True
             system_blocks = await self._current_system_blocks(context, config, model)
             # Resolving the prompt can publish a durable host-state update
@@ -3406,17 +3423,6 @@ class AgentLoop:
                     provider_payload = event.provider_payload
                     error = event.error
                     retryable_interruption = bool(getattr(event, "retryable_interruption", False))
-                    # Fold received text NOW, before this turn's result is
-                    # built: the interrupted-turn recovery commits this
-                    # message into the continuation transcript, and the
-                    # exception arm above ("Assemble before re-raising")
-                    # already guarantees the same fold for cuts. Without it a
-                    # wordless error end whose deltas were displayed left an
-                    # EMPTY assistant turn in the continuation history -- the
-                    # text the user read would vanish from the wire while the
-                    # continuation prompt still referred to it.
-                    if text_parts:
-                        assistant.content = [TextContent(text="".join(text_parts))]
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
