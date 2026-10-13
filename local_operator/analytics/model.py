@@ -27,7 +27,6 @@ tokeniser touch — happens on the recorder's background thread.
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
@@ -268,9 +267,11 @@ class CallSnapshot:
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
     """``(cost in micro-USD, price known)`` for a snapshot, never raising.
 
-    Called by the store on its BACKGROUND thread (never the event loop), where
-    the potentially-blocking ``resolve_model_info`` cold-memo lookup is free —
-    the same reason the SQLite write lives there. Prices through
+    Called by the store on its BACKGROUND thread (never the event loop).
+    A valid provider receipt needs no metadata; only the estimate fallback
+    performs the potentially-blocking ``resolve_model_info`` cold lookup.
+    Keeping that lookup off the event loop does not make it free: a cold
+    catalogue can still delay every later item on the single writer. Prices through
     ``cost_for_usage``, the one money computation the whole app shares, so the
     analytics dollar total cannot diverge from the status band. Returns
     ``(0, False)`` for a model with no published price (rendered ``$—``, not a
@@ -284,26 +285,21 @@ def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
     if snapshot.priced:
         return int(snapshot.cost_micro), bool(snapshot.cost_known)
     try:
-        from local_operator.model.configure import cost_for_usage, resolve_model_info
+        from local_operator.model.configure import (
+            _usage_cost,
+            cost_for_usage,
+            resolve_model_info,
+        )
 
-        info = resolve_model_info(snapshot.provider, snapshot.model_id)
-        # A provider-reported dollar is ground truth even when the registry has
-        # no row for this id (OpenRouter, a brand-new SKU). Asking the table
-        # first used to drop that figure and store the call as unpriced.
-        # Malformed reports (negative, non-finite) are "not reported" — the
-        # same rule ``cost_for_usage`` uses — so we fall through to the table
-        # rather than marking a garbage figure as known.
-        reported = snapshot.usd_cost
+        # The server's receipt is authoritative even for an unknown SKU or an
+        # unavailable catalogue. Validate it with the same helper as price_call
+        # BEFORE resolving metadata, so recording a bill cannot wait on a price
+        # estimate it will never use. Invalid receipts still take the ordinary
+        # table path; zero is a known receipt, not an absent one.
+        reported = _usage_cost(snapshot)
         if reported is not None:
-            try:
-                cost = float(reported)
-            except (TypeError, ValueError):
-                cost = None
-            else:
-                if not (math.isfinite(cost) and cost >= 0):
-                    cost = None
-            if cost is not None:
-                return int(round(cost * 1_000_000)), True
+            return int(round(reported * 1_000_000)), True
+        info = resolve_model_info(snapshot.provider, snapshot.model_id)
         if not (info.input_price or info.output_price):
             return 0, False
         # ``cost_for_usage`` duck-types its usage arg, so a plain object with the

@@ -4,7 +4,11 @@ These tests are the executable spec of the two-tier trust boundary: every
 field must resolve from a static ``ast`` parse with NO task code executing,
 and a field that is not statically resolvable must raise ``TaskParseError``
 rather than fall back to import (executing unknown code to decide whether to
-spend money is the failure the boundary exists to prevent).
+spend money is the failure the boundary exists to prevent). The ``instruction``
+field is the ONE documented deferral: an unresolvable instruction records
+None with ``instruction_static=False`` and the environment supplies the real
+text at reset (``providers/aws.py``'s post-setup accessor read), because the
+harness makes no decision on that text.
 """
 
 from __future__ import annotations
@@ -81,10 +85,73 @@ def test_module_constants_class_attributes_fstrings_and_strip_fold_statically() 
     }
 
 
-def test_an_imported_interpolation_folds_the_instruction_partially() -> None:
+def test_an_unresolvable_instruction_defers_instead_of_folding_a_prefix() -> None:
+    """An imported interpolation defers the instruction; no skeleton is kept.
+
+    The old contract folded this to the literal parts
+    (``"Open https://streamview./watch?v=1 and summarise."``). That prefix is
+    a fabricated instruction: it is not what the task says, and a consumer
+    cannot tell it from a real one. The deferred spelling -- None, with
+    ``instruction_static`` False -- is the only honest static statement.
+    """
+
     descriptor = taskfile.load_static(fixtures.PARTIAL_INSTRUCTION.encode(), module_name="t.py")
     assert descriptor.instruction_static is False
-    assert descriptor.instruction == "Open https://streamview./watch?v=1 and summarise."
+    assert descriptor.instruction is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_config"),
+    [
+        (fixtures.DEFERRED_HELPER_INSTRUCTION, ({"type": "launch", "app": "gedit"},)),
+        (fixtures.DEFERRED_CALL_INSTRUCTION, ()),
+    ],
+)
+def test_a_helper_expression_instruction_defers_without_executing(
+    source: str, expected_config: tuple[object, ...]
+) -> None:
+    """BinOp and call instructions defer, and the module never runs.
+
+    ``DEFERRED_HELPER_INSTRUCTION``'s class body raises when evaluated, so a
+    parser that imported the module to find out what the expression means
+    would crash here rather than defer. The rest of the parse completes:
+    the decision fields next to the deferred instruction are still read.
+    """
+
+    descriptor = taskfile.load_static(source.encode(), module_name="t.py")
+    assert descriptor.instruction is None
+    assert descriptor.instruction_static is False
+    assert descriptor.config == expected_config
+    # Never the stringified absence: ``str(None)`` would fabricate the text
+    # "None" and hand a consumer exactly the fake instruction deferral exists
+    # to avoid.
+    assert descriptor.instruction != "None"
+
+
+def test_an_unresolved_policy_field_refuses_next_to_a_deferred_instruction() -> None:
+    """Deferral is scoped to ``instruction``: policy stays strict.
+
+    ``platform`` here is an environment lookup, not a closed static shape, so
+    the whole module refuses BEFORE allocation even though the instruction
+    defers -- the same decision the field would force on its own.
+    """
+
+    with pytest.raises(TaskParseError, match="platform"):
+        taskfile.load_static(
+            fixtures.DEFERRED_INSTRUCTION_UNKNOWN_POLICY.encode(), module_name="t.py"
+        )
+
+
+def test_a_field_referencing_the_deferred_instruction_also_refuses() -> None:
+    """Anything that READS the instruction symbol is strict, not deferred.
+
+    The simulator config cannot resolve ``instruction`` (it deferred), and a
+    simulator is a pre-allocation decision, so it refuses -- deferral never
+    propagates into a decision field.
+    """
+
+    with pytest.raises(TaskParseError, match="user_simulator"):
+        taskfile.load_static(fixtures.DEFERRED_INSTRUCTION_REFERENCED.encode(), module_name="t.py")
 
 
 @pytest.mark.parametrize(

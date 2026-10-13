@@ -358,16 +358,13 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     assert settings.fallback_chains["anthropic/claude"]
 
 
-def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
-    """The message's list and the gate that refuses a value must be one set.
+def test_the_advertised_fixed_ladder_is_exactly_the_supported_depths() -> None:
+    """Keep fixed depth order separate from chain-only reset sentinels.
 
-    `CHAIN_EFFORT_LADDER` filters `EFFORT_ORDER` by `SUPPORTED_EFFORTS`, so the
-    drift is asymmetric: a rung added to `EFFORT_ORDER` alone is filtered out
-    and can never be advertised while refused (safe), but a rung added to
-    `SUPPORTED_EFFORTS` alone is ACCEPTED and silently missing from the list -
-    something the `sorted(SUPPORTED_EFFORTS)` this replaced could not do
-    (review round 32). Cheap to pin, and the failure it prevents is a user
-    being told a value they just used successfully is not one of the options.
+    `auto` is accepted in a chain but has no ordinal depth. The warning appends
+    it to this fixed ladder; `test_fallback_auto` pins that advertised union
+    against the chain vocabulary so a new accepted value cannot disappear from
+    the diagnostic (the drift pinned in review round 32).
     """
     assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
     # And it is a ladder, stated LITERALLY. Re-deriving it as

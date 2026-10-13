@@ -21,7 +21,10 @@ Prompt-cache guards (the whole point of doing this carefully):
   premium if ``i`` is mutated. Candidates whose suffix exceeds
   ``cache_warm_suffix_tokens`` sit inside the warm cache prefix and are left
   for compaction (which rebuilds the cache anyway) — *unless* the idle flush
-  applies.
+  applies, or the candidate is a superseded victim at least as large as that
+  suffix (see :data:`OVERSIZED_SUPERSEDE_TOKENS`). The useless pass has no
+  such exception: a worthless-once-consumed result does not repay a warm
+  re-write on any horizon the supersede arithmetic promises.
 - Idle flush: once ``now - last_activity >= idle_flush_ms`` the provider cache
   is provably cold (the default 90 min exceeds Anthropic's 1 h long-retention
   TTL), so re-writing the sent region is free and every candidate flushes.
@@ -29,8 +32,8 @@ Prompt-cache guards (the whole point of doing this carefully):
   more than it saves (the placeholder itself has a token cost) and only churns
   the cache — skip it.
 - Never blank ``is_error`` results (errors are signal), and never blank skill
-  reads (``skill://`` paths or the ``skill`` tool) — a pruned skill forces the
-  model into a re-read loop.
+  or guide reads (``skill://``/``guide://`` paths or the ``skill`` tool) — a
+  pruned skill or guide forces the model into a re-read loop.
 """
 
 from __future__ import annotations
@@ -74,6 +77,26 @@ USELESS_NOTICE = "[Uneventful result elided]"
 #: Exact placeholder written over a screenshot that a newer view of the same
 #: surface has superseded (see :func:`prune_stale_frames`).
 STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
+
+#: Minimum size for the Fix C oversized-supersede exception (see
+#: :func:`prune_tool_outputs`). The warm-suffix guard exists because blanking
+#: forces the provider to re-write everything after the victim at the
+#: cacheWrite premium, so a small victim costs more than it saves. That
+#: arithmetic inverts only when the victim itself outweighs the suffix it
+#: invalidates: the suffix is re-written once, while the victim would be
+#: re-billed on every request until compaction, so a victim at least as
+#: large as its suffix is repaid on the NEXT request alone. The exception
+#: therefore compares the victim estimate against the ACTUAL suffix
+#: (``suffix_tokens[i]``), never against a fixed number alone. This constant
+#: is only a floor beneath that comparison, mirroring
+#: ``cache_warm_suffix_tokens``' default (8,000) in the same units the guard
+#: already uses, so the exception can never fire for a victim the guard
+#: itself would call small. It deliberately does NOT apply to the useless
+#: pass (see the module docstring). This is NOT an earlier trigger: pruning
+#: already runs post-turn (session._maybe_compact -> _plan_compaction);
+#: the victims that accumulated did so because this guard deferred them,
+#: so the guard is where the fix belongs.
+OVERSIZED_SUPERSEDE_TOKENS = 8000
 
 #: How many of the newest frame-bearing messages the session-side stale-frame
 #: sweep always keeps (see :func:`prune_stale_frames_in_place`). Two, not one:
@@ -481,12 +504,15 @@ def _is_pruned(message: Message) -> bool:
 
 def _is_prunable(message: Message) -> bool:
     """One gate for BOTH prune passes (``protectedTools`` applies to the
-    superseded AND useless passes alike): never errors, never skill reads.
+    superseded AND useless passes alike): never errors, never skill/guide reads.
 
-    Skill reads are exempt because a pruned skill gets re-read in a loop.
-    Protection matches ``["skill", isSkillReadToolResult]``: the
-    ``skill`` tool itself, or a ``read`` result whose recorded target is a
-    ``skill://`` URL — the loop stores internal-URL reads under
+    Skill and guide reads are exempt because a pruned one gets re-read in a
+    loop — guides carry MUST-read rules whose loss is the same failure as a
+    lost skill, and Fix A now stamps ``guide://`` on filesystem guide reads
+    too, so exempting only ``skill://`` would leave exactly those new shaped
+    results blankable. Protection matches ``["skill", isSkillReadToolResult]``:
+    the ``skill`` tool itself, or a ``read`` result whose recorded target is a
+    ``skill://``/``guide://`` URL — the loop stores internal-URL reads under
     ``details['url']`` (tools/builtin.py) and filesystem reads under
     ``details['path']``; both are checked.
     """
@@ -498,7 +524,7 @@ def _is_prunable(message: Message) -> bool:
         details = _details_of(message)
         for key in ("path", "url"):
             value = details.get(key)
-            if isinstance(value, str) and value.startswith("skill://"):
+            if isinstance(value, str) and value.startswith(("skill://", "guide://")):
                 return False
     return True
 
@@ -613,9 +639,11 @@ def prune_tool_outputs(
     ``changed`` is True when at least one result was blanked. Messages are
     NEVER removed so tool-call/result pairing survives for every provider.
 
-    Guards, in order per candidate: never errors, never skill reads, never
-    already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never inside
-    the warm cache suffix — unless the idle flush window has elapsed.
+    Guards, in order per candidate: never errors, never skill/guide reads,
+    never already-pruned, never below :data:`MIN_PRUNE_TOKENS`, and never
+    inside the warm cache suffix — unless the idle flush window has elapsed,
+    or (superseded pass only) the victim is at least as large as the suffix
+    it invalidates and at least :data:`OVERSIZED_SUPERSEDE_TOKENS`.
     """
     if not messages:
         return list(messages), False
@@ -699,16 +727,39 @@ def prune_tool_outputs(
     suffix_tokens = compute_suffix_tokens(messages) if (superseded or useless) else []
 
     changed = False
-    for indices, notice in ((superseded, SUPERSEDED_NOTICE), (useless, USELESS_NOTICE)):
+    # WHY the two passes do not share the oversized exception (R2): the
+    # exception's arithmetic is supersede-specific — a superseded victim is
+    # dead weight that would otherwise be re-billed verbatim on every
+    # request, so a victim outweighing its suffix repays the one re-write
+    # immediately. A useless-flagged result (zero-match search, timed-out
+    # wait) is worthless once consumed by definition; blanking it inside the
+    # warm suffix buys no such repayment, so it keeps the plain guard.
+    for indices, notice, is_superseded_pass in (
+        (superseded, SUPERSEDED_NOTICE, True),
+        (useless, USELESS_NOTICE, False),
+    ):
         for i in indices:
             message = messages[i]
-            if estimate_tokens(message) < MIN_PRUNE_TOKENS:
+            victim_tokens = estimate_tokens(message)
+            if victim_tokens < MIN_PRUNE_TOKENS:
                 continue
             if not idle and suffix_tokens[i] > cache_warm_suffix_tokens:
                 # Inside the warm cache prefix: re-writing it costs the
                 # cacheWrite premium on the whole suffix. Leave it for
-                # compaction, which rebuilds the cache anyway.
-                continue
+                # compaction, which rebuilds the cache anyway — UNLESS this
+                # is a superseded victim that alone outweighs that suffix
+                # (see OVERSIZED_SUPERSEDE_TOKENS): then the re-write is
+                # repaid by not re-billing the victim on the very next
+                # request. Both halves are required: the floor keeps the
+                # exception off victims the guard calls small, and the
+                # suffix comparison is the repayment invariant itself.
+                oversized_supersede = (
+                    is_superseded_pass
+                    and victim_tokens >= OVERSIZED_SUPERSEDE_TOKENS
+                    and victim_tokens >= suffix_tokens[i]
+                )
+                if not oversized_supersede:
+                    continue
             _blank(message, notice)
             changed = True
 
@@ -758,7 +809,7 @@ def prune_stale_frames_in_place(
     view — and applies the same caller guards :func:`prune_tool_outputs`
     applies, so the session's two in-place sweeps behave alike:
 
-    - never errors and never skill reads (:func:`_is_prunable`), never an
+    - never errors and never skill/guide reads (:func:`_is_prunable`), never an
       already-pruned result, and never below :data:`MIN_PRUNE_TOKENS`;
     - never a candidate whose suffix lies inside the warm prompt cache
       (``cache_warm_suffix_tokens``) — mutating there re-writes everything

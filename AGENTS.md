@@ -5,6 +5,9 @@ things that are easy to get wrong here and expensive to discover later. For
 what the rewrite set out to do see `docs/REWRITE.md`; for the evidence behind
 each round see `docs/VERIFICATION.md`.
 
+For bounded allocation, costly-evidence preflight and review convergence, read
+`guide://delivery` (packaged at `local_operator/guides/delivery/GUIDE.md`).
+
 ## Environment
 
 ```sh
@@ -1347,6 +1350,23 @@ it landed.
    and do not "fix" it by adding an always-run job: the narrow green is the
    design (`scripts/ci_scope.py`, `release_bump`), and the code being released
    was gated on the PR that landed it.
+   **Before cutting the tag, prove the combined target, not just each PR.** In
+   the release owner's clean worktree checked out at the exact bump merge SHA,
+   verify `git rev-parse HEAD` equals that intended target. With Python 3.12 and
+   Node 24 on PATH, run `python scripts/i18n/generate.py --check` followed by
+   `python scripts/i18n/check.py`; both must exit zero without modifying assets.
+   Retain the target SHA, tool versions and actual responses in the release
+   evidence. If the target moves, repeat against the new combined ref. A narrow
+   green version-bump CI run is not this proof; a drift/parity failure needs a
+   reviewed fix, never regeneration in the publisher or an audit/eligibility
+   waiver. `publish.yml` independently repeats these invariants unconditionally
+   on the release tag or dispatched SHA before build/publication, with an event
+   SHA assertion to reject a moved tag. Downstream source-consuming jobs pin
+   `github.sha` directly and verify HEAD before any build/upload, so a tag moved
+   after the gate cannot replace its validated bytes; extension change detection
+   uses that same verified commit. The release tag remains metadata, not a later
+   source resolver. Dispatch remains rehearsal-only.
+
 4. **Tag and publish** from the merge commit of that bump, then install and
    smoke (mechanics below). The release notes cover **every PR in the
    window**, grouped in the house style of the existing releases (a headline
@@ -3367,6 +3387,14 @@ against a hang rather than a stall, that is the file to read.
   failure that motivated the code, not what the line does. Match that density;
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
+
+## Localized product copy
+
+For message extraction, generated key functions, locale/audit eligibility and
+backend-owned language settings, read [the i18n contributor HOWTO](docs/I18N.md)
+and `guide://i18n` before editing. The contract remains
+[docs/design/i18n.md](docs/design/i18n.md); its rollout plan is not completion.
+Keep technical/model-facing docs English and key rendered product copy.
 
 ## Adding a configuration key
 

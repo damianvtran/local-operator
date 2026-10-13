@@ -38,27 +38,21 @@ from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
-from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.org_chart import OrgNode, resolve_org
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.org_render import RenderResult, Tier, render_org
+
+# Re-export the eager leaf's exact class: existing widget-module callers and
+# Textual's app handler must agree on one dismissal message after first use.
+from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: Tier index → the word shown in the title. The title always states the tier
 #: so "why is this collapsed?" is answered on screen (a small terminal
 #: auto-selects the outline tier).
 _TIER_NAME = {0: "outline", 1: "standard", 2: "detailed"}
-
-
-class OrgChartViewDismissed(Message):
-    """The page's ``esc`` hint was clicked. The app owns leaving the mode.
-
-    A DEDICATED message (not the subagent view's) so the app's Esc-chain routes
-    the click to :meth:`_close_org_chart_view` — reusing the subagent message
-    would hit that mode's handler, which does not own this widget.
-    """
 
 
 def _style_resolver() -> Callable[[str], Style]:

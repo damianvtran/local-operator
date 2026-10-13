@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "File is not an allowed audio type: {mime_type}",
+  "wire.errors.files.heic_conversion": "Failed to convert HEIC/HEIF file: {error}",
+  "wire.errors.files.html_type": "File is not an allowed HTML type: {mime_type}",
+  "wire.errors.files.html_utf8": "HTML file is not valid UTF-8 text.",
+  "wire.errors.files.image_type": "File is not an allowed image type: {mime_type}",
+  "wire.errors.files.internal_error": "Internal Server Error: {error}",
+  "wire.errors.files.sign_auth": "A local access token or desktop bearer is required.",
+  "wire.errors.files.sign_path": "path must not be empty.",
+  "wire.errors.files.sign_route": "route must be one of: {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s must be between 1 and {maximum}.",
+  "wire.errors.files.video_type": "File is not an allowed video type: {mime_type}"
+}
