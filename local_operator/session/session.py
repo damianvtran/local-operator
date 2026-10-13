@@ -21630,7 +21630,10 @@ class Session:
             return schedules
 
     async def _aida_reconcile_rows(
-        self, schedules: list[WakeSchedule], *, cadence_fired: WakeSchedule | None = None,
+        self,
+        schedules: list[WakeSchedule],
+        *,
+        cadence_fired: WakeSchedule | None = None,
     ) -> list[WakeSchedule]:
         """The engine's reconcile over one schedule list, notes journaled.
 
@@ -22165,7 +22168,8 @@ class Session:
             # Keep the original row, not the scheduler's grace-shifted copy.
             # This is spent only when the existing catch-up take accepts it.
             self._aida_cadence_catchup = next(
-                (m["schedule"] for m in missed if m["schedule"].id == "aida-cadence"), None,
+                (m["schedule"] for m in missed if m["schedule"].id == "aida-cadence"),
+                None,
             )
         # The swallow bookkeeping starts here: every folded row still OWES its
         # load-time fire (the pump re-armed each to now + grace), and the shim
@@ -22437,22 +22441,36 @@ class Session:
 
             accepted = getattr(self, "_aida_cadence_delivered", None)
             previous = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
-            previous_rows = (previous.payload.get("details", {}).get("schedules", [])
-                             if previous else [])
+            previous_rows = (
+                previous.payload.get("details", {}).get("schedules", []) if previous else []
+            )
             # Absence/cancel alone never spends a phase. An accepted occurrence
             # must also match the authoritative retired arm, so an unrelated
             # same-id replacement cannot spend an old delivery's receipt.
             if not any(row.id == proactive.CADENCE_ID for row in schedules):
-                previous_cadence = next((WakeSchedule.model_validate(raw) for raw in previous_rows
-                                         if raw.get("id") == proactive.CADENCE_ID), None)
+                previous_cadence = next(
+                    (
+                        WakeSchedule.model_validate(raw)
+                        for raw in previous_rows
+                        if raw.get("id") == proactive.CADENCE_ID
+                    ),
+                    None,
+                )
                 if accepted is not None and previous_cadence is not None:
-                    if (accepted.request_id == previous_cadence.request_id
-                            and accepted.created_at == previous_cadence.created_at
-                            and (proactive.cadence_phase(accepted) is not None
-                                 or proactive.policy(self._config_dir).interval_hours)):
+                    if (
+                        accepted.request_id == previous_cadence.request_id
+                        and accepted.created_at == previous_cadence.created_at
+                        and (
+                            proactive.cadence_phase(accepted) is not None
+                            or proactive.policy(self._config_dir).interval_hours
+                        )
+                    ):
                         cadence_fired = accepted
-                if (cadence_fired is None and previous_cadence is not None
-                        and proactive.cadence_phase(previous_cadence) is not None):
+                if (
+                    cadence_fired is None
+                    and previous_cadence is not None
+                    and proactive.cadence_phase(previous_cadence) is not None
+                ):
                     # An unaccepted removal (including a stale same-id receipt)
                     # cannot consume the authoritative replacement's owed phase.
                     schedules = [*schedules, previous_cadence]

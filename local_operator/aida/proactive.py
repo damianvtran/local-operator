@@ -603,19 +603,28 @@ def cadence_phase(row: WakeSchedule | None) -> dict[str, int] | None:
         return None
     if not row.request_id.startswith(_CADENCE_ORIGIN):
         return None
-    parts = row.request_id[len(_CADENCE_ORIGIN):].split(":")
+    parts = row.request_id[len(_CADENCE_ORIGIN) :].split(":")
     if len(parts) != 3 or any(not part.isascii() or not part.isdecimal() for part in parts):
         return None
     try:
-        return _validated_phase(dict(zip(
-            ("interval_hours", "anchor_ms", "due_ms"), (int(part) for part in parts), strict=True,
-        )))
+        return _validated_phase(
+            dict(
+                zip(
+                    ("interval_hours", "anchor_ms", "due_ms"),
+                    (int(part) for part in parts),
+                    strict=True,
+                )
+            )
+        )
     except ValueError:
         return None
 
 
 def remember_cadence(
-    config_dir: Path | str, schedules: Sequence[WakeSchedule], *, held: bool = False,
+    config_dir: Path | str,
+    schedules: Sequence[WakeSchedule],
+    *,
+    held: bool = False,
 ) -> None:
     """Mirror a COMMITTED row (or record an intentional hold), never retirement.
 
@@ -641,8 +650,9 @@ def _transcript_cadence(config_dir: Path | str, session_id: str) -> WakeSchedule
     from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
     from local_operator.session.transcript import read_latest_custom_entry
 
-    entry = read_latest_custom_entry(Path(config_dir) / "sessions" / session_id,
-                                     WAKE_SCHEDULES_CUSTOM_TYPE)
+    entry = read_latest_custom_entry(
+        Path(config_dir) / "sessions" / session_id, WAKE_SCHEDULES_CUSTOM_TYPE
+    )
     if entry is None:
         return None
     for raw in entry.payload.get("details", {}).get("schedules", []):
@@ -1086,8 +1096,12 @@ def reconcile(
         # install.)
         existing = next((row for row in kept if row.id == CADENCE_ID), None)
         candidate = cadence_schedule(
-            now, pol.at, config_dir=config_dir, interval_hours=pol.interval_hours,
-            existing=existing, cadence_fired=cadence_fired,
+            now,
+            pol.at,
+            config_dir=config_dir,
+            interval_hours=pol.interval_hours,
+            existing=existing,
+            cadence_fired=cadence_fired,
         )
         kept = [candidate if row.id == CADENCE_ID else row for row in kept]
         if existing is None:
@@ -1145,8 +1159,11 @@ def reconcile(
 
 
 def _cadence_due(
-    rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int,
-    *, config_dir: Path | str,
+    rows: Sequence[WakeSchedule],
+    pol: CadencePolicy,
+    now_ms: int,
+    *,
+    config_dir: Path | str,
 ) -> int:
     """The cadence row's due time, or the time it *would* be armed for.
 
@@ -1164,7 +1181,9 @@ def _cadence_due(
             if phase and phase["interval_hours"] == pol.interval_hours:
                 if raw.get("cadence_held"):
                     return next_cadence_ms(
-                        now_ms, pol.at, interval_hours=pol.interval_hours,
+                        now_ms,
+                        pol.at,
+                        interval_hours=pol.interval_hours,
                         anchor_ms=phase["anchor_ms"],
                     )
                 return max(phase["due_ms"], now_ms + 1_000)
@@ -1789,14 +1808,24 @@ async def ensure_armed(
                 await repair_index(root, session_id)
                 ids.add(CADENCE_ID)
             candidate = cadence_schedule(
-                now, pol.at, config_dir=root, interval_hours=pol.interval_hours, existing=current,
+                now,
+                pol.at,
+                config_dir=root,
+                interval_hours=pol.interval_hours,
+                existing=current,
             )
             if candidate != current:
                 await edit_wake(
-                    root, session_id, CADENCE_ID,
-                    {"at": _iso_due(candidate.next_due_at), "message": candidate.message,
-                     "notify": True},
-                    now_ms=now, request_id=candidate.request_id or "",
+                    root,
+                    session_id,
+                    CADENCE_ID,
+                    {
+                        "at": _iso_due(candidate.next_due_at),
+                        "message": candidate.message,
+                        "notify": True,
+                    },
+                    now_ms=now,
+                    request_id=candidate.request_id or "",
                     expected_request_id=current.request_id or "",
                 )
                 result = "armed"
@@ -1810,7 +1839,10 @@ async def ensure_armed(
         elif CADENCE_ID not in ids:
             try:
                 candidate = cadence_schedule(
-                    now, pol.at, config_dir=root, interval_hours=pol.interval_hours,
+                    now,
+                    pol.at,
+                    config_dir=root,
+                    interval_hours=pol.interval_hours,
                 )
                 await arm_wake(
                     root,
