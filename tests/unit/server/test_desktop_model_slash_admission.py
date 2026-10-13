@@ -81,10 +81,17 @@ def _facade(*, version: str, native: list[str] | None = None) -> Any:
         def effective_model(self) -> configure.ModelSpec:
             return _PRIMARY.model_copy()
 
-        def _read_state_field(self, name: str) -> Any:
-            assert name == "model_catalogue"
+        def runtime_model_catalogue(self) -> list[dict[str, Any]]:
             # Truncated/absent inventory is not a negative support claim.
             return []
+
+        def _read_state_field(self, name: str) -> Any:
+            # The real store serves a copy-free allow-list only and REFUSES
+            # non-scalar fields like ``model_catalogue`` by raising. Mirror
+            # that refusal: a lenient double is how the routed arm's misuse of
+            # this accessor slipped past these cells while the real store
+            # raised (CI's fork e2e, round 1).
+            raise KeyError(f"{name!r} is not a copy-free state field")
 
         async def bind_runtime(self) -> None:
             # The route's explicit _ensure_bound; this shell is already bound.
