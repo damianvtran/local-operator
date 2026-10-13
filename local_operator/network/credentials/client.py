@@ -197,23 +197,31 @@ class MeshCredentialClient:
 
     @classmethod
     def for_this_device(
-        cls, root: Path | None = None, network_id: str = ""
+        cls, root: Path | None = None, network_id: str = "", *, include_bridged: bool = False
     ) -> MeshCredentialClient | None:
         """A runtime-side client, or ``None`` when this device may borrow nothing.
 
-        ``None`` is the 0-peer answer and the whole reason ``build_auth_store`` can
-        promise byte-identical behaviour without a network: no placement that names
-        another device's credential as borrowable means no client exists, so no
-        code path below this line is reachable.
+        ``None`` is the zero-peer answer. ``include_bridged`` is only for session
+        construction: an already-admitted active remote member permits an empty
+        client whose document can later converge. Status readers keep the strict
+        default, and every bearer request still checks current holder permission.
+        No member/keypair is created and no dial occurs on either construction path.
         """
         found = placement_for_store(root)
         if found is None:
-            return None
-        found_network, document = found
+            if not include_bridged:
+                return None
+            found_network, document = _empty_document_for_member(root)
+            if document is None:
+                return None
+        else:
+            found_network, document = found
         from local_operator.network.identity import load as load_identity
 
         identity = load_identity(root)
-        device = identity.device_id if identity is not None else ""
+        if identity is None:
+            return None
+        device = identity.device_id
         return cls(
             root=root,
             self_device=device,
@@ -529,6 +537,16 @@ class MeshCredentialClient:
         # Quota is owner-stated backpressure, not a missing-login negative
         # cache. Respect its interval except for an explicit refresh.
         if not force_refresh:
+            # Installation grants are freshly minted, repository-narrowed forge
+            # tokens, NOT a provider login generation. Preserve their established
+            # helper TTL window; current holder permission was checked above.
+            # Provider OAuth/API access must still re-resolve its sole owner.
+            from local_operator.network.credentials.github import is_github_key
+
+            if is_github_key(key):
+                cached = self.grants.get(key, session_id)
+                if cached is not None:
+                    return cached
             refusal = self.cached_refusal(key)
             if refusal is not None and refusal.code == "quota_blocked":
                 return self._render(refusal, key, label)

@@ -23,6 +23,7 @@ from local_operator.providers.failover import (
 from tests.unit.network.test_credentials_placement import (
     NETWORK,
     OWNER,
+    _bridge_before_placement,
     _point_config_at,
     placement_mod,
 )
@@ -153,6 +154,33 @@ def test_success_is_expiry_and_recipient_bound(tmp_path: Path) -> None:
     source.close()
 
 
+def test_forge_cache_is_permission_bound_and_force_does_not_reuse_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from local_operator.network.credentials.github import GITHUB_KEY, GITHUB_KIND
+
+    source = _source(tmp_path)
+    document = source.placement
+    assert document is not None
+    document.declare(GITHUB_KEY, owner_device=OWNER, provider=GITHUB_KEY, by=OWNER)
+    document.grant(GITHUB_KEY, "recipient", scope="device", by=OWNER)
+    grant = _native()
+    grant.credential_ref = replace(grant.credential_ref, provider=GITHUB_KEY, kind=GITHUB_KIND)
+    source.grants.put(GITHUB_KEY, "forge-session", grant)
+    assert source.request_grant_sync(GITHUB_KEY, session_id="forge-session") is grant
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: None)
+    forced = source.request_grant_sync(GITHUB_KEY, session_id="forge-session", force_refresh=True)
+    assert isinstance(forced, BrokerError) and forced.code == "owner_offline"
+    document.revoke(GITHUB_KEY, "recipient", by=OWNER)
+    withdrawn = source.request_grant_sync(GITHUB_KEY, session_id="forge-session")
+    assert isinstance(withdrawn, BrokerError) and withdrawn.code == "not_a_holder"
+    assert source.grants.get(GITHUB_KEY, "forge-session") is None
+    source.close()
+
+
 @pytest.mark.parametrize("force", [False, True])
 def test_live_grant_and_old_login_refusal_do_not_short_circuit_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
@@ -190,6 +218,7 @@ async def test_hot_native_access_reaches_subscription_host_and_identity(
 
     _point_config_at(monkeypatch, tmp_path)
     identity = mint(tmp_path, name="synthetic-recipient")
+    _bridge_before_placement(tmp_path, identity.device_id)
     store = build_auth_store(tmp_path)
     assert (
         await _resolve_access_for_provider(
