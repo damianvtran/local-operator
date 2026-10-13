@@ -1966,6 +1966,39 @@ harness now honours the rule at the emit site as well: a row the shared
 cannot paint chrome it was never sent. An owner on an older build still sends
 these rows, which is why the marker (and the recogniser) remain the contract.
 
+### Hub deliveries on user-role rows: `provider_payload.hub_receipt`
+
+A comms delivery to a running child (a steer, a note, a question) is persisted
+as a `Message(role="user")` whose text is the model-facing `<parent-message>`
+envelope, because that is what the model must read. The envelope is NOT a
+display body: a surface that re-parses it is guessing provenance from text, and
+a surface that does not recognise it paints the XML as the user's own words.
+
+The producer therefore stamps the typed facts a `hub_message` custom carries
+onto the persisted row, under the same namespaced key both wires already
+carry:
+
+* `message_start.message.provider_payload.hub_receipt` — the live event's copy.
+* the durable row's `payload.provider_payload.hub_receipt` — the same key on the
+  journal entry a `snapshot`/`/history` page serves.
+
+Shape: `{direction: "to_child" | "to_parent", expects_reply: bool, steer: bool,
+body: str}` plus advisory `label`/`job_id` when the producer had them. `body`
+is the edited bytes the reader must see; the row's own `text` remains the
+envelope and is what providers receive — role, content, identity and
+scheduling are unchanged by the marker, and unrelated `provider_payload`
+bookkeeping on the row is merged around, never replaced.
+
+The consumer rule is POSITIVE PROVENANCE, read BEFORE any human-row
+classification: a valid marker means the row is the same hub receipt the
+`hub_message` custom path paints (never a user bubble, never the envelope); a
+malformed or body-less marker is not a receipt and the row keeps its ordinary
+user handling; a row without the marker is untouched, so transcripts written
+before the marker existed keep their legacy treatment. `hub_receipt_marker` in
+`local_operator/harness/hub_receipts.py` is the one definition all surfaces
+read (mobile projection, TUI main and child views; the desktop reducer mirrors
+it byte-for-byte).
+
 ### The `notification` frame
 
 Emitted **if and only if** the bridge observes a newly published, unseen

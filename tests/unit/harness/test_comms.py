@@ -785,6 +785,18 @@ def test_steer_passes_the_journaled_communication_id_to_the_child():
     assert journaled_ids[0] is not None
     assert [message.id for message in child.steer_messages] == [journaled_ids[0]]
 
+    # The persisted row carries the typed facts as a namespaced marker: the
+    # model envelope is what the model reads, but no display surface should
+    # have to re-parse it to know this was a parent steer.
+    persisted = child.steer_messages[0]
+    assert (persisted.provider_payload or {}).get("hub_receipt") == {
+        "direction": "to_child",
+        "expects_reply": False,
+        "steer": True,
+        "body": "stop after the first failing test",
+    }
+    assert "changes your instructions" in persisted.text
+
 
 @pytest.mark.parametrize(
     ("steer", "expects_reply", "kind"),
