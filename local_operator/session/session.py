@@ -9407,6 +9407,9 @@ class Session:
                 body=str(message.details.get("body", "")),
                 sender=sender,
                 message_id=message.id,
+                # The row's OWN provenance kind, so the live surface paints the
+                # same card the history replay will (§13.4); empty stays peer.
+                custom_type=message.custom_type,
             )
         )
 

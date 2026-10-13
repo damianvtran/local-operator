@@ -413,13 +413,22 @@ class PeerMessageDelivered(SessionEvent):
     the cross-session indicator immediately, even while the session is idle.
     ``message_id`` is the persisted transcript row's id, recorded by the app so
     a later history replay does not mount a second copy of the same delivery.
+    ``custom_type`` is the delivery's provenance kind (empty = peer), so the
+    live paint chooses the same card the replay fold does (§13.4).
     """
 
-    def __init__(self, body: str, sender: dict[str, Any], message_id: str = "") -> None:
+    def __init__(
+        self,
+        body: str,
+        sender: dict[str, Any],
+        message_id: str = "",
+        custom_type: str = "",
+    ) -> None:
         super().__init__()
         self.body = body
         self.sender = sender
         self.message_id = message_id
+        self.custom_type = custom_type
 
 
 class NoticePosted(SessionEvent):
@@ -1184,7 +1193,11 @@ class EventController:
         # No generation guard: a peer delivery is a state fact about the
         # session (this message landed), not a turn-scoped boundary, so a
         # superseded turn cannot invalidate it — same rationale as a wake.
-        self._post(PeerMessageDelivered(event.body, dict(event.sender), event.message_id))
+        self._post(
+            PeerMessageDelivered(
+                event.body, dict(event.sender), event.message_id, event.custom_type
+            )
+        )
 
     def _handle_steering_delivered(self, event: SteeringDeliveredEvent) -> None:
         # No TURN guard, deliberately: the drain belongs to whichever turn is

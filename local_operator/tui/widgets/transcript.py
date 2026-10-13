@@ -3654,6 +3654,13 @@ def quiet_group_record_of(
     anchor = getattr(block, "navigation_anchor_id", "") or ""
     part = getattr(block, "navigation_anchor_part", 0)
     record_id = f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+    if isinstance(block, TeamBridgeBlock):
+        # D2 (§13.4): a bridge receipt keeps its OWN kind. The derivation
+        # treats every kind outside its trigger/member list as a SPLITTER, so
+        # two bridge receipts are never folded under the peer family's word
+        # ("peer messages · 2" for org mail) — the card stays individually
+        # visible beside any fold. No new copy anywhere.
+        return QuietGroupRecord(kind="bridge", id=record_id)
     if isinstance(block, PeerMessageBlock):
         return QuietGroupRecord(kind="peer", id=record_id, sender=block._sender)
     if isinstance(block, MonitorDeltaBlock):

@@ -52,13 +52,16 @@ from local_operator.harness.types import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import ToolComposing, ToolEnded, ToolStarted, ToolUpdated
+from local_operator.tui.quiet_groups import group_splitter_of
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     PeerMessageBlock,
+    QuietGroupBlock,
     TeamBridgeBlock,
     TranscriptView,
     UserBlock,
+    quiet_group_record_of,
 )
 
 from .test_app_pilot import FakeSession, _factory
@@ -622,3 +625,173 @@ async def test_a_hidden_bridge_row_mounts_nothing_under_the_gate(hide_cross_sess
             what="the re-projected bridge card",
         )
         assert len([b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]) == 1
+
+
+BRIDGE_SENDER: dict[str, object] = {
+    "account_id": "acc_org",
+    "source": TEAM_BRIDGE_MESSAGE_TYPE,
+}
+#: Long enough that the expanded card wraps to several rows at 100 columns
+#: (the peer control's own growth measurement is 96x4 under the same toggle).
+LONG_BRIDGE_BODY = (
+    "The release window opens at 18:00 UTC and the claim is one plain sentence; "
+    "reply with the claim text and the bump class you argue, and the notes will "
+    "name every pull request merged since the last tag. " * 2
+).strip()
+
+
+def _bridge_blocks(app: OperatorApp) -> list[TeamBridgeBlock]:
+    return [b for b in _blocks(app) if type(b) is TeamBridgeBlock]
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_live_delivery_paints_the_bridge_card_once(hide_cross_session) -> None:
+    """F1/A1: the LIVE paint selects the SAME card the replay fold does."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(
+                body="org note",
+                sender=BRIDGE_SENDER,
+                message_id="bridge-live-1",
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+        )
+        await _wait_for(pilot, lambda: _bridge_blocks(app), what="the live bridge card")
+        assert len(_bridge_blocks(app)) == 1
+        # Not a peer-typed card for the same delivery.
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        # The dedup id is recorded, so a later REPLAY of this attach skips it
+        # (live-vs-live is at-least-once by design; the record exists for the
+        # replay fold, exactly as the peer branch's does).
+        assert "bridge-live-1" in app._live_peer_receipts
+        app._project_settled_rows(
+            [
+                SimpleNamespace(
+                    role=None,
+                    custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                    id="bridge-live-1",
+                    text="",
+                    tool_calls=None,
+                    content=[],
+                    details={"body": "org note", "sender": BRIDGE_SENDER},
+                )
+            ]
+        )
+        for _ in range(10):
+            await pilot.pause()
+        assert len(_bridge_blocks(app)) == 1, "the replay must skip the live-painted id"
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_live_bridge_delivery_mounts_nothing(hide_cross_session) -> None:
+    """The hide gate runs BEFORE the de-dup record: nothing painted, nothing to de-dup."""
+
+    hide_cross_session(True)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(
+                body="org note",
+                sender=BRIDGE_SENDER,
+                message_id="bridge-live-2",
+                custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+            )
+        )
+        # A second event rides behind it so the queue provably drained past the
+        # bridge delivery (delivered-and-suppressed, not not-yet-delivered).
+        app._append_block(UserBlock("hello"))
+        session.emit(NoticeEvent(text="after the bridge note", kind="info"))
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, NoticeBlock) for b in _blocks(app)),
+            what="the notice queued behind the bridge delivery",
+        )
+        assert _bridge_blocks(app) == []
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        assert "bridge-live-2" not in app._live_peer_receipts
+
+
+@pytest.mark.asyncio
+async def test_a_default_live_delivery_still_paints_the_peer_card(hide_cross_session) -> None:
+    """The default path is byte-for-byte the old one: no kind, peer card."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        session.emit(
+            PeerMessageDeliveredEvent(body="peer note", sender=SENDER, message_id="peer-live-3")
+        )
+        await _wait_for(pilot, lambda: _peer_blocks(app), what="the live peer card")
+        peers = [b for b in _blocks(app) if type(b) is PeerMessageBlock]
+        assert len(peers) == 1 and peers[0].text() == "peer note"
+        assert _bridge_blocks(app) == []
+        assert "peer-live-3" in app._live_peer_receipts
+
+
+@pytest.mark.asyncio
+async def test_an_expanded_bridge_card_grows_beyond_one_row() -> None:
+    """D1: the shipped stylesheet frees the expanded card, exactly like the peer's."""
+
+    from tests.unit.tui.conftest import StyledTranscriptApp
+
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        bridge = TeamBridgeBlock(LONG_BRIDGE_BODY, BRIDGE_SENDER)
+        peer = PeerMessageBlock(LONG_BRIDGE_BODY, SENDER)
+        view.append_block(bridge)
+        view.append_block(peer)
+        await pilot.pause()
+        await pilot.pause()
+        assert bridge.size.height == 1 and peer.size.height == 1
+        assert bridge.toggle_expanded() is True
+        assert peer.toggle_expanded() is True
+        await pilot.pause()
+        await pilot.pause()
+        # The control: the peer card grows under the same toggle.
+        assert peer.size.height > 1
+        # D1's discrimination: WITHOUT the stylesheet rule this stayed pinned
+        # at one row (measured 96x1 by the design round); the rule frees it.
+        assert bridge.size.height > 1
+
+
+def test_a_bridge_receipt_is_a_quiet_fold_splitter_not_a_peer_member() -> None:
+    """D2: never folded under the peer family's word ("peer messages · 2")."""
+
+    record = quiet_group_record_of(TeamBridgeBlock("org note", BRIDGE_SENDER))
+    assert record.kind == "bridge"
+    assert group_splitter_of(record) is True
+    # The peer control still classifies as a member of its own family.
+    peer_record = quiet_group_record_of(PeerMessageBlock("peer note", SENDER))
+    assert peer_record.kind == "peer" and group_splitter_of(peer_record) is False
+
+
+@pytest.mark.asyncio
+async def test_two_bridge_receipts_are_never_folded_into_a_bar(hide_cross_session) -> None:
+    """The mounted consequence: two live bridge deliveries stay two cards."""
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        for i, mid in enumerate(("bridge-a", "bridge-b"), start=1):
+            session.emit(
+                PeerMessageDeliveredEvent(
+                    body=f"org note {i}",
+                    sender=BRIDGE_SENDER,
+                    message_id=mid,
+                    custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                )
+            )
+        await _wait_for(pilot, lambda: len(_bridge_blocks(app)) == 2, what="both bridge cards")
+        blocks = _blocks(app)
+        bars = [b for b in blocks if isinstance(b, QuietGroupBlock)]
+        assert bars == [], "bridge receipts are splitters: no fold bar may appear"
+        assert all(b.display for b in _bridge_blocks(app)), "both cards stay visible"

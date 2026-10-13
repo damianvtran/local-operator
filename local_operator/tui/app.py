@@ -105,7 +105,10 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    PEER_MESSAGE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
+)
 from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
@@ -514,11 +517,10 @@ from local_operator.tui.widgets.tool_card import (
     parse_duration,
 )
 
-# Re-exported for the replay fold: ``session_presentation`` imports its block
-# vocabulary from this module (the sibling convention), and a bridge row must
-# replay as its own card (§13.4). This module mounts none itself yet, so the
-# import is deliberately unused here.
-from local_operator.tui.widgets.transcript import TeamBridgeBlock  # noqa: F401
+# Mounted by ``on_peer_message_delivered`` below AND re-exported for the
+# replay fold: ``session_presentation`` imports its block vocabulary from this
+# module (the sibling convention), and a bridge wake must paint the same card
+# live and on replay (§13.4).
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
@@ -528,6 +530,7 @@ from local_operator.tui.widgets.transcript import (
     NoticeKind,
     PeerMessageBlock,
     RichBlock,
+    TeamBridgeBlock,
     TranscriptView,
     UserBlock,
     WakeBlock,
@@ -55825,7 +55828,14 @@ class OperatorApp(App[None]):
             return
         if message.message_id:
             self._live_peer_receipts.add(message.message_id)
-        self._append_block(PeerMessageBlock(message.body, message.sender))
+        if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+            # §13.4 on the LIVE surface: a bridge wake is its own card here
+            # too — the peer-typed card this used to paint would ALSO dedup
+            # the correct bridge card away on a later replay of this attach
+            # (the replay skips ids in ``_live_peer_receipts``).
+            self._append_block(TeamBridgeBlock(message.body, message.sender))
+        else:
+            self._append_block(PeerMessageBlock(message.body, message.sender))
 
     def _announce_on_splash(
         self, text: str, kind: NoticeKind, *, headline: str | None = None

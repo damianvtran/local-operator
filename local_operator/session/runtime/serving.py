@@ -4590,7 +4590,7 @@ class ServingSessionHandle(SessionHandle):
                 PEER_DELIVERABLE_CUSTOM_TYPES,
             )
 
-            if custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES:
+            if not isinstance(custom_type, str) or custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES:
                 raise ValueError(
                     "receive_peer_message carries an unknown custom_type; "
                     "refusing to stamp a provenance kind the session cannot verify"
