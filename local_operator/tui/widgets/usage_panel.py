@@ -42,11 +42,6 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
-from local_operator.providers.usage import (
-    META_MUSE_ALLOWANCE_NOTE,
-    META_MUSE_NO_OBSERVATION_NOTE,
-    META_MUSE_USAGE_NOTES,
-)
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -774,6 +769,15 @@ def build_usage_body(  # noqa: ANN001
     details: set[int] = set()
     if not reports:
         return UsageBody(lines, frozenset({0}))
+
+    # Usage owns HTTP fetchers as well as these fixed provenance strings.
+    # Import only when painting actual reports: importing the panel at first
+    # paint must not pull httpx/the provider stack onto every app startup.
+    from local_operator.providers.usage import (
+        META_MUSE_ALLOWANCE_NOTE,
+        META_MUSE_NO_OBSERVATION_NOTE,
+        META_MUSE_USAGE_NOTES,
+    )
 
     columns = _measure_columns(reports, width, now_ms)
 
