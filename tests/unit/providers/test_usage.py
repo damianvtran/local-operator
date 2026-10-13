@@ -1662,10 +1662,9 @@ def test_the_advertised_set_is_the_dispatch_table() -> None:
     from local_operator.providers import usage as usage_mod
 
     assert usage_mod.USAGE_PROVIDERS == frozenset(usage_mod._FETCHERS)
-    # 12 since `zai-oauth` joined: the Z.AI browser sign-in is its own provider
-    # id, like `xai-oauth`, and needs its own route or a signed-in account
-    # reports no usage at all.
-    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 13
+    # Muse joins the live fetchers with a passive sign-in receipt route: without
+    # its dispatch entry a signed-in account disappears from every usage surface.
+    assert usage_mod.USAGE_PROVIDERS is not None and len(usage_mod.USAGE_PROVIDERS) == 14
     assert not hasattr(usage_mod, "OAUTH_USAGE_PROVIDERS")
 
 
