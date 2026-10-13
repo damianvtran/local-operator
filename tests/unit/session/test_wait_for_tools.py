@@ -18,31 +18,52 @@ than timing assumptions:
   call can still return ready;
 * cancellation propagates and leaves discovery alive;
 * the inventory is never widened, and names are validated before any wait.
+
+The doubles are deliberately TYPED: ``_SessionDouble`` is a real ``Session``
+subclass (never engine-``__init__``-ed -- ``build`` seeds only the two
+attributes the method under test reads), and the manager fakes subclass
+``McpManager`` so the tests exercise the production receiver types rather
+than duck-typed stand-ins the static gate would flag.
 """
 
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
+from local_operator.harness.types import AgentTool
+from local_operator.mcp.manager import McpManager
 from local_operator.session.session import Session
-from local_operator.session.tool_readiness import ToolReadiness
 
 
-class _DuckSession:
-    """The live-inventory + manager surface ``Session.wait_for_tools`` touches."""
+class _SessionDouble(Session):
+    """A typed ``Session`` double for the readiness surface.
 
-    def __init__(self, names: tuple[str, ...] = (), manager: object | None = None) -> None:
-        self.names = list(names)
-        self.mcp_manager = manager
+    Built via :meth:`build` so the engine constructor never runs: only the
+    live ``_tools`` inventory and ``mcp_manager`` -- exactly what
+    ``wait_for_tools`` reads -- are seeded. Seeds use ``model_construct``
+    because ``AgentTool.execute`` is a required field this surface never
+    touches.
+    """
 
-    @property
-    def tool_inventory(self) -> tuple[str, ...]:
-        return tuple(self.names)
+    @classmethod
+    def build(
+        cls, names: tuple[str, ...] = (), manager: McpManager | None = None
+    ) -> _SessionDouble:
+        session = cls.__new__(cls)
+        session._tools = [AgentTool.model_construct(name=name) for name in names]
+        session.mcp_manager = manager
+        return session
+
+    def seed_tool(self, name: str) -> None:
+        """Append a name to the LIVE inventory (the delayed arrival fixture)."""
+
+        self._tools.append(AgentTool.model_construct(name=name))
 
 
-class _ExplodingManager:
+class _ExplodingManager(McpManager):
     """Fails loudly if consulted -- the fast path must not wait on anything."""
 
     def __init__(self) -> None:
@@ -53,7 +74,7 @@ class _ExplodingManager:
         raise AssertionError("wait_settled must not be called on the fast path")
 
 
-class _SettledManager:
+class _SettledManager(McpManager):
     """Settles immediately, reporting success or failure; never adds tools."""
 
     def __init__(self, settle_result: bool = True, error: Exception | None = None) -> None:
@@ -70,7 +91,7 @@ class _SettledManager:
         return self.settle_result
 
 
-class _DelayedManager:
+class _DelayedManager(McpManager):
     """The controlled delayed-MCP fixture.
 
     The tool lands after ``delay_s`` on an arrival task that ``wait_settled``
@@ -78,8 +99,8 @@ class _DelayedManager:
     the arrival without cancelling it, so discovery keeps moving.
     """
 
-    def __init__(self, duck: _DuckSession, name: str, delay_s: float) -> None:
-        self.duck = duck
+    def __init__(self, session: _SessionDouble, name: str, delay_s: float) -> None:
+        self.session = session
         self.name = name
         self.delay_s = delay_s
         self.calls = 0
@@ -92,8 +113,7 @@ class _DelayedManager:
 
         async def _arrive() -> None:
             await asyncio.sleep(self.delay_s)
-            if self.name not in self.duck.names:
-                self.duck.names.append(self.name)
+            self.session.seed_tool(self.name)
             self.arrived.set()
 
         self._task = asyncio.get_running_loop().create_task(_arrive())
@@ -111,42 +131,46 @@ class _DelayedManager:
 @pytest.mark.asyncio
 async def test_already_present_reads_ready_without_a_manager_call() -> None:
     manager = _ExplodingManager()
-    duck = _DuckSession(("bash",), manager)
-    readiness = await Session.wait_for_tools(duck, ["bash"])
-    assert readiness == ToolReadiness("ready", ("bash",), ("bash",), (), None)
+    session = _SessionDouble.build(("bash",), manager)
+    readiness = await session.wait_for_tools(["bash"])
+    assert readiness.status == "ready"
+    assert readiness.discovery_settled is None
+    assert readiness.present == ("bash",)
+    assert readiness.missing == ()
     assert manager.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_delayed_discovery_race_is_gated_by_the_wait() -> None:
-    duck = _DuckSession()
-    manager = _DelayedManager(duck, "mcp__episode_actions", 0.05)
-    duck.mcp_manager = manager
+async def test_delayed_discovery_is_gated_by_the_wait() -> None:
+    session = _SessionDouble.build()
+    manager = _DelayedManager(session, "mcp__episode_actions", 0.05)
+    session.mcp_manager = manager
     # The raw race the gap class describes: an immediate read is empty even
     # though the tool is on its way.
-    assert duck.tool_inventory == ()
-    readiness = await Session.wait_for_tools(duck, ["mcp__episode_actions"], timeout_s=1.0)
+    assert session.tool_inventory == ()
+    readiness = await session.wait_for_tools(["mcp__episode_actions"], timeout_s=1.0)
     assert readiness.status == "ready"
     assert readiness.discovery_settled is True
     assert readiness.present == ("mcp__episode_actions",)
     # The first request built after this gate sees the tool.
-    assert "mcp__episode_actions" in duck.tool_inventory
+    assert "mcp__episode_actions" in session.tool_inventory
 
 
 @pytest.mark.asyncio
 async def test_settled_without_the_name_is_missing() -> None:
     manager = _SettledManager(settle_result=True)
-    duck = _DuckSession(("bash",), manager)
-    readiness = await Session.wait_for_tools(duck, ["mcp__gone"], timeout_s=0.5)
+    session = _SessionDouble.build(("bash",), manager)
+    readiness = await session.wait_for_tools(["mcp__gone"], timeout_s=0.5)
     assert readiness.status == "missing"
     assert readiness.discovery_settled is True
     assert readiness.missing == ("mcp__gone",)
+    assert manager.timeouts == [0.5]
 
 
 @pytest.mark.asyncio
 async def test_missing_without_a_manager_is_missing_not_pending() -> None:
-    duck = _DuckSession(("bash",), None)
-    readiness = await Session.wait_for_tools(duck, ["mcp__gone"])
+    session = _SessionDouble.build(("bash",))
+    readiness = await session.wait_for_tools(["mcp__gone"])
     assert readiness.status == "missing"
     assert readiness.discovery_settled is None
 
@@ -154,47 +178,50 @@ async def test_missing_without_a_manager_is_missing_not_pending() -> None:
 @pytest.mark.asyncio
 async def test_manager_failure_is_never_ready() -> None:
     manager = _SettledManager(error=RuntimeError("reduced manager"))
-    duck = _DuckSession((), manager)
-    readiness = await Session.wait_for_tools(duck, ["mcp__x"], timeout_s=0.5)
+    session = _SessionDouble.build((), manager)
+    readiness = await session.wait_for_tools(["mcp__x"], timeout_s=0.5)
     assert readiness.status == "pending"
     assert readiness.discovery_settled is None
 
 
 @pytest.mark.asyncio
 async def test_timeout_is_pending_and_a_later_wait_still_reads_ready() -> None:
-    duck = _DuckSession()
-    manager = _DelayedManager(duck, "mcp__late", 0.15)
-    duck.mcp_manager = manager
-    readiness = await Session.wait_for_tools(duck, ["mcp__late"], timeout_s=0.01)
+    session = _SessionDouble.build()
+    manager = _DelayedManager(session, "mcp__late", 0.15)
+    session.mcp_manager = manager
+    readiness = await session.wait_for_tools(["mcp__late"], timeout_s=0.01)
     assert readiness.status == "pending"
     assert readiness.discovery_settled is False
     # The timeout must not have cancelled discovery: the continuation lands.
     await asyncio.wait_for(manager.arrived.wait(), timeout=1.0)
-    fresh = await Session.wait_for_tools(duck, ["mcp__late"], timeout_s=1.0)
+    fresh = await session.wait_for_tools(["mcp__late"], timeout_s=1.0)
     assert fresh.status == "ready"
 
 
 @pytest.mark.asyncio
 async def test_cancellation_propagates_and_leaves_discovery_alive() -> None:
-    duck = _DuckSession()
-    manager = _DelayedManager(duck, "mcp__slow", 0.05)
-    duck.mcp_manager = manager
-    task = asyncio.create_task(Session.wait_for_tools(duck, ["mcp__slow"], timeout_s=30.0))
-    await asyncio.sleep(0)  # let the task enter the manager wait
+    session = _SessionDouble.build()
+    manager = _DelayedManager(session, "mcp__slow", 0.05)
+    session.mcp_manager = manager
+    task = asyncio.create_task(session.wait_for_tools(["mcp__slow"], timeout_s=30.0))
+    for _ in range(100):  # let the task enter the manager wait
+        if manager.calls == 1:
+            break
+        await asyncio.sleep(0.001)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert manager.calls == 1
     # Discovery untouched: it completes later and a fresh wait reads ready.
     await asyncio.wait_for(manager.arrived.wait(), timeout=1.0)
-    fresh = await Session.wait_for_tools(duck, ["mcp__slow"], timeout_s=1.0)
+    fresh = await session.wait_for_tools(["mcp__slow"], timeout_s=1.0)
     assert fresh.status == "ready"
 
 
 @pytest.mark.asyncio
 async def test_names_are_deduped_in_caller_order() -> None:
-    duck = _DuckSession(("a", "b"))
-    readiness = await Session.wait_for_tools(duck, ["b", "a", "b"])
+    session = _SessionDouble.build(("a", "b"))
+    readiness = await session.wait_for_tools(["b", "a", "b"])
     assert readiness.required == ("b", "a")
     assert readiness.present == ("b", "a")
 
@@ -202,11 +229,11 @@ async def test_names_are_deduped_in_caller_order() -> None:
 @pytest.mark.asyncio
 async def test_inventory_is_never_widened() -> None:
     manager = _SettledManager(settle_result=True)
-    duck = _DuckSession(("bash",), manager)
-    before = duck.tool_inventory
-    readiness = await Session.wait_for_tools(duck, ["mcp__typo"], timeout_s=0.5)
+    session = _SessionDouble.build(("bash",), manager)
+    before = session.tool_inventory
+    readiness = await session.wait_for_tools(["mcp__typo"], timeout_s=0.5)
     assert readiness.status == "missing"
-    assert duck.tool_inventory == before
+    assert session.tool_inventory == before
 
 
 @pytest.mark.asyncio
@@ -222,11 +249,9 @@ async def test_inventory_is_never_widened() -> None:
         (None, 1.0),
     ],
 )
-async def test_invalid_inputs_are_refused_before_any_wait(
-    required: object, timeout_s: float
-) -> None:
+async def test_invalid_inputs_are_refused_before_any_wait(required: Any, timeout_s: float) -> None:
     manager = _ExplodingManager()
-    duck = _DuckSession(("ok",), manager)
+    session = _SessionDouble.build(("ok",), manager)
     with pytest.raises(ValueError):
-        await Session.wait_for_tools(duck, required, timeout_s=timeout_s)  # type: ignore[arg-type]
+        await session.wait_for_tools(required, timeout_s=timeout_s)
     assert manager.calls == 0
