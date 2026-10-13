@@ -276,7 +276,9 @@ class ControllerAuthStore(Protocol):
         self, provider: str, endpoint: str
     ) -> "StoredCredential | None": ...  # pragma: no cover
 
-    async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
+    async def get_oauth_access(
+        self, provider: str, *, read_only: bool = False
+    ) -> "OAuthAccess | None": ...  # pragma: no cover
 
     async def list_oauth_accesses(
         self, provider: str
@@ -284,7 +286,9 @@ class ControllerAuthStore(Protocol):
 
     def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
-    async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
+    async def get_api_key(
+        self, provider: str, *, read_only: bool = False
+    ) -> str | None: ...  # pragma: no cover
 
 
 def _chat_providers() -> list[ProviderDefinition]:
@@ -3021,7 +3025,21 @@ class ProviderController:
         return entries, statuses
 
     async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
+        # Existing embedded hosts implement the original one-argument store
+        # protocol. Keep their calling convention while sharing the identity
+        # decision with the authoring HTTP catalogue below.
+        return await self.listing_credential(provider)
+
+    async def listing_credential(
+        self, provider: str, *, read_only: bool = False
+    ) -> tuple[str | None, bool, str | None]:
         """``(secret, is_oauth, account_id)`` for a model listing call.
+
+        Authoring catalogues pass ``read_only=True``: inspecting available
+        models must not move session stickiness or block a credential beside
+        a running turn. It still uses the serving cascade and native account
+        identity, never an API key guessed from an OAuth bearer. The default
+        preserves existing embedded store implementations and picker calls.
 
         The account id is part of OpenAI's ChatGPT authorization boundary; the
         current Codex catalogue rejects a subscription token without it. Other
@@ -3042,7 +3060,10 @@ class ProviderController:
         current.
         """
         credential_id = credential_provider_id(provider)
-        access = await self.auth_store.get_oauth_access(credential_id)
+        # Do not introduce a new keyword on old hosts unless the caller needs
+        # the read-only contract; the real AuthStore supports both shapes.
+        kwargs = {"read_only": True} if read_only else {}
+        access = await self.auth_store.get_oauth_access(credential_id, **kwargs)
         if access is not None and access.kind == "oauth" and access.access_token:
             return (
                 access.access_token,
@@ -3054,7 +3075,7 @@ class ProviderController:
         if access is not None and access.access_token:
             return access.access_token, False, None
         try:
-            stored = await self.auth_store.get_api_key(credential_id)
+            stored = await self.auth_store.get_api_key(credential_id, **kwargs)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
             stored = None
         # The environment is the last tier of the same cascade the stream uses, so
