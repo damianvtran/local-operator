@@ -65,7 +65,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
@@ -84,6 +84,13 @@ from local_operator.session.tail_anchor import (
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 from local_operator.session.transcript_index import probe_index, start_refresh
+
+if TYPE_CHECKING:
+    # The return annotation of ``_cold_replay_key`` names it, so it must be BOUND for
+    # pyflakes/pyright — a quoted annotation alone still trips F821 when the name is
+    # never imported. ``TYPE_CHECKING``-only keeps the import off the runtime path:
+    # this module is built at core startup and the name is used in annotations alone.
+    from local_operator.session.replay_cache import ReplayKey
 
 logger = logging.getLogger(__name__)
 

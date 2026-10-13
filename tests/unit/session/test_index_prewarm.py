@@ -12,6 +12,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -395,6 +396,7 @@ async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
     from local_operator.session import replay_cache
     from local_operator.session.owner import LocalOwner
     from local_operator.session.runtime import launch
+    from local_operator.session.runtime.launch import WarmErrand
 
     spawned = {"called": False}
 
@@ -414,11 +416,16 @@ async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(LocalOwner, "engage", forbid_engage)
 
     # ARMED: reach the seams THROUGH the patched attributes, so a setattr that did
-    # not land would fail here rather than leave the control silently inert.
+    # not land would fail here rather than leave the control silently inert. A real
+    # ``LocalOwner`` instance carries the typed ``self`` the annotation wants, and
+    # ``cast`` names the deliberate bad argument: this call exists to prove the
+    # patched seam RAISES, so a valid ``warm`` would defeat its own purpose.
     with pytest.raises(AssertionError):
         launch._spawn_runtime("s", "cwd", defer_materialise=False)
     with pytest.raises(AssertionError):
-        await LocalOwner.engage(None, cwd="cwd", warm=None)
+        await LocalOwner.engage(
+            object.__new__(LocalOwner), cwd="cwd", warm=cast(WarmErrand, None)
+        )
     # The armed probes above are the ONLY thing allowed to have moved the flag, and
     # they have: reset it so the assertion below is about the PREHEAT alone.
     spawned["called"] = False
@@ -445,6 +452,7 @@ async def test_the_replay_preheat_is_skipped_under_the_disk_guard(tmp_path, monk
 
     assert await prewarm.warm_replay_cache(root) == 0
     key = prewarm._cold_replay_key(root / "sessions" / "newest")
+    assert key is not None
     assert replay_cache.cached_replay(key) is None
 
 
@@ -501,6 +509,7 @@ async def test_a_reader_joining_an_in_flight_preheat_does_not_parse_twice(tmp_pa
     preheat = asyncio.create_task(prewarm.warm_replay_cache(root, limit=1))
     await asyncio.sleep(0.05)  # let the preheat become the leader
     key = prewarm._cold_replay_key(root / "sessions" / "s1")
+    assert key is not None
 
     async def open_read():
         return await replay_cache.load_cold_replay(
