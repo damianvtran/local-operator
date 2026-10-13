@@ -8,10 +8,14 @@ command that upgrades whatever they actually have, without being pointed at
 env, which is the opposite audience.
 
 "Latest" is always ``https://pypi.org/pypi/local-operator/json`` →
-``info.version``, compared to ``importlib.metadata.version("local-operator")``.
-That is the same source the splash version row and ``lop --version`` already
-use. A second version channel (git tags, ``lop-update``, a pin file) would
-diverge from what the running process reports.
+``info.version``, compared to ``importlib.metadata.version("local-operator")``
+— but only once that release is DOWNLOADABLE (see
+:func:`_ready_pypi_version`): PyPI names the version before its files finish
+uploading, and advertising that window sends the installer after artifacts
+that do not exist yet. That is the same source the splash version row and
+``lop --version`` already use. A second version channel (git tags,
+``lop-update``, a pin file) would diverge from what the running process
+reports.
 
 WHY THE CACHE
 -------------
@@ -338,6 +342,13 @@ class VersionCheck:
     installed: str
     latest: str | None
     behind: bool
+    #: The version PyPI named whose files are not downloadable YET, when a
+    #: live read proved exactly that. ``latest is None`` alone collapses two
+    #: different facts — "PyPI could not be reached" and "PyPI answered, a
+    #: release is still publishing" — and the front ends' sentences differ
+    #: between them (UX round 1, M1), so the distinction travels here while
+    #: the advertisement rule above keeps treating both as "do not offer".
+    pending_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -599,12 +610,134 @@ def _write_cache(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
-def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
-    """Live ``info.version``, or ``None`` on any transport/HTTP/JSON error.
+def _installer_wheel(entry: Any, version: str) -> bool:
+    """True when one PyPI file entry is a wheel THIS host's installer takes.
 
-    httpx is imported here so ``import local_operator.cli`` (and the splash
-    module) never pay for it. The splash worker already swallows ``None``.
+    The acceptance rule is the installer's own, not a paraphrase of it:
+    :func:`_fresh_publication` — the evidence ``lop update``'s generation
+    install pins its download to — accepts on macOS only the universal2
+    wheel (the one the signed key agent rides in, :func:`_is_macos_universal2_wheel`)
+    and off macOS only a wheel whose parsed tags intersect ``sys_tags()``,
+    in both cases non-yanked, served over https from files.pythonhosted.org
+    with a SHA256 digest to pin. Round 1's any-wheel gate advertised in the
+    inter-wheel window too (pure wheel landed, macOS wheel still uploading:
+    offered on a Mac, refused by the installer). Reusing the same filename
+    predicate on macOS and the same tag test off it is what makes "ready"
+    here mean "the pinned install below would accept this release".
     """
+    if not isinstance(entry, dict) or entry.get("packagetype") != "bdist_wheel":
+        return False
+    if entry.get("yanked"):
+        return False
+    url = entry.get("url")
+    if (
+        not isinstance(url, str)
+        or urlparse(url).scheme != "https"
+        or urlparse(url).hostname != "files.pythonhosted.org"
+    ):
+        return False
+    digests = entry.get("digests")
+    digest = digests.get("sha256", "") if isinstance(digests, dict) else ""
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False
+    if _HOST_IS_MACOS:
+        return _is_macos_universal2_wheel(entry, version)
+    filename = entry.get("filename")
+    if not isinstance(filename, str):
+        return False
+    from packaging.tags import sys_tags
+    from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
+    try:
+        name, wheel_version, _, tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        return False
+    return (
+        str(name).replace("-", "_") == DISTRIBUTION_NAME.replace("-", "_")
+        and str(wheel_version) == version
+        and bool(set(sys_tags()).intersection(tags))
+    )
+
+
+def _downloadable_wheel(files: Any, version: str) -> bool:
+    """True when a PyPI file list carries the wheel this host can install.
+
+    WHY THIS IS THE READINESS GATE: PyPI flips ``info.version`` when a
+    release is created, before its files finish uploading (the publish
+    workflow uploads the pure wheel, the macOS wheel and the sdist in one
+    sequential pass). A checker that reads only the version string
+    therefore advertises a release the installer cannot yet download — the
+    operator's 2026-10-12 report, where the update offer appeared and
+    ``lop update`` exited 1 for 0.70.13 minutes after publication. The file
+    list in the SAME JSON document is the earliest signal that can agree
+    with the installer — provided it asks for the wheel the installer
+    would take (:func:`_installer_wheel`), not just any wheel. An sdist
+    alone does not count: this project always publishes wheels, so an
+    sdist-only moment is a release still mid-upload.
+    """
+    if not isinstance(files, list):
+        return False
+    return any(_installer_wheel(entry, version) for entry in files)
+
+
+def _ready_pypi_version(payload: Any) -> str | None:
+    """The payload's version, but only when that release is downloadable.
+
+    ``urls`` is PyPI's file list for the latest release; ``releases`` is the
+    fallback for payloads that omit it. A version with no downloadable wheel
+    yet returns ``None``: "not ready" and "unknown" both mean do not
+    advertise, and the next check re-reads rather than caching a premature
+    verdict. The two stay distinguishable one level down
+    (:func:`_fetch_pypi_read`), where the cache fallback and the front
+    ends' sentences depend on telling them apart.
+    """
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    version_s = info.get("version")
+    if not isinstance(version_s, str) or not version_s.strip():
+        return None
+    version_s = version_s.strip()
+    if not _downloadable_wheel(payload.get("urls"), version_s):
+        releases = payload.get("releases")
+        files = releases.get(version_s) if isinstance(releases, dict) else None
+        if not _downloadable_wheel(files, version_s):
+            return None
+    return version_s
+
+
+def _named_pypi_version(payload: Any) -> str | None:
+    """The version a PyPI document NAMES, ready or not. See VersionCheck."""
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    version_s = info.get("version")
+    if not isinstance(version_s, str) or not version_s.strip():
+        return None
+    return version_s.strip()
+
+
+@dataclass(frozen=True)
+class _PypiRead:
+    """One live PyPI read, with "answered but not ready" kept distinct.
+
+    ``answered`` is the B3 distinction: a document was read and the gate
+    refused it (files still uploading, or since yanked), which is an
+    authoritative "not this version" — not a transport failure, and it
+    must not fall back to a stale ready cache the way an outage does.
+    """
+
+    version: str | None
+    answered: bool = False
+    named_version: str | None = None
+
+
+def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
+    """One live read: ready version, or an answered-but-not-ready refusal."""
     import httpx
 
     try:
@@ -613,12 +746,26 @@ def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
         else:
             response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
         response.raise_for_status()
-        version_s = response.json()["info"]["version"]
+        payload = response.json()
     except Exception:
-        return None
-    if not isinstance(version_s, str) or not version_s.strip():
-        return None
-    return version_s.strip()
+        return _PypiRead(version=None)
+    named = _named_pypi_version(payload)
+    if named is None:
+        return _PypiRead(version=None)
+    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
+
+
+def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
+    """Live ready ``info.version``, or ``None`` when not ready/unreadable.
+
+    httpx is imported here so ``import local_operator.cli`` (and the splash
+    module) never pay for it. The splash worker already swallows ``None``.
+    "Readiness" is :func:`_ready_pypi_version`: the version alone is not
+    enough, because PyPI publishes it before the release's files land.
+    Callers that must tell "not ready" from "unreachable" (the cache
+    fallback, the front ends' sentences) use :func:`_fetch_pypi_read`.
+    """
+    return _fetch_pypi_read(client=client).version
 
 
 def check_latest(
@@ -635,24 +782,48 @@ def check_latest(
     installed = installed_version()
     path = _cache_path(cache_dir)
     payload, age = _read_cache(path)
+    # Only a cache entry written by a readiness-checked fetch may advertise.
+    # A bare ``version`` (written before the gate existed) proves the string
+    # was seen, not that its files were downloadable, so it must not skip
+    # the network or stand in for a failed fetch — otherwise the race this
+    # gate closes would survive for a whole TTL on upgraded installs.
     cached: str | None = None
-    if payload is not None:
+    if payload is not None and payload.get("ready") is True:
         raw = payload.get("version")
         if isinstance(raw, str) and raw.strip():
             cached = raw.strip()
 
     latest: str | None
+    pending: str | None = None
     if cached is not None and age < TTL_S and not force:
         latest = cached
     else:
-        fetched = _fetch_pypi_version(client=client)
-        if fetched is not None:
-            latest = fetched
-            _write_cache(path, {"version": fetched})
+        read = _fetch_pypi_read(client=client)
+        if read.version is not None:
+            latest = read.version
+            _write_cache(path, {"version": read.version, "ready": True})
+        elif read.answered:
+            # Authoritative refusal (B3): PyPI was read and this release is
+            # not downloadable — still uploading, or yanked since it was
+            # cached. The stale ready entry must not resurrect it, and the
+            # cache is dropped so a later TTL read cannot either; the
+            # stale-on-OUTAGE fallback below is only for reads that never
+            # got an answer, where the cached copy is all anyone knows.
+            latest = None
+            pending = read.named_version
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
         else:
             latest = cached
 
-    return VersionCheck(installed=installed, latest=latest, behind=is_behind(installed, latest))
+    return VersionCheck(
+        installed=installed,
+        latest=latest,
+        behind=is_behind(installed, latest),
+        pending_version=pending,
+    )
 
 
 def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | None]:
@@ -690,6 +861,27 @@ def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | No
     # skew), which is not an age any caller can render. The version is still
     # good, so the value survives and only its staleness is unknown.
     return raw.strip(), (age if age != float("inf") else None)
+
+
+def cached_ready_version(cache_dir: Path | None = None) -> str | None:
+    """The cached version ONLY when a readiness-checked fetch proved it.
+
+    The split from :func:`cached_latest` is deliberate (QA round 3, Q3-1):
+    that reader is a diagnostic — "the last PyPI answer this machine has"
+    — and its contract (legacy entries included) is pinned by
+    ``tests/unit/info/test_collect.py``. A *behind* claim is not a
+    diagnostic, it is the advertisement race's own sentence, so it must
+    derive only from an entry stamped ``ready`` by the gated fetch: a bare
+    pre-gate entry names a version whose wheels may never have existed.
+    Never fetches, never writes, like its sibling.
+    """
+    payload, _age = _read_cache(_cache_path(cache_dir))
+    if payload is None or payload.get("ready") is not True:
+        return None
+    raw = payload.get("version")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
 
 
 def _direct_url_payload() -> dict[str, Any] | None:
@@ -7970,7 +8162,18 @@ def update_command(
 
     result = check_latest(force=True)
     if result.latest is None:
-        print("could not reach PyPI to learn the latest version", file=sys.stderr)
+        if result.pending_version is not None:
+            # PyPI answered; the release exists and is still publishing.
+            # Naming a connection fault here would send the reader to debug
+            # a healthy network (UX round 1, M1) — coherent with the desktop
+            # app's sentence for the same state.
+            print(
+                f"PyPI has named {result.pending_version} but its files are still "
+                "publishing, so there is no update to install yet — try again in a few minutes",
+                file=sys.stderr,
+            )
+        else:
+            print("could not reach PyPI to learn the latest version", file=sys.stderr)
         return 1
 
     if check:
