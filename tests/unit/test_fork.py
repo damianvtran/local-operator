@@ -313,7 +313,19 @@ class TestTheForkBoundary:
                 "input"
             ]
         )
-        assert google[:-1] == GoogleClient()._build_body(baseline)["contents"]
+        baseline_google = GoogleClient()._build_body(baseline)["contents"]
+        # Google cannot send the inherited assistant-ended history as prefill.
+        # Its standalone baseline now needs a transport-only continuation;
+        # the actual fork already ends in its own user boundary. Compare only
+        # the inherited prefix, and independently pin both boundary semantics
+        # so dropping history or persisting the continuation cannot pass.
+        assert [message["role"] for message in baseline_google] == ["user", "model", "user"]
+        assert "harness continuation — not an operator message" in (
+            baseline_google[-1]["parts"][0]["text"]
+        )
+        assert google[:-1] == baseline_google[:-1]
+        assert len(baseline.messages) == 2
+        assert baseline.messages[-1].role == "assistant"
 
         resumed = _build_session(fork_dir)
         assert all(
