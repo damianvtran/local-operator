@@ -1229,17 +1229,22 @@ def test_floors_are_atomic_account_scoped_and_durable(tmp_path) -> None:
         store2.advance_text_floors(owner, [("guidance", "bridge-guidance-v1", "q" * 64)])
 
 
-def test_finish_refuses_nonbody_proof_mutation_after_post(tmp_path) -> None:
-    """R11/1 (F1): a valid closed retained record whose NON-body field was
-    altered after the controlled POST must HOLD with NO receipt while the
-    already-spent logical/physical units stay exactly as charged (no unsafe
-    refund, no repair) — the final native transaction is the last place a
-    corrupted authority could have committed an allow."""
+def test_finish_refuses_field_mutation_with_matching_revision(tmp_path) -> None:
+    """R12/F1+F2: every retained field is re-derived inside the finish
+    transaction. With the MATCHING admission revision (so the revision
+    comparison cannot be what refuses), mutating any registered non-body
+    field — model, provider, request, display, logical reference, or an
+    approved-map edit that keeps membership — must refuse, commit no
+    receipt and leave the spent counts exactly as charged. On the
+    pre-fix revision this test observes DELIVER (receipt committed), so it
+    discriminates the defect it names.
+    """
 
     import sqlite3 as _sqlite3
     import time as _time
 
     from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.screening import _identities_digest
     from local_operator.team_bridge.store import StoreRefused, state_db_path
     from local_operator.team_bridge.types import ScreeningReceipt
 
@@ -1271,10 +1276,13 @@ def test_finish_refuses_nonbody_proof_mutation_after_post(tmp_path) -> None:
         "epoch": 1,
         "message": "bmsg_1",
         "tenant": owner.tenant_id,
-        "logical": "rev-1|b|e",
+        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}"),
     }
     attempt = store.reserve_screening_attempt(
-        owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
+        owner,
+        message_id="bmsg_1",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}",
+        input_proof=proof,
     )
     job = AdmissionJob(
         owner_generation=owner.enrollment_generation,
@@ -1300,20 +1308,7 @@ def test_finish_refuses_nonbody_proof_mutation_after_post(tmp_path) -> None:
     )
     store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
     store.reserve_screening_dispatch(owner, message_id="bmsg_1", job=job, turn=turn)
-    # The controlled POST has happened; an attacker now alters a NON-body field.
     db = state_db_path(tmp_path)
-    with _sqlite3.connect(db) as conn:
-        raw = conn.execute(
-            "SELECT fingerprint FROM screening_attempts WHERE attempt_id = ? AND kind = 'logical'",
-            (attempt,),
-        ).fetchone()[0]
-        mutated = raw.replace('"model":"qa-default"', '"model":"foreign-served-model"')
-        assert mutated != raw
-        conn.execute(
-            "UPDATE screening_attempts SET fingerprint = ? "
-            "WHERE attempt_id = ? AND kind = 'logical'",
-            (mutated, attempt),
-        )
     receipt = ScreeningReceipt(
         verdict="allow",
         model="qa-default",
@@ -1322,18 +1317,520 @@ def test_finish_refuses_nonbody_proof_mutation_after_post(tmp_path) -> None:
         body_sha256=body,
         categories=(),
     ).validated()
+    for field, replacement, expected_code in (
+        ("model", "foreign-served-model", "attempt_mismatch"),
+        ("provider", "foreign-provider", "attempt_mismatch"),
+        ("request", "f" * 64, "attempt_mismatch"),
+        ("display", "9" * 64, "attempt_mismatch"),
+        ("logical", "rev-1|f|e", "proof_corrupt"),
+        ("approved", ["qa-default", "sneaked-in"], "attempt_mismatch"),
+    ):
+        with _sqlite3.connect(db) as conn:
+            raw = conn.execute(
+                "SELECT fingerprint FROM screening_attempts WHERE attempt_id = ? "
+                "AND kind = 'logical'",
+                (attempt,),
+            ).fetchone()[0]
+            if field == "approved":
+                mutated = raw.replace(
+                    '"approved":["qa-default"]', '"approved":["qa-default","sneaked-in"]'
+                )
+            else:
+                old_value = '"%s":"%s"' % (field, proof[field])
+                new_value = '"%s":%s' % (
+                    field,
+                    (
+                        _sqlite3.Binary and repr(replacement)
+                        if isinstance(replacement, list)
+                        else '"%s"' % replacement
+                    ),
+                )
+                if isinstance(replacement, list):
+                    new_value = '"approved":["qa-default","sneaked-in"]'
+                mutated = raw.replace(old_value, new_value)
+            assert mutated != raw, f"arm {field} did not mutate the retained record"
+            conn.execute(
+                "UPDATE screening_attempts SET fingerprint = ? WHERE attempt_id = ? "
+                "AND kind = 'logical'",
+                (mutated, attempt),
+            )
+        with _sqlite3.connect(db) as conn:
+            spent_before = conn.execute(
+                "SELECT COUNT(*) FROM screening_attempts WHERE kind IN ('physical', 'http')"
+            ).fetchone()[0]
+        with pytest.raises(StoreRefused) as err:
+            store.finish_screening(
+                owner,
+                "bmsg_1",
+                attempt_id=attempt,
+                fingerprint=job.digest,
+                expected_epoch=1,
+                receipt=receipt,
+                envelope_digest="e" * 64,
+                admission_revision="rev-1",
+            )
+        assert err.value.code == expected_code, (field, err.value.code)
+        assert "re-derive" in str(err.value), (field, str(err.value))
+        with _sqlite3.connect(db) as conn:
+            receipts = conn.execute("SELECT COUNT(*) FROM screening_receipts").fetchone()[0]
+            spent_after = conn.execute(
+                "SELECT COUNT(*) FROM screening_attempts WHERE kind IN ('physical', 'http')"
+            ).fetchone()[0]
+        assert receipts == 0
+        assert spent_after == spent_before  # spent counts stay exactly as charged
+        # restore the exact record for the next arm
+        with _sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE screening_attempts SET fingerprint = ? WHERE attempt_id = ? "
+                "AND kind = 'logical'",
+                (
+                    "job:"
+                    + job.digest
+                    + "|proof:"
+                    + __import__("json").dumps(proof, separators=(",", ":")),
+                    attempt,
+                ),
+            )
+
+
+def test_first_bind_refuses_zero_digest(tmp_path) -> None:
+    """R10/B preserved: an all-zero digest on a real minted job refuses
+    BEFORE the bind — no row mutation, no physical charge."""
+
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.store import StoreRefused, state_db_path
+    from local_operator.team_bridge.types import OwnerSnapshot
+
+    owner = OwnerSnapshot(
+        credential_id=1,
+        account_id="acc_1",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        canonical_base_url="https://api.radienthq.com/v1",
+        enrollment_generation=1,
+    )
+    store, owner = _setup(tmp_path, owner)
+    store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        default_model="qa-default",
+        revision="rev-1",
+    )
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    attempt = store.reserve_screening_attempt(
+        owner,
+        message_id="bmsg_1",
+        fingerprint="rev-1|b|e",
+        input_proof={
+            "owner": "1|acc_1|tnt_1|bep_1|https://api.radienthq.com/v1|1",
+            "message": "bmsg_1",
+            "body": "b" * 64,
+            "template": "ab" * 32,
+            "version": "bridge-screen-v1",
+            "provider": "openai",
+            "model": "qa-default",
+            "approved": ["qa-default"],
+            "envelope": "e" * 64,
+            "request": "r" * 64,
+            "display": "d" * 64,
+            "revision": "rev-1",
+            "epoch": 1,
+            "tenant": "tnt_1",
+            "logical": "rev-1|b|e",
+        },
+    )
+    job = AdmissionJob(
+        owner_generation=1,
+        credential_id=1,
+        account_id="acc_1",
+        tenant_id="tnt_1",
+        endpoint_id="bep_1",
+        hub_url="https://api.radienthq.com/v1",
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256="b" * 64,
+        template_sha256="ab" * 32,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa-default",
+        approved=("qa-default",),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=1,
+        turn=turn,
+    )
     with pytest.raises(StoreRefused) as err:
-        store.finish_screening(
-            owner,
-            "bmsg_1",
-            attempt_id=attempt,
-            fingerprint=job.digest,
-            expected_epoch=1,
-            receipt=receipt,
-            envelope_digest="e" * 64,
-            admission_revision="accepted:x",
-        )
-    assert err.value.code in ("proof_corrupt", "attempt_mismatch")
+        store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint="0" * 64, job=job)
+    assert err.value.code == "attempt_mismatch"
+    db = state_db_path(tmp_path)
     with _sqlite3.connect(db) as conn:
-        receipts = conn.execute("SELECT COUNT(*) FROM screening_receipts").fetchone()[0]
-    assert receipts == 0
+        raw = conn.execute(
+            "SELECT fingerprint FROM screening_attempts WHERE attempt_id = ? "
+            "AND kind = 'logical'",
+            (attempt,),
+        ).fetchone()[0]
+        physical = conn.execute(
+            "SELECT COUNT(*) FROM screening_attempts WHERE attempt_id = ? " "AND kind = 'physical'",
+            (attempt,),
+        ).fetchone()[0]
+    assert not raw.startswith("job:")
+    assert physical == 0
+
+
+def test_bound_registration_corruption_refused_at_reservation(tmp_path) -> None:
+    """R10/B preserved at the native boundary: a bound registration
+    corrupted (null proof / changed body / extra key) refuses the PHYSICAL
+    reservation — no charge, no physical row."""
+
+    import json as _json
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.screening import _identities_digest
+    from local_operator.team_bridge.store import StoreRefused, state_db_path
+
+    store, owner = _setup(tmp_path)
+    store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        default_model="qa-default",
+        revision="rev-1",
+    )
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    body = "b" * 64
+    proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
+        "body": body,
+        "template": "ab" * 32,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa-default",
+        "approved": ["qa-default"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 1,
+        "message": "bmsg_1",
+        "tenant": owner.tenant_id,
+        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default',))}"),
+    }
+    attempt = store.reserve_screening_attempt(
+        owner,
+        message_id="bmsg_1",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}",
+        input_proof=proof,
+    )
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256=body,
+        template_sha256="ab" * 32,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa-default",
+        approved=("qa-default",),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=1,
+        turn=turn,
+    )
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
+    db = state_db_path(tmp_path)
+    exact = "job:" + job.digest + "|proof:" + _json.dumps(proof, separators=(",", ":"))
+    tampered = [
+        "job:" + job.digest + "|proof:null",
+        exact.replace('"body":"%s"' % body, '"body":"%s"' % ("c" * 64)),
+        exact.replace('"revision":"rev-1"', '"revision":"rev-1","extra":"x"'),
+    ]
+    for raw in tampered:
+        with _sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE screening_attempts SET fingerprint = ? WHERE attempt_id = ? "
+                "AND kind = 'logical'",
+                (raw, attempt),
+            )
+        with pytest.raises(StoreRefused):
+            store.reserve_screening_dispatch(owner, message_id="bmsg_1", job=job, turn=turn)
+        with _sqlite3.connect(db) as conn:
+            physical = conn.execute(
+                "SELECT COUNT(*) FROM screening_attempts WHERE attempt_id = ? "
+                "AND kind = 'physical'",
+                (attempt,),
+            ).fetchone()[0]
+        assert physical == 0
+
+
+def test_alias_served_model_still_commits(tmp_path) -> None:
+    """F1 keeps the alias rule: a served identity resolved through the
+    approved map (a legitimate alias, not the default string) still
+    commits its receipt."""
+
+    import time as _time
+
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.screening import _identities_digest
+    from local_operator.team_bridge.types import ScreeningReceipt
+
+    store, owner = _setup(tmp_path)
+    store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        default_model="qa-default",
+        revision="rev-1",
+    )
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    body = "b" * 64
+    proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
+        "body": body,
+        "template": "ab" * 32,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa-default",
+        "approved": ["qa-default", "qa/alias"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 1,
+        "message": "bmsg_1",
+        "tenant": owner.tenant_id,
+        "logical": (f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}"),
+    }
+    attempt = store.reserve_screening_attempt(
+        owner,
+        message_id="bmsg_1",
+        fingerprint=f"rev-1|{'e' * 64}|{_identities_digest(('qa-default', 'qa/alias'))}",
+        input_proof=proof,
+    )
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256=body,
+        template_sha256="ab" * 32,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa-default",
+        approved=("qa-default", "qa/alias"),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=1,
+        turn=turn,
+    )
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
+    store.reserve_screening_dispatch(owner, message_id="bmsg_1", job=job, turn=turn)
+    receipt = ScreeningReceipt(
+        verdict="allow",
+        model="qa/alias",
+        prompt_version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        body_sha256=body,
+        categories=(),
+    ).validated()
+    store.finish_screening(
+        owner,
+        "bmsg_1",
+        attempt_id=attempt,
+        fingerprint=job.digest,
+        expected_epoch=1,
+        receipt=receipt,
+        envelope_digest="e" * 64,
+        admission_revision="rev-1",
+    )
+    committed = store.find_screening_receipt(
+        owner,
+        body_sha256=body,
+        template_sha256="ab" * 32,
+        model="qa/alias",
+        admission_revision="rev-1",
+        envelope_digest="e" * 64,
+    )
+    assert committed is not None
+
+
+def test_legacy_floor_row_is_read_and_reconciled(tmp_path) -> None:
+    """R12/O3: a pre-scope-change legacy floor row is still READ (the
+    conservative fallback) and an advance migrates to the account-scope key
+    without destroying the legacy row."""
+
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.team_bridge import store as _store_mod
+    from local_operator.team_bridge.store import state_db_path
+
+    store, owner = _setup(tmp_path)
+    legacy_key = _store_mod._owner_key(owner)
+    db = state_db_path(tmp_path)
+    with _sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO text_floors "
+            "(owner_key, hub, kind, version, sha256, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                legacy_key,
+                owner.canonical_base_url,
+                "guidance",
+                "bridge-guidance-v1",
+                "a" * 64,
+                _time.time(),
+            ),
+        )
+    assert store.text_floor(owner, "guidance") == ("bridge-guidance-v1", "a" * 64)
+    store.advance_text_floors(owner, [("guidance", "bridge-guidance-v2", "b" * 64)])
+    assert store.text_floor(owner, "guidance") == ("bridge-guidance-v2", "b" * 64)
+    with _sqlite3.connect(db) as conn:
+        legacy = conn.execute(
+            "SELECT COUNT(*) FROM text_floors WHERE owner_key = ?", (legacy_key,)
+        ).fetchone()[0]
+    assert legacy == 1  # the legacy row is preserved, never deleted or repaired
+
+
+def test_accepted_capture_is_strictly_immutable(tmp_path) -> None:
+    """R12/Q2: no production copy affordance — the supported capture is
+    immutable, and the default copy machinery can only write through the
+    same guard (AttributeError), so nothing supported can refresh the age
+    provenance."""
+
+    import copy as _copy
+    import time as _time
+
+    from local_operator.team_bridge import scheduler as _scheduler
+
+    capture = _scheduler.AcceptedCapture(
+        _scheduler._CAPTURE_TOKEN,
+        version="bridge-screen-v1",
+        template_hash="ab" * 32,
+        owner_frame="f" * 64,
+        captured_at=_time.time(),
+        credential_id=1,
+        account_id="acc_1",
+        hub="https://api.radienthq.com/v1",
+        owner_generation=1,
+        consent_version="bridge_consent_v1",
+        consent_ref="ref-1",
+        consent_served_version="bridge_consent_v1",
+        guidance_version="bridge-guidance-v1",
+        guidance_sha="a" * 64,
+        consent_sha="b" * 64,
+        source="status",
+    )
+    with pytest.raises(AttributeError):
+        _copy.copy(capture)
+    with pytest.raises(AttributeError):
+        capture.captured_at = _time.time()
+
+
+def test_normalizer_refuses_consent_currency_without_floor_writes(tmp_path) -> None:
+    """R12/O3: the normalizer no longer writes floors — a currency
+    mismatch refuses in the law path and leaves BOTH floors unset."""
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V1
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    raw = {
+        "api_version": "1",
+        "available": True,
+        "tenants": [
+            {
+                "tenant_id": owner.tenant_id,
+                "tenant_name": "Org",
+                "eligible": True,
+                "endpoint": {"id": owner.endpoint_id, "label": "e", "state": "active"},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+        "guidance": {"version": "bridge-guidance-v1", "text": "g"},
+        "screening": {"version": "bridge-screen-v1", "template": SCREENING_TEMPLATE_V1},
+        "consent": {"version": "bridge_consent_v2", "text": "c"},
+    }
+    with pytest.raises(StoreRefused):
+        _scheduler._normalize_accepted_status(raw, owner, store)
+    assert store.text_floor(owner, "guidance") is None
+    assert store.text_floor(owner, "consent") is None
+
+
+def test_live_identity_refuses_logout_and_same_row_switch(tmp_path) -> None:
+    """R12/O3: the reuse-time live-identity read (the supported seam the
+    cycle calls before any cached DELIVER) refuses a logout and a same-row
+    account switch, on the actual native AuthStore."""
+
+    import asyncio as _asyncio
+    import dataclasses as _dataclasses
+    import json as _json
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner0 = _setup(tmp_path)
+    auth = AuthStore(db_path=tmp_path / "auth.db")
+    expires = int((_time.time() + 3600) * 1000)  # AuthStore stores epoch MILLIS
+    row = auth.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "synthetic-access",
+            "refresh": "synthetic-refresh",
+            "expires": expires,
+            "account_id": owner0.account_id,
+            "org_id": owner0.tenant_id,
+            "api_endpoint": "https://api.radienthq.com/v1",
+            "email": "q@example.test",
+        },
+    )
+    owner = _dataclasses.replace(
+        owner0,
+        credential_id=row.id,
+        canonical_base_url="https://api.radienthq.com/v1",
+    )
+    _asyncio.run(_scheduler._verify_live_identity(owner, auth, tmp_path))
+    with _sqlite3.connect(tmp_path / "auth.db") as conn:
+        data = _json.loads(
+            conn.execute("SELECT data FROM auth_credentials WHERE id = ?", (row.id,)).fetchone()[0]
+        )
+        data["account_id"] = "acc_somewhere_else"
+        conn.execute(
+            "UPDATE auth_credentials SET data = ? WHERE id = ?",
+            (_json.dumps(data), row.id),
+        )
+    with pytest.raises(StoreRefused):
+        _asyncio.run(_scheduler._verify_live_identity(owner, auth, tmp_path))
+    auth.delete_credential(row.id)
+    with pytest.raises(StoreRefused):
+        _asyncio.run(_scheduler._verify_live_identity(owner, auth, tmp_path))

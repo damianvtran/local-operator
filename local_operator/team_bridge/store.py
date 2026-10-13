@@ -403,6 +403,78 @@ _JOB_BOUND_PREFIX = "job:"
 _PROOF_PREFIX = "proof:"
 
 
+def _canonical_digest_from_fields(fields: list[Any]) -> str:
+    """The ONE canonical digest encoder (stable order, compact separators).
+
+    Both the job mint and the retained-registration re-derivation hash this
+    exact list shape — one encoder, so the two sides can never drift into
+    duplicate serializers (R12/F1).
+    """
+
+    payload = json.dumps(fields, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _canonical_proof_digest(registered: Any, attempt_id: Any, turn: Any) -> str | None:
+    """Re-derive the canonical digest from a RETAINED registration record.
+
+    The retained record carries the semantic fields but not the attempt id or
+    the turn token (both are native/transaction context), so they are
+    supplied from the actual row and the finishing transaction. Any altered
+    field — model, provider, request, display, logical reference, approved
+    edit that keeps membership — changes this derivation and so cannot equal
+    the bound digest. Returns ``None`` when the record's owner namespace is
+    unparseable (the caller refuses).
+    """
+
+    owner = registered.get("owner")
+    if not isinstance(owner, str):
+        return None
+    parts = owner.split("|")
+    if len(parts) != 6:
+        return None
+    credential_id_s, account_id, tenant_id, endpoint_id, hub_url, owner_generation_s = parts
+
+    # The canonical digest is taken over NATIVE scalar types (the job mint
+    # hashes ints for credential id and generation), while the retained
+    # record stores the owner namespace joined as text — so re-coerce the
+    # numeric parts back to their minted types here. A non-numeric part keeps
+    # its string form, which then simply fails to equal the bound digest and
+    # refuses, never silently matching a different shape.
+    def _as_int(value: str) -> Any:
+        try:
+            return int(value)
+        except ValueError:
+            return value
+
+    credential_id = _as_int(credential_id_s)
+    generation = _as_int(owner_generation_s)
+    return _canonical_digest_from_fields(
+        [
+            generation,
+            credential_id,
+            account_id,
+            tenant_id,
+            endpoint_id,
+            hub_url,
+            registered.get("message"),
+            attempt_id,
+            registered.get("body"),
+            registered.get("template"),
+            registered.get("version"),
+            registered.get("provider"),
+            registered.get("model"),
+            list(registered.get("approved") or ()),
+            registered.get("envelope"),
+            registered.get("request"),
+            registered.get("display"),
+            registered.get("revision"),
+            registered.get("epoch"),
+            turn,
+        ]
+    )
+
+
 def _canonical_job_digest(job: Any) -> str:
     """Independently derive the canonical full-job digest from its FIELDS.
 
@@ -414,7 +486,7 @@ def _canonical_job_digest(job: Any) -> str:
     impossible to bind, dispatch or receipt.
     """
 
-    payload = json.dumps(
+    return _canonical_digest_from_fields(
         [
             getattr(job, "owner_generation", None),
             getattr(job, "credential_id", None),
@@ -436,10 +508,8 @@ def _canonical_job_digest(job: Any) -> str:
             getattr(job, "revision", None),
             getattr(job, "epoch", None),
             getattr(job, "turn", None),
-        ],
-        separators=(",", ":"),
+        ]
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
@@ -2193,6 +2263,47 @@ class Store:
                     raise StoreRefused("attempt_mismatch", "bound digest changed before finish")
                 if registered.get("message") != message_id:
                     raise StoreRefused("proof_corrupt", "retained proof names another message")
+                # R12/F1: ONE canonical re-derivation from the RETAINED
+                # registration (the same encoder and field order as the job
+                # mint), with the attempt id taken from the native row and
+                # the turn token from the finishing transaction. This closes
+                # EVERY registered field at once — staged provider/model/
+                # request/display/logical references and approved-map edits
+                # that keep membership included — against the digest bound
+                # at the physical reservation. Any field altered after the
+                # POST cannot re-derive the binding.
+                turn_candidates = [turn] if isinstance(turn, str) and turn else []
+                lease_row = conn.execute(
+                    "SELECT lease_holder FROM screening_schedule WHERE owner_key = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                if lease_row is not None and lease_row["lease_holder"]:
+                    turn_candidates.append(lease_row["lease_holder"])
+                re_derived = [
+                    _canonical_proof_digest(registered, attempt_id, candidate)
+                    for candidate in turn_candidates
+                ]
+                if fingerprint not in re_derived:
+                    raise StoreRefused(
+                        "attempt_mismatch",
+                        "retained registration does not re-derive the bound digest",
+                    )
+                # The PACKED logical reference is the pre-bind fingerprint the
+                # reservation pinned (revision | envelope | approved
+                # identities); it is not part of the job digest, so it is
+                # re-derived here with the same helper the scheduler used.
+                from local_operator.team_bridge.screening import _identities_digest
+
+                approved_set = frozenset(str(entry) for entry in (registered.get("approved") or []))
+                logical_expected = (
+                    f"{registered.get('revision')}|{registered.get('envelope')}"
+                    f"|{_identities_digest(approved_set)}"
+                )
+                if registered.get("logical") != logical_expected:
+                    raise StoreRefused(
+                        "proof_corrupt",
+                        "retained logical reference does not re-derive",
+                    )
                 # FULL closed comparison against the NATIVE authority the
                 # finish actually has (R11/1): owner namespace, tenant, the
                 # served model/template/version the receipt carries, approval

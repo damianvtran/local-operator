@@ -572,16 +572,14 @@ class AcceptedCapture:
             raise AttributeError("AcceptedCapture is immutable once minted")
         object.__setattr__(self, name, value)
 
-    def __copy__(self) -> "AcceptedCapture":
-        # A copy is an unlocked CLONE: negative-arm fixtures mutate it to
-        # prove that mutation cannot gain authority, and every reuse
-        # re-validates the fields at use, so an unlocked clone carries no
-        # additional trust.
-        clone = object.__new__(type(self))
-        for slot in self.__slots__:
-            object.__setattr__(clone, slot, getattr(self, slot))
-        object.__setattr__(clone, "_locked", False)
-        return clone
+    # R12/Q2: there is deliberately NO production copy affordance. The
+    # supported object is strictly immutable after mint (`__setattr__`
+    # raises once locked), so no supported API can refresh `captured_at`
+    # and re-assert the age gate. Negative-arm fixtures clone via
+    # `object.__new__` + `object.__setattr__`, which bypasses the guard BY
+    # DESIGN and therefore demonstrates nothing beyond what the guard
+    # already blocks; the age/freshness provenance is anchored by the
+    # `_CAPTURE_TOKEN` mint and the strict non-future/300 s re-validation.
 
 
 _VERIFIED_TOKEN = object()
@@ -774,6 +772,13 @@ async def run_screening_cycle(
         # tenant/endpoint, pinned selector, committed-consent currency):
         # advance BOTH accepted floors in ONE atomic transaction — a refused
         # candidate leaves every floor untouched.
+        receipt_pre = store.owner_consent_receipt(owner)
+        if receipt_pre is None:
+            raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+        if receipt_pre["consent_version"] != law.consent_served_version or not receipt_pre.get(
+            "consent_ref"
+        ):
+            raise StoreRefused("policy_stale", "consent receipt is not the served version")
         store.advance_text_floors(
             owner,
             [
@@ -781,9 +786,19 @@ async def run_screening_cycle(
                 ("consent", law.consent_served_version, law.consent_sha),
             ],
         )
+        # R12/O1: re-verify the receipt AFTER the floor advance and before
+        # mint/dispatch. A receipt rotated between the law check and the
+        # advance would otherwise mint a capture whose served-vs-current
+        # consent versions disagree — its future reuse would refuse, but
+        # the CURRENT run would already have proceeded on stale consent.
         receipt = store.owner_consent_receipt(owner)
-        if receipt is None:
-            raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+        if (
+            receipt is None
+            or receipt_pre["consent_version"] != receipt["consent_version"]
+            or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
+            or receipt["consent_version"] != law.consent_served_version
+        ):
+            raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
         capture = AcceptedCapture(
             _CAPTURE_TOKEN,
             version=law.version,
