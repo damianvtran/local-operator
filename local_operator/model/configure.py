@@ -59,6 +59,7 @@ from local_operator.model.registry import (
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
+    meta_muse_family_model_info,
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
@@ -125,6 +126,10 @@ UNKNOWN_MAX_OUTPUT = 8_192
 #: 160k compaction threshold on a model with 1M of room.
 _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
     "anthropic": anthropic_family_model_info,
+    # Muse ids reach here when discovery surfaces a tier this build's
+    # registry has not been taught (a new Spark point release, Wonder
+    # Full). Limits are inherited, prices are not — see the resolver.
+    "meta-muse": meta_muse_family_model_info,
 }
 
 #: Per-provider fallback templates for an id neither the registry nor a family
