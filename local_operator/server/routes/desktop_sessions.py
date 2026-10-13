@@ -2014,6 +2014,7 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             ProfileRegistryUnavailable,
             RuntimeRetiring,
         )
+        from local_operator.session.model_admission import RuntimeUpgradeNeededError
 
         if isinstance(error, ForkRefused):
             # THE REFUSAL IS THE ANSWER, exactly as it is for the arms around it.
@@ -2136,6 +2137,25 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # that control instead of retrying a call that cannot succeed. The
             # conversation exists, so 404 would be a lie about the user's own
             # work, and nothing failed, so 500 would be a lie about the machine.
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
+        if isinstance(error, RuntimeUpgradeNeededError):
+            # THE TYPED MODEL-SWITCH REFUSAL (agent review round 1, R1-1). The
+            # desktop's forwarded ``/model`` slash now pays the owner-record
+            # admission BEFORE it reaches the owner
+            # (``AttachedSession._require_routed_model_admission``); this arm is
+            # what carries that refusal to the renderer. Unlisted, the class
+            # landed in the catch-all below as a bare 409 whose body has no
+            # ``code`` at all (measured on the R1-1 repro), so a client could
+            # only parse prose. 409, in this block's established named-condition
+            # shape: the request is well-formed and the conversation's CURRENT
+            # runtime is what cannot honour it — the sentence itself names the
+            # remedies (a new conversation, or resuming after an idle-boundary
+            # update), and a sign-in repair is exactly what must NOT be
+            # suggested. A ``ValueError`` subclass precisely so it lands in THIS
+            # block rather than the generic arms below, exactly as
+            # ``AsideUnanswered`` is one for the same reason.
             raise HTTPException(
                 409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
             ) from None
