@@ -316,9 +316,7 @@ async def test_the_incident_is_recovered_over_the_wire(gateway, write_tool, note
     # The operator is told what happened, in the wording that is true of both
     # families this branch serves.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert notices == [
-        "response stream interrupted mid-answer — resuming the turn on the same route (1/3)"
-    ]
+    assert notices == ["response stream cut mid-answer — resuming the turn (1/3)"]
 
     # And the continuation reached the MODEL as harness chrome: the re-issued
     # request carries the instruction, naming the aborted call — and every
