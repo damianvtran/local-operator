@@ -103,9 +103,7 @@ def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
         encoding="utf-8"
     )
     for namespace in ("relay.shell", "relay.session"):
-        en = json.loads(
-            (REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text()
-        )
+        en = json.loads((REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text())
         assert f'"{namespace}": {{' in bundle
         for key, message in en.items():
             assert key.startswith(f"{namespace}.")
@@ -122,9 +120,7 @@ def test_committed_relay_session_namespace_is_whole_and_generated() -> None:
     desynced one of the three would otherwise ship a dead key or a missing one).
     """
     namespace = "relay.session"
-    en = json.loads(
-        (REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text()
-    )
+    en = json.loads((REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text())
     module = (REPO / "local_operator/i18n/keys/relay_session.py").read_text(encoding="utf-8")
     ts = (REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts").read_text(encoding="utf-8")
     for key in en:
