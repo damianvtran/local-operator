@@ -62,6 +62,6 @@ scratch/
 # `main` this sweep branched from, where the whole store is still present.
 bench/
 
-# In-repo worktrees (one per parallel lane): untracked build trees, never
-# part of the package or its distribution.
+# In-repo worktrees (one per parallel lane): untracked lane trees, never
+# part of the shipped package.
 .worktrees/
