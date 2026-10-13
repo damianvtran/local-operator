@@ -98,7 +98,8 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
-    TEAM_BRIDGE_MESSAGE_TYPE,
+    PEER_DELIVERABLE_CUSTOM_TYPES,
+    PEER_FAMILY_INPUT_TYPES,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -109,6 +110,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     SESSION_SEND_NOTICE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
@@ -643,18 +645,11 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
     }
 )
 
-#: Inputs that are another SESSION talking, not the operator this session's
-#: notifications belong to: a ``peer_message`` (another local session's agent,
-#: or a person at the other end of ``lop send``) and a ``hub_message`` (a
-#: child reporting to its parent — defensive here: every hub delivery routes
-#: through :meth:`Session.queue_aside`, so it cannot reach ``_note_run_input``
-#: today; the member keeps a future producer correct). §14's trigger record
-#: collapses every non-wake/monitor input into one "internal" class, so the
-#: peer-quiet rule in ``_finalize_attention_notify`` reads the finer
-#: ``_run_input_types`` record instead of widening that class vocabulary.
-PEER_FAMILY_INPUT_TYPES = frozenset(
-    {PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE}
-)
+#: Inputs that are another SESSION talking (see ``harness/message_types.py``
+#: for the full reasoning and membership): imported rather than re-declared so
+#: the renderer can answer "does this family type reach the model?" from the
+#: same single source — a second declaration site is how the render tuple and
+#: the family silently diverged.
 
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):
@@ -8945,7 +8940,12 @@ class Session:
         return found
 
     def _peer_custom_message(
-        self, text: str, sender: dict[str, Any], *, entry_id: str = ""
+        self,
+        text: str,
+        sender: dict[str, Any],
+        *,
+        entry_id: str = "",
+        custom_type: str | None = None,
     ) -> CustomMessage:
         """Build the transcript entry for one inbound cross-session message.
 
@@ -8970,14 +8970,38 @@ class Session:
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
         model_label = sender.get("model_label", "")
-        wrapped = (
-            f"<peer-session-message "
-            f"from_pid={pid!r} "
-            f"conversation={conversation!r} "
-            f"model={model_label!r}>\n"
-            f"{text}\n"
-            "</peer-session-message>"
-        )
+        # TRIPWIRE (H4e-render): every hop re-validates, and this is the LAST
+        # one before a row exists — an unknown kind here would be a caller bug
+        # or a bypassed boundary, and stamping it would put an unverifiable
+        # provenance kind on a durable card. Refuse, never coerce.
+        chosen = custom_type or PEER_MESSAGE_MESSAGE_TYPE
+        if chosen not in PEER_DELIVERABLE_CUSTOM_TYPES:
+            raise ValueError(
+                f"unknown peer custom_type {chosen!r}; refusing to stamp an "
+                "unverifiable provenance kind"
+            )
+        if chosen == TEAM_BRIDGE_MESSAGE_TYPE:
+            # A dedicated provenance envelope for bridge wakes (§13.4): the
+            # peer wrap's ``from_pid``/``conversation`` are misleading for an
+            # org member (there is no local pid), and the model should read the
+            # org identity + the source marker instead. ``body`` below stays
+            # the raw text every surface renders.
+            wrapped = (
+                f"<team-bridge-message "
+                f"from_account={sender.get('account_id')!r} "
+                f"source={sender.get('source')!r}>\n"
+                f"{text}\n"
+                "</team-bridge-message>"
+            )
+        else:
+            wrapped = (
+                f"<peer-session-message "
+                f"from_pid={pid!r} "
+                f"conversation={conversation!r} "
+                f"model={model_label!r}>\n"
+                f"{text}\n"
+                "</peer-session-message>"
+            )
         peer_fields: dict[str, Any] = {}
         if entry_id:
             # The SENDER's identity, when it validated -- see the docstring.
@@ -8985,7 +9009,7 @@ class Session:
             # byte-identical to what this function built before the carriage.
             peer_fields["id"] = entry_id
         return CustomMessage(
-            custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+            custom_type=chosen,
             attribution="user",
             details={"text": wrapped, "body": text, "sender": sender},
             **peer_fields,
@@ -9156,6 +9180,7 @@ class Session:
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
+        custom_type: str | None = None,
     ) -> PeerReceiveDetail:
         """Deliver a message from ANOTHER local lop session into this one.
 
@@ -9222,7 +9247,12 @@ class Session:
             self._peer_inflight_ids.add(incoming)
         try:
             return await self._deliver_peer_message(
-                text, incoming=incoming, mode=mode, wake=wake, sender=sender
+                text,
+                incoming=incoming,
+                mode=mode,
+                wake=wake,
+                sender=sender,
+                custom_type=custom_type,
             )
         finally:
             if incoming is not None:
@@ -9236,6 +9266,7 @@ class Session:
         mode: str,
         wake: bool,
         sender: dict[str, Any] | None,
+        custom_type: str | None = None,
     ) -> PeerReceiveDetail:
         # Resolve the sender against the LOCAL registry before anything renders
         # or persists. The identity arrives over the wire as the sender's own
@@ -9261,7 +9292,9 @@ class Session:
         from local_operator.mobile.peer_send import resolve_sender_identity
 
         sender = resolve_sender_identity(sender)
-        message = self._peer_custom_message(text, sender, entry_id=incoming or "")
+        message = self._peer_custom_message(
+            text, sender, entry_id=incoming or "", custom_type=custom_type
+        )
 
         def receipt(detail: str, *, queued: bool = False) -> PeerReceiveDetail:
             """This branch's ack: the receipt sentence plus what the receiver owns.

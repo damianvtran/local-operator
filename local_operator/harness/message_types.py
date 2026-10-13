@@ -327,7 +327,7 @@ PEER_MESSAGE_MESSAGE_TYPE = "peer_message"
 #: id + ``body_sha256``). A DEDICATED type rather than a ``peer_message`` per
 #: contract §13.4 ("it must not overload the wake/peer types"): surfaces can
 #: render bridge provenance honestly and the LLM-visible family stays a
-#: deliberate list (see ``session.py``'s ``PEER_FAMILY_INPUT_TYPES``).
+#: deliberate list (``PEER_FAMILY_INPUT_TYPES``, below).
 TEAM_BRIDGE_MESSAGE_TYPE = "team_bridge_message"
 
 #: ``CustomMessage.custom_type`` of a hub message in either direction. The
@@ -336,6 +336,37 @@ TEAM_BRIDGE_MESSAGE_TYPE = "team_bridge_message"
 #: a resumed child still sees what it was told. ``harness/comms.py``, which
 #: writes and classifies these, imports it from here.
 HUB_MESSAGE_TYPE = "hub_message"
+
+#: Inputs that are another SESSION talking, not the operator this session's
+#: notifications belong to: a ``peer_message`` (another local session's agent,
+#: or a person at the other end of ``lop send``), a ``hub_message`` (a child
+#: reporting to its parent — defensive here: every hub delivery routes through
+#: :meth:`Session.queue_aside`, so it cannot reach ``_note_run_input`` today;
+#: the member keeps a future producer correct) and a ``team_bridge_message``.
+#: §14's trigger record collapses every non-wake/monitor input into one
+#: "internal" class, so the peer-quiet rule in ``_finalize_attention_notify``
+#: reads the finer ``_run_input_types`` record instead of widening that class
+#: vocabulary.
+#:
+#: Lives HERE (moved from ``session.py`` at the H4e-render slice): the shared
+#: renderer must answer "does this family type reach the model?" without the
+#: heavyweight ``Session`` import graph, and a second declaration site is how
+#: the render tuple silently diverged from the family (the A1 class).
+#: ``session.py`` imports this name unchanged.
+PEER_FAMILY_INPUT_TYPES = frozenset(
+    {PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE}
+)
+
+#: The custom types a PEER DELIVERY frame may carry, sender-declared and
+#: receiver-VALIDATED at every hop (``peer_client`` carriage → receive-op
+#: validation → serving trust boundary → :meth:`Session._peer_custom_message`
+#: tripwire). CLIENT-LOCAL by construction: never widened by callers, never
+#: accepted from a server payload, and an unknown value is REFUSED (typed
+#: error) rather than coerced — a wrong provenance kind on a card is worse
+#: than a refused send. Distinct from ``PEER_FAMILY_INPUT_TYPES``: this set
+#: governs what may be STAMPED on delivery; that set governs what reaches the
+#: model as input.
+PEER_DELIVERABLE_CUSTOM_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE})
 
 #: The custom-message type the session's continuation guardrail injects at the
 #: yield boundary (``Session._todo_continuation``). The vocabulary is owned by

@@ -91,12 +91,18 @@ from local_operator.mobile.types import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import AckDetail, SessionHandle
+from local_operator.session.runtime.server import (
+    AckDetail,
+    SessionHandle,
+)
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
-from local_operator.session.runtime.server import receives_message_id
+from local_operator.session.runtime.server import (
+    receives_custom_type,
+    receives_message_id,
+)
 from local_operator.session.runtime.types import (
     RUNNING_SUBAGENT_STATUSES,
     SIGNAL_DRAIN_CAUSE,
@@ -2499,6 +2505,7 @@ class ServingSessionHandle(SessionHandle):
         command_id: str = "",
         harness_injected: bool = False,
         message_id: str = "",
+        custom_type: str = "",
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2586,6 +2593,12 @@ class ServingSessionHandle(SessionHandle):
                     # was spooled twice (see ``inbox.InboxLine.message_id``).
                     # Empty on the owner-prompt paths, which own none.
                     message_id=message_id,
+                    # The declared provenance kind, carried across the handover
+                    # for the same reason ``message_id`` is: the successor
+                    # cannot re-derive it, and a bridge wake replayed as a
+                    # generic peer card would re-open exactly the §13.4 gap this
+                    # carriage closes. Empty on the owner-prompt paths.
+                    custom_type=custom_type,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -4559,6 +4572,7 @@ class ServingSessionHandle(SessionHandle):
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
+        custom_type: str | None = None,
     ) -> AckDetail:
         # This handle owns an in-process Session on the registrant's own loop,
         # so the coroutine can be awaited directly (unlike the TUI handle, which
@@ -4567,6 +4581,20 @@ class ServingSessionHandle(SessionHandle):
         # steer() does, so an attached phone paints the peer card immediately
         # rather than waiting for the next MessageStartEvent.
         self._check_loop_thread()
+        # TRUST BOUNDARY: the handle is not the last line that sees this value,
+        # and a frame from a sender this build does not control could carry any
+        # string. Re-validate against the client-local allowlist HERE too — an
+        # unknown kind is refused (typed), never forwarded toward the stamp.
+        if custom_type is not None:
+            from local_operator.harness.message_types import (
+                PEER_DELIVERABLE_CUSTOM_TYPES,
+            )
+
+            if custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES:
+                raise ValueError(
+                    "receive_peer_message carries an unknown custom_type; "
+                    "refusing to stamp a provenance kind the session cannot verify"
+                )
         # A retiring runtime must not START a turn it will abort one await
         # later. The QUIET record-only delivery (``mailbox``, no wake) is
         # deliberately still admitted: it opens no turn, and refusing it would
@@ -4586,7 +4614,12 @@ class ServingSessionHandle(SessionHandle):
         if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
             if self._updating or (self._draining and not self._exit_committed):
                 receipt = await self._spool_for_successor(
-                    text, mode=mode, wake=wake, sender=sender or {}, message_id=message_id or ""
+                    text,
+                    mode=mode,
+                    wake=wake,
+                    sender=sender or {},
+                    message_id=message_id or "",
+                    custom_type=custom_type or "",
                 )
                 # The row is DURABLE the moment this returns (it raises instead
                 # when it cannot be written), so the sender may report it as
@@ -4613,6 +4646,12 @@ class ServingSessionHandle(SessionHandle):
         peer_kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender or {}}
         if receives_message_id(self._session):
             peer_kwargs["message_id"] = message_id
+        # The same handle-vs-session split as ``message_id`` directly above: the
+        # wire's signature is the HANDLE's, and the SESSION OBJECT the handle
+        # wraps is what actually receives the keyword. Only a value that exists
+        # is forwarded — a frame without one keeps the pre-carriage call shape.
+        if custom_type and receives_custom_type(self._session):
+            peer_kwargs["custom_type"] = custom_type
         result = await self._session.receive_peer_message(text, **peer_kwargs)
         self._fold.note_peer_message(text, sender=sender or {})
         self._notify()
