@@ -18,11 +18,12 @@ client (``desktop_env/evaluators/model_client.py``) resolves its API key from
 the process environment and nowhere else, and it runs INSIDE upstream's
 ``env.evaluate()`` — the binding honesty rule is that upstream evaluators are
 called unmodified, so there is no argument path to hand it the key. The
-adapter therefore writes ``OSWORLD_EVAL_MODEL_API_KEY`` (and the simulator
-twin) into the WORKER's own environment at ``reset_start`` and scrubs both on
-``close``. That environment is the stripped one the supervisor built, it is
-never inherited by a parent, and the worker never spawns children that could
-inherit it. See ``adapter.OSWorldV2Adapter._install_judge_environment``.
+adapter therefore writes the env-channel secrets (the judge key, its simulator
+twin, and the GitLab fixture token) into the WORKER's own environment at
+``reset_start`` and scrubs them on ``close``. That environment is the stripped
+one the supervisor built, it is never inherited by a parent, and the worker
+never spawns children that could inherit it. See
+``adapter.OSWorldV2Adapter._install_secret_environment``.
 """
 
 from __future__ import annotations
@@ -60,11 +61,25 @@ _ENV_INJECTABLE = frozenset(
     }
 )
 
-# The two secret names OSWorld reads from the environment. Written by the
+# The secret names OSWorld reads from the environment. Written by the
 # adapter only inside the worker and only for the episode's duration.
+#
+# GITLAB_PRIVATE_TOKEN is the documented self-hosted-GitLab FIXTURE channel
+# (upstream README requires self-hosting Task-Web/gitlab with a private
+# token): ``desktop_env/controllers/gitlab.py:19-23`` reads it -- beside
+# GITLAB_URL, which is non-secret infra -- through ``os.getenv`` AT MODULE
+# IMPORT, so it obeys the same rule as ``_OSWORLD_IMPORT_ENV``: the write
+# must land before the first ``desktop_env`` import (``load_desktop_env``)
+# or it is a silent no-op. Until this name had a channel, the requirements
+# seam refused every GitLab task outright (``UndeliverableRequirement``,
+# requirements.py); putting it here is the channel that seam's remedy names.
+# It is a benchmark-fixture credential for an operator-provisioned guest
+# service -- never a production gitlab.com token, and never one this build
+# provisions or defaults.
+GITLAB_TOKEN_ENV = "GITLAB_PRIVATE_TOKEN"
 JUDGE_KEY_ENV = "OSWORLD_EVAL_MODEL_API_KEY"
 USER_SIM_KEY_ENV = "OSWORLD_USER_SIM_API_KEY"
-SECRET_ENV_NAMES = frozenset({JUDGE_KEY_ENV, USER_SIM_KEY_ENV})
+SECRET_ENV_NAMES = frozenset({JUDGE_KEY_ENV, USER_SIM_KEY_ENV, GITLAB_TOKEN_ENV})
 
 # OSWorld's AWS manager module raises ``EnvironmentError`` AT IMPORT unless
 # these three are in the environment (manager.py:18-23) — and ``DesktopEnv``
@@ -122,11 +137,13 @@ def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None
 
 
 def install_secret_environment(values: dict[str, str]) -> None:
-    """The documented exception: hand OSWorld the judge/simulator keys.
+    """The documented exception: hand OSWorld the env-only secrets.
 
-    Only the two names in ``SECRET_ENV_NAMES`` are ever written; any other
-    name is refused so the AWS credentials (which the provider consumes
-    directly) can never take this path by accident.
+    Only the names in ``SECRET_ENV_NAMES`` are ever written; any other name
+    is refused so the AWS credentials (which the provider consumes directly)
+    can never take this path by accident. The GitLab fixture token takes
+    this path for the same reason as the judge key: its controller reads it
+    from the environment at import and nothing else can reach it.
     """
 
     for name, value in values.items():

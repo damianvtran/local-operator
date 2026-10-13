@@ -413,13 +413,14 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    no adapter, with an instance left to tear down. Two rules keep the refusal
    honest rather than merely fast:
    * **A value with no channel is refused whether or not it is supplied.**
-     `GITLAB_PRIVATE_TOKEN` is the case: `desktop_env/controllers/gitlab.py:19-23`
-     reads it through `os.getenv` at import, and this build hands the vendor only
+     `GITLAB_PRIVATE_TOKEN` was the case: `desktop_env/controllers/gitlab.py:19-23`
+     reads it through `os.getenv` at import, and this build handed the vendor only
      the env-delivery allowlist plus the provider's own credentials, so supplying
-     it changes nothing. The two GitLab tasks (`task_026`, `task_041`) therefore
-     cannot run on this build at all, and are refused at the seam instead of
-     allocating a guest and failing mid-setup; a build that puts the name on
-     `vendor_bridge.SECRET_ENV_NAMES` can run them.
+     it changed nothing. The name is now ON that allowlist
+     (`vendor_bridge.SECRET_ENV_NAMES`), installed in the worker before the first
+     `desktop_env` import and scrubbed on close, so the two GitLab tasks
+     (`task_026`, `task_041`) run when the operator supplies the token -- the
+     refusal remains for any future name with no channel.
    * **A documented substitute satisfies what it stands in for.** The pinned
      simulator resolves its key through `model_client`'s fallback chain
      (`user_simulator.respond` passes no key when it has none, and the client then
