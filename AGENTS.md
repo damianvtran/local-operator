@@ -1292,6 +1292,11 @@ Before starting a release, every agent does the same things, in this order:
    branch `release-next` with one empty commit and opening a draft PR titled
    `chore(release): claim release window`; its body names the owner's session
    pid from `lop sessions` and an empty checklist of the PRs in the window.
+   Include a `## Public release notes` section following
+   `.github/RELEASE_NOTES_TEMPLATE.md`; until contents are known, explicitly
+   label it “Draft — contents not yet determined”. Keep the ownership/window
+   record outside that public section, and internal gate evidence in separate
+   PR comments. Replace the public draft with the final copy before ready/tagging.
    Only then announce it with `send` to the other live sessions. Once the
    window's bump is decided, the same single commit is amended into the
    version change and retitled `chore(release): bump version to X.Y.Z`
@@ -1368,12 +1373,27 @@ it landed.
    source resolver. Dispatch remains rehearsal-only.
 
 4. **Tag and publish** from the merge commit of that bump, then install and
-   smoke (mechanics below). The release notes cover **every PR in the
-   window**, grouped in the house style of the existing releases (a headline
-   sentence naming the version's theme, then `## Major` / `## Minor` /
-   `## Fixes` as applicable, then `## Install` and the full-changelog compare
-   link). A window's notes are written from the collected impact lines, not
-   from commit subjects.
+   smoke (mechanics below). **The public-copy contract is
+   [`.github/RELEASE_NOTES_TEMPLATE.md`](.github/RELEASE_NOTES_TEMPLATE.md), not
+   previous release bodies.** Follow it in both the claim/bump PR's
+   `## Public release notes` section and the exact `--notes-file`: a short
+   theme headline, plain-language user impact summary, nonempty New / Fixed /
+   Improved bullets derived from the merged `Release:` lines, install/upgrade
+   guidance, and a compare URL from the previous published tag to this tag.
+   Account for **every PR in the tagged window**, but do not list internal IDs.
+   Say explicitly when a window is internal-only or version-metadata-only;
+   never invent a user-facing feature. Keep companion-app and installed-runtime
+   claims within what actually shipped.
+
+   **Complete the template's prepublish checklist in the release PR before
+   tagging.** Read the public PR section and exact notes file side by side.
+   Prohibit agent/QA/design round narratives, CI counts, reviewer names,
+   candidate/merge SHAs, branch names, residual-red classifications and internal
+   IDs in public copy. Put gate evidence in separate PR comments, not in the
+   public section or notes file. After publishing, read the exact
+   `/repos/damianvtran/local-operator/releases/tags/<this-tag>` response and
+   verify its body equals the approved file. This matters because desktop
+   update cards consume the release body as user-facing copy.
 
    **A macOS job is on the critical path for every platform now.** `pypi-publish`
    declares `keyagent-macos` as a hard dependency: the Developer-ID-signed helper and its
@@ -1418,8 +1438,12 @@ git -C /tmp/lop-release-next push -u origin release-next
 gh pr create --draft --base main --head release-next \
   --title 'chore(release): claim release window' --assignee damianvtran \
   --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
-Window (tick as each merges):
-- [ ] #<n> — <Release: line>'
+Window (tick as each merges; internal ownership record):
+- [ ] #<n> — <Release: line>
+
+## Public release notes
+Draft — contents not yet determined.
+Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
 # ... collect the window, write notes, wait for the last PR in the window to
 #     merge; then, with the bump decided:
 
@@ -1445,10 +1469,12 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 # If main IS the checked-out branch, use this instead:
 #   git -C ~/local-operator merge --ff-only origin/main
 
-# 4. Write the notes from the collected `Release:` lines, then tag + GitHub
-#    Release on the bump's merge commit. --target creates the tag on that
-#    exact SHA; the publish workflow triggers on the release.
-$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
+# 4. Write public notes using .github/RELEASE_NOTES_TEMPLATE.md from the
+#    collected `Release:` lines; match the claim/bump PR's public-notes section
+#    and complete the prepublish checklist there (evidence in separate comments).
+#    Then tag + GitHub Release on the bump's merge commit. --target creates
+#    the tag on that exact SHA; the publish workflow triggers on the release.
+$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
