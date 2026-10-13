@@ -278,7 +278,7 @@ def default_status_fetcher(
             from local_operator.team_bridge.client import BridgeRefusal
 
             raise BridgeRefusal("bridge_owner_mismatch", "the status read returned no mapping")
-        return VerifiedStatus(result)
+        return VerifiedStatus(_VERIFIED_TOKEN, result)
 
     return _fetch
 
@@ -372,17 +372,15 @@ class AcceptedLaw:
     consent_sha: str
 
 
-def _accept_text_floor(
-    store: Any, owner: Any, kind: str, version: Any, text: Any
-) -> tuple[str, str]:
-    """Accept one served text through the DURABLE contentless floor (R10/C).
+def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
+    """Stage one served text as contentless candidate metadata (R11/3).
 
-    The floor (version + sha256 of the bytes, never the text) survives reads
-    and restarts in the native store: a lower version, or the SAME version
-    with different bytes, is refused; identical same-version re-serves and
-    forward moves are accepted and persisted. A fresh in-memory accept set
-    would forget every prior acceptance — the store is what makes the
-    discipline real across processes.
+    Shape, boundedness and cap only — NO floor read and NO write here. The
+    version-rank/immutable-bytes comparison and the durable write belong to
+    ONE atomic native transaction (`Store.advance_text_floors`) AFTER the
+    whole origin/identity/currency law has passed, so a refused candidate —
+    or an unverified origin upstream — can never advance, or partially
+    poison, any floor.
     """
 
     import hashlib as _hashlib
@@ -392,22 +390,12 @@ def _accept_text_floor(
 
     if not isinstance(version, str) or not isinstance(text, str):
         raise StoreRefused("policy_stale", f"{kind} text has an unsupported shape")
-    number = version_number(version)
-    if number is None:
+    if version_number(version) is None:
         raise StoreRefused("policy_stale", f"{kind} version does not parse")
     encoded = text.encode("utf-8")
     if len(encoded) > TEXT_CAP_BYTES:
         raise StoreRefused("policy_stale", f"{kind} text exceeds the acceptance cap")
-    digest = _hashlib.sha256(encoded).hexdigest()
-    floor = store.text_floor(owner, kind)
-    if floor is not None:
-        prior_number = version_number(floor[0])
-        if prior_number is None or number < prior_number:
-            raise StoreRefused("policy_stale", f"{kind} version moved backwards")
-        if number == prior_number and digest != floor[1]:
-            raise StoreRefused("policy_stale", f"{kind} bytes differ for an accepted version")
-    store.set_text_floor(owner, kind, version, digest)
-    return version, digest
+    return version, _hashlib.sha256(encoded).hexdigest()
 
 
 def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: Any) -> AcceptedLaw:
@@ -465,14 +453,14 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     guidance = status.get("guidance")
     if not isinstance(guidance, Mapping):
         raise StoreRefused("policy_stale", "status carries no guidance section")
-    guidance_version, guidance_sha = _accept_text_floor(
-        store, owner, "guidance", guidance.get("version"), guidance.get("text")
+    guidance_version, guidance_sha = _stage_text_floor(
+        "guidance", guidance.get("version"), guidance.get("text")
     )
     consent = status.get("consent")
     if not isinstance(consent, Mapping):
         raise StoreRefused("policy_stale", "status carries no consent section")
-    consent_version, consent_sha = _accept_text_floor(
-        store, owner, "consent", consent.get("version"), consent.get("text")
+    consent_version, consent_sha = _stage_text_floor(
+        "consent", consent.get("version"), consent.get("text")
     )
     # CONSENT CURRENCY: the served version is the CURRENT server version, NOT
     # proof of acceptance. Acceptance is the COMMITTED native receipt;
@@ -517,6 +505,7 @@ class AcceptedCapture:
     """
 
     __slots__ = (
+        "_locked",
         "version",
         "template_hash",
         "owner_frame",
@@ -576,20 +565,48 @@ class AcceptedCapture:
         self.guidance_sha = guidance_sha
         self.consent_sha = consent_sha
         self.source = source
+        object.__setattr__(self, "_locked", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_locked", False):
+            raise AttributeError("AcceptedCapture is immutable once minted")
+        object.__setattr__(self, name, value)
+
+    def __copy__(self) -> "AcceptedCapture":
+        # A copy is an unlocked CLONE: negative-arm fixtures mutate it to
+        # prove that mutation cannot gain authority, and every reuse
+        # re-validates the fields at use, so an unlocked clone carries no
+        # additional trust.
+        clone = object.__new__(type(self))
+        for slot in self.__slots__:
+            object.__setattr__(clone, slot, getattr(self, slot))
+        object.__setattr__(clone, "_locked", False)
+        return clone
+
+
+_VERIFIED_TOKEN = object()
 
 
 class VerifiedStatus:
-    """A status payload returned by the VERIFIED production fetcher.
+    """A status payload carrying the SEALED internal receipt of the real SDK
+    verification (R11/2).
 
-    R10/A: only a fetch that actually performed the OAuth before/after
-    identity verification may mint a trusted capture. A bare Mapping from an
-    arbitrary injected callback is still normalized for adversarial-raw
-    coverage, but it can never acquire capture authority.
+    ``isinstance`` of a publicly constructible class is not provenance: a
+    caller could wrap a lawful raw DTO and gain authority. The constructor is
+    therefore token-sealed — only :func:`default_status_fetcher`, after its
+    actual before/after OAuth pin, native owner/generation and canonical-hub
+    checks, may issue one — and the cycle REFUSES any fetch result that is
+    not a sealed instance BEFORE normalizing, minting a capture, advancing a
+    text floor or creating a client. The pure normalizer stays available for
+    adversarial raw-data tests; provenance and data validation are separate
+    concerns.
     """
 
     __slots__ = ("status",)
 
-    def __init__(self, status: "Mapping[str, Any]") -> None:
+    def __init__(self, token: Any, status: "Mapping[str, Any]") -> None:
+        if token is not _VERIFIED_TOKEN:
+            raise ValueError("VerifiedStatus is issued only by the verified status path")
         self.status = status
 
 
@@ -697,7 +714,7 @@ async def run_screening_cycle(
             not isinstance(capture.captured_at, (int, float))
             or isinstance(capture.captured_at, bool)
             or capture.captured_at != capture.captured_at  # NaN
-            or capture.captured_at > now + 5.0
+            or capture.captured_at > now
             or (now - capture.captured_at) > _STATUS_CAPTURE_TTL
             or capture.owner_frame != _full_owner_frame(owner)
             or capture.credential_id != owner.credential_id
@@ -718,12 +735,16 @@ async def run_screening_cycle(
                     floors_ok = False
                     break
                 floor = store.text_floor(owner, kind)
-                if floor is not None and floor != (ver, sha):
+                # PRESENT and matching: an absent floor is a refusal, not
+                # accepted absence (the capture must still be backed by the
+                # durable acceptance it claims).
+                if floor is None or floor != (ver, sha):
                     floors_ok = False
                     break
             if (
                 receipt_now is None
                 or receipt_now["consent_version"] != capture.consent_served_version
+                or receipt_now.get("consent_ref") != capture.consent_ref
                 or not floors_ok
             ):
                 stale = True
@@ -738,38 +759,49 @@ async def run_screening_cycle(
             # dispatches.
             raise StoreRefused("policy_stale", "no verified status source")
         fetched = await status_fetcher()
-        verified = isinstance(fetched, VerifiedStatus)
-        raw = fetched.status if verified else fetched
+        if not isinstance(fetched, VerifiedStatus):
+            # R11/2: a public class shape is NOT provenance — an unverified
+            # callback (raw Mapping or a forged wrapper) refuses HERE, before
+            # normalization, floor advance, client creation or spend.
+            raise StoreRefused("policy_stale", "unverified status source")
+        raw = fetched.status
         if not isinstance(raw, Mapping):
             raise StoreRefused("policy_stale", "status fetch returned no mapping")
         law = _normalize_accepted_status(raw, owner, store)
         if not store.current_generation_is_live(owner):
             raise StoreRefused("policy_stale", "owner generation lost during the status read")
-        if verified:
-            # Mint trusted authority ONLY from the verified fetcher: an
-            # arbitrary injected callback is normalized for adversarial
-            # coverage but never mints a capture (R10/A).
-            receipt = store.owner_consent_receipt(owner)
-            if receipt is None:
-                raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-            capture = AcceptedCapture(
-                _CAPTURE_TOKEN,
-                version=law.version,
-                template_hash=law.template_hash,
-                owner_frame=_full_owner_frame(owner),
-                captured_at=time.time(),
-                credential_id=owner.credential_id,
-                account_id=owner.account_id,
-                hub=owner.canonical_base_url,
-                owner_generation=owner.enrollment_generation,
-                consent_version=receipt["consent_version"],
-                consent_ref=receipt["consent_ref"],
-                consent_served_version=law.consent_served_version,
-                guidance_version=law.guidance_version,
-                guidance_sha=law.guidance_sha,
-                consent_sha=law.consent_sha,
-                source="sdk-verified",
-            )
+        # The FULL law has passed (origin seal, identity, UNIQUE eligible
+        # tenant/endpoint, pinned selector, committed-consent currency):
+        # advance BOTH accepted floors in ONE atomic transaction — a refused
+        # candidate leaves every floor untouched.
+        store.advance_text_floors(
+            owner,
+            [
+                ("guidance", law.guidance_version, law.guidance_sha),
+                ("consent", law.consent_served_version, law.consent_sha),
+            ],
+        )
+        receipt = store.owner_consent_receipt(owner)
+        if receipt is None:
+            raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+        capture = AcceptedCapture(
+            _CAPTURE_TOKEN,
+            version=law.version,
+            template_hash=law.template_hash,
+            owner_frame=_full_owner_frame(owner),
+            captured_at=time.time(),
+            credential_id=owner.credential_id,
+            account_id=owner.account_id,
+            hub=owner.canonical_base_url,
+            owner_generation=owner.enrollment_generation,
+            consent_version=receipt["consent_version"],
+            consent_ref=receipt["consent_ref"],
+            consent_served_version=law.consent_served_version,
+            guidance_version=law.guidance_version,
+            guidance_sha=law.guidance_sha,
+            consent_sha=law.consent_sha,
+            source="sdk-verified",
+        )
     if capture is None:  # both branches above either set it or raised
         raise StoreRefused("policy_stale", "no verified status source")
     version, template_hash = capture.version, capture.template_hash

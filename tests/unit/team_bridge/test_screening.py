@@ -1136,3 +1136,204 @@ def test_owner_consent_receipt_reads_committed_rows_only(tmp_path) -> None:
     assert receipt == {"consent_version": "bridge_consent_v1", "consent_ref": "ref-1"}
     other = _dataclasses.replace(owner, enrollment_generation=9)
     assert store.owner_consent_receipt(other) is None
+
+
+def test_unverified_status_callback_never_mints_or_advances_floors(tmp_path) -> None:
+    """R11/2 (F1): a public class shape is NOT provenance. An injected
+    callback returning a lawful raw DTO — or a forged wrapper — must refuse
+    BEFORE normalization, floor advance, client creation or spend; this is
+    the guard that the earlier publicly-constructible marker class lacked.
+    """
+
+    import asyncio as _asyncio
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V1
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    (tmp_path / "config.yml").write_text("values:\n  hosting: openai\n  model_name: gpt-5.4\n")
+    lawful = {
+        "api_version": "1",
+        "available": True,
+        "tenants": [
+            {
+                "tenant_id": owner.tenant_id,
+                "tenant_name": "Org",
+                "eligible": True,
+                "endpoint": {"id": owner.endpoint_id, "label": "e", "state": "active"},
+                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+            }
+        ],
+        "guidance": {"version": "bridge-guidance-v1", "text": "g"},
+        "screening": {"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1},
+        "consent": {"version": "bridge_consent_v1", "text": "c"},
+    }
+
+    async def drive():
+        await _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[],
+            auth_store=None,
+            status_fetcher=lambda: _asyncio.sleep(0, result=lawful),
+        )
+
+    with pytest.raises(StoreRefused) as err:
+        _asyncio.run(drive())
+    assert err.value.code == "policy_stale"
+    # No floor was advanced and no capture-like authority was persisted.
+    assert store.text_floor(owner, "guidance") is None
+    assert store.text_floor(owner, "consent") is None
+
+
+def test_floors_are_atomic_account_scoped_and_durable(tmp_path) -> None:
+    """R11/3 (F1): floors advance as ONE accepted set, are keyed by account+
+    hub (not tenant), refuse cross-organization rollback, are refused
+    atomically when any candidate is stale, and survive a Store re-open."""
+
+    import dataclasses as _dataclasses
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    store, owner = _setup(tmp_path)
+    assert store.advance_text_floors is not None
+    store.advance_text_floors(
+        owner,
+        [("guidance", "bridge-guidance-v2", "a" * 64), ("consent", "bridge_consent_v2", "b" * 64)],
+    )
+    # a stale candidate in the SAME set refuses ALL writes (atomicity)
+    with pytest.raises(StoreRefused):
+        store.advance_text_floors(
+            owner,
+            [
+                ("guidance", "bridge-guidance-v3", "c" * 64),
+                ("consent", "bridge_consent_v1", "d" * 64),
+            ],
+        )
+    assert store.text_floor(owner, "guidance") == ("bridge-guidance-v2", "a" * 64)
+    assert store.text_floor(owner, "consent") == ("bridge_consent_v2", "b" * 64)
+    # same-version different bytes refuses; identical replay passes
+    with pytest.raises(StoreRefused):
+        store.advance_text_floors(owner, [("guidance", "bridge-guidance-v2", "z" * 64)])
+    store.advance_text_floors(owner, [("guidance", "bridge-guidance-v2", "a" * 64)])
+    # cross-organization on the SAME account cannot roll back the account floor
+    other = _dataclasses.replace(owner, tenant_id="tnt_2", endpoint_id="bep_2")
+    store.commit_enrollment(other, _dataclasses.replace(OwnerReceipt("bridge_consent_v2", "ref-2")))
+    with pytest.raises(StoreRefused):
+        store.advance_text_floors(other, [("guidance", "bridge-guidance-v1", "q" * 64)])
+    # durability across a fresh Store instance (restart) — the floor persists
+    store2 = Store(tmp_path)
+    assert store2.text_floor(owner, "guidance") == ("bridge-guidance-v2", "a" * 64)
+    with pytest.raises(StoreRefused):
+        store2.advance_text_floors(owner, [("guidance", "bridge-guidance-v1", "q" * 64)])
+
+
+def test_finish_refuses_nonbody_proof_mutation_after_post(tmp_path) -> None:
+    """R11/1 (F1): a valid closed retained record whose NON-body field was
+    altered after the controlled POST must HOLD with NO receipt while the
+    already-spent logical/physical units stay exactly as charged (no unsafe
+    refund, no repair) — the final native transaction is the last place a
+    corrupted authority could have committed an allow."""
+
+    import sqlite3 as _sqlite3
+    import time as _time
+
+    from local_operator.team_bridge.model_boundary import AdmissionJob
+    from local_operator.team_bridge.store import StoreRefused, state_db_path
+    from local_operator.team_bridge.types import ScreeningReceipt
+
+    store, owner = _setup(tmp_path)
+    store.publish_screening_policy(
+        owner,
+        version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        default_model="qa-default",
+        revision="rev-1",
+    )
+    turn = store.claim_screen_turn(owner, holder_prefix="qa", now=_time.time(), ttl=90)
+    body = "b" * 64
+    proof = {
+        "owner": (
+            f"{owner.credential_id}|{owner.account_id}|{owner.tenant_id}"
+            f"|{owner.endpoint_id}|{owner.canonical_base_url}|{owner.enrollment_generation}"
+        ),
+        "body": body,
+        "template": "ab" * 32,
+        "version": "bridge-screen-v1",
+        "provider": "openai",
+        "model": "qa-default",
+        "approved": ["qa-default"],
+        "envelope": "e" * 64,
+        "request": "r" * 64,
+        "display": "d" * 64,
+        "revision": "rev-1",
+        "epoch": 1,
+        "message": "bmsg_1",
+        "tenant": owner.tenant_id,
+        "logical": "rev-1|b|e",
+    }
+    attempt = store.reserve_screening_attempt(
+        owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
+    )
+    job = AdmissionJob(
+        owner_generation=owner.enrollment_generation,
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        hub_url=owner.canonical_base_url,
+        message_id="bmsg_1",
+        attempt_id=attempt,
+        body_sha256=body,
+        template_sha256="ab" * 32,
+        template_version="bridge-screen-v1",
+        provider="openai",
+        model="qa-default",
+        approved=("qa-default",),
+        envelope_digest="e" * 64,
+        request_digest="r" * 64,
+        display_digest="d" * 64,
+        revision="rev-1",
+        epoch=1,
+        turn=turn,
+    )
+    store.bind_attempt_fingerprint(owner, attempt_id=attempt, fingerprint=job.digest, job=job)
+    store.reserve_screening_dispatch(owner, message_id="bmsg_1", job=job, turn=turn)
+    # The controlled POST has happened; an attacker now alters a NON-body field.
+    db = state_db_path(tmp_path)
+    with _sqlite3.connect(db) as conn:
+        raw = conn.execute(
+            "SELECT fingerprint FROM screening_attempts WHERE attempt_id = ? AND kind = 'logical'",
+            (attempt,),
+        ).fetchone()[0]
+        mutated = raw.replace('"model":"qa-default"', '"model":"foreign-served-model"')
+        assert mutated != raw
+        conn.execute(
+            "UPDATE screening_attempts SET fingerprint = ? "
+            "WHERE attempt_id = ? AND kind = 'logical'",
+            (mutated, attempt),
+        )
+    receipt = ScreeningReceipt(
+        verdict="allow",
+        model="qa-default",
+        prompt_version="bridge-screen-v1",
+        template_sha256="ab" * 32,
+        body_sha256=body,
+        categories=(),
+    ).validated()
+    with pytest.raises(StoreRefused) as err:
+        store.finish_screening(
+            owner,
+            "bmsg_1",
+            attempt_id=attempt,
+            fingerprint=job.digest,
+            expected_epoch=1,
+            receipt=receipt,
+            envelope_digest="e" * 64,
+            admission_revision="accepted:x",
+        )
+    assert err.value.code in ("proof_corrupt", "attempt_mismatch")
+    with _sqlite3.connect(db) as conn:
+        receipts = conn.execute("SELECT COUNT(*) FROM screening_receipts").fetchone()[0]
+    assert receipts == 0
