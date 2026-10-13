@@ -1997,6 +1997,35 @@ def _log_once(message: str, *args: object) -> None:
     logger.warning(message, *args)
 
 
+_GOOGLE_CONTINUATION = (
+    "[harness continuation — not an operator message]\n"
+    "Continue the pending turn from the existing conversation and tool results."
+)
+
+
+def _google_user_boundary(turns: list[dict[str, Any]], *, native: bool = False) -> int:
+    """Close a rendered Google request without inventing an operator prompt.
+
+    Google rejects assistant/model prefill, including imported histories after
+    switches and failover. Repair the FINAL wire shape, not session history:
+    empty assistants and invalid tool pairs may already have been filtered out.
+    A tool response is already a Google user turn (OpenRouter translates it),
+    so leave valid pairs and ordinary user prompts byte-for-byte unchanged.
+    The labelled continuation is transport context only; never persist it or
+    let compaction count it as the operator's latest instruction. Return its
+    token estimate so admission includes the extra bytes we actually send.
+    """
+    if turns and turns[-1].get("role") in ("user", "tool"):
+        return 0
+    turn: dict[str, Any] = {"role": "user"}
+    if native:
+        turn["parts"] = [{"text": _GOOGLE_CONTINUATION}]
+    else:
+        turn["content"] = _GOOGLE_CONTINUATION
+    turns.append(turn)
+    return estimate_messages_tokens([Message.user(_GOOGLE_CONTINUATION)])
+
+
 def _without_unrenderable_tool_calls(messages: Sequence[Message]) -> Sequence[Message]:
     """The history as far as any wire may render it: no nameless tool calls.
 
@@ -2803,6 +2832,13 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+        # Aggregator identity alone is not the model family: Google keeps its
+        # final-user requirement through OpenRouter's OpenAI-compatible wire.
+        google_boundary_tokens = 0
+        if request.model.provider == "google" or (
+            request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
+        ):
+            google_boundary_tokens = _google_user_boundary(messages)
         # Admission is finalized AFTER the render, so the placeholders the body
         # just added are counted as the input they are -- the model reads the
         # echo and the provider bills it. ``_effective_max_tokens`` below reads
@@ -2814,7 +2850,9 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens(),
+            extra_native_tokens=(
+                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
+            ),
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -4508,9 +4546,6 @@ class GoogleClient:
             await self._http.aclose()
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
-        request = bind_native_context(
-            request, self._base_url, "google-content", scope, _estimate_slope(request.model)
-        )
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -4598,6 +4633,15 @@ class GoogleClient:
             if parts or message.role == "user":
                 contents.append({"role": role, "parts": parts or [{"text": ""}]})
 
+        boundary_tokens = _google_user_boundary(contents, native=True)
+        request = bind_native_context(
+            request,
+            self._base_url,
+            "google-content",
+            scope,
+            _estimate_slope(request.model),
+            extra_native_tokens=boundary_tokens,
+        )
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
