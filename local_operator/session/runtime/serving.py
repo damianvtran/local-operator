@@ -3259,6 +3259,9 @@ class ServingSessionHandle(SessionHandle):
                 self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
+                # Fallback/recovery is an access edge too: publishing only at
+                # primary selection leaves a signed-out Meta claim on OpenAI.
+                self.publish_model_access()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -4929,8 +4932,42 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
         from local_operator.model.effort import resolve_effort_in
+        from local_operator.session.model_admission import (
+            native_chat_provider_ids,
+            require_owner_provider,
+        )
 
+        current = self._session.model
+        effective = getattr(self._session, "effective_model", None) or current
+        # A session with no spec yet has NOTHING established: an absent model
+        # cannot affirm a provider, and this handle is the one live-switch
+        # surface with no picker, no catalogue and no config file in front of it
+        # -- any client can send any pair, including on a session that has not
+        # chosen a model yet. Degrade to "nothing established" rather than
+        # raising AttributeError out of the admission: the refusal that belongs
+        # here is the one ``build_model_spec`` raises BELOW (the decision-only
+        # sentence ``test_the_wire_op_refuses_a_decision_only_provider`` pins),
+        # and rehome/peer switches must still be able to land.
+        established = {spec.provider for spec in (current, effective) if spec is not None}
+        require_owner_provider(
+            provider,
+            established=established,
+            native=native_chat_provider_ids(),
+        )
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        if provider == "meta-muse":
+            from local_operator.harness.types import ModelSpec
+
+            # Resolve the same selected account BEFORE publishing primary/spec.
+            # This is the existing metadata seam, not an inference or Codex call.
+            resolver = getattr(
+                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+            )
+            if callable(resolver):
+                result = resolver(spec)
+                resolved = await result if inspect.isawaitable(result) else result
+                if isinstance(resolved, ModelSpec):
+                    spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={
@@ -4977,11 +5014,14 @@ class ServingSessionHandle(SessionHandle):
         if store is None:
             return
         try:
-            from local_operator.providers.model_access import usable_providers_here
-            from local_operator.session.frontend_state import model_access_claim
+            from local_operator.providers.model_access import serving_model_access_here
 
-            usable = usable_providers_here(config_dir=self._config_dir)
-            store.refresh_model_access(model_access_claim(_selector(self._session), usable))
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            store.refresh_model_access(
+                serving_model_access_here(
+                    f"{spec.provider}/{spec.model_id}", config_dir=self._config_dir
+                )
+            )
         except Exception:  # noqa: BLE001 — additive state never fails its edge
             logger.debug("model access publication failed", exc_info=True)
 

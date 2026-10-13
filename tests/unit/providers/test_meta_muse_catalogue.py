@@ -11,7 +11,7 @@ from local_operator.model.configure import build_model_spec
 from local_operator.model.discovery import available_models
 from local_operator.model.registry import static_models
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.controller import ProviderController
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController
 from local_operator.providers.meta_muse_credentials import delete_key
 
 KEY = "LLM|1234|fixture_subscription_key"
@@ -75,6 +75,49 @@ def test_subscription_catalogue_projects_actual_nested_fields_and_discovered_ful
     assert "muse-wonder-full-1.0" not in static_models("meta-muse")
     assert "chatgpt" not in str(calls[0].url)
     assert KEY not in "".join(path.name for path in tmp_path.iterdir())
+
+
+def test_a_shortened_ttl_refetches_a_young_muse_listing_and_a_default_one_reuses_it(
+    tmp_path: Path,
+):
+    """Fresh-on-open is the picker's SHORTENED TTL, decided in the reader.
+
+    ``docs/META_MUSE.md`` ("Catalogue freshness and existing conversations")
+    promises that a user-opened picker refreshes Muse's authenticated listing even
+    when its successful cache is young. A caller that shortens the hard TTL is
+    asking for an answer fresher than any reuse window can promise, which for Muse
+    means a real GET; the catalogue controller passes ``PICKER_TTL_S`` through
+    untouched (``test_the_picker_ttl_is_the_only_ttl_override`` pins that), so the
+    rule cannot live in the controller as a TTL override.
+
+    The control is the DEFAULT read: an unshortened TTL must keep reusing the
+    document, or every picker keystroke would block on the network.
+    """
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": [row("muse-wonder-1.0")]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        _rows, warm = available_models(
+            "meta-muse", api_key=KEY, is_oauth=True, cache_dir=tmp_path, client=http
+        )
+        assert (warm, len(calls)) == ("ok", 1)
+
+        _rows, bumped = available_models(
+            "meta-muse",
+            api_key=KEY,
+            is_oauth=True,
+            cache_dir=tmp_path,
+            client=http,
+            ttl_s=PICKER_TTL_S,
+        )
+        assert bumped == "ok"
+        assert len(calls) == 2, "a picker-open read must not be served from a young cache"
+
+        available_models("meta-muse", api_key=KEY, is_oauth=True, cache_dir=tmp_path, client=http)
+        assert len(calls) == 2, "an unshortened TTL must keep reusing the document"
 
 
 def test_empty_eligible_catalogue_is_authoritative_not_static_ghosts(tmp_path: Path):

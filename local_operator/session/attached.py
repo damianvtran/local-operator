@@ -9185,11 +9185,58 @@ class AttachedSession:
         # here.
         return self._read_state_label("effective_model_label")
 
+    def _require_owner_can_serve(self, provider: str) -> None:
+        """Refuse provider switches THIS owner cannot serve, before any mutation.
+
+        ONE DEFINITION, TWO SURFACES: the facade's own switch (:meth:`set_model`)
+        and the ``model`` slash a viewer forwards to the owner
+        (:meth:`_require_routed_model_admission`, reached from
+        ``route_shared_slash``). The owner side cannot carry this alone: a
+        pre-Muse owner's ``_model_slash`` predates ``require_owner_provider``
+        entirely, so a desktop pick forwarded blind could move a stale
+        conversation onto a provider that runtime cannot serve — the daemon's
+        catalogue offering the row is not evidence the owner implements it
+        (agent review round 1, R1-1).
+
+        Uses THIS bound owner's record/seed, never daemon-wide support. No
+        await can rebind between this check and choosing the client; a retired
+        client's authenticated socket cannot mutate a successor.
+        """
+        record = self._runtime_record
+        if record is None:
+            return
+        from local_operator.session.model_admission import require_owner_provider
+        from local_operator.update import installed_build
+
+        effective = self.effective_model
+        # The canonical reader (``runtime_model_catalogue``), NOT
+        # ``_read_state_field``: that accessor serves the store's copy-free
+        # allow-list only, and a non-scalar field like ``model_catalogue``
+        # raises through it on the real store (the routed arm caught this in
+        # CI's fork e2e, round 1).
+        rows = self.runtime_model_catalogue()
+        positive = {str(row.get("provider") or "") for row in rows if isinstance(row, dict)}
+        build = installed_build()
+        owner_ref = getattr(record, "source_ref", "")
+        stale = (
+            not record.version
+            or record.version != build.version
+            or bool(owner_ref and build.source_ref and owner_ref != build.source_ref)
+        )
+        require_owner_provider(
+            provider,
+            established={self.model.provider, effective.provider},
+            native=record.native_provider_ids,
+            positive_catalogue=positive,
+            stale=stale,
+        )
+
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         old = self.model
         client = self._client
         if client is None:
             return
+        self._require_owner_can_serve(model.provider)
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
             effort = model.reasoning_effort or "auto"
@@ -9628,6 +9675,12 @@ class AttachedSession:
         client = self._client
         if client is None or self._recovering or not client.connected:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))
+        if command == "model":
+            # A forwarded model switch pays the SAME owner-record admission as
+            # the facade's own (``_require_routed_model_admission``): the owner
+            # cannot be relied on to refuse, because a pre-Muse build's
+            # ``_model_slash`` predates the gate entirely (review round 1, R1-1).
+            self._require_routed_model_admission(args)
         try:
             return await client.slash_result(
                 command,
@@ -9636,6 +9689,40 @@ class AttachedSession:
             )
         except ConnectionError as error:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
+
+    def _require_routed_model_admission(self, args: str) -> None:
+        """The ``model`` arm's admission for a slash FORWARDED to the owner.
+
+        WHY THIS EXISTS (agent review round 1, R1-1): the desktop command path
+        dispatches the picker's choice as ``command.run("model", value)`` →
+        ``POST /v1/desktop/sessions/{id}/commands`` → this seam → the owner's
+        ``slash_result``. The owner-side gate only exists in a build that
+        already implements it — a pre-Muse owner's ``_model_slash`` predates
+        ``require_owner_provider`` entirely and reaches ``build_model_spec``,
+        which constructs an unknown-provider spec without complaint — so a new
+        desktop backend offering Muse rows could move a stale conversation
+        onto a provider that owner cannot serve. The facade's own switch
+        (:meth:`set_model`) pays :meth:`_require_owner_can_serve`; a forwarded
+        slash must pay the SAME gate, before anything reaches the owner.
+
+        The owner's own parse is mirrored deliberately (``_model_slash``): the
+        two non-switch forms (``saved``, ``default …``) and a bare or malformed
+        target are the owner's to answer, not ours to refuse here.
+        """
+        target = (args or "").strip()
+        lowered = target.lower()
+        if (
+            not target
+            or lowered == "saved"
+            or lowered == "default"
+            or lowered.startswith("default ")
+        ):
+            return
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            # The owner answers the usage notice; no provider to admit yet.
+            return
+        self._require_owner_can_serve(provider.lower())
 
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
