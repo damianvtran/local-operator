@@ -854,14 +854,6 @@ def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | No
     payload, age = _read_cache(_cache_path(cache_dir))
     if payload is None:
         return None, None
-    # The same readiness refusal as check_latest (B2): a bare pre-gate entry
-    # names a version but proves no downloadable wheel, and /info's behind
-    # flag is derived from this answer — serving it would keep the race
-    # alive on the diagnostic surface for a whole TTL after the offer path
-    # closed it. Still never a fetch and never a write: an unready entry
-    # simply reads as "no ready answer cached", like a cold cache.
-    if payload.get("ready") is not True:
-        return None, None
     raw = payload.get("version")
     if not isinstance(raw, str) or not raw.strip():
         return None, None
@@ -869,6 +861,27 @@ def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | No
     # skew), which is not an age any caller can render. The version is still
     # good, so the value survives and only its staleness is unknown.
     return raw.strip(), (age if age != float("inf") else None)
+
+
+def cached_ready_version(cache_dir: Path | None = None) -> str | None:
+    """The cached version ONLY when a readiness-checked fetch proved it.
+
+    The split from :func:`cached_latest` is deliberate (QA round 3, Q3-1):
+    that reader is a diagnostic — "the last PyPI answer this machine has"
+    — and its contract (legacy entries included) is pinned by
+    ``tests/unit/info/test_collect.py``. A *behind* claim is not a
+    diagnostic, it is the advertisement race's own sentence, so it must
+    derive only from an entry stamped ``ready`` by the gated fetch: a bare
+    pre-gate entry names a version whose wheels may never have existed.
+    Never fetches, never writes, like its sibling.
+    """
+    payload, _age = _read_cache(_cache_path(cache_dir))
+    if payload is None or payload.get("ready") is not True:
+        return None
+    raw = payload.get("version")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
 
 
 def _direct_url_payload() -> dict[str, Any] | None:
