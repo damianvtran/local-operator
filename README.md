@@ -597,6 +597,7 @@ login-capable provider; the ids and plan requirements:
 | ChatGPT | `lop login openai` (`openai-device` on a headless box) | ChatGPT Plus/Pro |
 | Claude | `lop login anthropic` | Claude Pro/Max |
 | Kimi | `lop login kimi` | Kimi (Moonshot) |
+| Meta Muse Code (unofficial) | `lop login meta-muse` | Active Muse Code plan; [billing/privacy limitations](docs/META_MUSE.md) |
 | Grok | `lop login xai-oauth` (`xai` = API key) | Grok OAuth |
 | Z.AI / GLM | `lop login zai-oauth` (`zai` = API key) | GLM Coding Plan |
 | Qwen | `lop login alibaba-token-plan-oauth` | QwenCloud Token Plan (a personal plan also needs the [console ticket](./local_operator/guides/qwencloud/GUIDE.md) for `/usage`) |
@@ -807,6 +808,7 @@ metadata overrides, desktop-app support, and server-specific limitations.
 | OpenAI / ChatGPT | `openai` / `openai-device`, or `OPENAI_API_KEY` |
 | Anthropic / Claude | `anthropic`, or `ANTHROPIC_API_KEY` |
 | Kimi (Moonshot) | `kimi`, or `KIMI_API_KEY` |
+| Meta Muse Code (unofficial subscription) | `meta-muse` device approval; no PAYG-key fallback |
 | xAI / Grok | `xai-oauth`, or `xai` / `XAI_API_KEY` |
 | Z.AI (GLM) | `zai-oauth`, or `zai` / `ZAI_API_KEY` |
 | Qwen (Alibaba) | `alibaba-token-plan-oauth`, or API key |

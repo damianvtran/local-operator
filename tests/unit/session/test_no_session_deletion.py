@@ -1827,9 +1827,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
     (
-        "local_operator/update.py::_remove_tree",
+        "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
-        "<stable>/generations/<id> — reserved by this call, or listed from generations_dir()",
+        "<stable>/generations/<id> — reserved/listed generations only; the owned "
+        "transaction wrapper retains current and live attempts before this same deletion",
+        1,
     ),
     (
         "local_operator/update.py::flip_pointer",
@@ -1882,6 +1884,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/update.py::_write_executable",
         "<path>.unlink",
         "cleanup of this function's own mkstemp temp FILE beside the shim",
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.rename",
+        "owned staged regular wheel FILE -> reserved generation/artifact FILE after SHA256; "
+        "never a session directory",
+        1,
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.unlink",
+        "failed owned temporary artifact FILE only; unlink cannot remove a directory",
+        1,
+    ),
+    # Node-local install attempt records, not session directories. Registration
+    # replaces a staged regular JSON FILE; retirement unlinks only that FILE
+    # after nonce/PID ownership checks. Exact operation counts stay enforced.
+    (
+        "local_operator/install_transaction.py::register_attempt",
+        "<path>.replace",
+        "owned staged JSON FILE -> INSTALLROOT/generation/.install-attempt.json FILE; "
+        "not a sessions/ path, and file replacement cannot replace a directory",
+        1,
+    ),
+    (
+        "local_operator/install_transaction.py::finish_attempt",
+        "<path>.unlink",
+        "nonce/PID-validated INSTALLROOT/generation attempt FILE only; unlink refuses directories",
+        1,
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
@@ -2708,6 +2739,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Best-effort removal of those same two artefacts (partial bundle + lock) "
         "after a failed create or verify, so the next pass starts clean",
+    ),  # -- owned_process: the managed owner's own files -----------------------
+    # Every path here is built from the run root the CALLER passed (``--run-root``,
+    # refused when volatile) or from the real passwd home's LaunchAgents plus this
+    # attempt's unique owner label. More importantly, os.open(O_CREAT|O_EXCL)
+    # produces a REGULAR temp file, and replacing a directory with that file
+    # fails; Path.unlink also refuses directories. These exact call counts
+    # therefore cannot remove a session directory, even under a surprising root.
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "os.replace",
+        "Atomic write of one owner-path file: <target> and its same-directory .tmp sibling",
+    ),
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "<path>.unlink",
+        "Clears the same-directory .tmp sibling this call itself created",
+    ),
+    (
+        "local_operator/owned_process.py::_retire_launchd_attempt",
+        "<path>.unlink",
+        "The plist THIS start attempt wrote, under the real <home>/Library/LaunchAgents",
+    ),
+    (
+        "local_operator/owned_process.py::retire_owned_job",
+        "<path>.unlink",
+        "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
 )
 

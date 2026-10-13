@@ -420,10 +420,7 @@ from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
-from local_operator.tui.widgets.org_chart_view import (
-    OrgChartView,
-    OrgChartViewDismissed,
-)
+from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.projects_send import (
     SEND_FAULT_NOTICE,
     SendTarget,
@@ -35652,6 +35649,11 @@ class OperatorApp(App[None]):
         re-resolving, so a repaint costs no registry I/O.
         """
 
+        # Conversation boot needs the dismissal message, not the optional
+        # renderer. Import before registry/focus/layout work so a first-use
+        # import failure remains observable without leaving a half-entered mode.
+        from local_operator.tui.widgets.org_chart_view import OrgChartView
+
         registry = self._team_registry()
         agents = getattr(self._session, "agent_registry", None)
         from local_operator.org_chart import resolve_org
@@ -49891,6 +49893,16 @@ class OperatorApp(App[None]):
                         (short, Style(color=theme_mod.semantic_color("signal"))),
                     )
                 )
+            if provider_id == "meta-muse":
+                # This device flow has no loopback /launch alias. Its verified
+                # public approval URL must remain reachable locally AND over
+                # SSH even if automatic opening is unavailable or declined.
+                lines.append(
+                    Text.assemble(
+                        ("Approval page: ", dim),
+                        (url, Style(color=theme_mod.semantic_color("signal"), link=url)),
+                    )
+                )
             if rest:
                 lines.append(Text(rest, style=dim))
             from local_operator.providers.login_catalog import (
@@ -49915,7 +49927,7 @@ class OperatorApp(App[None]):
                     style=dim,
                 )
             )
-            if headless_display():
+            if headless_display() and provider_id != "meta-muse":
                 # THE ONE CASE THE DUMP EXISTS FOR (design round 1, D5): a
                 # browser on another machine cannot follow the short /launch
                 # link, which points at THIS host's loopback, so the full URL is
@@ -49966,7 +49978,10 @@ class OperatorApp(App[None]):
             )
         if not getattr(definition, "accepts_paste_prompt", False):
             return LoginCallbacks(
-                on_auth_url=on_auth_url, on_progress=on_progress, on_warning=on_warning
+                on_auth_url=on_auth_url,
+                on_progress=on_progress,
+                on_warning=on_warning,
+                displays_warnings=True,
             )
 
         label = getattr(definition, "name", None) or getattr(definition, "id", "this provider")
@@ -49992,6 +50007,7 @@ class OperatorApp(App[None]):
             on_progress=on_progress,
             on_input_rejected=on_input_rejected,
             on_manual_code_input=on_manual_code_input,
+            displays_warnings=True,
         )
 
     async def _request_login_key(

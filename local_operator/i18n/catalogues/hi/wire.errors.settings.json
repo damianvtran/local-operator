@@ -1,0 +1,14 @@
+{
+  "wire.errors.settings.config_retrieve_failed": "कॉन्फ़िगरेशन प्राप्त करने में त्रुटि: {error}",
+  "wire.errors.settings.config_unreadable": "कॉन्फ़िगरेशन फ़ाइल पढ़ी नहीं जा सकती। सहेजने से पहले इसे सुधारें।",
+  "wire.errors.settings.config_update_failed": "कॉन्फ़िगरेशन अपडेट करने में त्रुटि: {error}",
+  "wire.errors.settings.credential_key_empty": "क्रेडेंशियल कुंजी खाली नहीं हो सकती",
+  "wire.errors.settings.credential_retrieve_failed": "क्रेडेंशियल्स प्राप्त करने में त्रुटि: {error}",
+  "wire.errors.settings.credential_update_failed": "क्रेडेंशियल अपडेट करने में त्रुटि: {error}",
+  "wire.errors.settings.inline_credentials": "अंतर्निहित क्रेडेंशियल्स या क्वेरी पैरामीटर के बिना endpoint का उपयोग करें।",
+  "wire.errors.settings.invalid_value": "{error}",
+  "wire.errors.settings.no_update_fields": "कोई मान्य अपडेट फ़ील्ड प्रदान नहीं किया गया",
+  "wire.errors.settings.not_registered": "यह सेटिंग पंजीकृत नहीं है।",
+  "wire.errors.settings.system_prompt_retrieve_failed": "सिस्टम प्रॉम्प्ट प्राप्त करने में त्रुटि: {error}",
+  "wire.errors.settings.system_prompt_update_failed": "सिस्टम प्रॉम्प्ट अपडेट करने में त्रुटि: {error}"
+}

@@ -105,6 +105,278 @@ class TestConfigDirContainment:
         assert launchd.config_lives_in_real_home(home / ".local-operator") is True
 
 
+@pytest.mark.parametrize(
+    "rc,body,state,pid",
+    [
+        (0, "state = running\npid = 12345\n", launchd.JobState.LIVE, 12345),
+        (0, "state = not running\n", launchd.JobState.ABSENT, None),
+        (113, "", launchd.JobState.ABSENT, None),
+        (124, "", launchd.JobState.UNKNOWN, None),
+        (5, "", launchd.JobState.UNKNOWN, None),
+        (0, "state = running\n", launchd.JobState.UNKNOWN, None),
+        (0, "", launchd.JobState.UNKNOWN, None),
+    ],
+)
+def test_observe_job_is_one_coherent_guarded_snapshot(tmp_path, monkeypatch, rc, body, state, pid):
+    """No second successful print may be projected as owner loss."""
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "synthetic-owned-observation"
+    path = tmp_path / "Library" / "LaunchAgents" / f"{label}.plist"
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, rc, body, "")
+
+    observed = launchd.observe_job(label=label, path=path, run=run)
+    assert observed.state is state and observed.pid == pid
+    assert calls == [("print", f"{launchd.job_domain()}/{label}")]
+    calls.clear()
+    assert launchd.job_pid(label=label, path=path, run=run) == pid
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    [
+        ("normal", True),
+        ("keepalive", False),
+        ("timer", False),
+        ("watch", False),
+        ("unknown_flag", None),
+        ("unknown_field", None),
+        ("truncated", None),
+        ("missing_properties", None),
+        ("duplicate", None),
+        ("wrong_target", None),
+        ("nested_properties", True),
+    ],
+)
+def test_loaded_policy_is_complete_top_level_same_target_snapshot(
+    tmp_path, monkeypatch, mutation, expected
+):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "synthetic-loaded-policy"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        f"{target} = {{\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n"
+        "\tstate = running\n\tprogram = /fixture\n"
+        "\targuments = {\n\t\tproperties = keepalive\n\t}\n"
+        "\tenvironment = {\n\t}\n\tdomain = gui/fixture\n\truns = 1\n"
+        "\tpid = 12345\n\tspawn type = daemon (3)\n"
+        "\tproperties = runatload | inferred program\n}\n"
+    )
+    if mutation == "keepalive":
+        body = body.replace("properties = runatload", "properties = keepalive | runatload")
+    if mutation in ("timer", "watch", "unknown_field", "duplicate"):
+        extra = {
+            "timer": "run interval = 60 seconds",
+            "watch": "event triggers = {\n\t}",
+            "unknown_field": "future policy = yes",
+            "duplicate": "properties = runatload",
+        }[mutation]
+        body = body[:-2] + "\t" + extra + "\n}\n"
+    if mutation == "unknown_flag":
+        body = body.replace("properties = runatload", "properties = future-flag | runatload")
+    if mutation == "truncated":
+        body = body[:-2]
+    if mutation == "missing_properties":
+        body = body.replace("\tproperties = runatload | inferred program\n", "")
+    if mutation == "wrong_target":
+        body = body.replace(target + " = {", target + "-other = {")
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    result = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert result.state is launchd.JobState.LIVE
+    assert result.loaded_no_restart is expected
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        "arguments",
+        "environment",
+        "inherited environment",
+        "default environment",
+        "resource coalition",
+        "jetsam coalition",
+        "event triggers",
+        "event channels",
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation", ["scalar", "missing_close", "wrong_indent", "nested_missing_close", "unkeyed_map"]
+)
+def test_recognized_sections_require_values_and_balanced_grammar(
+    tmp_path, monkeypatch, section, mutation
+):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "section-grammar"
+    target = f"{launchd.job_domain()}/{label}"
+    required = {
+        "active count": "1",
+        "path": "/fixture",
+        "type": "LaunchAgent",
+        "state": "running",
+        "program": "/fixture",
+        "arguments": "{\n\t\targ\n\t}",
+        "environment": "{\n\t\tNAME => data\n\t}",
+        "domain": "gui/fixture",
+        "runs": "1",
+        "pid": "12345",
+        "spawn type": "daemon (3)",
+        "properties": "runatload | inferred program",
+    }
+    if mutation == "scalar":
+        value = "unsupported-scalar"
+    elif mutation == "missing_close":
+        value = "{\n\t\tkey = value"
+    elif mutation == "wrong_indent":
+        value = "{\n\t\tkey = value\n\t\t}"
+    elif mutation == "nested_missing_close":
+        value = "{\n\t\tchild = {\n\t\t\tkey = value\n\t}"
+    else:
+        value = "{\n\t\tunkeyed unsupported text\n\t}"
+    # Arguments are opaque leaves, not maps: unkeyed text is legitimate there.
+    if section == "arguments" and mutation == "unkeyed_map":
+        expected = True
+    else:
+        expected = None
+    required[section] = value
+    body = target + " = {\n" + "\n".join(f"\t{k} = {v}" for k, v in required.items()) + "\n}\n"
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observed = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observed.state is launchd.JobState.LIVE
+    assert observed.loaded_no_restart is expected
+
+
+def test_section_grammar_preserves_optional_maps_and_opaque_argument_braces(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "valid-section-grammar"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        target + " = {\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n\tstate = running\n"
+        "\tprogram = /fixture\n\targuments = {\n\t\t}\n\t\t{\n\t\tname = {\n\t}\n"
+        "\tenvironment = {\n\t\tVALUE => {opaque}\n\t}\n"
+        "\tinherited environment = {\n\t\tNAME => value\n\t}\n"
+        "\tdefault environment = {\n\t\tPATH => /fixture\n\t}\n"
+        "\tresource coalition = {\n\t\tID = 7\n\t}\n"
+        "\tjetsam coalition = {\n\t\tID = 8\n\t}\n"
+        "\tdomain = gui/fixture\n\truns = 1\n\tpid = 12345\n"
+        "\tspawn type = daemon (3)\n\tproperties = runatload | inferred program\n}\n"
+    )
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observed = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observed.loaded_no_restart is True
+
+
+@pytest.mark.parametrize("section", ["environment", "inherited environment", "default environment"])
+@pytest.mark.parametrize(
+    "value",
+    ["name = {", "literal => name = {", "{", "}", "=>", "true", "value = { => }", "{opaque}"],
+)
+def test_environment_delimiter_keeps_entire_value_opaque(tmp_path, monkeypatch, section, value):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "opaque-leaf"
+    target = f"{launchd.job_domain()}/{label}"
+    fields = {
+        "active count": "1",
+        "path": "/fixture",
+        "type": "LaunchAgent",
+        "state": "running",
+        "program": "/fixture",
+        "arguments": "{\n\t\targ = {\n\t}",
+        "environment": "{\n\t}",
+        "domain": "gui/fixture",
+        "runs": "1",
+        "pid": "12345",
+        "spawn type": "daemon (3)",
+        "properties": "runatload | inferred program",
+    }
+    fields[section] = "{\n\t\tOPAQUE => " + value + "\n\t}"
+    body = target + " = {\n" + "\n".join(f"\t{k} = {v}" for k, v in fields.items()) + "\n}\n"
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    observation = launchd.observe_job(
+        label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+    )
+    assert observation.loaded_no_restart is True
+    # The same opaque arrow spelling is NOT a map entry in a coalition.
+    body = body.replace(f"\t{section} = {{", "\tresource coalition = {", 1)
+    if section == "environment":
+        body = body.replace(
+            "\tresource coalition = {", "\tenvironment = {\n\t}\n\tresource coalition = {", 1
+        )
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is None
+    )
+
+
+def test_keyed_nested_trigger_map_remains_structural_not_opaque(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path)
+    label = "nested-trigger"
+    target = f"{launchd.job_domain()}/{label}"
+    body = (
+        target + " = {\n"
+        "\tactive count = 1\n\tpath = /fixture\n\ttype = LaunchAgent\n\tstate = running\n"
+        "\tprogram = /fixture\n\targuments = {\n\t\targ\n\t}\n\tenvironment = {\n\t}\n"
+        "\tdomain = gui/fixture\n\truns = 1\n\tpid = 12345\n\tspawn type = daemon (3)\n"
+        "\tevent triggers = {\n\t\tchild = {\n\t\t\tname = value => literal = {\n\t\t}\n\t}\n"
+        "\tproperties = runatload | inferred program\n}\n"
+    )
+
+    def run(*args):
+        return subprocess.CompletedProcess(args, 0, body, "")
+
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is False
+    )
+    body = body.replace("\t\t}\n", "", 1)
+    assert (
+        launchd.observe_job(
+            label=label, path=tmp_path / "Library" / "LaunchAgents" / f"{label}.plist", run=run
+        ).loaded_no_restart
+        is None
+    )
+
+
+def test_unaddressable_job_stays_unknown_without_calling_supervisor(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "real_home", lambda: tmp_path / "real")
+
+    def run(*args):
+        pytest.fail("unverified supervisor address called")
+
+    observed = launchd.observe_job(label="fixture", path=tmp_path / "other.plist", run=run)
+    assert observed.state is launchd.JobState.UNKNOWN and observed.pid is None
+
+
 class TestArgValue:
     """Reading a plist's argv for its ARGUMENTS, never for an interpreter."""
 

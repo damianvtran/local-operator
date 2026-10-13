@@ -332,7 +332,10 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     if not isinstance(raw_usage, Mapping):
         return None
     value = raw_usage.get("cost")
-    if value is None:
+    # Reject JSON booleans before Usage's float field can erase their type.
+    # Otherwise the pricing guard sees a seemingly legitimate $1/$0 receipt
+    # and cannot recover the fact that the provider never stated money.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)
@@ -3470,6 +3473,12 @@ class OpenAICompatClient:
             served_provider=served_provider,
         )
 
+    def _observe_responses_event(self, payload: dict[str, Any]) -> None:
+        """Dialect hook for safe, non-token provider receipts (default: no-op)."""
+
+    def _observe_responses_headers(self, headers: httpx.Headers) -> None:
+        """Dialect hook for request attribution; never copy all response headers."""
+
     async def _stream_responses(
         self,
         request: ChatRequest,
@@ -3515,6 +3524,7 @@ class OpenAICompatClient:
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
+            self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -3522,6 +3532,7 @@ class OpenAICompatClient:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
@@ -5015,6 +5026,12 @@ def client_for_spec(
         or (definition.base_url if definition else None)
         or "http://localhost:11434/v1"
     )
+    if spec.provider == "meta-muse":
+        # Muse is Responses-only; merely setting supports_responses_api does
+        # not select that wire in the general compatible-provider factory.
+        from local_operator.providers.meta_muse_client import MetaMuseClient
+
+        return MetaMuseClient(base_url=base, http_client=http_client, openai_api="responses")
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = openrouter_attribution_headers()
