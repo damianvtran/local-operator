@@ -122,7 +122,22 @@ def _wheel(version: str, **overrides: object) -> dict[str, object]:
         "packagetype": "bdist_wheel",
         "yanked": False,
         "url": f"https://files.pythonhosted.org/packages/local_operator-{version}-py3-none-any.whl",
+        # The installer pins by digest, so a ready entry carries one.
+        "digests": {"sha256": "a" * 64},
     }
+    entry.update(overrides)
+    return entry
+
+
+def _mac_wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry = _wheel(
+        version,
+        filename=f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl",
+        url=(
+            "https://files.pythonhosted.org/packages/"
+            f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl"
+        ),
+    )
     entry.update(overrides)
     return entry
 
@@ -138,7 +153,12 @@ def _pypi_transport(
         # A READY release by default: PyPI's document names a version long
         # before its files land, so a stub without ``urls`` would model the
         # race, not the normal case every caller below means to exercise.
-        return httpx.Response(status, json=_pypi_payload(version, [_wheel(version)]))
+        # Both published wheels ride along, so the stub is ready on any host
+        # platform (macOS installs take the universal2 wheel, others the
+        # pure one — see test_check_latest_readiness_is_platform_aware).
+        return httpx.Response(
+            status, json=_pypi_payload(version, [_wheel(version), _mac_wheel(version)])
+        )
 
     return httpx.MockTransport(handler)
 
@@ -222,8 +242,8 @@ def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> Non
                 }
             ],
         ),
-        _pypi_payload("0.28.0", [_wheel("0.28.0", yanked=True)]),
-        _pypi_payload("0.28.0", [_wheel("0.28.0", url="")]),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", yanked=True), _mac_wheel("0.28.0", yanked=True)]),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", url=""), _mac_wheel("0.28.0", url="")]),
         {"info": {"version": "0.28.0"}},
     ]
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
@@ -236,10 +256,141 @@ def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> Non
         ready = check_latest(
             force=True,
             cache_dir=tmp_path,
-            client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            client=_client(
+                _transport_for(
+                    _pypi_payload("0.28.0", [_wheel("0.28.0"), _mac_wheel("0.28.0")])
+                )
+            ),
         )
         assert ready.latest == "0.28.0"
         assert ready.behind is True
+        # The not-ready answers above carry the distinction the front ends
+        # print (UX M1): PyPI answered, and this is the version publishing.
+        assert ready.pending_version is None
+
+
+def test_check_latest_readiness_is_platform_aware(tmp_path: Path) -> None:
+    """B1: ready means the wheel THIS host's installer would pin.
+
+    The publish pass uploads the pure and macOS wheels sequentially, so
+    the inter-wheel window is real in both directions: on macOS only the
+    universal2 wheel installs (the signed key agent rides in it), off
+    macOS a macOS-only list offers nothing a Linux/Windows installer can
+    take.
+    """
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        with patch.object(update_mod, "_HOST_IS_MACOS", True):
+            pure_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_only.latest is None
+            assert pure_only.pending_version == "0.28.0"
+            mac_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_mac_wheel("0.28.0")]))),
+            )
+            assert mac_ready.latest == "0.28.0"
+        with patch.object(update_mod, "_HOST_IS_MACOS", False):
+            pure_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_ready.latest == "0.28.0"
+            foreign_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(
+                    _transport_for(
+                        _pypi_payload(
+                            "0.28.0",
+                            [
+                                _wheel(
+                                    "0.28.0",
+                                    filename="local_operator-0.28.0-py3-none-win_amd64.whl",
+                                    url=(
+                                        "https://files.pythonhosted.org/packages/"
+                                        "local_operator-0.28.0-py3-none-win_amd64.whl"
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ),
+            )
+            # A Windows wheel's tags intersect this host's sys_tags only on
+            # Windows itself; everywhere else there is nothing to install.
+            import sys as _sys
+
+            assert (foreign_only.latest is None) == (_sys.platform != "win32")
+
+
+def test_check_latest_releases_fallback_advertises(tmp_path: Path) -> None:
+    """B4: a document without ``urls`` readies via ``releases[version]``."""
+    payload = {
+        "info": {"version": "0.28.0"},
+        "releases": {"0.28.0": [_wheel("0.28.0"), _mac_wheel("0.28.0")]},
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+        )
+    assert result.latest == "0.28.0"
+    assert result.behind is True
+
+
+def test_answered_not_ready_does_not_fall_back_to_stale_cache(tmp_path: Path) -> None:
+    """B3: an authoritative not-ready read retires the stale ready cache.
+
+    The release was cached ready, then its wheels were yanked: a fresh
+    read that finds nothing downloadable must not resurrect the cached
+    offer, and must drop the cache so a later TTL read cannot either.
+    The outage fallback (test_stale_cache_used_on_failure) is untouched:
+    it is the read that never got an answer which falls back.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(_transport_for(_pypi_payload("0.28.0", []))),
+        )
+    assert result.latest is None
+    assert result.behind is False
+    assert result.pending_version == "0.28.0"
+    assert not cache.exists()
+
+
+def test_cached_latest_ignores_unready_entries(tmp_path: Path) -> None:
+    """B2: /info's behind flag must not derive from a pre-gate cache entry."""
+    from local_operator.update import cached_latest
+
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    assert cached_latest(cache_dir=tmp_path) == (None, None)
+    cache.write_text(
+        json.dumps(
+            {"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}
+        ),
+        encoding="utf-8",
+    )
+    version, _age = cached_latest(cache_dir=tmp_path)
+    assert version == "0.28.0"
 
 
 def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
@@ -810,6 +961,23 @@ def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) 
         assert update_command(check=True) == 1
         refresh.assert_not_called()
     assert "could not reach PyPI" in capsys.readouterr().err
+
+
+def test_update_command_check_still_publishing(capsys: pytest.CaptureFixture[str]) -> None:
+    """UX M1: an answered-but-not-ready read names publishing, not a fault."""
+    pending = update_mod.VersionCheck(
+        installed="0.27.0", latest=None, behind=False, pending_version="0.28.0"
+    )
+    with (
+        patch.object(update_mod, "check_latest", return_value=pending),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
+        assert update_command(check=True) == 1
+        refresh.assert_not_called()
+    err = capsys.readouterr().err
+    assert "0.28.0" in err
+    assert "still publishing" in err
+    assert "could not reach PyPI" not in err
 
 
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
