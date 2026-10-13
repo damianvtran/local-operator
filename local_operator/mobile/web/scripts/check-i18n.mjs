@@ -14,14 +14,21 @@ export const NONTRANSLATABLE = [{
 const copyName = /(?:^|[._])(text|message|label|help|title|description|placeholder|summary|errorText)$/i;
 const attributes = new Set(["title", "alt", "placeholder", "aria-label", "aria-description", "aria-valuetext"]);
 const prose = value => /\p{L}/u.test(value);
+// Checkout-independent comparison: a Windows checkout (CRLF, autocrlf) yields
+// literal text whose indentation/newlines are \r\n, while frozen baseline keys
+// hold bare \n, so the same source would fingerprint differently. Normalising to
+// \n on both sides removes the asymmetry without exempting any file or weakening
+// the exact multiset semantics.
+const normalize = value => value.replace(/\r\n?/g, "\n");
 export function scanSource(source, path) {
+	source = normalize(source);
 	const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
 	if (tree.parseDiagnostics.length) throw new Error(`Cannot scan invalid source: ${path}`);
 	const found = [];
 	function literal(node, sink) {
 		if (!node) return;
 		if (ts.isStringLiteralLike(node) || ts.isJsxText(node)) {
-			const text = node.text.trim();
+			const text = normalize(node.text.trim());
 			if (prose(text) && !NONTRANSLATABLE.some(item => item.path === path && item.sink === sink && item.text === text)) found.push({ sink, text });
 			return;
 		}
@@ -31,7 +38,7 @@ export function scanSource(source, path) {
 			return;
 		}
 		if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
-			const text = node.text.trim(); if (prose(text)) found.push({ sink, text }); return;
+			const text = normalize(node.text.trim()); if (prose(text)) found.push({ sink, text }); return;
 		}
 		if (ts.isConditionalExpression(node)) { literal(node.whenTrue, sink); literal(node.whenFalse, sink); }
 		else if (ts.isBinaryExpression(node)) { literal(node.left, sink); literal(node.right, sink); }
