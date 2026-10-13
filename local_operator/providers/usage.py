@@ -27,6 +27,12 @@ What local-operator DOES fetch, grouped by the credential it needs:
   backend `/wham/usage`), ``kimi`` (`/coding/v1/usages`), ``xai``/
   ``xai-oauth`` (billing), ``radient`` (authenticated tenant credit balance).
 
+``meta-muse`` (Muse Code) has no verified read-only quota endpoint. Its login
+already stores a passive allowance receipt; the usage route reads that receipt
+without spending an inference request. Stream receipts are request provenance,
+not stored account snapshots. A signed-in
+account with no receipt still reports a provider row, but no invented numbers.
+
 ``kimi`` is the only provider with both, and its two routes are different
 endpoints on different hosts rather than two ways of authenticating one.
 
@@ -189,6 +195,7 @@ FetcherKind = Literal[
     "qwencloud-console-usage",
     "zai-quota",
     "radient-balance",
+    "meta-muse-observation",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -214,6 +221,10 @@ FetcherKind = Literal[
 #: the point, and re-adding one without the others would recreate the defect.
 _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "radient": ("radient-balance", None),
+    # Muse's OAuth row owns the passive receipt, not a public balance API.
+    # Register it here so enumeration, shared caching and every surface use
+    # the same report; probing inference for quota would spend the allowance.
+    "meta-muse": ("meta-muse-observation", None),
     "openrouter": (None, "openrouter"),
     "anthropic": ("anthropic-oauth", None),
     "openai": ("openai-oauth", None),
@@ -234,7 +245,7 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "zai-oauth": ("zai-quota", "zai-quota"),
 }
 
-#: Providers with a live quota endpoint, for callers that only need the question
+#: Providers with a quota source (live or passive), for callers that only need the question
 #: "does this provider report usage?" answered without importing every fetcher.
 #:
 #: DERIVED from the dispatch table, never hand-listed. This is the set that gates
@@ -2345,6 +2356,72 @@ async def fetch_usage(
     return None
 
 
+# These are local, fixed provenance statements, not arbitrary upstream notes.
+# Public usage serialization may safely retain ONLY these strings for Muse;
+# other providers' notes can contain untrusted endpoint/error vocabulary.
+META_MUSE_ALLOWANCE_NOTE = "Last sign-in allowance; refresh does not query Muse."
+META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded."
+META_MUSE_USAGE_NOTES = frozenset({META_MUSE_ALLOWANCE_NOTE, META_MUSE_NO_OBSERVATION_NOTE})
+
+
+def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
+    """Read a stored allowance receipt without turning its age into a live probe.
+
+    Meta's observed sources are key-mint ``subs_usage`` and the Responses SSE
+    ``response.subscription_usage`` event (see ``meta_muse_usage``). Neither is
+    a read-only quota API, and only the sign-in receipt is stored on the OAuth
+    row; SSE receipts remain request provenance. Reuse their sanitizer, but
+    retain the receipt's own timestamp: the sanitizer timestamps NEW
+    observations, whereas /usage is
+    only reading one. An absent/undated receipt says unknown, never zero usage.
+    """
+    from local_operator.providers.meta_muse_usage import subscription_observation
+
+    note = META_MUSE_ALLOWANCE_NOTE
+    # No observation is not a just-fetched reading. Zero is the existing
+    # non-observation stamp: freshness/quota consumers require fetched_at > 0.
+    unknown = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
+    raw = (creds or {}).get("subscription_observation")
+    if not isinstance(raw, dict):
+        return unknown
+    stamp = raw.get("observedAtMs")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return unknown
+    observed_at = _num(stamp)
+    if observed_at is None or not 0 < observed_at <= time.time() * 1000:
+        return unknown
+    try:
+        receipt = subscription_observation(raw)
+    except (OverflowError, ValueError):
+        # The store can outlive parser versions. Corrupt metadata must not
+        # disappear via the controller's exception isolation or invent a meter.
+        return unknown
+    if receipt is None:
+        return unknown
+    limits: list[UsageLimit] = []
+    for name in ("window", "weekly"):
+        entry = receipt.get(name)
+        if not isinstance(entry, dict):
+            continue
+        duration = entry.get("windowDurationMins")
+        label = _window_label(
+            duration * 60 if duration is not None else None,
+            "Weekly" if name == "weekly" else "Window",
+        )
+        limits.append(
+            UsageLimit(
+                id=f"meta-muse:{name}",
+                label=label,
+                amount=UsageAmount(used_fraction=entry["usedPercent"] / 100, unit="percent"),
+                window="weekly" if name == "weekly" else "rolling",
+                resets_at_ms=entry.get("resetsAtMs"),
+                # Both windows gate the subscription account, not one model.
+                shared=True,
+            )
+        )
+    return UsageReport(provider="meta-muse", fetched_at=int(observed_at), limits=limits, notes=note)
+
+
 async def _run_fetcher(
     client: httpx.AsyncClient,
     kind: FetcherKind,
@@ -2354,6 +2431,8 @@ async def _run_fetcher(
     creds: dict[str, Any] | None = None,
 ) -> UsageReport | None:
     """One fetcher by kind. Split out so the credential choice above stays legible."""
+    if kind == "meta-muse-observation":
+        return meta_muse_usage_report(creds)
     if kind == "openrouter":
         return await fetch_openrouter(client, secret)
     if kind == "anthropic-oauth":
