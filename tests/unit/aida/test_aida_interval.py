@@ -105,6 +105,7 @@ async def test_actual_settings_api_numeric_row_and_rejections(
 ) -> None:
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
+
     from local_operator.server.routes import settings as settings_routes
 
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "synthetic-test-token")
@@ -294,6 +295,7 @@ async def test_interval_registry_write_applies_through_live_config_watcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
+
     from local_operator.config_watch import ConfigWatcher
 
     configure(isolated_root)
