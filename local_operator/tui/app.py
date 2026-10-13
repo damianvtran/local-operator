@@ -16998,9 +16998,18 @@ class OperatorApp(App[None]):
             self.call_from_thread(self._finish_update)
             return
         if result.latest is None:
-            self.call_from_thread(
-                self._system_notice, "could not reach PyPI to learn the latest version", "warning"
+            # Two different facts hide behind a None latest (UX round 1, M1):
+            # PyPI unreachable, or PyPI answered and a release is still
+            # publishing. The sentence must not send a reader on a healthy
+            # network to debug their connection — coherent with the desktop
+            # app's wording for the same state.
+            notice = (
+                f"PyPI has named {result.pending_version} but its files are still "
+                "publishing, so there is no update to install yet — try again in a few minutes"
+                if result.pending_version is not None
+                else "could not reach PyPI to learn the latest version"
             )
+            self.call_from_thread(self._system_notice, notice, "warning")
             self.call_from_thread(self._finish_update)
             return
         if not result.behind:
