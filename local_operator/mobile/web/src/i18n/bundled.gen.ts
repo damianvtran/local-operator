@@ -3,6 +3,25 @@
  * namespaces only — never an implicit wire/bootstrap bundle.
  * Regenerate with generate.py; --check rejects drift in CI. */
 export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "relay.session": {
+    "relay.session.directory.path_placeholder": "or type another path\u2026",
+    "relay.session.directory.sheet_title": "working directory",
+    "relay.session.list.empty_hint": "start one below, or from the TUI on your machine",
+    "relay.session.list.no_matches": "no matching conversations",
+    "relay.session.list.search_placeholder": "Search conversations\u2026",
+    "relay.session.list.start_busy": "starting\u2026",
+    "relay.session.list.start_idle": "new session",
+    "relay.session.model.filter_placeholder": "filter models",
+    "relay.session.model.loading": "loading\u2026",
+    "relay.session.model.sheet_title": "model",
+    "relay.session.past.back": "back",
+    "relay.session.past.heading": "past sessions",
+    "relay.session.past.loading": "loading\u2026",
+    "relay.session.past.search_placeholder": "search names and conversations\u2026",
+    "relay.session.view.back": "back to sessions",
+    "relay.session.view.empty_hint": "send a message below to get started",
+    "relay.session.view.empty_title": "no messages yet",
+  },
   "relay.shell": {
     "relay.shell.list.connecting": "connecting\u2026",
     "relay.shell.list.empty": "no sessions running",

@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx"];
+export const ENFORCED = ["src/i18n/runtime.ts", "src/i18n/wire-cache.ts", "src/store.ts", "src/main.tsx", "src/screens/session-list.tsx", "src/screens/session-view.tsx", "src/screens/past-sessions.tsx", "src/components/directory-sheet.tsx", "src/components/model-sheet.tsx"];
 export const NONTRANSLATABLE = [{
 	path: "src/i18n/wire-cache.ts", sink: "new:Error", text: "catalogue response limit",
 	reason: "Internal payload bound caught by loader; never surfaced as user copy.",

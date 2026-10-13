@@ -217,7 +217,7 @@ function Header({
 			<button
 				type="button"
 				onClick={() => navigate("/")}
-				aria-label="back to sessions"
+				aria-label={messageRuntime.t("relay.session.view.back")}
 				className={cn(HEADER_CONTROL, "text-ink-muted")}
 			>
 				‹
@@ -804,7 +804,7 @@ export function SessionScreen({
 						<button
 							type="button"
 							onClick={() => navigate("/")}
-							aria-label="back to sessions"
+							aria-label={messageRuntime.t("relay.session.view.back")}
 							className={cn(HEADER_CONTROL, "text-ink-muted")}
 						>
 							‹
@@ -920,9 +920,11 @@ export function SessionScreen({
 				   turn begins streaming (the transcript fills from the user
 				   row up). */
 				<div className="flex flex-1 flex-col items-center justify-center gap-1 px-8 text-center">
-					<p className="text-body-sm text-ink-muted">no messages yet</p>
+					<p className="text-body-sm text-ink-muted">
+						{messageRuntime.t("relay.session.view.empty_title")}
+					</p>
 					<p className="text-meta text-ink-dim">
-						send a message below to get started
+						{messageRuntime.t("relay.session.view.empty_hint")}
 					</p>
 				</div>
 			) : (
