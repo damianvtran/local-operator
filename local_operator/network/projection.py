@@ -1560,8 +1560,9 @@ def peer_source_availability(root: Path | None, *, device_id: str, session_id: s
     Returns one of the contract's three signals — ``ready`` / ``unavailable``
     / ``unsupported`` — and NEVER a generation or a row: availability is a
     wake decision, and the authoritative read is what mints a domain. A missing
-    relay, a refusal or an expired hop reads as ``unavailable``: the caller's
-    next meaningful wake asks again, which is the bound the lane documents.
+    relay or expired hop reads as ``unavailable``. A refusal has no authorized
+    source contract and returns ``unsupported`` like an absent ACK, so a revoked
+    grant cannot establish a supported failed wave on the awaiting bridge.
 
     BLOCKING — dials this device's relay control socket. Callers on a loop hand
     it to ``asyncio.to_thread``.
@@ -1581,9 +1582,9 @@ def peer_source_availability(root: Path | None, *, device_id: str, session_id: s
         source_read="availability",
         **{PEER_JOURNAL_SOURCE_FLAG: True},
     )
-    if not reply or reply.get("refused"):
+    if not reply:
         return "unavailable"
-    if reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
+    if reply.get("refused") or reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
         return "unsupported"
     return "ready" if reply.get("source_available") is True else "unavailable"
 
