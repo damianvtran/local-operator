@@ -1178,9 +1178,16 @@ async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
         wake: bool,
         sender: Any,
         message_id: str | None = None,
+        custom_type: str | None = None,
         deadline_s: float | None = None,
     ) -> str:
         assert rec is record
+        # The default caller declares NO provenance kind (the wire omission
+        # discipline lives one layer down in ``peer_client``; at THIS seam the
+        # kwarg is always passed), so the normal path stays exactly the old
+        # frame — a declared kind here would be a product-path change this
+        # test does not stand for.
+        assert custom_type is None
         return "delivered and woke the session" if wake else "delivered to the mailbox"
 
     monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
