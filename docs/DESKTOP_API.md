@@ -2912,7 +2912,7 @@ Proposed purposes on the existing view-authorized stored-history RPC:
 | page | Verified bounded page; explicit page acceptance only |
 | metadata | Requested raw-ID facts only; no body/cursor/frontend effects |
 | payload | Expected accepted generation REQUIRED; fresh projected bodies and same-read coordinates together |
-| availability | One bounded deferred index refresh/join signal (4 s owner wait, inside the read-sized hop); no rows or generation authority. A build past the bound answers bounded `unavailable` beside the explicit reconcile correction and the client latch re-arms on the next `ready` answer — never a dead `building`, never a per-token poll |
+| availability | One bounded deferred index refresh/join signal (4 s owner wait, inside the read-sized hop); no rows or generation authority. A build past the bound emits ONE explicit reconcile correction; further declared typed/page reads of that failed wave report `unavailable`, not a dead `building`. Explicit retry before readiness remains unavailable; an actual current-owner `ready` read clears the latch. No retry-per-render or longer wait is implied. Owner/attach-client changes invalidate the old wave; closed bridges, stale completions and refused grants cannot establish its failure on a new source. ACK, bodies, cursors and previously proven facts are preserved, and undeclared legacy responses are unchanged |
 
 Requested IDs plus explicit dependency IDs are bounded at 512. Missing means
 proven absent, unavailable means present but unsafe/unprojectable, remaining
