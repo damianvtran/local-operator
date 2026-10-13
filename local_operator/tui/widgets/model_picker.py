@@ -648,8 +648,60 @@ class ModelPicker(Static):
             out.append_text(row)
         return out
 
+    def _native_detail_slots(self) -> int:
+        # Hold the same footprint while navigating a catalogue containing Muse;
+        # loading/selection must not move the list when optional facts arrive.
+        return 3 if any(row.provider == "meta-muse" for row in self._matches) else 0
+
+    def _native_detail_rows(self, width: int) -> list[Text]:
+        slots = self._native_detail_slots()
+        if not slots:
+            return []
+        row = self.highlighted()
+        clauses: list[list[str]] = [[], [], []]
+        if row is not None and row.provider == "meta-muse":
+            clauses[0] = [
+                (
+                    f"output {row.max_output_tokens:,}"
+                    if row.max_output_tokens > 0
+                    else "output unknown"
+                )
+            ]
+            for label, value in (
+                ("tools", row.supports_tools),
+                ("images", row.supports_images),
+                ("reasoning", row.reasoning),
+            ):
+                if value is not None:
+                    clauses[0].append(f"{label} {'yes' if value else 'no'}")
+            if row.reasoning_efforts is not None:
+                clauses[1].append("effort " + ("/".join(row.reasoning_efforts) or "none"))
+            if row.reasoning_default_effort:
+                clauses[1].append("default " + row.reasoning_default_effort)
+            if row.modalities:
+                for direction in ("input", "output"):
+                    values = row.modalities.get(direction)
+                    if values:
+                        clauses[1].append(direction + " " + "/".join(values))
+            if row.family:
+                clauses[2].append(row.family)
+            if row.release_date:
+                clauses[2].append("released " + row.release_date)
+        # Rich Text escapes provider-controlled labels; cell clipping keeps
+        # native detail optionality from widening the picker at narrow sizes.
+        rendered = []
+        for parts in clauses:
+            text = Text(" " + _SEAM.join(parts), style="dim")
+            text.truncate(max(0, width), overflow="ellipsis")
+            rendered.append(text)
+        return rendered
+
     def _chrome_rows(self, width: int) -> list[Text]:
-        return [*self.render_rows(width), *self._footer_rows(width)]
+        return [
+            *self.render_rows(width),
+            *self._native_detail_rows(width),
+            *self._footer_rows(width),
+        ]
 
     def _repaint(self) -> None:
         if not self._open or not self.is_mounted:
@@ -951,7 +1003,9 @@ class ModelPicker(Static):
         status_rows = 2 if persistent else (1 if self._status or self._status_row_held else 0)
         return max(
             1,
-            min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION) - status_rows,
+            min(MAX_VISIBLE_ROWS, screen_height // _SCREEN_HEIGHT_FRACTION)
+            - status_rows
+            - self._native_detail_slots(),
         )
 
     def _scroll_to_selection(self) -> None:

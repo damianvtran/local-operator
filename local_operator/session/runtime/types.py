@@ -1514,6 +1514,9 @@ class SessionRecord:
     #: older than any terminal that can read it. A viewer compares this with
     #: its own build to NAME skew rather than fail silently under it.
     version: str = ""
+    #: Native registry of THIS owner, not the daemon/UI. None means legacy
+    #: unreported support; an absent catalogue row is never negative evidence.
+    native_provider_ids: list[str] | None = None
     #: The git ref of that install when ``lop-update`` recorded one; ``""``
     #: for PyPI/pipx/editable installs. Needed because same-version rebuilds
     #: are this host's common drift — see ``update.BuildStamp``.
@@ -1588,6 +1591,13 @@ class SessionRecord:
         # only a deserialized key-less record is assumed pre-field.
         known = {f for f in SessionRecord.__dataclass_fields__}
         fields = {k: v for k, v in data.items() if k in known}
+        advertised = fields.get("native_provider_ids")
+        if advertised is not None and not (
+            isinstance(advertised, list) and all(isinstance(item, str) for item in advertised)
+        ):
+            # A malformed advertisement is unknown, never an empty authoritative
+            # provider set that would reject otherwise compatible conversations.
+            fields["native_provider_ids"] = None
         if "started" not in data:
             fields["started"] = True
         return SessionRecord(**fields)

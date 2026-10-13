@@ -9034,6 +9034,31 @@ class AttachedSession:
         client = self._client
         if client is None:
             return
+        record = self._runtime_record
+        if record is not None:
+            from local_operator.session.model_admission import require_owner_provider
+            from local_operator.update import installed_build
+
+            effective = self.effective_model
+            rows = self._read_state_field("model_catalogue") or []
+            positive = {str(row.get("provider") or "") for row in rows if isinstance(row, dict)}
+            # Use THIS bound owner's record/seed, never daemon-wide support.
+            # No await can rebind between this check and choosing the client;
+            # a retired client's authenticated socket cannot mutate a successor.
+            build = installed_build()
+            owner_ref = getattr(record, "source_ref", "")
+            stale = (
+                not record.version
+                or record.version != build.version
+                or bool(owner_ref and build.source_ref and owner_ref != build.source_ref)
+            )
+            require_owner_provider(
+                model.provider,
+                established={old.provider, effective.provider},
+                native=record.native_provider_ids,
+                positive_catalogue=positive,
+                stale=stale,
+            )
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
             effort = model.reasoning_effort or "auto"
