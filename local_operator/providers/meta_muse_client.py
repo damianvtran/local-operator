@@ -188,7 +188,17 @@ class MetaMuseClient(OpenAICompatClient):
                 retryable=original.retryable,
                 retry_after_ms=original.retry_after_ms,
                 request_sent=original.request_sent,
-                fail_closed=True,
+                # PRESERVE the raiser's own flag; never force it here. Forcing
+                # ``fail_closed`` on every wrapped error is what stopped a
+                # recoverable quota 429 from reaching the user's CONFIGURED
+                # fallback chains: the failover engine raises immediately on a
+                # fail-closed error, so the cascade never ran (evidence session
+                # 5ebdcd0d1ec8). A quota block is the primary being unable to
+                # serve, not a silent billable fallback -- descending to a
+                # target the user configured is their explicit choice. Only the
+                # billing-attribution refusal and the missing-meter refusal
+                # arrive here with the flag set.
+                fail_closed=original.fail_closed,
             ) from None
         except httpx.HTTPError:
             raise ProviderError(
@@ -197,7 +207,6 @@ class MetaMuseClient(OpenAICompatClient):
                 kind="transient",
                 retryable=True,
                 transport=True,
-                fail_closed=True,
             ) from None
         finally:
             _ACTIVE_OBSERVATION.reset(token)
@@ -213,10 +222,20 @@ class MetaMuseClient(OpenAICompatClient):
         reverse = {alias: name for name, alias in tool_aliases(request).items()}
         async for event in super().stream(request, api_key, oauth_access):
             if isinstance(event, StreamEndEvent) and event.error is not None:
-                # Error bodies can echo a submitted key. Preserve the status
-                # classification, never the provider body, and prohibit a
-                # hidden billable cross-provider fallback from this plan route.
-                raise ProviderError(None, "Muse Code stream failed.", fail_closed=True)
+                if event.stop_reason == "refusal":
+                    # A refusal is the provider's ANSWER, not provider weather:
+                    # pass it through so the loop renders it and the failover
+                    # engine can never re-ask refused content on another route.
+                    # Every other dialect yields refusal ends rather than
+                    # raising them; Muse converts them for no benefit.
+                    pass
+                else:
+                    # Error bodies can echo a submitted key. Preserve the status
+                    # classification, never the provider body. Deliberately NOT
+                    # fail-closed: an unknown mid-stream provider fault is
+                    # exactly what a configured fallback is for, and the engine
+                    # still refuses to replay once any content was forwarded.
+                    raise ProviderError(None, "Muse Code stream failed.")
             if isinstance(event, StreamToolCallDelta) and event.name:
                 event = event.model_copy(update={"name": reverse.get(event.name, event.name)})
             elif isinstance(event, StreamEndEvent) and event.provider_payload:

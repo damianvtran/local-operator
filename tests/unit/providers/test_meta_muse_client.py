@@ -137,7 +137,16 @@ async def test_actual_factory_posts_responses_and_restores_tool_names():
 
 
 @pytest.mark.asyncio
-async def test_reflected_key_error_is_redacted_and_cannot_fallback():
+async def test_reflected_key_error_is_redacted_and_cascade_eligible():
+    """A dead sign-in is a normal auth failure, sanitised and cascade-eligible.
+
+    The redaction is the point of this seam: an error body can echo the
+    submitted key, and the provider's text must never ride out. Classification
+    stays ``auth`` (never quota), and it no longer fails closed -- a dead key is
+    exactly what the user's CONFIGURED fallback chains answer, while the
+    billing-attribution and missing-meter refusals keep their own fail-closed
+    flags untouched.
+    """
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda _r: httpx.Response(401, json={"error": {"message": KEY}})
@@ -147,7 +156,8 @@ async def test_reflected_key_error_is_redacted_and_cannot_fallback():
         with pytest.raises(ProviderError) as caught:
             _ = [event async for event in client.stream(request(), KEY)]
     assert KEY not in str(caught.value)
-    assert caught.value.fail_closed
+    assert caught.value.kind == "auth"
+    assert not caught.value.fail_closed
     assert caught.value.status == 401
 
 
