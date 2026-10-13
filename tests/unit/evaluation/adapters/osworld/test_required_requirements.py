@@ -24,10 +24,10 @@ FIVE claims, each with its own test:
    REF (never a value), says which flag supplies it, and lands BEFORE the
    provider is constructed -- watching the provider factory, which is what
    actually allocates, rather than reading a comment;
-2. a required name this build cannot deliver is refused even when it IS
-   supplied, because the remedy would be inert (``GITLAB_PRIVATE_TOKEN``: the
-   controller reads it from ``os.getenv`` at import and nothing here puts it
-   there);
+2. a required name with NO channel is refused even when it IS supplied -- the
+   machinery that made ``GITLAB_PRIVATE_TOKEN`` inert before R-2.026 added its
+   channel; no shipped family is in this class any more, so that machinery is
+   pinned by driving the derivation directly;
 3. it is derived from the table, so it covers every family a task's own fields
    introduce instead of one hardcoded name (the agreement test removes each
    deliverable row in turn and requires exactly that one back);
@@ -65,12 +65,16 @@ ProvisioningError = provisioning.ProvisioningError
 _MISSING_FAMILIES = (
     pytest.param("task_website", fixtures.WEBSITE, id="website-controller"),
     pytest.param("task_llmsim", fixtures.LLM_SIMULATOR, id="llm-user-simulator"),
+    pytest.param("task_gitlab", fixtures.GITLAB, id="gitlab-controller"),
 )
 
-# Families whose declared name has NO channel to its consumer in this build. The
-# declared set is read from the table rather than restated here, so adding a row
-# to the table covers the new name without touching this file.
-_UNDELIVERABLE_FAMILIES = (pytest.param("task_gitlab", fixtures.GITLAB, id="gitlab-controller"),)
+# NO shipped family is undeliverable any more: R-2.026 put the GitLab fixture
+# token on the env-delivery allowlist (``vendor_bridge.SECRET_ENV_NAMES``), so
+# the name reaches its import-time reader. The refusal machinery stays -- a
+# future family whose name has no channel must still be refused rather than
+# allocating a guest -- and is pinned by
+# ``test_a_name_with_no_channel_is_still_refused_by_the_derivation`` below,
+# which drives the derivation directly instead of a task fixture.
 
 
 def _infra(name: str, value: str = "supplied") -> ScopedInfraValue:
@@ -166,57 +170,27 @@ async def test_a_required_absent_requirement_is_refused_before_the_provider(
     assert "value-" not in message
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("task_id", "source"), _UNDELIVERABLE_FAMILIES)
-async def test_a_required_name_no_channel_can_carry_is_refused_even_when_supplied(
-    tmp_path: Path, episode_id: str, task_id: str, source: str
-) -> None:
-    """QA round 1's reproduction, as a test: the inert remedy.
+def test_a_name_with_no_channel_is_still_refused_by_the_derivation() -> None:
+    """The machinery that made ``GITLAB_PRIVATE_TOKEN`` inert, pinned directly.
 
-    ``GITLAB_PRIVATE_TOKEN`` is declared by the task, matched by name -- and
-    unreachable: ``desktop_env/controllers/gitlab.py:19-23`` reads it from
-    ``os.getenv`` at import, and this build hands the vendor only the env-delivery
-    allowlist plus the provider's own credentials. So an operator who complies
-    with a "supply this" refusal still gets the old failure: a guest allocated,
-    then a vendor ``ValueError`` mid-setup. Refusing a value the run cannot use is
-    the only honest answer, and it must hold in BOTH directions -- unsupplied and
-    supplied.
+    No SHIPPED family is in this class any more (R-2.026 put the GitLab token
+    on the env-delivery allowlist, and both directions of its family are
+    covered by the ``_MISSING_FAMILIES`` tests above), but the refusal must
+    survive for any FUTURE family whose name has no channel -- allocating a
+    guest for a value the vendor can never read is the failure this whole
+    module exists to prevent. Driving ``undelivered_secrets`` directly keeps
+    that machinery covered without a task fixture that no longer exists.
     """
 
-    declared = _required(source)
-    # Secrets only: an infra value is deliverable by construction, so it is never
-    # the reason this refusal fires (the message must agree with that split).
-    undeliverable = {
-        row.name
-        for row in declared
-        if row.kind == "secret" and row.name not in requirements._DELIVERED_SECRETS
-    }
-    assert (
-        "GITLAB_PRIVATE_TOKEN" in undeliverable
-    ), "the fixture family must declare the name with no channel"
-
-    # (a) nothing supplied
-    bare, bare_built = await _seam(tmp_path / "bare", episode_id, task_id, source)
-    assert isinstance(bare, requirements.UndeliverableRequirement), bare
-    for name in undeliverable:
-        assert name in str(bare)
-    assert bare_built == []
-
-    # (b) the operator COMPLIED: every declared name supplied, the undeliverable
-    # one included. The remedy still cannot be performed, so the refusal must not
-    # disappear -- this is QA round 1's reproduction, and the reason the check
-    # cannot be a supply-vs-missing test alone.
-    complied, complied_built = await _seam(
-        tmp_path / "complied",
-        episode_id,
-        task_id,
-        source,
-        infra=_INFRA + tuple(_infra(row.name) for row in declared if row.kind == "infra"),
-        secrets=tuple(_secret(row.name) for row in declared if row.kind == "secret"),
+    no_channel = requirements._requirement(
+        "SYNTHETIC_NO_CHANNEL_SECRET", kind="secret", required=True
     )
-    assert isinstance(complied, requirements.UndeliverableRequirement), complied
-    assert complied_built == []
-    assert "change nothing" in str(complied)
+    assert requirements.undelivered_secrets((no_channel,)) == ("SYNTHETIC_NO_CHANNEL_SECRET",)
+    # The GitLab token is NOT in that class: its channel is the env-delivery
+    # allowlist (``vendor_bridge.SECRET_ENV_NAMES``) this build ships.
+    delivered = requirements._requirement("GITLAB_PRIVATE_TOKEN", kind="secret", required=True)
+    assert requirements.undelivered_secrets((delivered,)) == ()
+    assert "GITLAB_PRIVATE_TOKEN" in requirements._DELIVERED_SECRETS
 
 
 @pytest.mark.asyncio
