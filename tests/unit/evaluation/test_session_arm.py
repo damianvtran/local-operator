@@ -108,6 +108,7 @@ from local_operator.incidents import (
 from local_operator.mcp.manager import McpManager
 from local_operator.session.session import Session
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from local_operator.session.tool_readiness import ToolReadiness
 from local_operator.session.transcript import Transcript
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
@@ -1934,6 +1935,25 @@ class _ScriptedSession:
 
     def set_tool_confinement(self, root: Any) -> None:
         del root
+
+    async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
+        # The arm's first-request gate now calls the typed owning API
+        # (``Session.wait_for_tools``). This double drives no discovery
+        # manager, so it spells the same no-manager semantics: names already
+        # in the live inventory read ready; anything else reads missing.
+        # Nothing here waits, so the bound is unused.
+        del timeout_s
+        names = {tool.name for tool in self._tools}
+        required_names = tuple(required)
+        present = tuple(n for n in required_names if n in names)
+        missing = tuple(n for n in required_names if n not in names)
+        return ToolReadiness(
+            status="ready" if not missing else "missing",
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=None,
+        )
 
     def request_graceful_cancel(self, reason: str = "cancelled") -> None:
         self.cancels.append(reason)
