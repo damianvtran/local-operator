@@ -3898,6 +3898,27 @@ async def stream_with_failover(
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
+    if request.same_route_retry:
+        # SINGLE ATTEMPT on the SAME machine: a recovery re-ask for an
+        # interrupted turn goes back to the provider/model that actually
+        # served the failed attempt, so the three denials ``isolated``
+        # expresses by retry-off apply here too -- no fallback chain (the
+        # chain gate below reads ``retry.enabled``), no transport-retry
+        # budget, no credential rotation (every rotation ``continue`` sits
+        # behind a ``retry.enabled`` raise) -- plus dropping route state so
+        # the recovery neither reads nor rewrites the session's fallback pin.
+        #
+        # It is NOT isolated: the resolve below stays a normal WRITE (a
+        # recovery re-ask is a real turn on the real cascade, subject to every
+        # account/quota constraint of the credential it lands on), the request
+        # keeps its ordinary errand/cache/account semantics, and it earns no
+        # special auth re-resolve -- a recovery whose credential fails STOPS
+        # with that failure as its reason rather than walking the pool. With
+        # retries disabled globally this copy changes nothing, which is the
+        # point: the recovery was never a retry budget, it is one re-ask.
+        retry = dataclasses.replace(retry, enabled=False)
+        route_state = None
+
     # The isolated errand's ONE rotation-class re-resolve has been spent.
     # Latched per REQUEST so a pool of dead keys cannot turn a decorative call
     # into a walk: the errand makes at most TWO AUTH attempts, and the second

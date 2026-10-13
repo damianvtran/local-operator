@@ -6243,7 +6243,18 @@ class SessionStreamFn:
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message
         # boundary (which owns quota recovery and auto-effort classification).
-        if request.purpose == "turn":
+        #
+        # A recovery re-ask (``same_route_retry``) skips this preflight ON
+        # PURPOSE: its job here is to BLOCK a credential and activate a
+        # fallback route for the session, which is exactly the route REWRITE
+        # a recovery must never perform -- it goes back to the machine that
+        # served the failed turn. Nothing is bypassed by skipping it: the
+        # account's quota and auth constraints still land on the single wire
+        # attempt below (``stream_with_failover`` runs it with retry off, so
+        # no rotation, no chain), and an exhausted or disabled pinned route
+        # therefore stops the recovery with that failure as its reason
+        # instead of re-pointing the call at another credential or model.
+        if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
         # The binding boundary (``_note_serving_binding``): after the preflight
         # above has settled and pinned the session's credential, note it for the

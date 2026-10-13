@@ -3495,6 +3495,20 @@ class ChatRequest(BaseModel):
     #: was meant to shrink keeps growing. Auto-naming is the opposite case and
     #: sets ``isolated`` instead — see below.
     replayable: bool = False
+    #: This call is a recovery re-ask for a turn an interrupted stream aborted,
+    #: and it must go out on the SAME provider/model that actually served the
+    #: attempt it continues.
+    #:
+    #: Transport policy like ``replayable`` above. It makes ``SessionStreamFn``
+    #: skip the route-REWRITING machinery (quota-preflight activation, sticky
+    #: and fallback routing) so nothing re-points the call, while every HARD
+    #: constraint still applies: an exhausted quota, a disabled route or an
+    #: auth failure stops the recovery with its own reason instead of moving
+    #: the call to another credential or model. ``stream_with_failover`` reads
+    #: it as single-attempt/no-fallback. It is deliberately NOT ``isolated``:
+    #: errand cache/quota/account semantics stay intact -- see that field's
+    #: six-point list for why the two must not be conflated.
+    same_route_retry: bool = False
     #: This call is DECORATION running alongside a user turn, and it must not be
     #: able to change anything the turn depends on.
     #:
@@ -3772,6 +3786,15 @@ class StreamEndEvent(BaseModel):
     #: marker (``content_filter``, ``refusal``, ``SAFETY``…) is still visible,
     #: so they must put it here; downstream only ever sees the normalized stop.
     error: str | None = None
+    #: A bare ``error`` finish with no refusal prose and no hard error object --
+    #: the provider ended the stream mid-answer without saying why. Set ONLY on
+    #: the shape ``providers/clients.py`` classifies there. It is a bounded
+    #: ELIGIBILITY for the loop's interruption continuation (see
+    #: ``MAX_CONNECTIVITY_CONTINUATIONS``), NOT a claim that the cause was the
+    #: network nor that the failure is transient -- neither is knowable from
+    #: the wire. Defaults False, so every other end shape keeps the existing
+    #: terminal behaviour byte-for-byte until the loop decides otherwise.
+    retryable_interruption: bool = False
 
 
 class StreamModelEvent(BaseModel):
