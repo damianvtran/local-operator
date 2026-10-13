@@ -3845,6 +3845,26 @@ def _stamp_input_refusal_recovery(event: StreamEvent, degradations: Sequence[str
     return event.model_copy(update={"provider_payload": payload})
 
 
+def _stamp_attempted_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Carry the effective API selector on a MARKED wordless end.
+
+    WHY. The interrupted-turn recovery re-asks the route that actually served
+    the failure, and on these turns no ``StreamModelEvent`` exists to name it
+    (measured: the OpenRouter route ends wordlessly without one), while the
+    REQUEST's model can name a different route than the one that served -- a
+    sticky handoff or a driver fallback makes exactly that split. This frame
+    is the only place that holds the truth (``spec`` -- the per-attempt
+    selector, already consumed by the sibling stampers), so the end itself
+    carries it forward and the loop never guesses. FAULT-ONLY: an unmarked
+    end is returned unchanged, so every ordinary turn's events stay
+    byte-for-byte what they were. The selector is the ATTEMPTED API route,
+    not proof of the underlying provider/quantization.
+    """
+    if not isinstance(event, StreamEndEvent) or not event.retryable_interruption:
+        return event
+    return event.model_copy(update={"attempted_selector": spec})
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -3895,6 +3915,27 @@ async def stream_with_failover(
         # relying on. The fifth is not expressible here — the credential
         # cascade takes routing decisions of its own on a read — so the resolve
         # below is asked for read-only (`read_only=request.isolated`).
+        retry = dataclasses.replace(retry, enabled=False)
+        route_state = None
+
+    if request.same_route_retry:
+        # SINGLE ATTEMPT on the SAME machine: a recovery re-ask for an
+        # interrupted turn goes back to the provider/model that actually
+        # served the failed attempt, so the three denials ``isolated``
+        # expresses by retry-off apply here too -- no fallback chain (the
+        # chain gate below reads ``retry.enabled``), no transport-retry
+        # budget, no credential rotation (every rotation ``continue`` sits
+        # behind a ``retry.enabled`` raise) -- plus dropping route state so
+        # the recovery neither reads nor rewrites the session's fallback pin.
+        #
+        # It is NOT isolated: the resolve below stays a normal WRITE (a
+        # recovery re-ask is a real turn on the real cascade, subject to every
+        # account/quota constraint of the credential it lands on), the request
+        # keeps its ordinary errand/cache/account semantics, and it earns no
+        # special auth re-resolve -- a recovery whose credential fails STOPS
+        # with that failure as its reason rather than walking the pool. With
+        # retries disabled globally this copy changes nothing, which is the
+        # point: the recovery was never a retry budget, it is one re-ask.
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
@@ -4367,6 +4408,7 @@ async def stream_with_failover(
                 async for event in client.stream(current_request, key, oauth_access=access):
                     stamped = _stamp_serving_spec(event, spec)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
+                    stamped = _stamp_attempted_selector(stamped, spec)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue

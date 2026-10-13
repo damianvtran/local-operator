@@ -3424,6 +3424,7 @@ class OpenAICompatClient:
         if refusal_parts and stop_reason in ("stop", "length"):
             stop_reason = "refusal"
         error: str | None = None
+        retryable_interruption = False
         if stop_reason == "refusal":
             # Name what actually detected the refusal (design review D2): when
             # the finish reason was an ordinary stop/length and the prose slot
@@ -3442,6 +3443,14 @@ class OpenAICompatClient:
             # the loop journals `error` as the incident, so name the failure,
             # not just the wire field that signalled it.
             error = f"provider reported a mid-stream failure (finish_reason '{finish_reason}')"
+            # Eligible for the loop's bounded interrupted-turn continuation.
+            # WHY this branch is the condition: it fires only for a bare
+            # ``error`` finish -- a refusal took the branch above, a hard
+            # error object raised in ``_compat_stream_error`` before we got
+            # here, and a local envelope violation aborts the session. It is
+            # an ELIGIBILITY, not a causal claim: the stream ended without the
+            # provider saying why, and retryability is unknown from the wire.
+            retryable_interruption = True
         if reasoning_parts:
             calls = []
             valid = True
@@ -3471,6 +3480,7 @@ class OpenAICompatClient:
             provider_payload=provider_payload,
             error=error,
             served_provider=served_provider,
+            retryable_interruption=retryable_interruption,
         )
 
     def _observe_responses_event(self, payload: dict[str, Any]) -> None:
