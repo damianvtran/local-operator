@@ -41,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from local_operator import agent_shell, sdk
@@ -148,6 +149,25 @@ def short_scratch() -> Iterator[Path]:
     """
 
     path = Path(tempfile.mkdtemp(prefix="lo-arm-t-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def real_arm_scratch() -> Iterator[Path]:
+    """A short root the REAL session's world-root gate accepts.
+
+    Deliberately NOT ``short_scratch``: that fixture stages under the
+    platform TMPDIR (``/private/var/folders`` on macOS), and a real
+    ``sdk.open_session`` refuses a controller store under a kernel-exposed
+    tree (``SessionSpecError``, measured). ``/tmp`` is short enough for the
+    bridge's ``sun_path`` socket and is not the refused tree; the name stays
+    session-unique so parallel lanes cannot clobber each other.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix="lo-arm-t-", dir="/tmp"))
     try:
         yield path
     finally:
@@ -496,6 +516,158 @@ class TestBridgeDiscipline:
         )
         reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert reply["is_error"] is True
+
+
+class TestAttemptedOutputClock:
+    """The dual-clock slice (audit §45-49): completed root output groups.
+
+    ``steps`` keeps its admitted/bound-world meaning; the ATTEMPTED clock
+    beside it counts every COMPLETED root output group -- world batches,
+    refused frame/schema attempts, local-tool-only turns, ask/finish,
+    terminal prose -- ONCE per generated assistant message, and it is what
+    the horizon is enforced on: the Nth group is reserved before validation,
+    its legal results pair, and group N+1 is refused before any of its work
+    happens. A turn whose typed signal says the stream faulted is not a
+    completed output group and never charges.
+    """
+
+    def _recorder(self) -> tuple[list[tuple[str, Any]], Any]:
+        rows: list[tuple[str, Any]] = []
+
+        def record(kind: str, payload: Any) -> None:
+            rows.append((kind, dict(payload)))
+
+        return rows, record
+
+    def _turn(self, bridge: ActionBridge, call_id: str) -> None:
+        """One completed root turn whose message id carries ``call_id``-named
+        tool calls (the canonical group identity the reserve reads)."""
+
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id=call_id, name="apply_actions", arguments={})],
+                )
+            )
+        )
+
+    def _group_kinds(self, rows: list[tuple[str, Any]]) -> list[str]:
+        return [payload["group_kind"] for kind, payload in rows if kind == "attempted_group"]
+
+    @pytest.mark.asyncio
+    async def test_a_multi_call_group_charges_once(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+        first = await bridge.call(wait)
+        assert first["is_error"] is False
+        second = await bridge.call(wait)
+        assert second["details"]["rejection_class"] == "second-batch"
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 1
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["batch"]
+        assert all(
+            payload["message_id"].startswith("message:")
+            for kind, payload in rows
+            if kind == "attempted_group"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_group_consumes_the_attempt_not_the_epoch(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        reply = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert reply["is_error"] is True
+        assert "rejection_class" in reply["details"]
+        assert bridge.attempted_groups == 1  # the attempt is spent...
+        assert bridge.steps == 0  # ...the admitted epoch is not
+        bridge.fold(TurnEndEvent())
+        kinds = self._group_kinds(rows)
+        assert len(kinds) == 1 and kinds[0].startswith("refused:")
+
+    @pytest.mark.asyncio
+    async def test_the_nth_invalid_group_still_ends_the_episode(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path, max_steps=1)
+        self._turn(bridge, "c1")
+        refused = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert refused["is_error"] is True  # its paired error result first...
+        assert bridge.attempted_groups == 1
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["is_error"] is False
+        assert blocked["details"]["terminal"] == "max-steps"
+        assert bridge.end_requested == "max-steps"
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_local_tool_only_group_charges_at_turn_end(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, max_steps=1, record=record)
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="b1", name="bash", arguments={})],
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())  # no bridge call: the turn boundary charges it
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 0
+        assert self._group_kinds(rows) == ["local-tool"]
+        # N+1 is refused before any of its work happens.
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["details"]["terminal"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_a_faulted_turn_is_not_an_output_group(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        # The typed fault signal this bridge layer sees: the partial assistant
+        # message carries stop_reason "error" (the wire-level interruption
+        # marker lives upstream of the bridge).
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    content=[TextContent(text="partial")],
+                    stop_reason="error",
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 0
+        assert self._group_kinds(rows) == []
+        # The next COMPLETED group charges normally -- terminal prose here.
+        bridge.fold(
+            MessageEndEvent(message=Message(role="assistant", content=[TextContent(text="done")]))
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 1
+        assert self._group_kinds(rows) == ["prose-terminal"]
+
+    @pytest.mark.asyncio
+    async def test_challenged_and_accepted_finish_charge_once_each(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "complete"}]}
+        self._turn(bridge, "c1")
+        first = await bridge.call(claim)
+        assert first["details"]["terminal"] == "completion-challenged"
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["finish-challenged", "finish"]
+        assert bridge.attempted_groups == 2
+        assert bridge.steps == 2
 
 
 class TestSplitPromptContent:
@@ -2970,3 +3142,239 @@ class TestRetainedJoin:
         assert not task.done()
         release.set()
         await asyncio.wait_for(task, timeout=15)
+
+
+def _sse_response(events: list[dict[str, Any]]) -> httpx.Response:
+    """One scripted SSE body, the shape ``OpenAICompatClient`` parses."""
+
+    wire = "".join("data: " + json.dumps(e) + "\n\n" for e in events) + "data: [DONE]\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=wire.encode())
+
+
+def _tool_delta(model: str, calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """A tool-call delta chunk for every call, ids stable per index."""
+
+    tcs = [
+        {
+            "index": i,
+            "id": f"call_{i}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+        for i, (name, args) in enumerate(calls)
+    ]
+    return {
+        "id": "r",
+        "model": model,
+        "choices": [{"index": 0, "delta": {"tool_calls": tcs}, "finish_reason": None}],
+    }
+
+
+class TestTheStreamCompletedStopBoundary:
+    """R1 C1: a stream-completed Nth group must stop the NEXT ROOT REQUEST.
+
+    The unit-level clock tests cannot see this boundary: the loop asks its
+    graceful question BEFORE it yields ``TurnEndEvent`` (``loop.py``), so a
+    stop requested when the sink sees that event is first read one boundary
+    late. Only the REAL loop shows whether the stop is read in time -- the
+    round-1 measurement on this stack: a local-tool-only Nth group let a
+    second root request go out and its tool execute (``wire_calls=2``).
+
+    This class drives the real stack through ``run_session_episode`` -- real
+    ``sdk.open_session``, real ``AgentLoop``, the arm's own native MCP action
+    tool -- with only the MODEL TRANSPORT scripted (zero spend: no network,
+    no VM, no paid model). The wire counter is the discriminator.
+    """
+
+    @staticmethod
+    def _wire(
+        script: list[list[tuple[str, dict[str, Any]]]],
+    ) -> tuple[list[dict[str, Any]], httpx.MockTransport]:
+        calls: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            calls.append({"model": body.get("model"), "messages": len(body.get("messages", []))})
+            idx = min(len(calls) - 1, len(script) - 1)
+            model = body.get("model") or "mock"
+            return _sse_response(
+                [
+                    _tool_delta(model, script[idx]),
+                    {
+                        "id": "r",
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                    },
+                ]
+            )
+
+        return calls, httpx.MockTransport(handler)
+
+    async def _run(
+        self,
+        short_scratch: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        script: list[list[tuple[str, dict[str, Any]]]],
+        max_steps: int,
+    ) -> tuple[list[dict[str, Any]], Any, str]:
+        """One real episode; returns (wire calls, outcome, record text)."""
+
+        import local_operator.providers.clients as clients_mod
+
+        home = short_scratch / "home"
+        for d in (home / ".local-operator", home / "home", home / "work"):
+            d.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(home / "home"))
+        monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+        # The documented nested-session escape: this test opens a real
+        # session in-process, which the agent-shell guard refuses without it
+        # (the same hook the zero-spend QA rigs run under).
+        monkeypatch.setenv("LOCAL_OPERATOR_ALLOW_NESTED_SESSION", "1")
+        world = short_scratch / "world"
+        (world / "work").mkdir(parents=True)
+        (world / "note.txt").write_text("synthetic world note", encoding="utf-8")
+
+        calls, transport = self._wire(script)
+        original = clients_mod.client_for_spec
+
+        def patched(spec: Any, **kwargs: Any) -> Any:
+            if getattr(spec, "provider", None) == "test":
+                return clients_mod.OpenAICompatClient(
+                    "https://synthetic.invalid/v1",
+                    http_client=httpx.AsyncClient(transport=transport),
+                    openai_api="chat_completions",
+                )
+            return original(spec, **kwargs)
+
+        monkeypatch.setattr(clients_mod, "client_for_spec", patched)
+
+        class _AskOwnerAdapter(FakeAdapter):
+            """FakeAdapter + the session arm's required ask-owner capability."""
+
+            async def handshake(self, *, timeout: float = 10.0) -> Any:
+                base = await super().handshake(timeout=timeout)
+                capabilities = base.metadata.capabilities.model_copy(
+                    update={"ask_user_answer_owner": "adapter"}
+                )
+                return base.model_copy(
+                    update={
+                        "metadata": base.metadata.model_copy(update={"capabilities": capabilities})
+                    }
+                )
+
+        roots = SessionRoots(
+            config_dir=home / ".local-operator",
+            agent_home=home / "home",
+            cwd=world / "work",
+            allow_volatile=True,
+        )
+        spec = build_spec("ep-stop-boundary")
+        config = build_config(short_scratch, observation_retry_delay=0.0, max_steps=max_steps)
+        adapter = _AskOwnerAdapter(short_scratch, spec.episode_id)
+        session_spec = SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=world,
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-stop-boundary",
+        )
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            del descriptor, kwargs
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        outcome = await run_session_episode(
+            spec=spec,
+            config=config,
+            selector=selector(short_scratch),
+            roots=roots,
+            scratch_root=short_scratch,
+            session_spec=session_spec,
+            secrets=(),
+            launch=launch,
+            rescue=rescue,
+        )
+        record = outcome.record_root / "events.jsonl" if outcome.record_root else None
+        text = ""
+        if record is not None and record.exists():
+            text = record.read_text(encoding="utf-8")
+        return calls, outcome, text
+
+    @pytest.mark.asyncio
+    async def test_a_local_only_nth_group_spends_no_second_request(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The measured R1 class: max_steps=1, turn 1 = a local ``read``.
+
+        Pre-fix the wire served a second request and the extra turn's tool
+        ran (round-1 logs: wire 2, duplicate ``read``); post-fix the request
+        is never spent.
+        """
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[("read", {"path": str(real_arm_scratch / "world" / "note.txt")})]],
+            max_steps=1,
+        )
+        assert len(calls) == 1  # the N+1 root request is never spent
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        assert '"budget_stop"' in text
+        assert text.count("tool_execution_end") == 1  # the extra turn's tool never ran
+
+    @pytest.mark.asyncio
+    async def test_a_local_nth_group_never_lets_an_action_turn_start(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Turn 1 local, turn 2 (if it were ever requested) an action call.
+
+        Pre-fix the second request was served and the action call was only
+        refused at the bridge; post-fix the request never goes out, so no
+        action-tool execution row exists at all.
+        """
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[
+                [("read", {"path": str(real_arm_scratch / "world" / "note.txt")})],
+                [("apply_actions", {"actions": [{"kind": "wait", "duration_ms": 50}]})],
+            ],
+            max_steps=1,
+        )
+        assert len(calls) == 1
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        action_rows = [
+            line
+            for line in text.splitlines()
+            if "tool_execution_end" in line and "apply_actions" in line
+        ]
+        assert action_rows == []
+
+    @pytest.mark.asyncio
+    async def test_a_multi_call_nth_group_pairs_every_result(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Nth group's OWN calls still all execute and pair: the stop is
+        honoured only after the batch completes, never mid-batch."""
+
+        path = str(real_arm_scratch / "world" / "note.txt")
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[("read", {"path": path}), ("read", {"path": path})]],
+            max_steps=1,
+        )
+        assert len(calls) == 1
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        assert text.count("tool_execution_end") == 2  # both paired

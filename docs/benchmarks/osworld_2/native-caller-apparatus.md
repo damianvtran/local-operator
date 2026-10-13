@@ -28,6 +28,7 @@ must name the release they ran.
 | --- | --- | --- |
 | Official external epoch | ONE `agent.predict` output group, or one ASK_USER exchange (all returned actions execute under one epoch; `lib_run_single.py:1529–1533`, increment at `:1616`) | The selected official horizon. Internal predict retries do NOT add epochs (`mm_agents/anthropic/main.py:844–845, :894–896`). |
 | `ActionBridge._steps` (native output epochs) | ONE per ADMITTED output decision: executed batch, finish proposal (incl. the challenged one), ask exchange, committed read-back loss | The native mapping of the official epoch. Consumed at admission, BEFORE the guest await; pre-admission refusals charge compute/wall only. |
+| `ActionBridge.attempted_groups` (attempted output groups) | ONE per COMPLETED root output group, keyed by the generated assistant message: world batches, refused frame/schema attempts, local-tool-only turns, ask/finish, terminal prose | The horizon the arm ENFORCES (`max_steps`), beside the admitted epoch the public `steps` reports. A refused group consumes the attempt but not the admitted epoch and never rebinds the screen token. A turn whose typed signal says the stream faulted never completed and is not charged. |
 | Root model-request cap | Unique root `purpose=turn` request-final records (incl. native format/recovery re-asks; excludes children/compaction/naming) | A conservative native-generation safety cap — NOT the official 500, because upstream can retry inside one predict. |
 | Whole-system all-actor compute | Root + child/grandchild/helper requests, observed and reported | Reported, not capped: final-row callbacks alone cannot bound concurrent child calls. Any optional bound is declared separately. |
 
@@ -43,6 +44,45 @@ more root request on a decision the terminal bridge can only refuse
 with no stop marker). The bridge's own budget refusal remains the
 fail-closed fallback, so guest admission closes AT the budget, never one
 decision later.
+
+The ATTEMPTED clock (audit 2026-10-13, `native-osworld-v21-epoch-audit.md`)
+extends enforcement to every completed root output group. `max_steps` is
+enforced on it: the Nth group is reserved at the bridge's entry BEFORE batch
+validation, its legal actions/results pair, and group N+1 is refused before
+any of its work happens (the admitted-count check remains the fail-closed
+fallback). The stop seam also covers the local-tool-only and prose-only Nth
+group — a turn boundary with no action-tool result at all — via the loop's
+own turn end while the episode is live. A pre-admission refusal after
+explicit action output consumes an ATTEMPTED group without touching the
+admitted `_steps` or the screen-token binding: a run whose whole budget went
+to refused frames would otherwise report a spend the world never saw. The
+same ledger carries both: one `output_epoch` row per admitted epoch, one
+`attempted_group` row per completed group (`group_kind` carries the per-kind
+reason; a same-group follow-up call never renames it). **Official-equivalence
+of this root-all mapping (local tools, ask/finish, terminal prose included)
+remains UNVERIFIED** — it is a declared conservative choice pending
+maintainer confirmation of the multi-agent/Full-tools mapping, not a claim
+that every counted group is an official epoch. Internal bounded
+format-recovery requests, helper, compaction and naming compute stay
+separately accounted and disclosed (see the request-cap and all-actor rows).
+The fault filter is the assistant message's own typed `stop_reason == "error"`
+-- the typed fact at the bridge layer; the wire-level `retryable_interruption`
+marker (core #2337, merged `1684c66b`; this slice cut from `7c88ef5a`) lives
+UPSTREAM (the loop consumes it to continue the turn). The direct
+clock×recovery integration surface is exercised only once both changes share
+one base. Any selector cut before
+this slice merges carries a stale `session_arm` hash and is refused by
+design at preflight — re-cut the selector from the merged main.
+
+Wall bounds, stated once: the native timer is the caller's `--session-wall-s`
+(passed straight to `run_session_episode`; a KILL switch on the arm), while
+`--max-wall-s` bounds the owner lease and frontend close-out on either side
+of it. Launch records must name BOTH — a record carrying only `--max-wall-s`
+cannot say which bound actually fired. `18000 s` is this harness's OWN
+runaway guard, NOT a published OSWorld time allowance: the pinned
+guideline/runner carries no whole-episode wall ceiling, and `500` is the
+Claude sample's SELECTED comparison horizon, not a universal maximum (the
+GPT sample uses 200).
 
 ## Model policy (preflight requirement, not a proved admission mechanism)
 
