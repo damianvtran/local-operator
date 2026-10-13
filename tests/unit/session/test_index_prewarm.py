@@ -376,13 +376,16 @@ async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
 
     A REAL NEGATIVE CONTROL, not a description. The spawn seam is guarded at the
     TWO places every runtime creation goes through — ``launch._spawn_runtime``
-    (the subprocess) and ``SessionOwner.engage`` (the dial that leads to it) — and
-    both are replaced with one that fails the test. The assertions then prove the
-    control is ARMED and the preheat actually ran:
+    (the subprocess) and ``LocalOwner.engage`` (the dial that leads to it) — and
+    both are replaced with one that records the call and fails. The test then
+    proves the control is ARMED and the preheat actually ran:
 
-    * the patch is live (calling the replaced seam raises), so a preheat that
-      reached it would error here rather than pass silently;
-    * the preheat materialized a real replay against it.
+    * the patch is live: invoking the replaced seams THROUGH THE PATCHED
+      ATTRIBUTES (``launch._spawn_runtime`` / ``LocalOwner.engage``, not the raw
+      closures) raises — so this proves ``setattr`` landed, not merely that some
+      closure raises — and it is then RESET, because arming it necessarily moved
+      the flag the final assertion reads;
+    * the preheat materialized a real replay with the flag still untouched.
 
     Why these two and not the facade's own ``warm_runtime``/``_ensure_bound``: the
     failure mode this guards is a preheat that reaches a runtime by some path the
@@ -410,11 +413,15 @@ async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(launch, "_spawn_runtime", forbid_spawn)
     monkeypatch.setattr(LocalOwner, "engage", forbid_engage)
 
-    # ARMED: the control really is the live seam, so it cannot pass vacuously.
+    # ARMED: reach the seams THROUGH the patched attributes, so a setattr that did
+    # not land would fail here rather than leave the control silently inert.
     with pytest.raises(AssertionError):
-        forbid_spawn()
+        launch._spawn_runtime("s", "cwd", defer_materialise=False)
     with pytest.raises(AssertionError):
-        await forbid_engage()
+        await LocalOwner.engage(None, cwd="cwd", warm=None)
+    # The armed probes above are the ONLY thing allowed to have moved the flag, and
+    # they have: reset it so the assertion below is about the PREHEAT alone.
+    spawned["called"] = False
 
     root = tmp_path
     await replay_ready_journal(root, "newest", mtime=1_000.0)
