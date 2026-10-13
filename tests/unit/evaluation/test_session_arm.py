@@ -498,6 +498,158 @@ class TestBridgeDiscipline:
         assert reply["is_error"] is True
 
 
+class TestAttemptedOutputClock:
+    """The dual-clock slice (audit §45-49): completed root output groups.
+
+    ``steps`` keeps its admitted/bound-world meaning; the ATTEMPTED clock
+    beside it counts every COMPLETED root output group -- world batches,
+    refused frame/schema attempts, local-tool-only turns, ask/finish,
+    terminal prose -- ONCE per generated assistant message, and it is what
+    the horizon is enforced on: the Nth group is reserved before validation,
+    its legal results pair, and group N+1 is refused before any of its work
+    happens. A turn whose typed signal says the stream faulted is not a
+    completed output group and never charges.
+    """
+
+    def _recorder(self) -> tuple[list[tuple[str, Any]], Any]:
+        rows: list[tuple[str, Any]] = []
+
+        def record(kind: str, payload: Any) -> None:
+            rows.append((kind, dict(payload)))
+
+        return rows, record
+
+    def _turn(self, bridge: ActionBridge, call_id: str) -> None:
+        """One completed root turn whose message id carries ``call_id``-named
+        tool calls (the canonical group identity the reserve reads)."""
+
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id=call_id, name="apply_actions", arguments={})],
+                )
+            )
+        )
+
+    def _group_kinds(self, rows: list[tuple[str, Any]]) -> list[str]:
+        return [payload["group_kind"] for kind, payload in rows if kind == "attempted_group"]
+
+    @pytest.mark.asyncio
+    async def test_a_multi_call_group_charges_once(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+        first = await bridge.call(wait)
+        assert first["is_error"] is False
+        second = await bridge.call(wait)
+        assert second["details"]["rejection_class"] == "second-batch"
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 1
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["batch"]
+        assert all(
+            payload["message_id"].startswith("message:")
+            for kind, payload in rows
+            if kind == "attempted_group"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_group_consumes_the_attempt_not_the_epoch(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        reply = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert reply["is_error"] is True
+        assert "rejection_class" in reply["details"]
+        assert bridge.attempted_groups == 1  # the attempt is spent...
+        assert bridge.steps == 0  # ...the admitted epoch is not
+        bridge.fold(TurnEndEvent())
+        kinds = self._group_kinds(rows)
+        assert len(kinds) == 1 and kinds[0].startswith("refused:")
+
+    @pytest.mark.asyncio
+    async def test_the_nth_invalid_group_still_ends_the_episode(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path, max_steps=1)
+        self._turn(bridge, "c1")
+        refused = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert refused["is_error"] is True  # its paired error result first...
+        assert bridge.attempted_groups == 1
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["is_error"] is False
+        assert blocked["details"]["terminal"] == "max-steps"
+        assert bridge.end_requested == "max-steps"
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_local_tool_only_group_charges_at_turn_end(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, max_steps=1, record=record)
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="b1", name="bash", arguments={})],
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())  # no bridge call: the turn boundary charges it
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 0
+        assert self._group_kinds(rows) == ["local-tool"]
+        # N+1 is refused before any of its work happens.
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["details"]["terminal"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_a_faulted_turn_is_not_an_output_group(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        # The typed fault signal this bridge layer sees: the partial assistant
+        # message carries stop_reason "error" (the wire-level interruption
+        # marker lives upstream of the bridge).
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    content=[TextContent(text="partial")],
+                    stop_reason="error",
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 0
+        assert self._group_kinds(rows) == []
+        # The next COMPLETED group charges normally -- terminal prose here.
+        bridge.fold(
+            MessageEndEvent(message=Message(role="assistant", content=[TextContent(text="done")]))
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 1
+        assert self._group_kinds(rows) == ["prose-terminal"]
+
+    @pytest.mark.asyncio
+    async def test_challenged_and_accepted_finish_charge_once_each(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "complete"}]}
+        self._turn(bridge, "c1")
+        first = await bridge.call(claim)
+        assert first["details"]["terminal"] == "completion-challenged"
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["finish-challenged", "finish"]
+        assert bridge.attempted_groups == 2
+        assert bridge.steps == 2
+
+
 class TestSplitPromptContent:
     """The rendered-blocks → ``Session.prompt(text, images)`` seam.
 
