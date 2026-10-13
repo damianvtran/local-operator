@@ -7668,6 +7668,20 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     capabilities=(readiness_mod.CAPABILITY_BUILD, *readiness_mod.PEER_SIDE_CHECKS),
                 )
             )
+            selector = str(getattr(args, "model", "") or "")
+            if selector:
+                # The local fallback cannot observe the peer's selected access.
+                # Preserve the requested context, not the viewer's login/default.
+                checks.append(
+                    readiness_mod.selected_model_row(
+                        member,
+                        {"state": "pending"},
+                        selector=selector,
+                        session_id=str(getattr(args, "session", "") or ""),
+                        peer_label=member.name or member.device_id,
+                        source=readiness_mod.SOURCE_UNKNOWN,
+                    )
+                )
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),

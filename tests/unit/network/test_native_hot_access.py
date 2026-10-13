@@ -77,6 +77,63 @@ def test_truthful_states(tmp_path: Path, code: str, state: str) -> None:
     source.close()
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "eligible_borrow_unverified",
+        "effective_borrow",
+        "expired",
+        "revoked",
+        "owner_offline",
+        "no_local_credential",
+        "non_portable",
+        "quota_blocked",
+    ],
+)
+def test_model_access_and_selected_facts_preserve_keyless_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    import json
+
+    from local_operator.providers.model_access import serving_model_access_here
+
+    _point_config_at(monkeypatch, tmp_path)
+    source = _source(tmp_path)
+    monkeypatch.setattr(MeshCredentialClient, "for_this_device", lambda *_args, **_kw: source)
+    native = _native()
+    if outcome != "eligible_borrow_unverified":
+        if outcome == "expired":
+            native.grant_expires_at_ms = 1
+        note_resolution(tmp_path, "openai", native)
+        if outcome == "revoked":
+            document = source.placement
+            assert document is not None
+            document.revoke("openai", "recipient", by=OWNER)
+        elif outcome not in {"expired", "effective_borrow"}:
+            note_resolution(tmp_path, "openai", BrokerError(code=outcome, owner_device=OWNER))
+    claim = serving_model_access_here("openai/gpt-6.1-sol", config_dir=tmp_path)
+    assert claim is not None
+    fact = selected_model_fact(tmp_path, "openai/gpt-6.1-sol", session_id="same-session")
+    for reading in (claim.model_dump(), fact):
+        assert reading["owner_device"] == OWNER
+        assert reading["owner_label"]
+        if outcome == "eligible_borrow_unverified":
+            assert reading["last_grant_at"] is None and reading["last_grant_expires_at"] is None
+        else:
+            assert reading["observed_at"] is not None and reading["last_grant_at"] is not None
+            assert reading["last_grant_expires_at"] == native.grant_expires_at_ms / 1000
+        assert native.access_token not in json.dumps(reading)
+        assert "access_token" not in reading and "identity" not in reading
+    assert fact["usable"] is (outcome == "effective_borrow")
+    if outcome == "expired":
+        assert claim.effective_state == fact["state"] == "expired"
+    if outcome == "revoked":
+        assert claim.effective_state == fact["state"] == "withdrawn"
+    source.close()
+
+
 def test_success_is_expiry_and_recipient_bound(tmp_path: Path) -> None:
     source = _source(tmp_path)
     native = _native()
@@ -84,7 +141,10 @@ def test_success_is_expiry_and_recipient_bound(tmp_path: Path) -> None:
     assert effective_access("openai", root=tmp_path, mesh=source).usable
     native.grant_expires_at_ms = 1
     note_resolution(tmp_path, "openai", native)
-    assert effective_access("openai", root=tmp_path, mesh=source).state == "withdrawn"
+    expired = effective_access("openai", root=tmp_path, mesh=source)
+    assert expired.state == "expired" and expired.eligible and not expired.usable
+    assert expired.owner == OWNER
+    assert expired.last_grant_expires_at == 0.001
     document = source.placement
     assert document is not None
     document.revoke("openai", "recipient", by=OWNER)
@@ -256,6 +316,7 @@ async def test_readiness_tool_carries_active_selector_and_session(
     [
         ("eligible_borrow_unverified", False),
         ("effective_borrow", True),
+        ("expired", False),
         ("pending", False),
         ("owner_unavailable", False),
         ("withdrawn", False),
@@ -315,6 +376,13 @@ def test_selected_readiness_row_does_not_promote_holder_permission(
     selected = next(row for row in rows if row.get("capability") == "selected_model_credential")
     assert selected["code"] == state and selected["ok"] is usable
     assert selected["session_id"] == "same-session"
+    if state != "local":
+        assert selected["remedies"]
+    if state in {"eligible_borrow_unverified", "effective_borrow", "device_bound"}:
+        rendered = "\n".join(readiness.render_check_lines([selected]))
+        assert state not in rendered
+        assert "openai" in rendered
+        assert "    " in rendered  # existing indented remedy register
 
 
 def test_device_bound_and_absent_are_not_effective(tmp_path: Path) -> None:
