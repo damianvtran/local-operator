@@ -160,6 +160,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     TextContent,
     ToolExecutionEndEvent,
+    TurnEndEvent,
 )
 from local_operator.headless_print import printable_event
 from local_operator.incidents import classify_incident, render_cut_off_reason
@@ -817,6 +818,23 @@ class ActionBridge:
         # the socket handler.
         self._token: PendingObservationToken | None = None
         self._steps = 0
+        # THE ATTEMPTED OUTPUT-GROUP CLOCK (audit §45-49). Every COMPLETED
+        # root output group -- a world batch, a refused frame/schema attempt,
+        # a local-tool-only turn, an ask/finish proposal, a committed
+        # read-back loss or terminal prose -- reserves one slot here, keyed
+        # by the generated assistant message that produced it. Kept SEPARATE
+        # from ``_steps`` (the admitted/bound-world epoch the public
+        # ``steps`` still reports, unchanged): this is the clock the horizon
+        # is ENFORCED on, so a run cannot spend a whole budget on groups the
+        # world never admitted. No second ledger: its rows go to the same
+        # RecordSink below.
+        self._attempted_groups = 0
+        self._attempted_keys: set[str] = set()
+        #: The group currently being served -- its key, the outcome kind its
+        #: row will carry, and whether that row was already written.
+        self._attempted_current: str | None = None
+        self._attempted_kind: str | None = None
+        self._attempted_recorded = False
         self._lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
         self._closed = False
@@ -880,6 +898,147 @@ class ActionBridge:
         return self._steps
 
     @property
+    def attempted_groups(self) -> int:
+        """Completed root output groups reserved on the ATTEMPTED clock.
+
+        The horizon the episode is ENFORCED on (see ``call``); the public
+        ``steps`` stays the admitted/bound-world epoch, unchanged, so every
+        existing reader of the outcome and records keeps its old meaning.
+        """
+
+        return self._attempted_groups
+
+    def _group_key(self) -> str:
+        """The canonical key of the output group being served.
+
+        The assistant message that carried the calls IS the group: the fold
+        stores it on ``MessageEndEvent`` before any of its tool calls execute,
+        so every call of one model output reads the SAME id -- multi-call
+        groups charge once and duplicate deliveries dedupe. No tool-name,
+        model-name or task-id heuristic feeds this key (the audit's rule);
+        the per-call fallback exists only for a driver bug (a call before any
+        assistant message), where over-counting one group beats a silently
+        free one.
+        """
+
+        message = self._last_assistant_message
+        if message is None:
+            return f"pre-message:{uuid.uuid4().hex[:12]}"
+        return f"message:{message.id}"
+
+    def _reserve_output_group(self) -> str | None:
+        """Reserve the current output group on the attempted clock.
+
+        Called at ``call`` ENTRY, BEFORE validation: the Nth group is
+        reserved even when its batch is refused -- a schema/frame refusal
+        after explicit action output consumed a model output group, and the
+        runner charges those to the horizon even though they never bound a
+        screen token (the token is untouched here).
+
+        Returns the group key when the call may proceed, ``None`` when this
+        is group N+1 (the budget is spent). A call whose group is ALREADY
+        reserved -- a second tool call or action in the SAME output group --
+        is never refused by this gate: the group was charged once and its
+        remaining calls pair exactly as before.
+        """
+
+        key = self._group_key()
+        if key in self._attempted_keys:
+            return key
+        if self._attempted_groups >= self.max_steps:
+            return None
+        self._attempted_keys.add(key)
+        self._attempted_groups += 1
+        self._attempted_current = key
+        self._attempted_kind = None
+        self._attempted_recorded = False
+        return key
+
+    def _mark_group_kind(self, kind: str) -> None:
+        """Record the group's outcome kind -- FIRST writer wins.
+
+        A same-group follow-up call (a second action of one model output, a
+        duplicate delivery) must not rename the group: its late refusal would
+        otherwise overwrite an admitted batch's ``batch`` kind with the
+        refusal class. The first call's outcome describes how the group
+        actually completed.
+        """
+
+        if self._attempted_kind is None:
+            self._attempted_kind = kind
+
+    def _finalize_output_group(self) -> None:
+        """Charge/record the turn's group at its end boundary.
+
+        Two duties, one boundary (``TurnEndEvent``/``AgentEndEvent``):
+
+        * a group the STREAM completed without any bridge call -- a
+          local-tool-only turn or terminal prose -- is charged here, once,
+          keyed by its assistant message (kind ``local-tool``/
+          ``prose-terminal``);
+        * the row of an already-reserved group is written here with the
+          outcome kind its calls recorded (admitted batch, ask, finish,
+          refusal class, read-back loss...).
+
+        NOT a completed group: a turn whose assistant message's own typed
+        ``stop_reason`` is ``"error"`` -- a wordless provider fault the loop
+        may continue internally or end on. (The wire-level
+        ``retryable_interruption`` marker it keys on lives upstream of this
+        bridge; the message's stop_reason is the typed fact this layer sees.)
+        Counting fault frames as output groups would charge the horizon for
+        compute the model never got to complete; that is a TYPED fact, never
+        a tool/model-name guess. An explicit next root request after a fault
+        is a new group and charges normally; a read-back recovery inside one
+        call is the same group, not another.
+        """
+
+        message = self._last_assistant_message
+        # A turn whose assistant message carries the typed ``stop_reason``
+        # "error" did not COMPLETE -- the loop may even continue it internally
+        # (the wire-level ``retryable_interruption`` marker lives upstream of
+        # this bridge; the message's own stop_reason is the typed fact this
+        # layer sees). Non-completed faults are never output groups.
+        faulted = message is not None and message.stop_reason == "error"
+        if message is None:
+            return
+        key = f"message:{message.id}"
+        if key in self._attempted_keys:
+            self._record_output_group()
+            return
+        if faulted:
+            return
+        if self._attempted_groups >= self.max_steps:
+            return
+        self._attempted_keys.add(key)
+        self._attempted_groups += 1
+        self._attempted_current = key
+        self._attempted_kind = "local-tool" if message.tool_calls else "prose-terminal"
+        self._attempted_recorded = False
+        self._record_output_group()
+
+    def _record_output_group(self) -> None:
+        """Write the reserved group's row once, with its outcome kind.
+
+        Same RecordSink ledger as every other row -- the admitted epoch's
+        row and this one coexist; ``group_kind`` (never ``kind``: the row
+        merge collision ``_consume_output_epoch`` documents) carries the
+        per-kind reason.
+        """
+
+        if self._attempted_current is None or self._attempted_recorded:
+            return
+        self._attempted_recorded = True
+        if self.record is not None:
+            self.record(
+                "attempted_group",
+                {
+                    "group_kind": self._attempted_kind or "unknown",
+                    "attempted_groups": self._attempted_groups,
+                    "message_id": self._attempted_current,
+                },
+            )
+
+    @property
     def terminal(self) -> bool:
         return self._token is not None and self._token.terminal
 
@@ -941,6 +1100,8 @@ class ActionBridge:
             # isinstance check is what tells the type checker so.
             if isinstance(message, Message) and message.role == "assistant":
                 self._last_assistant_message = message
+        if isinstance(event, (TurnEndEvent, AgentEndEvent)):
+            self._finalize_output_group()
 
     def prose_completion_challenge(self) -> list[Any] | None:
         """The gate's re-prompt for a terminal message that CLAIMS completion.
@@ -1129,11 +1290,35 @@ class ActionBridge:
 
         async with self._lock:
             call_id = f"step-{self._steps}-{uuid.uuid4().hex[:6]}"
+            # THE ATTEMPTED CLOCK'S GATE (audit §48): reserve the group BEFORE
+            # validation -- so a refused Nth group is still spent -- and
+            # refuse group N+1 HERE, before any of its work happens. The
+            # admitted check further down stays as the fail-closed fallback;
+            # ``steps`` and the public outcome fields are unchanged.
+            if self._reserve_output_group() is None:
+                blocked_token = self._token
+                if blocked_token is not None:
+                    blocked_token.mark_terminal()
+                self.end_requested = self.end_requested or "max-steps"
+                if self.record is not None:
+                    self.record(
+                        "budget",
+                        {
+                            "steps": self._steps,
+                            "attempted_groups": self._attempted_groups,
+                        },
+                    )
+                return {
+                    "content": [TextContent(text=BUDGET_ACK)],
+                    "is_error": False,
+                    "details": {"terminal": "max-steps"},
+                }
             self._pending_ask_delivery = []
             self._pending_ask_receipt = None
             token = self._token
             pending = token.pending if token is not None else None
             if token is None or pending is None or token.terminal:
+                self._mark_group_kind("refused:no-pending")
                 refusal = _no_pending_refusal(call_id)
                 return {
                     "content": refusal.content,
@@ -1151,6 +1336,7 @@ class ActionBridge:
             try:
                 batch, tolerated_fields = _build_batch(arguments, pending)
             except ValidationError as error:
+                self._mark_group_kind(f"refused:{classify_validation_error(error)}")
                 refusal = _refusal(
                     call_id,
                     validation_diagnostic(error),
@@ -1167,6 +1353,7 @@ class ActionBridge:
                 batch.validate_for(pending)
                 self.surface.validate_batch(batch)
             except ValueError as error:
+                self._mark_group_kind(f"refused:{classify_admission_error(error)}")
                 refusal = _refusal(
                     call_id,
                     f"action batch does not match this observation: {error}",
@@ -1219,6 +1406,7 @@ class ActionBridge:
                     # The proposal is ADMITTED here: one epoch, consumed
                     # before the challenge is built and recorded (blueprint §3).
                     self._consume_output_epoch("finish-challenged")
+                    self._mark_group_kind("finish-challenged")
                     self._completion_fired += 1
                     challenge = build_completion_challenge(
                         claim=claim,
@@ -1257,6 +1445,7 @@ class ActionBridge:
                 # any reader grading a finish) reasons about; an action count
                 # alone cannot answer "what did it claim".
                 self._consume_output_epoch("finish")
+                self._mark_group_kind("finish")
                 token.mark_terminal()
                 self.end_requested = "finish"
                 if self.record is not None:
@@ -1289,6 +1478,7 @@ class ActionBridge:
                         "details": {"rejection_class": "ask_user-unsupported"},
                     }
                 self._consume_output_epoch("ask_user")
+                self._mark_group_kind("ask_user")
                 delivery = await self.ask(batch)
                 # The exchange's THIRD consumer: the answer text AND the
                 # canonical receipt ride the native result's CONTENT (staged
@@ -1318,6 +1508,7 @@ class ActionBridge:
                 # matrix); refusals ABOVE this point still charge compute
                 # only, and resum/re-bind below never charges a second one.
                 self._consume_output_epoch("batch")
+                self._mark_group_kind("batch")
 
             observation = token.consume_pending()
             if observation is None:  # pragma: no cover - the lock makes this unreachable
@@ -1330,6 +1521,7 @@ class ActionBridge:
             try:
                 result = await self.execute(batch)
             except Exception as error:  # noqa: BLE001 - _after_failed_execute owns it
+                self._mark_group_kind("read-back")
                 # The token was consumed above, so a raise from here used to
                 # leave the bridge permanently unable to bind any later batch
                 # -- including a finish -- and the episode spun to an
@@ -1993,6 +2185,11 @@ class SessionArmOutcome:
     record_root: Path | None
     score: Any | None = None
     steps: int = 0
+    #: The ATTEMPTED output-group clock beside ``steps`` (audit §45-49):
+    #: completed root output groups, including refused and local-tool-only
+    #: groups the admitted epoch never charged. ADDITIVE field -- historical
+    #: rows and the ``steps`` semantics stay exactly as shipped.
+    attempted_groups: int = 0
     #: The stable token naming why the run ended: ``finish`` / ``max-steps`` /
     #: ``bridge-wedged`` on the terminalled paths; for an ``agent_stop`` or a
     #: ``failed`` the reason read from the end-of-turn facts (see
@@ -2319,17 +2516,45 @@ async def run_session_episode(
             # fail-closed fallback for any call that still arrives; the check
             # is a state test, never a tool-call-name heuristic (the
             # declaration names the ONE action tool the arm installed itself).
+            # The stop seam (audit §48), two branches:
+            # * the action tool's own result -- the boundary the R3 rounds
+            #   pinned: fires on the Nth ADMITTED epoch's paired result
+            #   regardless of the terminal ``end_requested``, so a terminal
+            #   finish at epoch N never spends request N+1, and refused
+            #   groups are covered too (their error result still ends
+            #   through the action tool); the attempted clock raises the
+            #   same boundary for groups the admitted count has not reached;
+            # * a TurnEnd -- the ONLY boundary a local-tool-only (or
+            #   prose-only) Nth group has -- fires while the episode is still
+            #   LIVE (``end_requested is None``): a completed terminal turn
+            #   has nothing left to stop.
             if (
                 not budget_stop_sent
                 and handle is not None
-                and isinstance(event, ToolExecutionEndEvent)
-                and event.tool_name == declaration.tool_name
-                and bridge.steps >= config.max_steps
+                and (
+                    (
+                        isinstance(event, ToolExecutionEndEvent)
+                        and event.tool_name == declaration.tool_name
+                        and (
+                            bridge.steps >= config.max_steps
+                            or bridge.attempted_groups >= config.max_steps
+                        )
+                    )
+                    or (
+                        isinstance(event, TurnEndEvent)
+                        and bridge.end_requested is None
+                        and bridge.attempted_groups >= config.max_steps
+                    )
+                )
             ):
                 budget_stop_sent = True
                 record.write(
                     "budget_stop",
-                    {"steps": bridge.steps, "surface": declaration.tool_name},
+                    {
+                        "steps": bridge.steps,
+                        "attempted_groups": bridge.attempted_groups,
+                        "surface": declaration.tool_name,
+                    },
                 )
                 handle.session.request_graceful_cancel("episode step budget reached")
 
@@ -2632,6 +2857,7 @@ async def run_session_episode(
             record_root=record_root,
             score=score,
             steps=steps,
+            attempted_groups=bridge.attempted_groups,
             terminal_reason=terminal_reason,
             diagnostic=diagnostic,
             record_incomplete=record_failure is not None,
@@ -3344,6 +3570,7 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "record_root": str(outcome.record_root) if outcome.record_root else None,
         "score": score_payload,
         "steps": outcome.steps,
+        "attempted_groups": outcome.attempted_groups,
         "terminal_reason": outcome.terminal_reason,
         "diagnostic": outcome.diagnostic,
         "rescue_required": outcome.rescue_required,
