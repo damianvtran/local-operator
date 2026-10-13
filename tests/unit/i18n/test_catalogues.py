@@ -51,6 +51,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.slash",
+        "wire.aida_cadence",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -61,6 +62,11 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.exec") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
+    # The Aida cadence interval row is a small English-only addition carried in
+    # its own `wire.*` namespace so already-audited `wire.settings` locale
+    # hashes stay valid; pinned populated here for the same reason the other
+    # populated namespaces are.
+    assert catalogues.load_catalogue("en", "wire.aida_cadence") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 

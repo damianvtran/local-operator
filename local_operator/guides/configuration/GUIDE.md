@@ -164,6 +164,7 @@ In the TUI, `/failovers` prints the live cascade and which provider is serving.
 
 `values` in `config.yml` accepts these current groups:
 
+- `aida.cadence`: `interval_hours` (`0`, whole number 0–168) selects intrinsic check-in timing. Zero/unset keeps daily local `at` (`08:30`); positive values use elapsed hours (set `4` for every four hours), ignoring `at`. The interval anchor survives restarts; missed ticks catch up once, then return to the elapsed grid. A mode switch preserves an already-owed check-in. `paused` still suppresses cadence, and resume skips hold-suppressed ticks to the next future grid point. All keys are in the shared live `/settings` registry; see the Aida README for persistence/ownership semantics.
 - `hosting`, `model_name`: global model defaults
 - `auto_save_conversation`: legacy conversation persistence switch
 - `compaction`: `enabled`, `strategy`, `reserve_tokens`, `keep_recent_tokens`, `threshold_percent`, `threshold_tokens`, `auto_continue`, `mid_turn_enabled`. A pass fires when the context passes `min(threshold_percent * context_window, threshold_tokens)` — the smaller of the two, defaults `0.80` (80% of the window; `80` is accepted and means the same) and `400000` tokens. On a 1M-token model that resolves to 400k; on a 200k model to 160k. Lower either knob to compact earlier; the legacy `max_threshold_tokens` key is read as `threshold_tokens` with a rename warning.

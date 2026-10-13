@@ -1,0 +1,4 @@
+{
+  "wire.aida_cadence.interval_hours.label": "Check-in interval (hours)",
+  "wire.aida_cadence.interval_hours.help": "0 keeps the daily local check-in time. 1–168 uses elapsed hours; 4 checks in every four hours. Changes preserve an already-owed check-in."
+}
