@@ -313,3 +313,197 @@ def test_the_anchor_write_is_single_flight(tmp_path, monkeypatch):
 
     assert len(scans) == 1, f"the scan ran {len(scans)} times"
     assert results == [False, False], "no sidecar belongs on this journal"
+
+
+# ---------------------------------------------------------------------------
+# The replay preheat: spawn-free, cache-reusing, single-flighted, guarded.
+# ---------------------------------------------------------------------------
+
+
+async def replay_ready_journal(root: Path, session_id: str, *, mtime: float, rows: int = 4) -> None:
+    """A journal that materializes a REAL replay (via the real suffix read).
+
+    Written through ``Transcript`` so the rows carry the fields the suffix reader
+    and ``replay_entries`` expect — a hand-written message line would parse but
+    would not exercise the same path the preheat shares with a reader.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    transcript = Transcript(directory, defer_materialise=False)
+    for index in range(rows):
+        await transcript.append_message(
+            Message(role="user", content=[TextContent(text=f"turn {index}")])
+        )
+    os.utime(directory / "transcript.jsonl", (mtime, mtime))
+
+
+@pytest.mark.asyncio
+async def test_the_startup_preheat_materializes_a_replay_the_next_open_hits(tmp_path):
+    """The point of the pass: the newest journals are cached so an open is a HIT.
+
+    Asserted at the SEAM both sides share — the replay cache and the key a cold
+    open builds — rather than by inspecting the preheat's own bookkeeping, so a
+    preheat that warmed the wrong key would fail this.
+    """
+    from local_operator.session import replay_cache
+
+    root = tmp_path
+    journal(root, "older", mtime=1_000.0)
+    await replay_ready_journal(root, "newest", mtime=2_000.0)
+    replay_cache.replay_cache().clear()
+
+    # THE SELECTION, first: the newest uncached journal is a candidate, and it is
+    # asked BEFORE the pass so the answer is about the empty cache this start has.
+    assert "newest" in prewarm.sessions_needing_replay(root)
+
+    started = await prewarm.warm_replay_cache(root)
+
+    assert started >= 1
+    key = prewarm._cold_replay_key(root / "sessions" / "newest")
+    assert key is not None
+    assert replay_cache.cached_replay(key) is not None, "the newest journal was not materialized"
+    # And the pass is IDEMPOTENT on the cache it just filled: a second start finds
+    # nothing to do, which is what keeps an already-warm process from re-parsing.
+    assert "newest" not in prewarm.sessions_needing_replay(root)
+
+
+@pytest.mark.asyncio
+async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
+    """The read is durable rows, so a preheat at core start must not spawn a runtime.
+
+    A REAL NEGATIVE CONTROL, not a description. The spawn seam is guarded at the
+    TWO places every runtime creation goes through — ``launch._spawn_runtime``
+    (the subprocess) and ``SessionOwner.engage`` (the dial that leads to it) — and
+    both are replaced with one that fails the test. The assertions then prove the
+    control is ARMED and the preheat actually ran:
+
+    * the patch is live (calling the replaced seam raises), so a preheat that
+      reached it would error here rather than pass silently;
+    * the preheat materialized a real replay against it.
+
+    Why these two and not the facade's own ``warm_runtime``/``_ensure_bound``: the
+    failure mode this guards is a preheat that reaches a runtime by some path the
+    test did not anticipate, so the control belongs on the seam that cannot be
+    bypassed — the fork itself, and the owner dial that leads to it.
+    """
+    from local_operator.session import replay_cache
+    from local_operator.session.owner import LocalOwner
+    from local_operator.session.runtime import launch
+
+    spawned = {"called": False}
+
+    def forbid_spawn(*_args, **_kwargs):
+        spawned["called"] = True
+        raise AssertionError("the replay preheat spawned a runtime process")
+
+    async def forbid_engage(*_args, **_kwargs):
+        spawned["called"] = True
+        raise AssertionError("the replay preheat dialled a session owner")
+
+    # The TWO seams every runtime creation goes through: the subprocess fork and the
+    # attempt to dial an owner to bind a runtime. ``LocalOwner`` is the CONCRETE
+    # class ``owner_for`` defaults to, so patching its ``engage`` catches a stray dial
+    # (`SessionOwner` is only the Protocol and a patch there would never fire).
+    monkeypatch.setattr(launch, "_spawn_runtime", forbid_spawn)
+    monkeypatch.setattr(LocalOwner, "engage", forbid_engage)
+
+    # ARMED: the control really is the live seam, so it cannot pass vacuously.
+    with pytest.raises(AssertionError):
+        forbid_spawn()
+    with pytest.raises(AssertionError):
+        await forbid_engage()
+
+    root = tmp_path
+    await replay_ready_journal(root, "newest", mtime=1_000.0)
+    replay_cache.replay_cache().clear()
+
+    assert await prewarm.warm_replay_cache(root) >= 1
+    assert spawned["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_replay_preheat_is_skipped_under_the_disk_guard(tmp_path, monkeypatch):
+    """The replay pass reuses the SAME guard the index pass uses, before any work."""
+    from local_operator.session import replay_cache
+
+    root = tmp_path
+    await replay_ready_journal(root, "newest", mtime=1_000.0)
+    replay_cache.replay_cache().clear()
+    monkeypatch.setattr(
+        prewarm, "free_bytes", lambda _root=None: prewarm.PREWARM_MIN_FREE_BYTES - 1
+    )
+
+    assert await prewarm.warm_replay_cache(root) == 0
+    key = prewarm._cold_replay_key(root / "sessions" / "newest")
+    assert replay_cache.cached_replay(key) is None
+
+
+@pytest.mark.asyncio
+async def test_the_replay_preheat_counts_only_entries_the_cache_holds(tmp_path, monkeypatch):
+    """An over-budget replay is REFUSED, so it must not be counted as materialized.
+
+    ``publish_replay`` returns an over-budget value with ``retained == 0`` and
+    stores nothing, so the preheat's number must follow the CACHE, not the read:
+    counting the refusal would report a warm cache that is empty, on exactly the
+    large journals the figure is watched for.
+    """
+    from local_operator.session import replay_cache
+
+    root = tmp_path
+    await replay_ready_journal(root, "big", mtime=1_000.0)
+    replay_cache.replay_cache().clear()
+
+    # Route the preheat's builder through the bound's REAL refusal: publish with a
+    # zero byte budget, so ``retained_bytes`` returns ``None`` and the entry is
+    # handed back UNCACHED — the exact shape the bound produces on a real oversize
+    # journal, without needing an 8-MiB fixture.
+    monkeypatch.setattr(replay_cache, "REPLAY_CACHE_BYTES", 0, raising=False)
+    assert await prewarm.warm_replay_cache(root) == 0
+    assert replay_cache.replay_cache().entry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_reader_joining_an_in_flight_preheat_does_not_parse_twice(tmp_path, monkeypatch):
+    """ONE read for a preheat and a reader that race — the reader JOINS.
+
+    The preheat publishes through ``load_cold_replay``, the reader's own
+    single-flight, so a user who opens the session mid-preheat shares that task
+    instead of paying a second parse. Counted at the ONE place a parse can happen
+    (``build_cold_replay``), with the read held open long enough for the reader to
+    arrive.
+    """
+    from local_operator.session import replay_cache
+
+    root = tmp_path
+    await replay_ready_journal(root, "s1", mtime=1_000.0)
+    replay_cache.replay_cache().clear()
+
+    builds = {"count": 0}
+    real_build = replay_cache.build_cold_replay
+
+    def counted(directory, **kwargs):  # noqa: ANN001, ANN003
+        builds["count"] += 1
+        time.sleep(0.2)  # hold the leader open so the reader can join
+        return real_build(directory, **kwargs)
+
+    monkeypatch.setattr(prewarm, "build_cold_replay", counted)
+
+    preheat = asyncio.create_task(prewarm.warm_replay_cache(root, limit=1))
+    await asyncio.sleep(0.05)  # let the preheat become the leader
+    key = prewarm._cold_replay_key(root / "sessions" / "s1")
+
+    async def open_read():
+        return await replay_cache.load_cold_replay(
+            key,
+            lambda: asyncio.to_thread(
+                counted, root / "sessions" / "s1",
+                key=key, want_checkpoint=True, through_id=None, strict_cut=False,
+            ),
+        )
+
+    await asyncio.gather(preheat, open_read())
+    assert builds["count"] == 1, f"the journal was parsed {builds['count']} times"
+    assert replay_cache.cached_replay(key) is not None

@@ -130,9 +130,9 @@ from local_operator.session.protocol import (
 from local_operator.session.replay_cache import (
     ColdReplay,
     ReplayKey,
+    build_cold_replay,
     cached_replay,
     load_cold_replay,
-    publish_replay,
     replay_key,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
@@ -146,15 +146,11 @@ from local_operator.session.transcript import (
     ATTACHMENT_KEY,
     ATTACHMENT_MISSING,
     Transcript,
-    read_replay_suffix,
-    replay_entries,
-    usages_since_newest_shrink,
 )
 from local_operator.session.usage_seed import (
     denominator_window,
     reading_identity,
     reading_window,
-    seed_reported_usage,
 )
 from local_operator.session_lease import SessionLeaseHeldError
 
@@ -6252,104 +6248,22 @@ class AttachedSession:
         through_id: str | None,
         strict_cut: bool,
     ) -> "ColdReplay":
-        """One cold parse of the journal, published under its file version.
+        """One cold parse of THIS session's journal, off the loop.
 
-        WORKER-THREAD ONLY (the caller wraps it in ``asyncio.to_thread``), and
-        the single place a cold read is built, so the cached and uncached paths
-        cannot drift: the cache stores exactly what this returns.
+        A THIN DELEGATION, and the shape is the point: the read itself lives in
+        ``replay_cache.build_cold_replay`` because the startup preheat's
+        materialization reaches the SAME code, so the cached and uncached paths
+        cannot drift and "the cached bytes are exactly what this returns" is a
+        property of one function rather than a promise kept in step across two
+        files. WORKER-THREAD ONLY (the caller wraps it in ``asyncio.to_thread``).
         """
-        directory = self._config_dir / "sessions" / self._session_id
-        checkpoint_types = (FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()
-        opportunistic = (SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()
-        # NO SECOND STAT (review round 1, F5): the key was taken by the caller
-        # before this read was scheduled, and taking it again here would only
-        # measure a different moment. What matters is the OTHER end of the read —
-        # see the re-check before publishing below.
-        suffix = read_replay_suffix(
-            directory,
-            through_id=through_id,
-            # TWO types out of ONE pass, and the distinction between the two
-            # parameters is load-bearing (review R1-2): the checkpoint is
-            # REQUIRED (the stop condition may wait for it), the spend record
-            # is OPPORTUNISTIC — a pre-ledger journal legitimately has none,
-            # and requiring it made this read the whole file on every cold
-            # open of exactly the sessions that have a checkpoint.
-            checkpoint_types=checkpoint_types,
-            opportunistic_types=opportunistic,
-        )
-        cut = through_id
-        if cut is not None and not suffix.through_present and not strict_cut:
-            # Older owners used best-effort cursors; preserve that fallback
-            # only for legacy full replay, never the negotiated window cut.
-            # ``through_present`` is false only after the reader reached
-            # the file START without meeting the cursor, so this is the
-            # same "id is not in the journal" the whole-file parse saw.
-            cut = None
-        # The accounting fallback rides the SAME read, from the rows already in
-        # hand: the suffix reader stops only once the newest shrink and its kept
-        # window are buffered, so every post-shrink message row — and therefore
-        # every still-valid usage receipt — is in ``suffix.entries``. One parse,
-        # one pass, no extra I/O on a file that reaches 103 MB. See
-        # ``_seed_cold_usage`` for what the reading is used for and why the
-        # checkpoint still wins.
-        #
-        # NOT seeded when a cursor CUTS this read. The cut discards rows above
-        # the cursor from the replay below (the reader even forgets a compaction
-        # met above it), so a receipt from those rows describes a window this
-        # viewer is not showing — and a second implementation of the cut rule
-        # here is exactly the second-boundary defect the shared scan exists to
-        # prevent. Cold passes no cursor today, so this is the correctness of
-        # the shape: an uncut read seeds, a bounded one prefers "no reading"
-        # to a reading from outside the window.
-        seed_usage = (
-            seed_reported_usage(usages_since_newest_shrink(suffix.entries))
-            if want_checkpoint and cut is None
-            else None
-        )
-        # Resolve externalized media against the store that OWNED this journal
-        # (``<config>/attachments``), derived from the session directory rather
-        # than from this reader's environment — the sidebar's saved-preview
-        # reader and this cold replay both know the config dir that owns the
-        # transcript, and only the co-located root is the writer's root by
-        # construction. The obvious-looking alternative, a per-session store at
-        # ``<config>/sessions/<id>``, was the bug (#694): NOTHING ever writes
-        # there, so every digest resolved to None and a live, on-disk
-        # screenshot replayed as "image unavailable — no longer in the
-        # transcript". ``store_for_transcript_dir`` owns that rule for both
-        # readers.
-        messages = replay_entries(
-            suffix.entries,
-            store_for_transcript_dir(directory),
-            through_id=cut,
-        )
-        values = {
-            "checkpoint": suffix.checkpoint,
-            "checkpoints": suffix.checkpoints,
-            "order": suffix.checkpoint_order,
-            "seed_usage": seed_usage,
-            "bytes_read": suffix.bytes_read,
-        }
-        if key is None:
-            return ColdReplay(messages=tuple(messages), retained=0, **values)
-        # RE-STAT AFTER THE READ, and publish only for the version still on disk.
-        # An append that lands mid-read leaves this answer describing the journal
-        # as it was when the read STARTED, which is the version ``key`` names — but
-        # ``_write_entries``' rollback (``os.truncate`` + a restored mtime for a
-        # bookkeeping batch) can bring that exact ``(ino, size, mtime_ns)`` back
-        # with different bytes, so an entry stored for it could be served over a
-        # journal it does not describe. One stat closes that: if the file moved on,
-        # the caller still gets this answer and nothing is cached under a key that
-        # no longer names it.
-        fresh = replay_key(
-            directory,
+        return build_cold_replay(
+            self._config_dir / "sessions" / self._session_id,
+            key=key,
+            want_checkpoint=want_checkpoint,
             through_id=through_id,
             strict_cut=strict_cut,
-            checkpoint_types=checkpoint_types,
-            opportunistic_types=opportunistic,
         )
-        if fresh != key:
-            return ColdReplay(messages=tuple(messages), retained=0, **values)
-        return publish_replay(key, messages=messages, **values)
 
     def _bind_history(
         self,
