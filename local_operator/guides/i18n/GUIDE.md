@@ -55,3 +55,7 @@ picker is requested, not shipped. The HOWTO distinguishes current source, the
 already-cut v0.70.11 tag, measured PyPI and installed 0.70.10; do not conflate them.
 Release invariants run unconditionally at the exact event SHA in `publish.yml`;
 follow the combined-target checks in AGENTS.md, not a narrow docs/version CI green.
+At 2026-10-13 00:29 UTC, 0.70.11 is published (PyPI 200/three files; publisher's
+five jobs successful), while the separately rechecked installed CLI is still
+0.70.10. See the HOWTO's named publication supersession; the General-language
+picker remains a next UI feature request, not shipped.
