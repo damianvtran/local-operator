@@ -2102,6 +2102,8 @@ class RuntimeServer:
         #: so the boot snapshot cannot drift toward the disk value it is
         #: compared against.
         self._boot_build = build
+        from local_operator.session.model_admission import native_chat_provider_ids
+
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -2257,6 +2259,7 @@ class RuntimeServer:
             # The heartbeat republishes this same dataclass, so the stamp
             # rides every rewrite without a second code path.
             version=build.version,
+            native_provider_ids=native_chat_provider_ids(),
             source_ref=build.source_ref,
             # The tree THIS runtime imports from. Under the generation layout a
             # process belongs to exactly one generation and the record is where
