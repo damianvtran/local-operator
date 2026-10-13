@@ -2,6 +2,7 @@
  "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs.",
  "durations": {
   "tests/unit/aida/test_aida_bootstrap.py": 1.0,
+  "tests/unit/aida/test_aida_interval.py": 1.098,
   "tests/unit/aida/test_aida_onboarding.py": 1.0,
   "tests/unit/aida/test_aida_proactive.py": 5.614,
   "tests/unit/aida/test_aida_session_hooks.py": 1.0,
@@ -965,6 +966,7 @@
   "tests/unit/ui_console/test_backend.py": 2.037,
   "tests/unit/ui_console/test_state.py": 1.0,
   "tests/unit/wakes/test_arm.py": 2.698,
+  "tests/unit/wakes/test_cadence_origin.py": 1.0,
   "tests/unit/wakes/test_deliveries.py": 1.0,
   "tests/unit/wakes/test_display.py": 8.098,
   "tests/unit/wakes/test_install.py": 1.0,

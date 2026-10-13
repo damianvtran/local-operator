@@ -13,6 +13,8 @@ export type MessageParams = {
   "relay.shell.list.theme": undefined;
   "relay.shell.session.connecting": undefined;
   "relay.shell.session.waiting": undefined;
+  "wire.aida_cadence.interval_hours.help": undefined;
+  "wire.aida_cadence.interval_hours.label": undefined;
   "wire.errors.agents.agent_not_found": undefined;
   "wire.errors.agents.agent_not_found_id": { "agent_id": string };
   "wire.errors.agents.agent_not_found_wrapped": { "error": string };

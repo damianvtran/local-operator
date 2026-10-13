@@ -21633,7 +21633,12 @@ class Session:
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
             return schedules
 
-    async def _aida_reconcile_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+    async def _aida_reconcile_rows(
+        self,
+        schedules: list[WakeSchedule],
+        *,
+        cadence_fired: WakeSchedule | None = None,
+    ) -> list[WakeSchedule]:
         """The engine's reconcile over one schedule list, notes journaled.
 
         Called from the persist (so a fire's automatic re-arm and every wake
@@ -21655,6 +21660,7 @@ class Session:
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
                 attended=self._aida_greeting_may_land(),
+                cadence_fired=cadence_fired,
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -21664,6 +21670,10 @@ class Session:
             self._aida_pending_trigger_settle = result.settle
             return result.schedules
         except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            if cadence_fired is not None:
+                # Do not commit retirement without its successor: an accepted
+                # interval occurrence must remain retryable on engine failure.
+                raise
             logger.warning("aida: reconcile failed; leaving the list as given", exc_info=True)
             return schedules
 
@@ -22158,6 +22168,13 @@ class Session:
         # into the message (review round 2, R7); the leftover load-time fires
         # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        if getattr(self, "_aida_duty", False):
+            # Keep the original row, not the scheduler's grace-shifted copy.
+            # This is spent only when the existing catch-up take accepts it.
+            self._aida_cadence_catchup = next(
+                (m["schedule"] for m in missed if m["schedule"].id == "aida-cadence"),
+                None,
+            )
         # The swallow bookkeeping starts here: every folded row still OWES its
         # load-time fire (the pump re-armed each to now + grace), and the shim
         # must swallow each exactly once — see _deliver_wake_catchup.
@@ -22268,6 +22285,9 @@ class Session:
         # now + grace) stay covered by ``_resume_catchup_phantoms``, consumed
         # one fire at a time — so a same-batch fire arriving after this take
         # is still swallowed, while an occurrence one interval later is not.
+        if getattr(self, "_aida_duty", False) and "aida-cadence" in self._resume_catchup_ids:
+            self._aida_cadence_delivered = getattr(self, "_aida_cadence_catchup", None)
+            self._aida_cadence_catchup = None
         self._resume_catchup_ids = set()
         return message
 
@@ -22419,12 +22439,62 @@ class Session:
         # precedent), and a host that never ran ``Session.__init__`` has no
         # aida flag — absent means "not her session", which is the same answer
         # every other non-Aida caller gets.
+        cadence_fired = None
         if getattr(self, "_aida_duty", False):
-            schedules = await self._aida_reconcile_rows(schedules)
+            from local_operator.aida import proactive
+
+            accepted = getattr(self, "_aida_cadence_delivered", None)
+            previous = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+            previous_rows = (
+                previous.payload.get("details", {}).get("schedules", []) if previous else []
+            )
+            # Absence/cancel alone never spends a phase. An accepted occurrence
+            # must also match the authoritative retired arm, so an unrelated
+            # same-id replacement cannot spend an old delivery's receipt.
+            if not any(row.id == proactive.CADENCE_ID for row in schedules):
+                previous_cadence = next(
+                    (
+                        WakeSchedule.model_validate(raw)
+                        for raw in previous_rows
+                        if raw.get("id") == proactive.CADENCE_ID
+                    ),
+                    None,
+                )
+                if accepted is not None and previous_cadence is not None:
+                    if (
+                        accepted.request_id == previous_cadence.request_id
+                        and accepted.created_at == previous_cadence.created_at
+                        and (
+                            proactive.cadence_phase(accepted) is not None
+                            or proactive.policy(self._config_dir).interval_hours
+                        )
+                    ):
+                        cadence_fired = accepted
+                if (
+                    cadence_fired is None
+                    and previous_cadence is not None
+                    and proactive.cadence_phase(previous_cadence) is not None
+                ):
+                    # An unaccepted removal (including a stale same-id receipt)
+                    # cannot consume the authoritative replacement's owed phase.
+                    schedules = [*schedules, previous_cadence]
+            schedules = await self._aida_reconcile_rows(schedules, cadence_fired=cadence_fired)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+        if getattr(self, "_aida_duty", False):
+            from local_operator.aida import proactive
+
+            # The next row's origin+due is now committed atomically. The state
+            # mirror is recoverable if it fails; clear a receipt only after this
+            # append, never on a failed persist or merely on a config/event turn.
+            if cadence_fired is not None:
+                self._aida_cadence_delivered = None
+            try:
+                proactive.remember_cadence(self._config_dir, schedules)
+            except Exception:  # noqa: BLE001 — the transcript remains authority
+                logger.warning("aida: cadence mirror failed after persist", exc_info=True)
         # A persist that follows a delivery stamps `last_fired_at`. The
         # scheduler's pump delivers and THEN persists the advanced list, so
         # the flag set at delivery is still standing here; consuming it (not
@@ -23592,6 +23662,10 @@ class Session:
         )
         if getattr(self, "_aida_duty", False):
             self._stamp_aida_greeting_delivered(due)
+            if due.schedule.id == "aida-cadence":
+                # Aida-only accepted occurrence, consumed by the existing persist
+                # boundary after retirement. No generic fire/dedup behavior changes.
+                self._aida_cadence_delivered = due.schedule
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no

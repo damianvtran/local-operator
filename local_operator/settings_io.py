@@ -62,6 +62,7 @@ import yaml
 from local_operator import keymap as _keymap
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
+from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
@@ -101,8 +102,17 @@ except Exception:  # pragma: no cover - a wheel without the catalogue is broken
     _WIRE_SETTINGS_SOURCES = {}
 
 
+# A small English-only addition must not invalidate already-audited settings
+# translations. Keep the established import-time rendering path, with its own
+# namespace so carried locales retain their existing source hashes/eligibility.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+
 def _t(message: _Msg) -> str:
-    """The resolved string for a generated `wire.settings` message."""
+    """The resolved string for a generated settings message."""
     source = _WIRE_SETTINGS_SOURCES.get(message.code)
     if source is None:
         return message.code
@@ -4787,6 +4797,17 @@ SETTINGS: tuple[Setting, ...] = (
         default="08:30",
         placeholder=_t(_ws.aida_cadence_at_placeholder()),
         help=_t(_ws.aida_cadence_at_help()),
+    ),
+    Setting(
+        key="aida.cadence.interval_hours",
+        path=("aida", "cadence", "interval_hours"),
+        section="aida",
+        label=_t(_ac.interval_hours_label()),
+        kind=Kind.INT,
+        default=0,
+        minimum=0,
+        maximum=168,
+        help=_t(_ac.interval_hours_help()),
     ),
     Setting(
         key="aida.cadence.paused",
