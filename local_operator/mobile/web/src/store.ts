@@ -12,6 +12,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
 import { createWireLoader } from "./i18n/wire-cache";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -142,6 +143,25 @@ const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore re
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
 const listeners = new Set<() => void>();
+
+/* THE SPA'S OWN ENGLISH COPY, registered before any consumer renders the relay
+   (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
+   owned-copy language an ACTUAL rendered fact rather than a claim: `uiLocaleFor`
+   only returns a non-English UI locale when SOME bundle carries the WHOLE
+   English key set plus the resolved locale, so with English-only copy the SPA
+   stays EN/LTR under every backend frame — `lang`/`dir` describe the copy on
+   screen, not the backend preference (that stays on `useLanguage`). The bundle
+   is generated from the explicit owned namespaces (§ bundled.gen.ts); no wire
+   prose is bundled, so this cannot smuggle a served namespace into the client.
+   Registration runs through the ONE store channel — `registerBundle` ->
+   `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
+   document instead of creating a second locale truth. Placed AFTER the
+   listener set is declared: an init-time registration notifies that set, so
+   registering above it would emit into a `listeners` binding still in its
+   temporal dead zone and abort module evaluation. */
+for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
+	messageRuntime.registerBundle(namespace, "en", { ...messages });
+}
 
 function emit() {
 	for (const l of listeners) l();
