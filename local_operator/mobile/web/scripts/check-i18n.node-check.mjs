@@ -55,6 +55,35 @@ test("legacy exact match passes; outside-scope source is advisory, not exempted 
 	try { writeFileSync(join(rig.directory, "src/advisory.ts"), 'const message = "Unextracted app copy";'); const result = rig.run(); assert.equal(result.status, 0); assert.match(result.stdout, /1 advisory/); }
 	finally { rmSync(rig.directory, { recursive: true, force: true }); }
 });
+test("a NEW hardcoded string in a touched relay.shell path fails the actual mandatory gate", () => {
+	// C activates the two shell screens it extracts from. Their residual
+	// (unextracted) copy is frozen as exact legacy fingerprints, so the gate
+	// must now refuse a NEW literal in either — the mutation is the future
+	// extraction slice's own regression, run through the SAME mandatory entry
+	// point the build/check/test scripts use.
+	for (const scope of ["src/screens/session-list.tsx", "src/screens/session-view.tsx"]) {
+		const baselineSource = readFileSync(join(root, scope), "utf8");
+		const mutatedSource = `${baselineSource}\nconst message = "New hardcoded shell copy";\n`;
+		const rig = fixture(mutatedSource, baselineSource, scope);
+		try {
+			const result = rig.run();
+			assert.equal(result.status, 1, `${scope} must refuse a new literal`);
+			assert.match(result.stderr, /New hardcoded shell copy/);
+		} finally { rmSync(rig.directory, { recursive: true, force: true }); }
+	}
+});
+test("the activated relay.shell screens are exactly the reviewed scope", () => {
+	assert(ENFORCED.includes("src/screens/session-list.tsx"));
+	assert(ENFORCED.includes("src/screens/session-view.tsx"));
+	// agent-view.tsx is a LATER namespace: activating it here would freeze copy
+	// this slice deliberately left out.
+	assert(!ENFORCED.includes("src/screens/agent-view.tsx"));
+	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
+	assert.deepEqual([...baseline.enforced].sort(), [...ENFORCED].sort());
+	for (const scope of ["src/screens/session-list.tsx", "src/screens/session-view.tsx"]) {
+		assert(Object.keys(baseline.legacy[scope] ?? {}).length > 0, `${scope} needs frozen residual fingerprints`);
+	}
+});
 test("build/check/test scripts all execute the mandatory gate", () => {
 	const scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts;
 	for (const mode of ["build", "check", "test"]) assert(scripts[mode].startsWith("node scripts/check-i18n.mjs &&"));

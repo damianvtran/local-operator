@@ -42,7 +42,12 @@ describe("retainConfigStream", () => {
 		vi.stubGlobal("navigator", { language: "ur-PK", languages: ["ur-PK"] });
 		fresh.initializeLocaleMetadata();
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0 });
+		// revision 1, not 0: the SPA's OWN English bundle (relay.shell) is
+		// registered at module init, and that is a same-locale content
+		// registration which repaints through the one store channel. The
+		// semantic claims this test exists for — no device-language inference,
+		// no fetch, English/LTR UI under an unknown backend — are unchanged.
+		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: 1 });
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});
