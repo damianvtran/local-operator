@@ -339,7 +339,7 @@ async def list_models(
                 api_key, is_oauth, account_id = await controller.listing_credential(
                     "openai", read_only=True
                 )
-                rows, _ = await asyncio.to_thread(
+                rows, status = await asyncio.to_thread(
                     available_models,
                     "openai",
                     api_key=api_key,
@@ -355,6 +355,27 @@ async def list_models(
                         id=row.id, name=row.name or row.id, description="Model listed by OpenAI"
                     )
                     info = info_from_discovered_model("openai", row.id, row, fallback)
+                    if is_oauth:
+                        # Public API limits are not the subscription's limits.
+                        # The native parser records each quoted context limit
+                        # separately; silence, including an empty/offline static
+                        # fallback, must not resurrect the registry's budget.
+                        native_limits = status not in {"static", "unauthenticated"} and (
+                            row.default_context_window or row.max_context_window
+                        )
+                        info = info.model_copy(
+                            update={
+                                "context_window": (
+                                    (row.context_window or None) if native_limits else None
+                                ),
+                                "default_context_window": (
+                                    row.default_context_window if native_limits else None
+                                ),
+                                "max_context_window": (
+                                    row.max_context_window if native_limits else None
+                                ),
+                            }
+                        )
                     models.append(
                         ModelEntry(
                             id=row.id,

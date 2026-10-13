@@ -114,6 +114,33 @@ def test_bundled_metadata_remains_the_fallback_not_a_new_price_claim(native_cata
     assert row["info"]["supports_images"] is False
 
 
+@pytest.mark.parametrize(
+    "native_limits,expected",
+    [
+        ({}, (None, None, None)),
+        (
+            {"context_window": 272_000, "max_context_window": 1_050_000},
+            (1_050_000, 272_000, 1_050_000),
+        ),
+    ],
+)
+def test_native_bundled_limits_come_only_from_native_document(
+    native_catalogue, native_limits, expected
+):
+    state = native_catalogue
+    model_id = "gpt-6-astra"
+    state.body = {"models": [{"slug": model_id, **native_limits}]}
+    row = listed(state)[0]
+    fields = ("context_window", "default_context_window", "max_context_window")
+    assert tuple(row["info"][field] for field in fields) == expected
+    # The public API negative control keeps its independently known context,
+    # whether the preceding subscription quoted one or explicitly stayed silent.
+    state.store.get_oauth_access.return_value = OAuthAccess("fixture", 2, kind="api_key")
+    state.body = {"data": [{"id": model_id}]}
+    api_row = next(row for row in listed(state) if row["id"] == model_id)
+    assert api_row["info"]["context_window"] == openai_models[model_id].context_window
+
+
 def test_api_and_oauth_inventory_never_share_a_cache(native_catalogue):
     state = native_catalogue
     assert [row["id"] for row in listed(state)] == ["gpt-6.1-sol"]
@@ -169,12 +196,25 @@ def test_empty_invalid_or_failed_native_listing_preserves_existing_fallback(
     ids = {row["id"] for row in listed(state)}
     assert ids == set(openai_models)
     assert "synthetic-never-listed" not in ids
+    # Static suggestions survive an outage, but their API limits must not be
+    # presented as the account's native subscription budget.
+    assert all(
+        row["info"][field] is None
+        for row in listed(state)
+        for field in ("context_window", "default_context_window", "max_context_window")
+    )
 
 
 def test_missing_oauth_account_does_not_send_token_to_public_api(native_catalogue):
     state = native_catalogue
     state.store.get_oauth_access.return_value = OAuthAccess("fixture", 1)
-    assert {row["id"] for row in listed(state)} == set(openai_models)
+    rows = listed(state)
+    assert {row["id"] for row in rows} == set(openai_models)
+    assert all(
+        row["info"][field] is None
+        for row in rows
+        for field in ("context_window", "default_context_window", "max_context_window")
+    )
     assert not state.requests
 
 
