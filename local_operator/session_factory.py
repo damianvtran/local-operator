@@ -4459,7 +4459,12 @@ async def _prepare(
     # this module's annotations name it.
     from local_operator.network.credentials import build_auth_store
 
-    auth_store = build_auth_store(config_manager.config_dir)
+    # Metadata and sealed provider keys must share the selected root. The
+    # factory's legacy default DB follows ambient HOME, not config_dir; relying
+    # on that default makes a desktop login invisible to this session.
+    auth_store = build_auth_store(
+        config_manager.config_dir, db_path=config_manager.config_dir / "auth.db"
+    )
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.

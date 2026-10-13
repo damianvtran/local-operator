@@ -278,6 +278,9 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: ``input_modalities`` is read for images, not audio, so ``openai``'s stamp
 #: does not move).
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
+    # Native Muse detail facts were omitted by its v1 writer; only this
+    # transport needs a refetch, not every provider's healthy cached listing.
+    "meta-muse": 2,
     "anthropic": 2,
     # Version 1 could normalize malformed nonempty /models data to []. The
     # original payload is gone, so it cannot safely authorize an empty native
@@ -468,6 +471,11 @@ class DiscoveredModel:
     #: by ``shift+tab``, so seeding it would strand the band on a level the
     #: cycle can never return to.
     reasoning_default_effort: str | None = None
+    #: Native facts are optional: unknown detail is not a fabricated capability.
+    family: str | None = None
+    release_date: str | None = None
+    modalities: dict[str, list[str]] | None = None
+    variants: dict[str, dict[str, object]] | None = None
     #: The time-of-use schedule NAME the row's prices are quoted at
     #: (``ModelInfo.time_of_use``), inherited from the registry twin this row was
     #: merged with and never stated by a listing — no provider publishes its
@@ -1250,7 +1258,16 @@ def _row_from_meta_muse_entry(entry: Mapping[str, object]) -> DiscoveredModel | 
     inputs = modalities.get("input")
     return dataclasses.replace(
         row,
-        name=model_id.removeprefix("muse-").replace("-", " ").title(),
+        name=_first_str(metadata.get("name"), entry.get("name"))
+        or model_id.removeprefix("muse-").replace("-", " ").title(),
+        family=_first_str(metadata.get("family")) or None,
+        release_date=_first_str(metadata.get("release_date")) or None,
+        modalities={
+            key: [item for item in value if isinstance(item, str)]
+            for key, value in modalities.items()
+            if key in ("input", "output") and isinstance(value, list)
+        },
+        variants={level: dict(_mapping(variants[level])) for level in efforts},
         context_window=_positive_int(limits.get("context")),
         max_tokens=_positive_int(limits.get("output")),
         supports_images=isinstance(inputs, list) and "image" in inputs,
@@ -1984,6 +2001,20 @@ def _rows_from_payload(
             DiscoveredModel(
                 id=model_id,
                 name=_first_str(entry.get("name")),
+                family=_first_str(entry.get("family")) or None,
+                release_date=_first_str(entry.get("release_date")) or None,
+                modalities={
+                    key: [item for item in value if isinstance(item, str)]
+                    for key, value in _mapping(entry.get("modalities")).items()
+                    if key in ("input", "output") and isinstance(value, list)
+                }
+                or None,
+                variants={
+                    level: dict(_mapping(value))
+                    for level, value in _mapping(entry.get("variants")).items()
+                    if level in ("minimal", "low", "medium", "high", "xhigh", "max")
+                }
+                or None,
                 authoritative_fields=tuple(
                     field
                     for field in (entry.get("authoritative_fields") or [])
@@ -1996,6 +2027,12 @@ def _rows_from_payload(
                         "cache_read_price",
                         "cache_write_price",
                         "supports_prompt_cache",
+                        "supports_images",
+                        "supports_audio_input",
+                        "supports_tools",
+                        "reasoning",
+                        "reasoning_efforts",
+                        "reasoning_default_effort",
                     }
                 ),
                 context_window=_positive_int(entry.get("context_window")),
@@ -2083,6 +2120,7 @@ def _listing_replaces_static(
 def cached_available_models(
     provider_id: str,
     *,
+    account_id: str | None = None,
     cache_dir: Path | None = None,
     base_url: str | None = None,
     values: Mapping[str, Any] | None = None,
@@ -2111,7 +2149,13 @@ def cached_available_models(
         return merge_models(rows, None), "static"
 
     storage_id = credential_provider_id(definition.id)
-    key = _cache_key(storage_id)
+    # First paint stays network/credential-value free. The caller supplies ONLY
+    # the selected account's metadata scope; never sweep another account's files.
+    key = _cache_key(
+        storage_id,
+        account_scoped=bool(storage_id == "meta-muse" and account_id),
+        account_id=account_id,
+    )
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
 

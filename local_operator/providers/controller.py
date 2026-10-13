@@ -200,6 +200,18 @@ class CatalogueEntry:
     #: the route by other means renders this; one that cannot keeps using
     #: ``label``. Nothing about ``label`` or the ranking changes.
     listing_name: str = dataclasses.field(default="", kw_only=True)
+    #: Optional native details. Zero/None means unknown, never an inferred plan.
+    max_output_tokens: int = dataclasses.field(default=0, kw_only=True)
+    supports_tools: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_images: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_audio_input: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_efforts: tuple[str, ...] | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_default_effort: str | None = dataclasses.field(default=None, kw_only=True)
+    family: str | None = dataclasses.field(default=None, kw_only=True)
+    release_date: str | None = dataclasses.field(default=None, kw_only=True)
+    modalities: dict[str, list[str]] | None = dataclasses.field(default=None, kw_only=True)
+    variants: dict[str, dict[str, object]] | None = dataclasses.field(default=None, kw_only=True)
     #: This provider RESELLS the model rather than serving it. The picker ranks
     #: the direct route first when the same model is reachable both ways.
     aggregated: bool = False
@@ -462,6 +474,7 @@ class ProviderController:
         # lop session on this machine: several terminals run at once, and one
         # process's refresh is every process's answer.
         self._usage_cache = usage_cache
+        self._meta_catalogue_scope: str | None = None
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -2274,8 +2287,35 @@ class ProviderController:
                 from local_operator.providers.local import config_values
 
                 values = config_values()
+            meta_scope = None
+            if definition.id == "meta-muse":
+                # A first frame cannot decrypt/rotate credentials or scan every
+                # account document. Use explicit metadata identity only when it
+                # is unambiguous; the live pass records its actual selected scope.
+                meta_scope = getattr(self, "_meta_catalogue_scope", None)
+                store = getattr(self, "auth_store", None)
+                if store is not None:
+                    rows = store.list_credentials("meta-muse")
+                    scopes = {
+                        str(
+                            row.data.get("account_id")
+                            or row.data.get("org_id")
+                            or row.data.get("email")
+                            or ""
+                        )
+                        for row in rows
+                        if row.credential_type == "oauth" and row.disabled_cause is None
+                    }
+                    scopes.discard("")
+                    if len(scopes) == 1:
+                        meta_scope = next(iter(scopes))
+                    elif meta_scope not in scopes:
+                        meta_scope = None
             models, _status = cached_available_models(
-                definition.id, cache_dir=cache_dir, values=values
+                definition.id,
+                cache_dir=cache_dir,
+                values=values,
+                **({"account_id": meta_scope} if definition.id == "meta-muse" else {}),
             )
             listed.append((definition, models))
         priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
@@ -2294,6 +2334,17 @@ class ProviderController:
                         context_window=max(0, model.context_window),
                         default_context_window=model.default_context_window,
                         max_context_window=model.max_context_window,
+                        max_output_tokens=model.max_tokens,
+                        supports_tools=model.supports_tools,
+                        supports_images=model.supports_images,
+                        supports_audio_input=model.supports_audio_input,
+                        reasoning=model.reasoning,
+                        reasoning_efforts=model.reasoning_efforts,
+                        reasoning_default_effort=model.reasoning_default_effort,
+                        family=model.family,
+                        release_date=model.release_date,
+                        modalities=model.modalities,
+                        variants=model.variants,
                         input_price=_price(model.input_price, definition, free=model.free),
                         output_price=_price(model.output_price, definition, free=model.free),
                         connected=connected,
@@ -2643,7 +2694,12 @@ class ProviderController:
                 "is_oauth": is_oauth,
                 "account_id": account_id,
             }
-            if ttl_s is not None:
+            if definition.id == "meta-muse":
+                # A user-open/explicit live refresh must see newly eligible IDs
+                # without waiting 15 minutes. Existing leases/backoff/stale
+                # fallback still bound failures; first paint stays offline.
+                kwargs["ttl_s"] = 0
+            elif ttl_s is not None:
                 kwargs["ttl_s"] = ttl_s
             if endpoint is not None:
                 kwargs["base_url"] = endpoint
@@ -2651,6 +2707,14 @@ class ProviderController:
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            if definition.id == "meta-muse":
+                import hashlib
+
+                self._meta_catalogue_scope = (
+                    account_id or "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
+                    if is_oauth and api_key
+                    else None
+                )
             if definition.id == "openai" and is_oauth:
                 # Price enrichment may know the API model, but not this route's
                 # limits. Preserve even an unknown OAuth window through it.
@@ -2691,6 +2755,17 @@ class ProviderController:
                         context_window=max(0, model.context_window),
                         default_context_window=model.default_context_window,
                         max_context_window=model.max_context_window,
+                        max_output_tokens=model.max_tokens,
+                        supports_tools=model.supports_tools,
+                        supports_images=model.supports_images,
+                        supports_audio_input=model.supports_audio_input,
+                        reasoning=model.reasoning,
+                        reasoning_efforts=model.reasoning_efforts,
+                        reasoning_default_effort=model.reasoning_default_effort,
+                        family=model.family,
+                        release_date=model.release_date,
+                        modalities=model.modalities,
+                        variants=model.variants,
                         # ``free`` is consumed HERE and goes no further: a
                         # stated zero survives ``_price`` as ``0.0``, which is
                         # already the entry's way of saying free (an unknown is
