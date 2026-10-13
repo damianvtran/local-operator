@@ -1209,6 +1209,39 @@ def supplement_event_frame(frame: Mapping[str, Any]) -> bool:
     return isinstance(payload, Mapping) and payload.get("type") == SUPPLEMENT_EVENT_TYPE
 
 
+#: The complete peer-source family a recovery history delta may carry. Named
+#: ONCE so the live gate, the replay projection and the tests all speak of the
+#: same keys. ``journal_generation`` is ALSO a wake payload's legitimate key,
+#: which is why both helpers are scoped to ``history_delta`` payloads and never
+#: key-match across events.
+HISTORY_DELTA_FAMILY_KEYS = ("journal_generation", "journal_ordinals", "entry_times")
+
+
+def history_delta_family_frame(frame: Mapping[str, Any]) -> bool:
+    """Whether one bridge frame is a history delta carrying any family key."""
+    if frame.get("type") != "event":
+        return False
+    payload = frame.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("type") != "history_delta":
+        return False
+    return any(key in payload for key in HISTORY_DELTA_FAMILY_KEYS)
+
+
+def strip_history_delta_family(frame: dict[str, Any]) -> dict[str, Any]:
+    """The same frame with the family keys removed FROM THE PAYLOAD ONLY.
+
+    A non-declaring subscriber's build predates the negotiation and must not
+    meet the family at all; the pre-negotiation frame is exactly this frame
+    without the keys, so the stripped variant IS the legacy bytes.
+    """
+    payload = {
+        key: value
+        for key, value in frame["payload"].items()
+        if key not in HISTORY_DELTA_FAMILY_KEYS
+    }
+    return {**frame, "payload": payload}
+
+
 @dataclass(eq=False)
 class DesktopSubscription:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -2383,6 +2416,13 @@ class DesktopSessionBridge:
             ):
                 _, removed = self.replay.popleft()
                 self.replay_bytes -= removed
+        # A NON-DECLARING SUBSCRIBER MUST NOT MEET THE COMPLETE-SOURCE FAMILY
+        # (the recovery delta's generation/ordinals/entry-times keys), and ITS
+        # frame is the family's absence — the bytes this bridge produced before
+        # the family existed. Built at most ONCE per frame for the whole
+        # fan-out, and only a frame that actually carries a key pays for it.
+        stripped_frame: dict[str, Any] | None = None
+        stripped_size = 0
         for sub in self.subscribers.values():
             if sub.overflow or sub.dwelling:
                 continue
@@ -2411,7 +2451,13 @@ class DesktopSessionBridge:
                 and frame.get("payload", {}).get("peer_source") is True
             ):
                 continue
-            if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
+            wire_frame, wire_size = frame, size
+            if not sub.peer_journal_source and history_delta_family_frame(frame):
+                if stripped_frame is None:
+                    stripped_frame = strip_history_delta_family(frame)
+                    stripped_size = len(json.dumps(stripped_frame, separators=(",", ":")).encode())
+                wire_frame, wire_size = stripped_frame, stripped_size
+            if sub.queue.full() or sub.queued_bytes + wire_size > REPLAY_BYTES:
                 if sub.opened:
                     # A READER that is behind: first try to FOLD the queued
                     # delta runs (``_compact_subscriber_queue``) -- the
@@ -2422,9 +2468,9 @@ class DesktopSessionBridge:
                     # reconnect, and revokes presence -- which is why a
                     # subscription the bridge revoked this way must never
                     # dwell (see ``events``).
-                    if self._compact_subscriber_queue(sub, size):
-                        sub.queue.put_nowait((frame, size))
-                        sub.queued_bytes += size
+                    if self._compact_subscriber_queue(sub, wire_size):
+                        sub.queue.put_nowait((wire_frame, wire_size))
+                        sub.queued_bytes += wire_size
                     else:
                         self._disconnect(sub)
                 else:
@@ -2443,11 +2489,11 @@ class DesktopSessionBridge:
                     # server disconnects, and the client's reconnect pays a fresh
                     # cold engage that publishes the next burst.
                     self._evict_oldest(sub)
-                    sub.queue.put_nowait((frame, size))
-                    sub.queued_bytes += size
+                    sub.queue.put_nowait((wire_frame, wire_size))
+                    sub.queued_bytes += wire_size
             else:
-                sub.queue.put_nowait((frame, size))
-                sub.queued_bytes += size
+                sub.queue.put_nowait((wire_frame, wire_size))
+                sub.queued_bytes += wire_size
 
     def publish_to_subscription(
         self, kind: str, payload: dict[str, Any], *, subscription_id: str
@@ -5610,7 +5656,11 @@ class DesktopSessionBridge:
             gap = epoch != self.epoch or after_seq < first - 1 or after_seq > cutoff
             replay = (
                 [
-                    f
+                    (
+                        strip_history_delta_family(f)
+                        if not sub.peer_journal_source and history_delta_family_frame(f)
+                        else f
+                    )
                     for f, _ in self.replay
                     if after_seq < f["seq"] <= cutoff
                     and (sub.supplements or not supplement_event_frame(f))

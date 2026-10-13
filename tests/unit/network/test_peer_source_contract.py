@@ -973,3 +973,153 @@ def test_route_wires_the_complete_params(tmp_path: Path, monkeypatch: pytest.Mon
             assert refused.status_code == 409, refused.text
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Commit B: the history-delta family is per-subscriber
+# ---------------------------------------------------------------------------
+
+
+def _family_delta_frame() -> dict[str, Any]:
+    """One recovery delta carrying the complete-source family, wire-shaped."""
+    return {
+        "type": "history_delta",
+        "messages": [],
+        "reset": False,
+        "journal_generation": "g-1",
+        "journal_ordinals": {"m1": 4, "m2": 5},
+        "entry_times": {"m1": 12.5},
+    }
+
+
+def test_bridge_live_strips_a_real_attached_event_frame(tmp_path: Path) -> None:
+    """The strip runs on the REAL ``_event`` boundary, not a hand-built dict.
+
+    ``DesktopSessionBridge._event`` is the one place every facade event crosses
+    into the fan-out (``event.model_dump(mode="json")`` — extras ride along);
+    driving it with the real :class:`HistoryDeltaEvent` proves the family keys
+    arrive through the actual serialization, and the non-declaring subscriber's
+    frame loses exactly those keys.
+    """
+    from local_operator.harness.types import HistoryDeltaEvent
+    from local_operator.server.utils.desktop_sessions import HISTORY_DELTA_FAMILY_KEYS
+
+    bridge, _row = _bridge(tmp_path)
+    legacy = bridge.subscribe(journal_order=True)
+    complete = bridge.subscribe(journal_order=True, peer_journal_source=True)
+    event = HistoryDeltaEvent(
+        messages=[],
+        reset=False,
+        # The extras ride exactly as ``_history_delta`` writes them (a dict
+        # unpack: pydantic's ``extra="allow"`` is invisible to the type
+        # checker, and the production path builds the map the same way).
+        **{
+            "journal_generation": "g-1",
+            "journal_ordinals": {"m1": 4},
+            "entry_times": {"m1": 12.5},
+        },
+    )
+    bridge._event(event)
+
+    def drain(sub: Any) -> list[dict[str, Any]]:
+        frames = []
+        while not sub.queue.empty():
+            frames.append(sub.queue.get_nowait()[0])
+        return frames
+
+    legacy_delta = [f for f in drain(legacy) if f["payload"].get("type") == "history_delta"]
+    complete_delta = [f for f in drain(complete) if f["payload"].get("type") == "history_delta"]
+    assert len(legacy_delta) == 1 and len(complete_delta) == 1
+    for key in HISTORY_DELTA_FAMILY_KEYS:
+        assert key not in legacy_delta[0]["payload"], key
+        assert key in complete_delta[0]["payload"], key
+
+
+def test_bridge_live_strips_the_delta_family_for_non_declaring_subscribers(
+    tmp_path: Path,
+) -> None:
+    """A legacy subscriber's history_delta frame is the family's ABSENCE.
+
+    The family is negotiated (the complete peer-source contract), so a
+    subscriber that never declared it must not meet the keys at all — asserted
+    at the FRAME level, byte-absence rather than consumer tolerance. The same
+    frame reaches a declaring subscriber intact, and a wake's own
+    ``journal_generation`` (a legitimate wake key) passes through untouched:
+    the strip is scoped to ``history_delta`` payloads, never key-matched
+    across event types.
+    """
+    from local_operator.server.utils.desktop_sessions import HISTORY_DELTA_FAMILY_KEYS
+
+    bridge, _row = _bridge(tmp_path)
+    legacy = bridge.subscribe(journal_order=True)
+    complete = bridge.subscribe(journal_order=True, peer_journal_source=True)
+    bridge.publish("event", _family_delta_frame())
+    wake = {"type": "journal_order_ready", "journal_generation": "g-1", "rows": [{"id": "m1"}]}
+    bridge.publish("event", wake)
+
+    def drain(sub: Any) -> list[dict[str, Any]]:
+        frames = []
+        while not sub.queue.empty():
+            frames.append(sub.queue.get_nowait()[0])
+        return frames
+
+    legacy_frames = drain(legacy)
+    complete_frames = drain(complete)
+    legacy_delta = [f for f in legacy_frames if f["payload"].get("type") == "history_delta"]
+    assert len(legacy_delta) == 1
+    for key in HISTORY_DELTA_FAMILY_KEYS:
+        assert key not in legacy_delta[0]["payload"], key
+    # Every other key survives: the same frame, minus the family.
+    assert legacy_delta[0]["payload"]["messages"] == []
+    assert legacy_delta[0]["payload"]["reset"] is False
+    assert legacy_delta[0]["payload"]["type"] == "history_delta"
+
+    complete_delta = [f for f in complete_frames if f["payload"].get("type") == "history_delta"]
+    assert len(complete_delta) == 1
+    for key in HISTORY_DELTA_FAMILY_KEYS:
+        assert key in complete_delta[0]["payload"], key
+
+    for frames in (legacy_frames, complete_frames):
+        wake_frames = [f for f in frames if f["payload"].get("type") == "journal_order_ready"]
+        assert len(wake_frames) == 1
+        assert wake_frames[0]["payload"]["journal_generation"] == "g-1", wake_frames
+
+
+@pytest.mark.asyncio
+async def test_bridge_replay_strips_the_delta_family_per_subscriber(tmp_path: Path) -> None:
+    """The REPLAY path re-projects the same per-subscriber decision.
+
+    ``events`` hands a frame published before this subscription existed to a
+    non-declaring subscriber WITHOUT the family, and to a declaring one with it
+    — the replay list itself keeps the original (one retained frame, two
+    projections), which is why the strip runs at projection time here and at
+    enqueue time in ``publish``.
+    """
+    from local_operator.server.utils.desktop_sessions import (
+        HISTORY_DELTA_FAMILY_KEYS,
+        DesktopSessions,
+    )
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        for declared in (False, True):
+            sub = bridge.subscribe(peer_journal_source=declared)
+            bridge.publish("event", _family_delta_frame())
+            stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0)
+            delta: dict[str, Any] | None = None
+            try:
+                for _ in range(8):
+                    frame = await asyncio.wait_for(anext(stream), timeout=5)
+                    if frame.get("payload", {}).get("type") == "history_delta":
+                        delta = frame
+                        break
+            finally:
+                await stream.aclose()
+            assert delta is not None, "the retained delta never replayed"
+            if declared:
+                for key in HISTORY_DELTA_FAMILY_KEYS:
+                    assert key in delta["payload"], key
+            else:
+                for key in HISTORY_DELTA_FAMILY_KEYS:
+                    assert key not in delta["payload"], key
