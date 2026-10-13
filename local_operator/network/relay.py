@@ -3089,6 +3089,18 @@ SOURCE_READ_PURPOSES: frozenset[str] = frozenset({"metadata", "payload", "availa
 #: exists to avoid. It is a BOUND, not a promise: an index still building past
 #: it answers unavailable and the client asks again on its next meaningful
 #: wake, never per token render.
+#:
+#: DELIBERATELY SMALLER THAN THE ARCHITECTURE NOTE'S ~55/60/62 s SKETCH
+#: (agent review round 1, m2). That sketch assumed this wait was free to be
+#: the longest in the system; it is not — the frame rides the read-sized hop,
+#: so raising this bound means retuning ``session_history_hop_bound_s`` and the
+#: client margin for EVERY stored read and letting a hung peer block a viewer
+#: for a minute on the common failure. The lane's job is a WAKE, not a
+#: completion guarantee, and the shorter bound keeps it inside the budget:
+#: a build past it settles as bounded ``unavailable`` (never a dead
+#: "building") beside the explicit reconcile correction, the client's latch
+#: re-arms on the next ``ready`` answer (a viewer-driven read), and no
+#: per-token polling exists anywhere on the path.
 SOURCE_AVAILABILITY_WAIT_S = 4.0
 
 #: The most availability continuations one relay holds at once. Past it the
@@ -11702,6 +11714,14 @@ class RelayServer:
             # on it.
             **({"open_frame": True} if open_frame else {}),
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+            # A TYPED PURPOSE'S IDS RIDE EVEN WITHOUT THE OLD PAGE OPT-IN: a
+            # purpose IS a lookup, and ids validated at this boundary then
+            # dropped one hop later would answer a degraded read nothing
+            # names (QA round 1, Q1). The client half sends ``journal_order``
+            # beside them; this clause keeps a future or broken client from
+            # losing facts the owner side would have served. The page path
+            # above stays byte-identical for every request that is not one.
+            **({"order_ids": order_ids} if order_ids and source_read and not journal_order else {}),
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:

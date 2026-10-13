@@ -206,15 +206,19 @@ two sources will share whichever shape that slice settles.
 
 
 
-## Proposed complete peer-source contract (not advertised)
+## Complete peer-source contract (advertised; no consumer until the UI slice)
 
-This is a contract-first prototype, not shipped capability support. Existing
-remote `journal_order` alone must remain byte-compatible unsupported when this
-work is integrated. Local ordering and local mobile partial negotiation remain
-unchanged. The proposed `peer-journal-source-v1` capability and explicit
-`peer_journal_source` query/declaration require complete runtime/receiver support
-and authenticated owner acknowledgment; neither is currently advertised here.
-Every new field must be omitted for legacy viewers on live and replay paths.
+`peer-journal-source-v1` IS advertised by this build — on every relay link
+(`network/wire.py`), on the runtime record (`session/runtime/serving.py` +
+`runtime/server.py`) and as the `peer_journal_source` feature key
+(`server/features.py`). ADVERTISING IS NOT ACTIVATION: every read still passes
+the four-part gate — owner advertisement, viewer declaration, authenticated
+session source, per-response acknowledgment — and absent any half the answer
+stays the legacy bytes. A remote `journal_order` alone remains
+byte-compatible unsupported, and local ordering and local mobile partial
+negotiation are unchanged. The recovery envelope's source facts are
+receiver-side implemented and inert until a UI slice consumes them. Every new
+field is omitted for legacy viewers on live and replay paths.
 
 The authority bootstrap uses the existing session GET but applies only source
 metadata via `applyJournalOrderMetadata`: install the equality-only order domain
@@ -243,7 +247,7 @@ limits include every metadata map. Raw-ID lookup demand unions canonical,
 quarantined and loaded-body-owed IDs BEFORE the no-debt/no-generation guard.
 No alias, clock, wire sequence or receiver disk supplies source authority.
 
-Proof prerequisites before DTO extension or capability advertisement:
+Proof prerequisites the advertisement was gated on (held before this slice shipped):
 
 * Extend the SAME index with validated raw-ID byte ranges, retaining no bodies;
   FD-before/after, path identity and index source must agree for bounded reads.

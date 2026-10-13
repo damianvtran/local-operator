@@ -42,6 +42,18 @@ def get(directory, index, ids, **kwargs):
     )
 
 
+def served(directory, index, ids, **kwargs):
+    """``get`` for cells that REQUIRE an answer — asserts, so the checker narrows.
+
+    ``get`` stays for the cells whose subject IS the refusal (``is None``);
+    every other cell goes through this one, so an accidental ``None`` fails
+    here with a sentence instead of as a subscript error three lines later.
+    """
+    result = get(directory, index, ids, **kwargs)
+    assert result is not None, "this cell requires a servable subset"
+    return result
+
+
 def partition(result, requested):
     sets = [set(result[key]) for key in ("present", "missing", "unavailable", "remaining")]
     assert set.union(*sets) == set(requested)
@@ -107,7 +119,7 @@ def test_long_warm_selected_ranges_and_far_later_last_prune(tmp_path, monkeypatc
         monkeypatch.setattr(tr, name, forbidden)
     monkeypatch.setattr(tr.Transcript, "__init__", forbidden)
     monkeypatch.setattr(ti.SourceProjectionViews, "build", forbidden)
-    result = get(directory, index, ["target", "absent", "filler-9000"])
+    result = served(directory, index, ["target", "absent", "filler-9000"])
     assert result is not None
     partition(result, ["target", "absent", "filler-9000"])
     assert result["present"] == ["target", "filler-9000"] and result["missing"] == ["absent"]
@@ -119,7 +131,7 @@ def test_long_warm_selected_ranges_and_far_later_last_prune(tmp_path, monkeypatc
     for body in result["entries"]:
         assert body["message"] == oracle[body["id"]]
     assert "must not resurrect" not in json.dumps(result)
-    cut = get(directory, index, ["target"], through_id="prune-first")
+    cut = served(directory, index, ["target"], through_id="prune-first")
     assert cut["entries"][0]["message"] == cut_oracle["target"]
     assert cut["source_dependency_ids"] == ["call-owner", "prune-first"]
     output = os.environ.get("PEER_PROOF_OUTPUT")
@@ -162,7 +174,7 @@ def test_nonadjacent_multicall_unit_and_ambiguous_ask_hidden_declines(tmp_path):
     ]
     directory, index = write(tmp_path, entries)
     oracle = {m.id: m.model_dump(mode="json") for m in tr.Transcript(directory).build_llm_history()}
-    result = get(directory, index, ["result-a"])
+    result = served(directory, index, ["result-a"])
     assert result["present"] == ["result-a"]
     assert set(result["source_dependency_ids"]) == {"owner", "result-b", "pruned-b"}
     assert {e["id"] for e in result["dependency_entries"]} == {"owner", "result-b"}
@@ -180,7 +192,7 @@ def test_nonadjacent_multicall_unit_and_ambiguous_ask_hidden_declines(tmp_path):
             else [replacement] + entries[1:]
         )
         directory, changed = write(tmp_path, selected)
-        rejected = get(directory, changed, ["result-a", "plain"])
+        rejected = served(directory, changed, ["result-a", "plain"])
         assert "result-a" in rejected["unavailable"] and "plain" in rejected["present"]
 
 
@@ -206,12 +218,12 @@ def test_compaction_candidates_crosscut_and_unknown_cut(tmp_path):
         marker,
     ]
     directory, index = write(tmp_path, entries)
-    result = get(directory, index, ["old", "kept", "result"])
+    result = served(directory, index, ["old", "kept", "result"])
     assert set(result["unavailable"]) == {"old", "result"}
     assert result["present"] == ["kept"]
     marker.payload["first_kept_entry_id"] = "unknown-cut"
     directory, index = write(tmp_path, entries)
-    result = get(directory, index, ["kept", "absent"])
+    result = served(directory, index, ["kept", "absent"])
     assert result["unavailable"] == ["kept"] and result["missing"] == ["absent"]
 
 
@@ -253,7 +265,7 @@ def test_custom_inline_artifact_and_external_media_supplement_declines(tmp_path)
         max_messages=512,
     )
     oracle = {message.id: message.model_dump(mode="json") for message in window.messages}
-    result = get(directory, index, [e.id for e in entries])
+    result = served(directory, index, [e.id for e in entries])
     assert set(result["present"]) == {"inject", "inline"}
     assert next(body for body in result["entries"] if body["id"] == "inject")["kind"] == "custom"
     assert set(result["unavailable"]) == {"external", "supplement", "hidden"}
@@ -265,15 +277,15 @@ def test_custom_inline_artifact_and_external_media_supplement_declines(tmp_path)
 def test_huge_unit_fairness_aggregate_remaining_and_smaller_retry(tmp_path):
     entries = [row("huge", text="x" * (512 * 1024)), row("small")]
     directory, index = write(tmp_path, entries)
-    result = get(directory, index, ["huge", "small"])
+    result = served(directory, index, ["huge", "small"])
     assert result["unavailable"] == ["huge"] and result["present"] == ["small"]
     entries = [row(f"target-{i}", "assistant") for i in range(512)]
     entries += [prune(f"prune-{i}", f"target-{i}", "notice") for i in range(512)]
     directory, index = write(tmp_path, entries)
-    result = get(directory, index, [e.id for e in entries[:512]])
+    result = served(directory, index, [e.id for e in entries[:512]])
     assert len(result["remaining"]) == 512 and result["retry_smaller_batch"]
     assert 0 < len(result["retry_ids"]) <= 256
-    retried = get(directory, index, result["retry_ids"])
+    retried = served(directory, index, result["retry_ids"])
     assert set(retried["present"]) == set(result["retry_ids"])
     partition(result, [e.id for e in entries[:512]])
 
@@ -286,6 +298,7 @@ def test_cache_suffix_roundtrip_inverse_facts_and_duplicate_cross_boundary(tmp_p
         handle.write("".join(e.to_json() + "\n" for e in addition))
     appended = ti.refresh_index(tmp_path, SID)
     reloaded = ti.read_index(tmp_path, SID)
+    assert appended is not None and reloaded is not None
     fresh_root = tmp_path / "independent-full"
     _directory, rebuilt = write(fresh_root, entries + addition)
     assert (
@@ -295,7 +308,7 @@ def test_cache_suffix_roundtrip_inverse_facts_and_duplicate_cross_boundary(tmp_p
     )
     assert appended.source_views == rebuilt.source_views == reloaded.source_views
     assert appended.journal_generation == initial.journal_generation
-    assert get(directory, appended, ["user-0", "user-3"])["unavailable"] == ["user-0"]
+    assert served(directory, appended, ["user-0", "user-3"])["unavailable"] == ["user-0"]
     raw = json.loads(ti.index_path(tmp_path, SID).read_text())
     assert "notice" not in json.dumps(raw["source_projection_facts"])
     raw["source_projection_facts"][0]["source_class"] = "made-up"
@@ -310,45 +323,46 @@ def test_opaque_causal_scope_plain_progress_and_rewrite(tmp_path):
     ]
     directory, index = write(tmp_path, entries)
     assert index.source_views.opaque_causal_seqs
-    result = get(directory, index, ["plain", "owner", "opaque"])
+    result = served(directory, index, ["plain", "owner", "opaque"])
     assert result["present"] == ["plain"] and set(result["unavailable"]) == {"owner", "opaque"}
     replacement = directory / "replacement"
     replacement.write_text(row("plain", text="rewritten").to_json() + "\n")
     replacement.replace(directory / "transcript.jsonl")
     assert get(directory, index, ["plain"]) is None
     rebuilt = ti.refresh_index(tmp_path, SID)
+    assert rebuilt is not None
     assert rebuilt.journal_generation != index.journal_generation
-    assert get(directory, rebuilt, ["plain"])["present"] == ["plain"]
+    assert served(directory, rebuilt, ["plain"])["present"] == ["plain"]
 
 
 @pytest.mark.parametrize("ids", [["x"] * 513, ["x" * 129], [""], "bad"])
 def test_subset_lookup_bounds(tmp_path, ids):
     directory, index = write(tmp_path, [row("plain")])
     with pytest.raises(ValueError):
-        get(directory, index, ids)
+        served(directory, index, ids)
 
 
 def test_intrinsic_large_call_unit_and_aggregate_raw_encoded_budgets(tmp_path):
     owner = row("owner", "assistant", tool_calls=[{"id": "a", "name": "read", "arguments": {}}])
     results = [row(f"r-{i}", "tool", tool_call_id="a", tool_name="read") for i in range(513)]
     directory, index = write(tmp_path, [owner, *results, row("plain")])
-    result = get(directory, index, ["r-0", "plain"])
+    result = served(directory, index, ["r-0", "plain"])
     assert result["unavailable"] == ["r-0"] and result["present"] == ["plain"]
     directory, index = write(
         tmp_path, [row("one", text="a" * 300000), row("two", text="b" * 300000)]
     )
-    result = get(directory, index, ["one", "two"])
+    result = served(directory, index, ["one", "two"])
     assert len(result["present"]) == len(result["remaining"]) == 1
-    assert get(directory, index, result["retry_ids"])["present"] == result["retry_ids"]
+    assert served(directory, index, result["retry_ids"])["present"] == result["retry_ids"]
     directory, index = write(tmp_path, [row("one", text="a" * 500), row("two", text="b" * 500)])
     from local_operator.network.relay import session_history_reply_bytes
 
-    single = get(directory, index, ["one"])
+    single = served(directory, index, ["one"])
     budget = session_history_reply_bytes(0, single) + 100
-    result = get(directory, index, ["one", "two"], encoded_budget=budget)
+    result = served(directory, index, ["one", "two"], encoded_budget=budget)
     assert result is not None and len(result["present"]) == len(result["remaining"]) == 1
     assert session_history_reply_bytes(0, result) <= budget
-    tiny = get(directory, index, ["one"], encoded_budget=400)
+    tiny = served(directory, index, ["one"], encoded_budget=400)
     assert tiny is None or tiny["unavailable"] == ["one"]
 
 
@@ -359,7 +373,7 @@ def test_cross_cut_group_ask_divert_patience_and_plain_progress(tmp_path):
     )
     result_row = row("result", "tool", tool_call_id="a", tool_name="read")
     directory, index = write(tmp_path, [row("before"), owner, marker, result_row, row("plain")])
-    result = get(directory, index, ["result", "before", "plain"])
+    result = served(directory, index, ["result", "before", "plain"])
     assert result["unavailable"] == ["result"] and set(result["present"]) == {"before", "plain"}
     for name, details in [
         ("ask", {}),
@@ -375,7 +389,7 @@ def test_cross_cut_group_ask_divert_patience_and_plain_progress(tmp_path):
             provider_payload={"details": details},
         )
         directory, index = write(tmp_path, [owner, target, row("plain")])
-        result = get(directory, index, ["result", "plain"])
+        result = served(directory, index, ["result", "plain"])
         assert result["unavailable"] == ["result"] and result["present"] == ["plain"]
 
 
@@ -387,12 +401,12 @@ def test_unknown_preserved_shape_and_global_unknown_scope(tmp_path):
         directory, index = write(
             tmp_path, [row("plain"), tr.TranscriptEntry("cut", 1, tr.ENTRY_COMPACTION, payload)]
         )
-        result = get(directory, index, ["plain", "absent"])
+        result = served(directory, index, ["plain", "absent"])
         assert result["unavailable"] == ["plain"] and result["missing"] == ["absent"]
     directory, index = write(
         tmp_path, [row("plain"), tr.TranscriptEntry("unknown", 1, "unknown-type", {})]
     )
-    assert get(directory, index, ["plain"])["unavailable"] == ["plain"]
+    assert served(directory, index, ["plain"])["unavailable"] == ["plain"]
 
 
 def test_real_artifact_digest_survives_without_attachment_resolution(tmp_path, monkeypatch):
@@ -407,7 +421,7 @@ def test_real_artifact_digest_survives_without_attachment_resolution(tmp_path, m
         pytest.fail("artifact unexpectedly attempted media expansion")
 
     monkeypatch.setattr(tr.AttachmentStore, "get", no_resolution)
-    result = get(directory, index, ["artifact"])
+    result = served(directory, index, ["artifact"])
     assert result["entries"][0]["message"] == expected
     assert result["entries"][0]["message"]["content"][0]["attachment"] == "a" * 32
 
@@ -419,8 +433,9 @@ def test_append_prune_into_prefix_keeps_domain_but_changes_body_proof(tmp_path):
         handle.write(prune("late", "target", "new notice").to_json() + "\n")
     assert get(directory, initial, ["target"]) is None
     appended = ti.refresh_index(tmp_path, SID)
+    assert appended is not None
     assert appended.journal_generation == initial.journal_generation
-    result = get(directory, appended, ["target"])
+    result = served(directory, appended, ["target"])
     expected = next(m for m in tr.Transcript(directory).build_llm_history() if m.id == "target")
     assert result["entries"][0]["message"] == expected.model_dump(mode="json")
     assert result["source_dependency_ids"] == ["late"]
@@ -508,7 +523,7 @@ def test_complete_query_uri_fits_actual_serializer_not_literal_batch_count():
 
 def test_prune_original_request_remains_unavailable_but_named_dependency(tmp_path):
     directory, index = write(tmp_path, [row("target"), prune("prune", "target", "notice")])
-    result = get(directory, index, ["target", "prune"])
+    result = served(directory, index, ["target", "prune"])
     assert result["present"] == ["target"] and result["unavailable"] == ["prune"]
     assert result["source_dependency_ids"] == ["prune"]
     assert result["dependency_entries"] == []

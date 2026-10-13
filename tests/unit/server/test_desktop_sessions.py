@@ -6804,7 +6804,7 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     # Recorded as the PAIR each call carried: the route builds the subscription
     # from both additive flags, and a spy that watched only ``frontend_replace``
     # would let the supplements half be dropped without a failure.
-    negotiated: list[tuple[bool, bool, bool]] = []
+    negotiated: list[tuple[bool, bool, bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
     def spy(
@@ -6813,13 +6813,20 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         frontend_replace: bool = False,
         supplements: bool = False,
         journal_order: bool = False,
+        peer_journal_source: bool = False,
     ):  # noqa: ANN001
-        negotiated.append((frontend_replace, supplements, journal_order))
+        # THE SPY MIRRORS THE COLLABORATOR'S SIGNATURE, which gained the
+        # complete declaration's flag with the peer-source contract: a spy
+        # frozen at the old signature fails on a keyword the real method
+        # takes, and one that silently swallowed it would let the route drop
+        # the declaration unnoticed. Four flags, four hand-offs asserted.
+        negotiated.append((frontend_replace, supplements, journal_order, peer_journal_source))
         return real_subscribe(
             self,
             frontend_replace=frontend_replace,
             supplements=supplements,
             journal_order=journal_order,
+            peer_journal_source=peer_journal_source,
         )
 
     async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -6836,13 +6843,13 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
         assert negotiated == [
-            (False, False, False)
+            (False, False, False, False)
         ], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
         assert negotiated == [
-            (False, False, False),
-            (True, False, False),
+            (False, False, False, False),
+            (True, False, False, False),
         ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
         # The supplements declaration is the same hand-off on its own parameter
@@ -6851,14 +6858,26 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         declared = await client.get(url, params={"supplements": 1})
         assert declared.status_code == 200, declared.text
         assert negotiated == [
-            (False, False, False),
-            (True, False, False),
-            (False, True, False),
+            (False, False, False, False),
+            (True, False, False, False),
+            (False, True, False, False),
         ], "the route dropped the supplements declaration"
 
         ordered = await client.get(url, params={"journal_order": 1})
         assert ordered.status_code == 200, ordered.text
-        assert negotiated[-1] == (False, False, True), "source order opt-in was dropped"
+        assert negotiated[-1] == (False, False, True, False), "source order opt-in was dropped"
+
+        # The complete contract's declaration is the fourth hand-off on the
+        # same seam (peer-source contract): ``?peer_journal_source=1`` must
+        # arrive on the subscription as True.
+        declared_complete = await client.get(url, params={"peer_journal_source": 1})
+        assert declared_complete.status_code == 200, declared_complete.text
+        assert negotiated[-1] == (
+            False,
+            False,
+            False,
+            True,
+        ), "the complete peer-source declaration was dropped"
 
 
 @pytest.mark.asyncio

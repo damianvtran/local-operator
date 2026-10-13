@@ -1280,7 +1280,13 @@ class RemoteSessionClient(AttachClient):
             )
             if declared:
                 auth["journal_order"] = True
-                auth[PEER_JOURNAL_SOURCE_FLAG] = True
+                # LITERAL, not ``PEER_JOURNAL_SOURCE_FLAG``: the allowlist
+                # guard scans these declarations as SYNTAX, and a computed key
+                # is invisible to it — a declaration written that way could
+                # ship inert and the guard would never say so
+                # (test_dial_allowlist). The literal is pinned to the constant
+                # by the vocabulary test.
+                auth["peer_journal_source"] = True
             # THE ATTACHMENT'S OWN HALF OF THE GATE, exposed viewer-locally for
             # the facade's retention: the flag says THIS dial actually declared
             # the complete contract, re-derived on every connect (a redial to a
@@ -1531,7 +1537,14 @@ def peer_source_read(
         session_id=session_id,
         source_read=purpose,
         **{PEER_JOURNAL_SOURCE_FLAG: True},
-        **({"order_ids": order_ids} if order_ids else {}),
+        # THE PURPOSE CARRIES THE PAGE OPT-IN BESIDE ITS IDS, end to end: the
+        # relay's stored-hop forward keeps ``order_ids`` beside a truthy
+        # ``journal_order`` (its own shape rule), and a purpose whose ids are
+        # dropped at that seam answers a factless "ready" that nothing names —
+        # the silently-degraded read QA round 1 (Q1) reproduced through the
+        # product's own door. The ids ARE the lookup; the opt-in is how they
+        # travel.
+        **({"journal_order": True, "order_ids": order_ids} if order_ids else {}),
         **({"expected_journal_generation": expected_generation} if expected_generation else {}),
     )
     if not reply or reply.get("refused"):
