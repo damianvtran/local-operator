@@ -809,6 +809,7 @@ def grant_key_set(
     THE CALLER HOLDS THE LOCK: wrap this in :func:`mutate` so all keys land
     under one read-modify-write. Returns ``(granted, skipped)``.
     """
+    from local_operator.network.credentials import consent
     from local_operator.network.credentials import github as github_mod
     from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.types import MeshRefusal
@@ -817,6 +818,11 @@ def grant_key_set(
     skipped: list[dict[str, str]] = []
     for key in keys:
         try:
+            # This caller already holds placement's lock: read the atomically
+            # published negative snapshot ONLY, never acquire consent in reverse
+            # order. A concurrent newer deny still wins at the owner serve guard;
+            # finite projection writes cannot erase that authority/tombstone.
+            consent.check_borrow(document.network_id, self_device, device, key, {}, config)
             if not offers_mod.credential_here(key, config):
                 skipped.append({"key": key, "reason": "no_local_credential"})
                 continue

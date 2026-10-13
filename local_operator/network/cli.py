@@ -2137,28 +2137,46 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     if verb == "share" and not scope:
         scope = "device" if github_mod.is_github_key(key) else "session"
 
-    with placement_mod.mutate(record.network_id, self_device=identity.device_id) as document:
-        entry = document.entry(key)
-        if verb == "share":
-            if entry is None:
-                # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
-                # runs where the credential is. ``declare`` refuses on behalf of another
-                # device, so a share can never move ownership by accident.
-                entry = document.declare(
-                    key,
-                    owner_device=identity.device_id,
-                    owner_device_name=identity.name,
-                    provider=provider,
-                    kind=kind,
-                    identity_label=label,
-                    by=identity.device_id,
-                )
-            entry = document.grant(key, device, scope=scope, by=identity.device_id)
-            action = "sharing"
-        else:
-            entry = document.revoke(key, device, by=identity.device_id)
-            action = "revoked"
-        entry_json = entry.to_json()
+    # Consent is authority; placement is only its mergeable projection. Revoke
+    # persists its tombstone first, and legacy share cannot clear that tombstone.
+    from local_operator.network.credentials import consent
+
+    if verb == "revoke":
+        import time as _clock
+
+        reduced = consent.restrict_and_revoke(
+            record.network_id,
+            identity.device_id,
+            device,
+            {"credential_key": key},
+            "owner-revoke:" + str(_clock.time_ns()),
+        )
+        entry_json = reduced["entry"] or {}
+        action = "revoked"
+    else:
+        authority = consent.ConsentDocument(record.network_id, identity.device_id)
+        with authority.locked():
+            consent.check_borrow(record.network_id, identity.device_id, device, key, {})
+            with placement_mod.mutate(
+                record.network_id, self_device=identity.device_id
+            ) as document:
+                entry = document.entry(key)
+                if entry is None:
+                    # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
+                    # runs where the credential is. ``declare`` refuses on behalf of another
+                    # device, so a share can never move ownership by accident.
+                    entry = document.declare(
+                        key,
+                        owner_device=identity.device_id,
+                        owner_device_name=identity.name,
+                        provider=provider,
+                        kind=kind,
+                        identity_label=label,
+                        by=identity.device_id,
+                    )
+                entry = document.grant(key, device, scope=scope, by=identity.device_id)
+                action = "sharing"
+                entry_json = entry.to_json()
 
     capability = ""
     if verb == "share":
