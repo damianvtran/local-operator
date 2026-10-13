@@ -2904,6 +2904,26 @@ continuity amendment must separate metadata facts from rank/body/causal-owner
 admission and retain later source demand while admitting valid earlier facts.
 
 
+### Recovery-delta source facts (receiver side, unpublished)
+
+A facade retains, per attachment, the last owner-attested ``{raw id:
+journal_seq}`` observed on its own order wakes for one generation: merged within
+a generation, atomically replaced on rotation, invalidated by ``reconcile``,
+bounded at 4096 (overflow invalidates rather than growing a partial map), and
+disposed on every rebind, go-cold and dispose. A recovery ``history_delta`` may
+carry ``journal_generation``, ``journal_ordinals`` and the owner-stamped
+``entry_times`` subset ONLY when the attachment declared the complete contract
+and EVERY delta row was attested in the retained domain — all-or-nothing,
+because a partial map under a packet-level claim would over-release rows the
+owner never attested. Omission is the designed common case (rows committed
+while disconnected were never observed on this attachment) and settles through
+the fresh authority read and the payload-by-ID fallback, never through a wrong
+display. The family is per-subscriber: a non-declaring subscriber's
+``history_delta`` frame is byte-identical to the pre-contract event on the live
+and replay paths alike. Retention is passive — it rewrites no event and
+publishes no frame.
+
+
 ### Bounded structural source-body subset (unpublished implementation)
 
 The same transcript-index cache schema now proposes version 7: raw ranges and

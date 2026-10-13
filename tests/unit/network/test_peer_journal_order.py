@@ -472,6 +472,10 @@ async def test_remote_attach_declares_complete_order_only_when_negotiated(
         declared = True if complete and events else None
         assert frames[0]["auth"].get("journal_order") is declared
         assert frames[0]["auth"].get("peer_journal_source") is declared
+        # The facade-half of the same gate: the flag the retention reads is
+        # written by THIS declaration decision, per dial, and is False whenever
+        # the gate fails (a redial to a lesser owner re-answers the question).
+        assert client.peer_journal_source_declared is (declared is True)
     finally:
         client.close()
         await asyncio.wait_for(done.wait(), 2)

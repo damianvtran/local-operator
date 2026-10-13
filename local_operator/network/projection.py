@@ -1192,6 +1192,12 @@ class RemoteSessionClient(AttachClient):
         super().__init__(on_projection, on_disconnected, locality="remote", **kwargs)
         self._facts = facts
         self._stream_id = ""
+        #: Whether THIS dial declared the complete peer-source contract (set in
+        #: ``connect`` from the same gate that writes the auth fields). The
+        #: facade reads it to decide whether owner order wakes may seed its
+        #: retained domain — a viewer that declared nothing can never vouch,
+        #: and a local client with no such property reads False.
+        self.peer_journal_source_declared = False
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Open a forwarded stream to the owner and consume its welcome.
@@ -1267,13 +1273,21 @@ class RemoteSessionClient(AttachClient):
             # path to settle. Both keys ride together, and only when the OWNER
             # advertises BOTH strings; otherwise NEITHER is declared and the
             # attach carries no new peer order request at all.
-            if (
+            declared = (
                 PEER_SOURCE_RECEIVER_SUPPORTED
                 and JOURNAL_ORDER_CAPABILITY in capabilities
                 and PEER_JOURNAL_SOURCE_CAPABILITY in capabilities
-            ):
+            )
+            if declared:
                 auth["journal_order"] = True
                 auth[PEER_JOURNAL_SOURCE_FLAG] = True
+            # THE ATTACHMENT'S OWN HALF OF THE GATE, exposed viewer-locally for
+            # the facade's retention: the flag says THIS dial actually declared
+            # the complete contract, re-derived on every connect (a redial to a
+            # successor with different capabilities re-answers the question
+            # rather than inheriting the last verdict) and False whenever the
+            # gate fails, which is the fail-closed direction.
+            self.peer_journal_source_declared = declared
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in capabilities:
