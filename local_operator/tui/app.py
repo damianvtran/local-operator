@@ -51084,13 +51084,17 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import (
                 discover_skills,
                 roots_fingerprint,
             )
 
-            roots = default_skill_roots(Path(os.getcwd()))
+            roots = default_skill_roots(
+                Path(os.getcwd()),
+                config_dir=getattr(self._providers, "config_dir", None) or config_dir(),
+            )
             fingerprint = roots_fingerprint(roots)
             if self._skills_by_name is None or fingerprint != self._skills_fingerprint:
                 skills, _warnings = discover_skills(roots)
@@ -51285,10 +51289,16 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import discover_skills
 
-            skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
+            skills, _warnings = discover_skills(
+                default_skill_roots(
+                    Path(os.getcwd()),
+                    config_dir=getattr(self._providers, "config_dir", None) or config_dir(),
+                )
+            )
             if not skills:
                 return None
             rows = [
