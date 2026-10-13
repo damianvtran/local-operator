@@ -10,7 +10,9 @@ error this module exists to prevent.
 
 Binary completion and partial reward are distinct metrics (OSWorld 2.0 paper,
 https://arxiv.org/html/2606.29537v1, sections 2.1.3 and 3.2). Only a full raw
-score is binary completion: the pinned d578d2d4 upstream monitor/static/index.js
+score is binary completion: the pinned 325ab352 upstream monitor/static/index.js
+(byte-identical to the file at the previous pin d578d2d4 -- sha256 38ce7afc... --
+so this citation's line numbers and the score === 1 condition still hold)
 counts fullScoreTasks only when score === 1 (lines 265-270). Rounding partial
 reward must never promote a near miss. The original evaluate() result is retained
 as canonical JSON, including any safety/checkpoint/error fields, not reconstructed
