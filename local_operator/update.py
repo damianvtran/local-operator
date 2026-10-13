@@ -8,10 +8,14 @@ command that upgrades whatever they actually have, without being pointed at
 env, which is the opposite audience.
 
 "Latest" is always ``https://pypi.org/pypi/local-operator/json`` →
-``info.version``, compared to ``importlib.metadata.version("local-operator")``.
-That is the same source the splash version row and ``lop --version`` already
-use. A second version channel (git tags, ``lop-update``, a pin file) would
-diverge from what the running process reports.
+``info.version``, compared to ``importlib.metadata.version("local-operator")``
+— but only once that release is DOWNLOADABLE (see
+:func:`_ready_pypi_version`): PyPI names the version before its files finish
+uploading, and advertising that window sends the installer after artifacts
+that do not exist yet. That is the same source the splash version row and
+``lop --version`` already use. A second version channel (git tags,
+``lop-update``, a pin file) would diverge from what the running process
+reports.
 
 WHY THE CACHE
 -------------
@@ -599,11 +603,72 @@ def _write_cache(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
+def _downloadable_wheel(files: Any) -> bool:
+    """True when a PyPI file list carries a wheel an installer can take.
+
+    WHY A WHEEL, AND WHY THIS IS THE READINESS GATE: PyPI flips
+    ``info.version`` when a release is created, before its files finish
+    uploading (the publish workflow uploads the wheels and the sdist in one
+    twine pass, file by file). A checker that reads only the version string
+    therefore advertises a release the installer cannot yet download — the
+    operator's 2026-10-12 report, where the update offer appeared and
+    ``lop update`` exited 1 for 0.70.13 minutes after publication. The file
+    list in the SAME JSON document is the earliest signal that agrees with
+    the installer: a non-yanked ``bdist_wheel`` entry with a download URL
+    means the artifact exists on PyPI. An sdist alone does not count: this
+    project always publishes wheels, so an sdist-only moment is a release
+    still mid-upload, and the install paths (``uv tool``, pipx, pip) are
+    wheel consumers first. Yanked files are refused by installers, so a
+    yanked wheel is not readiness either.
+    """
+    if not isinstance(files, list):
+        return False
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("packagetype") != "bdist_wheel":
+            continue
+        if entry.get("yanked"):
+            continue
+        url = entry.get("url")
+        if isinstance(url, str) and url.strip():
+            return True
+    return False
+
+
+def _ready_pypi_version(payload: Any) -> str | None:
+    """The payload's version, but only when that release is downloadable.
+
+    ``urls`` is PyPI's file list for the latest release; ``releases`` is the
+    fallback for payloads that omit it. A version with no downloadable wheel
+    yet returns ``None`` — indistinguishable from a failed fetch to callers,
+    deliberately: "not ready" and "unknown" both mean do not advertise,
+    and the next check re-reads rather than caching a premature verdict.
+    """
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    version_s = info.get("version")
+    if not isinstance(version_s, str) or not version_s.strip():
+        return None
+    version_s = version_s.strip()
+    if not _downloadable_wheel(payload.get("urls")):
+        releases = payload.get("releases")
+        files = releases.get(version_s) if isinstance(releases, dict) else None
+        if not _downloadable_wheel(files):
+            return None
+    return version_s
+
+
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
-    """Live ``info.version``, or ``None`` on any transport/HTTP/JSON error.
+    """Live ready ``info.version``, or ``None`` when not ready/unreadable.
 
     httpx is imported here so ``import local_operator.cli`` (and the splash
     module) never pay for it. The splash worker already swallows ``None``.
+    "Readiness" is :func:`_ready_pypi_version`: the version alone is not
+    enough, because PyPI publishes it before the release's files land.
     """
     import httpx
 
@@ -613,12 +678,10 @@ def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
         else:
             response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
         response.raise_for_status()
-        version_s = response.json()["info"]["version"]
+        payload = response.json()
     except Exception:
         return None
-    if not isinstance(version_s, str) or not version_s.strip():
-        return None
-    return version_s.strip()
+    return _ready_pypi_version(payload)
 
 
 def check_latest(
@@ -635,8 +698,13 @@ def check_latest(
     installed = installed_version()
     path = _cache_path(cache_dir)
     payload, age = _read_cache(path)
+    # Only a cache entry written by a readiness-checked fetch may advertise.
+    # A bare ``version`` (written before the gate existed) proves the string
+    # was seen, not that its files were downloadable, so it must not skip
+    # the network or stand in for a failed fetch — otherwise the race this
+    # gate closes would survive for a whole TTL on upgraded installs.
     cached: str | None = None
-    if payload is not None:
+    if payload is not None and payload.get("ready") is True:
         raw = payload.get("version")
         if isinstance(raw, str) and raw.strip():
             cached = raw.strip()
@@ -648,7 +716,7 @@ def check_latest(
         fetched = _fetch_pypi_version(client=client)
         if fetched is not None:
             latest = fetched
-            _write_cache(path, {"version": fetched})
+            _write_cache(path, {"version": fetched, "ready": True})
         else:
             latest = cached
 
