@@ -46,6 +46,14 @@ STANDARD = {
     "muse-spark-1.1": (1.25, 4.25, 0.15),
 }
 
+# Contributor variants are NOT shipped registry rows: they reach a price only
+# through the catalogue chain, so a namespace/catalogue-key regression would
+# silently return them to 0/0 unless the chain itself is pinned here.
+CONTRIBUTOR = {
+    "muse-spark-1.3-contributor": (0.10, 0.20, 0.002),
+    "muse-spark-1.2-contributor": (0.10, 0.20, 0.002),
+}
+
 
 def _usage(input_tokens=0, output_tokens=0, cache_read=0, cache_write=0):
     return SimpleNamespace(
@@ -146,6 +154,52 @@ def test_family_resolver_drops_prices_for_unshipped_ids() -> None:
     # Non-text Muse lines and non-Muse ids are not this family's business.
     assert meta_muse_family_model_info("muse-image-1.0") is None
     assert meta_muse_family_model_info("llama-4") is None
+
+
+def test_family_resolver_requires_a_separator_after_the_tier_name() -> None:
+    """Ids merely starting with the tier letters are a different family.
+
+    A bare-prefix match would hand Wonder/Spark limits and capabilities to
+    ``muse-wonderful-…``/``muse-sparkle-…``; only the ``muse-wonder-`` /
+    ``muse-spark-`` namespace (point releases, Wonder Full, Contributor)
+    may inherit.
+    """
+    assert meta_muse_family_model_info("muse-wonderful-1.0") is None
+    assert meta_muse_family_model_info("muse-sparkle-1.0") is None
+    assert meta_muse_family_model_info("muse-wonder") is None
+    assert meta_muse_family_model_info("muse-spark") is None
+    assert meta_muse_family_model_info("muse-wonder-full-1.0") is not None
+    assert meta_muse_family_model_info("muse-spark-1.3-contributor") is not None
+
+
+def test_family_resolver_normalises_a_namespaced_id() -> None:
+    """The returned row is keyed by the stripped spelling, not the raw ask."""
+    info = meta_muse_family_model_info("meta/muse-spark-1.9")
+    assert info is not None
+    assert (info.id, info.name) == ("muse-spark-1.9", "muse-spark-1.9")
+
+
+@pytest.mark.parametrize("model_id", sorted(CONTRIBUTOR))
+def test_price_chain_reads_contributor_prices_from_models_dev(model_id: str) -> None:
+    """Contributor ids price through the models.dev `meta` leg at 0.10/0.20/0.002."""
+    body = {
+        "meta": {
+            "id": "meta",
+            "name": "Meta",
+            "models": {
+                model_id: {
+                    "id": model_id,
+                    "name": model_id,
+                    "limit": {"context": 1048576, "output": 131072},
+                    "cost": {"input": 0.10, "output": 0.20, "cache_read": 0.002},
+                }
+            },
+        }
+    }
+    projected = prices.project(body, None)["providers"]
+    row = prices.price_row("meta-muse", model_id, models_dev=projected, openrouter=[])
+    assert row is not None
+    assert (row.input_price, row.output_price, row.cache_read_price) == CONTRIBUTOR[model_id]
 
 
 def test_price_chain_reads_models_dev_meta_key() -> None:

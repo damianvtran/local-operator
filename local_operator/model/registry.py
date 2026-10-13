@@ -3122,17 +3122,29 @@ def meta_muse_family_model_info(model_id: str) -> Optional[ModelInfo]:
     """
     wanted = model_id.strip().casefold().removeprefix("meta/")
     tier_row: ModelInfo | None = None
-    if wanted.startswith("muse-wonder"):
+    # The separator is the boundary: a bare ``muse-wonder``/``muse-spark``
+    # prefix would also seize unrelated ids that merely begin with those
+    # letters (``muse-wonderful-…``, ``muse-sparkle-…``) and hand them this
+    # tier's limits and capabilities. Requiring ``muse-wonder-`` /
+    # ``muse-spark-`` keeps the match to ids in the tier's own namespace
+    # (point releases, ``muse-wonder-full-*``, ``…-contributor``).
+    if wanted.startswith("muse-wonder-"):
         tier_row = meta_muse_models["muse-wonder-1.0"]
-    elif wanted.startswith("muse-spark"):
+    elif wanted.startswith("muse-spark-"):
         tier_row = meta_muse_models["muse-spark-1.3"]
     if tier_row is None:
         return None
     return tier_row.model_copy(
         deep=True,
         update={
-            "id": model_id,
-            "name": model_id,
+            # The stripped spelling, not the caller's raw one: tier rows are
+            # keyed bare (``muse-spark-1.3``), so a ``meta/``-qualified or
+            # oddly-cased request must not leak that spelling into the row's
+            # identity. Callers key on the id they asked for (and
+            # ``configure`` re-stamps ``info.id`` from the model spec), so
+            # normalising here changes no caller's lookup.
+            "id": wanted,
+            "name": wanted,
             "input_price": 0.0,
             "output_price": 0.0,
             "cache_reads_price": None,
