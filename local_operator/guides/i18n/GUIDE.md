@@ -18,7 +18,9 @@ description: Contribute localized product copy, add message keys or locales, che
    Run `scripts/i18n/generate.py`, `generate.py --check`, and `check.py` with the
    checkout's interpreter and Node. Never hand-edit generated keys/shipped data
    or raise a baseline; lower only touched extracted files with `--update PATH`.
-   TS/client commands must come from that client's source, not the RFC sketch.
+   Core generation also emits/checks the relay type-only
+   `local_operator/mobile/web/src/i18n/keys.gen.ts` from the same ICU arguments.
+   This is not all-client generation/typechecking; use each client's actual scripts.
 4. Treat backend `language` as the single source for config, TUI and connected
    UI settings: explicit config → `LOP_LANG` → OS → `en`, then shipped eligibility.
    Missing namespace/key uses English **source and formatting/plural rules**.
@@ -44,3 +46,12 @@ including required actual-Sonnet design. Chinese slash 50/51 is an incomplete
 audit, **SECURITY HELD**, never a waiver. Urdu/native RTL, remaining clients and
 global enforcement are unfinished. Use the HOWTO's primary links and verify
 fresh state; this guide neither completes these streams nor performs their audits.
+
+**Source supersession (2026-10-13 UTC):** at `641a392040bf`, six partial eligible
+locales include hi; the four PRs above have merged, so their historical OPEN/design
+holds are not current states. Chinese SECURITY HOLD, Urdu/native RTL, remaining
+clients and global enforcement are still unfinished. A new General-language
+picker is requested, not shipped. The HOWTO distinguishes current source, the
+already-cut v0.70.11 tag, measured PyPI and installed 0.70.10; do not conflate them.
+Release invariants run unconditionally at the exact event SHA in `publish.yml`;
+follow the combined-target checks in AGENTS.md, not a narrow docs/version CI green.
