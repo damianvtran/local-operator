@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
+from local_operator.providers.usage import META_MUSE_USAGE_NOTES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -286,8 +287,17 @@ async def usage(
         for report in reports:
             row = dataclasses.asdict(report)
             # Arbitrary provider notes are not a safe public error vocabulary.
-            row["notes"] = None
-            row["age_ms"] = max(0, now - report.fetched_at)
+            # Muse's fixed local provenance is essential to interpreting its
+            # passive meters, so retain only its known constants, never a
+            # provider-supplied string (even one labelled as Muse).
+            row["notes"] = (
+                report.notes
+                if report.provider == "meta-muse"
+                and isinstance(report.notes, str)
+                and report.notes in META_MUSE_USAGE_NOTES
+                else None
+            )
+            row["age_ms"] = max(0, now - report.fetched_at) if report.fetched_at > 0 else None
             row["state"] = (
                 "reauth_required"
                 if report.credential_invalid
