@@ -2356,6 +2356,14 @@ async def fetch_usage(
     return None
 
 
+# These are local, fixed provenance statements, not arbitrary upstream notes.
+# Public usage serialization may safely retain ONLY these strings for Muse;
+# other providers' notes can contain untrusted endpoint/error vocabulary.
+META_MUSE_ALLOWANCE_NOTE = "Last sign-in allowance; refresh does not query Muse."
+META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded."
+META_MUSE_USAGE_NOTES = frozenset({META_MUSE_ALLOWANCE_NOTE, META_MUSE_NO_OBSERVATION_NOTE})
+
+
 def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
     """Read a stored allowance receipt without turning its age into a live probe.
 
@@ -2363,14 +2371,16 @@ def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
     ``response.subscription_usage`` event (see ``meta_muse_usage``). Neither is
     a read-only quota API, and only the sign-in receipt is stored on the OAuth
     row; SSE receipts remain request provenance. Reuse their sanitizer, but
-    retain the receipt's own
-    timestamp: the sanitizer timestamps NEW observations, whereas /usage is
+    retain the receipt's own timestamp: the sanitizer timestamps NEW
+    observations, whereas /usage is
     only reading one. An absent/undated receipt says unknown, never zero usage.
     """
     from local_operator.providers.meta_muse_usage import subscription_observation
 
-    note = "Last sign-in allowance; refresh does not query Muse."
-    unknown = UsageReport(provider="meta-muse", notes="No allowance observation recorded.")
+    note = META_MUSE_ALLOWANCE_NOTE
+    # No observation is not a just-fetched reading. Zero is the existing
+    # non-observation stamp: freshness/quota consumers require fetched_at > 0.
+    unknown = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
     raw = (creds or {}).get("subscription_observation")
     if not isinstance(raw, dict):
         return unknown
