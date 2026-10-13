@@ -2996,9 +2996,6 @@ class AgentLoop:
         # spec we built the request from. The run loop's echo fill acts on what
         # we SENT.
         request_model: "ModelSpec | None" = None
-        #: The spec that actually served this turn when the client reported
-        #: one (``StreamModelEvent``); the interrupted-turn recovery pins it.
-        served_model: "ModelSpec | None" = None
         #: The bare-error finish marker carried off ``StreamEndEvent``; see
         #: the event field for why it is an eligibility, not a cause.
         retryable_interruption = False
@@ -3034,7 +3031,14 @@ class AgentLoop:
                     model.provider == recovery.requested.provider
                     and model.model_id == recovery.requested.model_id
                 ):
-                    model = recovery.attempted
+                    # The gate armed this recovery only with a KNOWN effective
+                    # selector (``attempted_selector is not None``); the
+                    # assertion re-proves that narrowing locally so the static
+                    # type follows the same fact the gate enforces -- no cast,
+                    # no suppression.
+                    attempted = recovery.attempted
+                    assert attempted is not None
+                    model = attempted
                     same_route_retry = True
             system_blocks = await self._current_system_blocks(context, config, model)
             # Resolving the prompt can publish a durable host-state update
@@ -3131,11 +3135,6 @@ class AgentLoop:
             async for event in stream:
                 if isinstance(event, StreamModelEvent):
                     model = event.model
-                    # What ACTUALLY served the call, for the interrupted-turn
-                    # recovery pin (see ``_InterruptedRecovery``): the request
-                    # model is what we asked for, and a fallback or rotation
-                    # makes the two differ.
-                    served_model = event.model
                     yield ModelChangeEvent(
                         provider=model.provider,
                         model_id=model.model_id,
@@ -3600,7 +3599,6 @@ class AgentLoop:
             connectivity_loss=connectivity_loss,
             retryable_interruption=retryable_interruption,
             attempted_selector=attempted_selector,
-            served_model=served_model,
             model=request_model,
             nameless_call_drops=nameless_call_drops,
         )
@@ -5744,14 +5742,11 @@ class _ModelTurnResult:
     connectivity_loss: bool = False
     #: The bare-error finish marker (see ``StreamEndEvent.retryable_interruption``)
     #: -- an eligibility for the same bounded continuation, with the narrower
-    #: gates the run loop applies (no complete call, known serving spec).
+    #: gates the run loop applies (no complete call, a known effective selector).
     retryable_interruption: bool = False
     #: Effective API selector of the MARKED attempt (fault-only; stamped by
     #: the failover on the forwarded end). The recovery pin without a guess.
     attempted_selector: "ModelSpec | None" = None
-    #: The spec that actually served this turn, when the client reported one;
-    #: the interrupted-turn recovery pins it (see ``_InterruptedRecovery``).
-    served_model: "ModelSpec | None" = None
     #: How many tool calls this turn emitted and had DROPPED because they
     #: arrived with no name (see ``_model_turn``'s assembly guard). There is no
     #: row to replay for such a call, so only the run loop can tell the model;
