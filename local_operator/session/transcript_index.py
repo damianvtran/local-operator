@@ -179,7 +179,7 @@ CROSS_SESSION_TOOL_NAME = "send"
 #: 5: all-row journal ordinals and their equality domain. Earlier caches only
 #: cover the search/rail subsets; they cannot prove a visible custom row's
 #: position. Rebuilding on version mismatch is preferable to fabricating it.
-TRANSCRIPT_INDEX_VERSION = 6
+TRANSCRIPT_INDEX_VERSION = 7
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -545,6 +545,245 @@ class ScanState:
 
 
 @dataclass
+class SourceProjectionViews:
+    """Body-free inverse views, rebuilt ONCE with this same index, never per read."""
+
+    by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    duplicates: set[str] = field(default_factory=set)
+    prunes: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    owners: dict[str, list[str]] = field(default_factory=dict)
+    results: dict[str, list[str]] = field(default_factory=dict)
+    compactions: list[dict[str, Any]] = field(default_factory=list)
+    compaction_seqs: list[int] = field(default_factory=list)
+    prune_seqs: dict[str, list[int]] = field(default_factory=dict)
+    preserved_sets: dict[int, frozenset[str]] = field(default_factory=dict)
+    opaque_causal_seqs: list[int] = field(default_factory=list)
+    global_unknown_seqs: list[int] = field(default_factory=list)
+    unknown_identity_seqs: list[int] = field(default_factory=list)
+    origins_complete: bool = False
+
+    @classmethod
+    def build(cls, facts: list[dict[str, Any]]) -> "SourceProjectionViews":
+        out = cls()
+        for fact in facts:
+            id_, seq = fact["id"], fact["seq"]
+            if id_ in out.by_id:
+                out.duplicates.add(id_)
+            out.by_id[id_] = fact
+            if not id_:
+                out.unknown_identity_seqs.append(seq)
+            flags = fact.get("flags", [])
+            if "global_unknown" in flags:
+                out.global_unknown_seqs.append(seq)
+            if "opaque_causal" in flags:
+                out.opaque_causal_seqs.append(seq)
+            for call in fact.get("call_ids", []):
+                out.owners.setdefault(call, []).append(id_)
+            if fact.get("result_call_id"):
+                out.results.setdefault(fact["result_call_id"], []).append(id_)
+            if fact["source_class"] == "prune" and fact.get("prune_target"):
+                target = fact["prune_target"]
+                out.prunes.setdefault(target, []).append(fact)
+                out.prune_seqs.setdefault(target, []).append(seq)
+            if fact["source_class"] == "compaction":
+                out.compactions.append(fact)
+                out.compaction_seqs.append(seq)
+                out.preserved_sets[seq] = frozenset(fact.get("preserved_candidate_ids", []))
+        return out
+
+
+def source_projection_fact(entry: Any, seq: int) -> dict[str, Any]:
+    """Extract IDs/flags before rail classification drops semantic information.
+
+    This receives the scanner's ALREADY parsed JSON. No reparse, arguments,
+    prose, prune notices or preserved bodies are retained. Incomplete semantic
+    shape fails closed; opaque tool bodies have causal rather than global scope.
+    """
+    from local_operator.harness.rows import (
+        is_ask_gate_divert_row,
+        is_hidden_tool_name,
+        is_hidden_wake_delivery,
+        is_settle_only_ask,
+    )
+
+    fact: dict[str, Any] = {
+        "id": "",
+        "seq": seq,
+        "source_class": "invalid",
+        "flags": ["global_unknown"],
+    }
+    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+        return fact
+    fact["id"] = entry["id"]
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return fact
+    etype = entry.get("type")
+    fact["flags"] = []
+    if etype == "custom":
+        fact["source_class"] = "bookkeeping"
+    elif etype == "prune":
+        fact["source_class"] = "prune"
+        target = payload.get("target")
+        if isinstance(target, str) and 1 <= len(target) <= 128:
+            fact["prune_target"] = target
+        else:
+            fact["flags"] = ["global_unknown"]
+    elif etype == "compaction":
+        fact["source_class"] = "compaction"
+        kept = payload.get("first_kept_entry_id")
+        if kept is not None and (not isinstance(kept, str) or not 1 <= len(kept) <= 128):
+            fact["flags"].append("incomplete")
+        else:
+            fact["first_kept_entry_id"] = kept
+        preserved = payload.get("preserved_user_turns", [])
+        if (
+            not isinstance(preserved, list)
+            or len(preserved) > 512
+            or any(
+                not isinstance(turn, dict)
+                or not isinstance(turn.get("id"), str)
+                or not 1 <= len(turn["id"]) <= 128
+                for turn in preserved
+            )
+        ):
+            fact["flags"].append("incomplete")
+        else:
+            fact["preserved_candidate_ids"] = [turn["id"] for turn in preserved]
+    elif etype == "message":
+        kind = payload.get("kind", "message")
+        if kind not in ("message", "custom"):
+            fact["flags"] = ["global_unknown"]
+            return fact
+        fact["source_class"] = "custom_message" if kind == "custom" else "plain_message"
+        if kind == "custom":
+            if payload.get("custom_type"):
+                fact["flags"].append("injection")
+            else:
+                fact["flags"].append("incomplete")
+        else:
+            role = payload.get("role")
+            if role not in ("user", "assistant", "tool"):
+                fact["flags"].append("incomplete")
+            calls = payload.get("tool_calls", [])
+            if (
+                not isinstance(calls, list)
+                or len(calls) > 512
+                or any(
+                    not isinstance(call, dict)
+                    or not isinstance(call.get("id"), str)
+                    or not 1 <= len(call["id"]) <= 128
+                    for call in calls
+                )
+            ):
+                fact["flags"].append("opaque_causal")
+            elif calls and role != "assistant":
+                fact["flags"].append("opaque_causal")
+            elif calls:
+                fact["call_ids"] = [call["id"] for call in calls]
+                if any(is_settle_only_ask(call.get("name"), queued_engine=True) for call in calls):
+                    fact["flags"].append("ask")
+                if any(is_hidden_tool_name(call.get("name")) for call in calls):
+                    fact["flags"].append("hidden")
+            if role == "tool":
+                call = payload.get("tool_call_id")
+                if isinstance(call, str) and 1 <= len(call) <= 128:
+                    fact["result_call_id"] = call
+                else:
+                    fact["flags"].append("opaque_causal")
+                if is_settle_only_ask(payload.get("tool_name"), queued_engine=True):
+                    fact["flags"].append("ask")
+        if (
+            _row_is_invisible(entry)
+            or is_ask_gate_divert_row(entry)
+            or is_hidden_wake_delivery(payload)
+        ):
+            fact["flags"].append("hidden")
+    else:
+        fact["flags"] = ["global_unknown"]
+    fact["flags"] = sorted(set(fact["flags"]))
+    return fact
+
+
+def valid_source_projection_facts(facts: Any, scan: ScanState, rows: dict[str, Any]) -> bool:
+    """Cache structure/origins are validated, not silently repaired/truncated."""
+    # ScanState.rows counts the most recent reader's segment, NOT total rows
+    # after suffix re-derivation. Contiguous fact ordinals plus last-ID origins
+    # validate the complete table without mistaking a valid append for corruption.
+    if not isinstance(facts, list) or not 0 <= scan.window_rows <= len(facts):
+        return False
+    allowed = {
+        "id",
+        "seq",
+        "source_class",
+        "flags",
+        "call_ids",
+        "result_call_id",
+        "prune_target",
+        "first_kept_entry_id",
+        "preserved_candidate_ids",
+    }
+    enums = {
+        "plain_message",
+        "custom_message",
+        "prune",
+        "compaction",
+        "bookkeeping",
+        "opaque",
+        "invalid",
+    }
+    flag_enums = {"injection", "hidden", "ask", "incomplete", "opaque_causal", "global_unknown"}
+    last = {}
+    for seq, fact in enumerate(facts):
+        if (
+            not isinstance(fact, dict)
+            or set(fact) - allowed
+            or type(fact.get("seq")) is not int
+            or fact["seq"] != seq
+        ):
+            return False
+        if (
+            not isinstance(fact.get("id"), str)
+            or not isinstance(fact.get("source_class"), str)
+            or fact["source_class"] not in enums
+        ):
+            return False
+        flags = fact.get("flags")
+        if not isinstance(flags, list) or any(
+            not isinstance(flag, str) or flag not in flag_enums for flag in flags
+        ):
+            return False
+        for key in ("call_ids", "preserved_candidate_ids"):
+            values = fact.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not 1 <= len(value) <= 128 for value in values
+            ):
+                return False
+            if len(values) > 512:
+                return False
+        for key in ("result_call_id", "prune_target", "first_kept_entry_id"):
+            value = fact.get(key)
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
+                return False
+        cls, flags = fact["source_class"], set(flags)
+        if cls == "invalid" and "global_unknown" not in flags:
+            return False
+        if cls == "opaque" and flags not in ({"opaque_causal"}, {"global_unknown"}):
+            return False
+        if cls == "prune" and not fact.get("prune_target") and "global_unknown" not in flags:
+            return False
+        if (
+            cls == "compaction"
+            and "incomplete" not in flags
+            and ("first_kept_entry_id" not in fact or "preserved_candidate_ids" not in fact)
+        ):
+            return False
+        if fact["id"]:
+            last[fact["id"]] = seq
+    return last == rows
+
+
+@dataclass
 class TranscriptIndex:
     """The parsed cache: checkpoints, message docs, and the scan's own facts."""
 
@@ -568,7 +807,15 @@ class TranscriptIndex:
     # PROTOTYPE: offsets come from the same scanner/witness as ordinals. They
     # retain no payload and do not certify settled replay projection semantics.
     journal_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
+    source_projection_facts: list[dict[str, Any]] = field(default_factory=list)
+    source_views: SourceProjectionViews = field(init=False, repr=False)
     version: int = TRANSCRIPT_INDEX_VERSION
+
+    def __post_init__(self) -> None:
+        self.source_views = SourceProjectionViews.build(self.source_projection_facts)
+        self.source_views.origins_complete = {
+            id_: fact["seq"] for id_, fact in self.source_views.by_id.items() if id_
+        } == self.journal_rows
 
 
 def journal_coordinates_for_page(
@@ -644,6 +891,9 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     messages = raw.get("messages")
     if not isinstance(checkpoints, list) or not isinstance(messages, list):
         return None
+    facts = raw.get("source_projection_facts")
+    if not valid_source_projection_facts(facts, scan, raw.get("journal_rows")):
+        return None
     raw_ranges = raw.get("journal_ranges")
     raw_rows = raw.get("journal_rows")
     if (
@@ -685,6 +935,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         journal_generation=(
             raw["journal_generation"] if isinstance(raw.get("journal_generation"), str) else ""
         ),
+        source_projection_facts=facts,
         journal_ranges={id_: tuple(span) for id_, span in raw_ranges.items()},
         journal_rows=(
             {
@@ -728,6 +979,7 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "journal_generation": index.journal_generation,
         "journal_rows": index.journal_rows,
         "journal_ranges": index.journal_ranges,
+        "source_projection_facts": index.source_projection_facts,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -871,6 +1123,7 @@ class _Row:
     #: inside it can be read, so a run containing one is only ever ``complete:
     #: False`` (see :class:`RunRecord`).
     body_dropped: bool = False
+    source_fact: dict[str, Any] | None = None
     #: True when this row PAINTS as a completed turn — the desktop's terminal
     #: vocabulary (``boundaryKindOf``/``isTerminalMarker``): a
     #: ``completion_attention`` marker the renderer turns into a ``complete``
@@ -1133,13 +1386,31 @@ def _classify(
             # and the note at its call site (UI review round 2, M2).
             tool_name=dropped_tool_name if kind == "tool" else "",
             body_dropped=True,
+            source_fact={
+                "id": id_,
+                "seq": ordinal,
+                "source_class": "opaque",
+                "flags": ["opaque_causal" if kind == "tool" else "global_unknown"],
+            },
         )
+    fact = source_projection_fact(None, ordinal)
+
+    def make_row(**kwargs: Any) -> _Row:
+        captured = {**fact, "id": kwargs.get("id", "")}
+        return _Row(**kwargs, source_fact=captured)
+
     try:
         entry = json.loads(line)
     except ValueError:
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
     if not isinstance(entry, dict):
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
+    fact = source_projection_fact(entry, ordinal)
+    id_ = entry.get("id") if isinstance(entry.get("id"), str) else id_
     if _row_is_invisible(entry):
         # F5: A ROW THE CLIENT NEVER RECEIVES IS NOT WORK. The page is filtered
         # through ``harness.rows.visible_transcript_rows`` before it is served —
@@ -1148,7 +1419,7 @@ def _classify(
         # the reader cannot see, and the client's own fold would contradict it
         # (reproduced: a run of one visible call and one hidden row reported
         # ``action_count=2``, worked 3.5 s, against the fold's 1 and 3.0 s).
-        return _Row(
+        return make_row(
             ordinal=ordinal,
             offset=line_start,
             end=line_end,
@@ -1168,7 +1439,7 @@ def _classify(
         # Classified before the payload branches: a compaction is a transcript
         # RECORD (the marker a reader pins) and never a message, whatever the
         # payload holds.
-        return _Row(
+        return make_row(
             ordinal=ordinal,
             offset=line_start,
             end=line_end,
@@ -1182,7 +1453,7 @@ def _classify(
     if etype == "message":
         if payload.get("kind") == "custom" and payload.get("custom_type"):
             inject_type = str(payload.get("custom_type"))
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1202,7 +1473,7 @@ def _classify(
             if role == "user" and _is_harness_user_row(id_, payload, text):
                 # Harness chrome, skipped whole: no user checkpoint (the rail
                 # would caption it "Your message"), no find doc, no turn content.
-                return _Row(
+                return make_row(
                     ordinal=ordinal,
                     offset=line_start,
                     end=line_end,
@@ -1210,7 +1481,7 @@ def _classify(
                     ts=ts,
                     kind="other",
                 )
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1220,7 +1491,7 @@ def _classify(
                 text=text,
             )
         if role == "tool":
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1233,7 +1504,9 @@ def _classify(
                 tool_name=str(payload.get("tool_name") or ""),
                 **_tool_fault_fields(payload),
             )
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
     if etype == "custom":
         custom_type = payload.get("custom_type")
         if custom_type == _ATTENTION_STARTED:
@@ -1241,7 +1514,7 @@ def _classify(
             token = ""
             if isinstance(details, dict):
                 token = str(details.get("token", ""))
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1270,7 +1543,7 @@ def _classify(
                 # boundary.
                 anchored = isinstance(details.get("anchor"), str)
                 anchor = str(details.get("anchor") or "") if anchored else ""
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1283,7 +1556,7 @@ def _classify(
                 eligible=eligible,
                 terminal=anchored and marker_kind in _TERMINAL_MARKER_KINDS,
             )
-    return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+    return make_row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
 
 
 class _RowReader:
@@ -2081,7 +2354,9 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
     state = _Derivation()
     journal_rows: dict[str, int] = {}
     journal_ranges: dict[str, tuple[int, int]] = {}
+    source_facts = []
     for row in reader:
+        source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
             journal_ranges[row.id] = (row.offset, row.end)
@@ -2107,6 +2382,7 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
         journal_generation=uuid4().hex,
         journal_rows=journal_rows,
         journal_ranges=journal_ranges,
+        source_projection_facts=source_facts,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2152,7 +2428,9 @@ def _scan_incremental(
     journal_ranges = {
         id_: span for id_, span in previous.journal_ranges.items() if id_ in journal_rows
     }
+    source_facts = [fact for fact in previous.source_projection_facts if fact["seq"] < window_rows]
     for row in reader:
+        source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
             journal_ranges[row.id] = (row.offset, row.end)
@@ -2183,6 +2461,7 @@ def _scan_incremental(
         journal_generation=previous.journal_generation,
         journal_rows=journal_rows,
         journal_ranges=journal_ranges,
+        source_projection_facts=source_facts,
         naming=naming,
         runs=runs,
         scan=ScanState(
