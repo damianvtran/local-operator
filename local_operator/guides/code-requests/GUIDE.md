@@ -54,6 +54,15 @@ While a row's first state read is still in flight the row shows a loading
 state and no remedy; the sign-in remedy appears only once a read has resolved
 without a usable login.
 
+## Release copy is separate from gate evidence
+
+The review-round comments above are internal engineering evidence, not public
+release copy. When releasing this repository, `AGENTS.md` owns the release
+procedure and `.github/RELEASE_NOTES_TEMPLATE.md` owns the public-copy format.
+Use that template for both the claim/bump PR's public-notes section and the
+publication file; do not copy review/QA/design narratives or CI counts into
+release notes consumed by update cards.
+
 ## Tracking and monitoring
 
 Rows are derived from the session's own activity as it happens: opening,
