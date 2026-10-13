@@ -1231,6 +1231,13 @@ class DesktopSubscription:
     #: this transport's half).
     supplements: bool = False
     journal_order: bool = False
+    #: Whether this subscriber negotiated the COMPLETE peer-source contract
+    #: (the events route's ``?peer_journal_source=1``): only then does the
+    #: bridge hand it peer-origin ``journal_order_ready`` wakes. False for
+    #: every caller that does not know the flag — the installed UI sends
+    #: ``journal_order`` without it and must never meet a wake for a peer
+    #: session whose complete read it never declared.
+    peer_journal_source: bool = False
     expires: float = 0.0
     overflow: bool = False
     #: False until ``events`` has finished the OPEN handshake -- i.e. until the
@@ -1314,6 +1321,17 @@ class DesktopSessionBridge:
         self._closing = False
         self._order_pending: dict[str, tuple[dict[str, Any], tuple[int, int, float] | None]] = {}
         self._order_correction: asyncio.Task[Any] | None = None
+        #: THE PEER SOURCE-AVAILABILITY FLIGHT (complete peer-source contract):
+        #: ONE coalesced wait per debt wave, started when a complete-negotiated
+        #: stored read finds the owner's index ``building``. Its outcome is a
+        #: metadata-only ``journal_order_ready`` wake (or the explicit
+        #: reconcile correction), published only after rechecking this bridge.
+        self._source_wait_task: asyncio.Task[Any] | None = None
+        #: Whether the LAST flight failed for the current wave. A failed wait
+        #: is not retried on every sweep — only a meaningful change (a ready
+        #: result, or a non-building state) re-arms the lane, which is the
+        #: "never retry per token render" rule in one boolean.
+        self._source_wait_failed = False
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
@@ -2136,6 +2154,8 @@ class DesktopSessionBridge:
         self._order_pending.clear()
         if self._order_correction is not None:
             self._order_correction.cancel()
+        if self._source_wait_task is not None:
+            self._source_wait_task.cancel()
         for sub in self.subscribers.values():
             self._disconnect(sub)
         self._cancel_dwells()
@@ -2378,6 +2398,17 @@ class DesktopSessionBridge:
                 not sub.journal_order
                 and frame.get("type") == "event"
                 and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+            ):
+                continue
+            # PEER-ORIGIN WAKES ARE THEIR OWN NEGOTIATION: a complete peer read
+            # is the only thing that can start them, but the wake must still
+            # reach only subscribers that declared the complete contract --
+            # a legacy subscriber sweeping on it would hold debt the
+            # unnegotiated peer read can never settle.
+            if (
+                not sub.peer_journal_source
+                and frame.get("type") == "event"
+                and frame.get("payload", {}).get("peer_source") is True
             ):
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
@@ -3213,6 +3244,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        peer_journal_source: bool = False,
         supplements: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
@@ -3327,6 +3359,7 @@ class DesktopSessionBridge:
                 entry_times=entry_times,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
                 **supplement_read_options(supplements),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
@@ -3397,6 +3430,9 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        peer_journal_source: bool = False,
+        source_read: str | None = None,
+        expected_journal_generation: str | None = None,
         supplements: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
@@ -3468,6 +3504,30 @@ class DesktopSessionBridge:
             or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in order_ids)
         ):
             raise ValueError("order_ids must contain at most 512 entry ids of 1..128 characters")
+        if source_read is not None:
+            # THE TYPED SOURCE PURPOSES ARE A PEER CONTRACT (docs/DESKTOP_API.md
+            # "Complete peer-source contract"): a LOCAL session's source facts
+            # already ride its ordinary page read (the #2274 negotiation), so a
+            # purpose against one is refused by name rather than answered with
+            # a second local dialect. The shape checks repeat the relay's own
+            # shared validators so a malformed request never spends a hop.
+            from local_operator.network.relay import SOURCE_READ_PURPOSES
+
+            if source_read not in SOURCE_READ_PURPOSES:
+                raise ValueError(
+                    f"source_read must be one of {', '.join(sorted(SOURCE_READ_PURPOSES))}"
+                )
+            if not peer_journal_source:
+                raise ValueError("source_read requires peer_journal_source")
+            if source_read == "payload" and (not order_ids or expected_journal_generation is None):
+                raise ValueError("payload requires order_ids and expected_journal_generation")
+            if self.remote_row is None:
+                raise ValueError("source_read purposes are served for peer sessions only")
+            return await self._peer_source_read(
+                source_read=source_read,
+                order_ids=order_ids or [],
+                expected_generation=expected_journal_generation,
+            )
         if open_frame:
             # A PEER'S FRAME IS BUILT BY ITS OWNER, AND THE FLAG NOW TRAVELS WITH
             # THE REQUEST (docs/DESKTOP_API.md §"The open frame"): the stored
@@ -3503,6 +3563,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     entry_times=entry_times,
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    peer_journal_source=peer_journal_source,
                     open_frame=True,
                 )
             # A LOCAL ID WITH NO FACADE YET (a draft, an id whose runtime never
@@ -3570,6 +3631,7 @@ class DesktopSessionBridge:
                 limit=limit,
                 entry_times=entry_times,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
             )
         try:
             page = await load_transcript_page(
@@ -4016,6 +4078,136 @@ class DesktopSessionBridge:
             self._order_correction = asyncio.create_task(correct())
         return answer
 
+    async def _peer_source_read(
+        self,
+        *,
+        source_read: str,
+        order_ids: list[str],
+        expected_generation: str | None,
+    ) -> dict[str, Any]:
+        """One typed source purpose against the OWNER's index, through the relay.
+
+        THE OWNER'S ANSWER IS ALREADY THE CONTRACT'S OWN SHAPE (the frozen
+        four-key envelope plus source facts), so a successful reply is passed
+        through whole — but only behind the per-response ACK. A reply without
+        ``peer_journal_source: true`` is not a complete result: an older owner
+        relay answers its familiar page, which this method must never surface
+        as source facts, so it degrades to today's ``unsupported`` with no
+        source keys. A ``building`` metadata answer arms the coalesced
+        availability flight — the wake that settles it — exactly as on the
+        page path. ``availability`` never rides this door (it is
+        ``_source_availability_flight``'s own internal wait).
+
+        BLOCKING hop, run off the loop by the caller's ``to_thread`` (this
+        method awaits that thread).
+        """
+        from local_operator.network.projection import peer_source_read
+
+        device_id = str(getattr(self.remote_row, "owner_device", "") or "")
+        if not device_id:
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": True,
+                "has_newer": None,
+                "journal_order_state": "unsupported",
+            }
+        answer = await asyncio.to_thread(
+            peer_source_read,
+            self.root,
+            device_id=device_id,
+            session_id=self.session_id,
+            purpose=source_read,
+            order_ids=order_ids,
+            expected_generation=expected_generation,
+        )
+        if not isinstance(answer, dict) or answer.get("peer_journal_source") is not True:
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": True,
+                "has_newer": None,
+                "journal_order_state": "unsupported",
+            }
+        state = answer.get("journal_order_state")
+        if isinstance(state, str):
+            self._note_source_availability(state)
+        return answer
+
+    def _note_source_availability(self, state: str) -> None:
+        """Arm, stand down or SKIP the peer availability wait for this wave.
+
+        ``ready`` stands the wave down (a later rewrite may arm a new one);
+        ``building`` arms ONE flight — coalesced while one is in flight, and
+        NOT re-armed after a failed wave until a ready answer arrives. Neither
+        ``unavailable`` nor ``unsupported`` arms anything: they are not "come
+        back in a moment" facts, and retrying them per render would be the
+        token poll this lane exists to remove.
+        """
+        if state == "ready":
+            self._source_wait_failed = False
+            return
+        if state != "building":
+            return
+        if self._source_wait_task is not None and not self._source_wait_task.done():
+            return
+        if self._source_wait_failed:
+            return
+        self._source_wait_task = asyncio.create_task(self._source_availability_flight())
+
+    async def _source_availability_flight(self) -> None:
+        """One bounded wait for the owner's index, then the coalesced wake.
+
+        The wait is the owner relay's DEFERRED availability lane: one
+        dispatcher-level continuation that joins the owner's existing index
+        refresh and answers when the bound expires or the index is resident.
+        Nothing here holds a runtime, a lease or the shared slow workers — a
+        deliberately STOPPED owner is served by the same lane, which is the
+        point of a stored read.
+
+        PUBLISHED ONLY AFTER RECHECKING THIS BRIDGE. The wait awaited, so the
+        bridge may have closed and the row's placement may have moved (a
+        handoff to another device); a wake then would point a renderer at a
+        source it no longer reads. The subscription-level declaration
+        (``peer_journal_source``) is the final gate, applied when the frame is
+        handed to each reader. A READY answer publishes a METADATA-ONLY
+        ``journal_order_ready`` — no rows, no generation: availability is not
+        generation authority (the authoritative read mints the domain, and an
+        unverified generation in a wake would be adopted by comparison rules
+        that exist to stop exactly that). A timeout or failure publishes the
+        explicit reconcile correction instead of leaving ``building`` with a
+        dead flight, and the failed wave is not retried until the state moves.
+        """
+        from local_operator.network.projection import peer_source_availability
+
+        device_id = str(getattr(self.remote_row, "owner_device", "") or "")
+        state: str | None = None
+        try:
+            if device_id:
+                state = await asyncio.to_thread(
+                    peer_source_availability,
+                    self.root,
+                    device_id=device_id,
+                    session_id=self.session_id,
+                )
+        except Exception:  # noqa: BLE001 — a failed wait is an honest not-ready
+            state = None
+        if state != "ready":
+            self._source_wait_failed = True
+        if self._closing:
+            return
+        if not device_id or str(getattr(self.remote_row, "owner_device", "") or "") != device_id:
+            # PLACEMENT MOVED while the wait ran: this wake names a source the
+            # row no longer points at, so it is dropped rather than published.
+            return
+        if state == "ready":
+            self._source_wait_failed = False
+            self.publish("event", {"type": JOURNAL_ORDER_EVENT, "peer_source": True})
+        else:
+            self.publish(
+                "event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True, "peer_source": True}
+            )
+
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
         return {
@@ -4038,6 +4230,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        peer_journal_source: bool = False,
     ) -> dict[str, Any]:
         """One page of a PEER's transcript: the wire when it can answer, the
         owner's stored journal when it cannot.
@@ -4148,6 +4341,7 @@ class DesktopSessionBridge:
                 limit=limit,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
             )
         if remote.is_cold:
             attach_at = time.monotonic()
@@ -4197,13 +4391,21 @@ class DesktopSessionBridge:
                 limit=limit,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
             )
-        if journal_order:
+        building = False
+        if journal_order and peer_journal_source:
             # A cold ready page installs the owner's domain in the renderer.
             # Once the facade hydrates, its uncoordinated wire window cannot
             # answer off-page repair IDs: prefer the SAME witnessed stored read
             # even while warm. Only ready owner truth may replace this window;
             # old/building/unservable owners keep the exact legacy wire page.
+            #
+            # THE COMPLETE DECLARATION IS THE GATE (see the projection's own
+            # note): without it this preference is not taken at all — the
+            # installed UI sends journal_order without the new declaration, and
+            # its peer pages must stay byte-identical unsupported rather than
+            # activate ordering with no negotiated wake behind it.
             ordered = await self._peer_stored_history(
                 before_id=before_id,
                 through_id=through_id,
@@ -4211,9 +4413,19 @@ class DesktopSessionBridge:
                 open_frame=open_frame,
                 journal_order=True,
                 order_ids=order_ids,
+                peer_journal_source=True,
             )
             if ordered.get("journal_order_state") == "ready" and ordered.get("journal_generation"):
                 return ordered
+            if ordered.get("journal_order_state") == "building":
+                # BUILDING IS SETTLEABLE UNDER THE COMPLETE CONTRACT: the
+                # availability flight is the wake. The WIRE page stays the
+                # answer (its rows are the live truth and only ready owner
+                # truth may replace this window), but it carries the honest
+                # building state so the renderer holds its debt until the
+                # flight publishes.
+                building = True
+                self._note_source_availability("building")
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
             # ONE OLDER PAGE PER CALL, not a drain: a reader that scrolls asks
@@ -4291,7 +4503,10 @@ class DesktopSessionBridge:
             answer["runs_state"] = "unsupported"
             answer["head_cut"] = False
         if journal_order:
-            answer.setdefault("journal_order_state", "unsupported")
+            if building:
+                answer["journal_order_state"] = "building"
+            else:
+                answer.setdefault("journal_order_state", "unsupported")
         return answer
 
     def _remote_rows(
@@ -4338,6 +4553,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        peer_journal_source: bool = False,
     ) -> dict[str, Any]:
         """A page of the OWNER'S STORED JOURNAL, or an unservable answer.
 
@@ -4383,6 +4599,7 @@ class DesktopSessionBridge:
                 limit=limit,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
             )
             if open_trace.enabled():
                 # THE MESH ASK, END TO END: control-socket dial, this device's
@@ -4424,7 +4641,20 @@ class DesktopSessionBridge:
                     answer.setdefault("runs_state", "unsupported")
                     answer.setdefault("head_cut", False)
                 if journal_order:
-                    answer.setdefault("journal_order_state", "unsupported")
+                    # TWO NEGOTIATIONS, EACH WITH ITS OWN WHOLE ANSWER (see the
+                    # projection's own note). COMPLETE: the owner's state rides
+                    # through — ready / building / unavailable + the ACK — and a
+                    # building answer arms the ONE coalesced availability flight,
+                    # the wake that settles it; a ready answer stands the wave
+                    # down. LEGACY: unsupported, byte-identically to before this
+                    # change, so the installed UI's peer pages are untouched.
+                    state = answer.get("journal_order_state")
+                    if peer_journal_source:
+                        self._note_source_availability(
+                            str(state) if isinstance(state, str) else "unsupported"
+                        )
+                    else:
+                        answer["journal_order_state"] = "unsupported"
                 return answer
         answer = {
             "entries": [],
@@ -5326,6 +5556,7 @@ class DesktopSessionBridge:
         frontend_replace: bool = False,
         supplements: bool = False,
         journal_order: bool = False,
+        peer_journal_source: bool = False,
     ) -> DesktopSubscription:
         """Register one event subscriber.
 
@@ -5352,7 +5583,10 @@ class DesktopSessionBridge:
                 "Update the desktop app, then reconnect."
             )
         sub = DesktopSubscription(
-            frontend_replace=frontend_replace, supplements=supplements, journal_order=journal_order
+            frontend_replace=frontend_replace,
+            supplements=supplements,
+            journal_order=journal_order,
+            peer_journal_source=peer_journal_source,
         )
         self.subscribers[sub.id] = sub
         return sub
@@ -5367,6 +5601,7 @@ class DesktopSessionBridge:
         open_frame: bool = False,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        peer_journal_source: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         gen_at = time.monotonic()
         try:
@@ -5384,6 +5619,11 @@ class DesktopSessionBridge:
                         or f.get("type") != "event"
                         or f.get("payload", {}).get("type") != JOURNAL_ORDER_EVENT
                     )
+                    and (
+                        sub.peer_journal_source
+                        or f.get("type") != "event"
+                        or f.get("payload", {}).get("peer_source") is not True
+                    )
                 ]
                 if not gap
                 else []
@@ -5392,6 +5632,7 @@ class DesktopSessionBridge:
                 entry_times=entry_times,
                 open_frame=open_frame,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=peer_journal_source,
                 **supplement_read_options(sub.supplements),
             )
             if open_trace.enabled():

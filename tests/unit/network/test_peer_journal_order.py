@@ -82,7 +82,12 @@ def test_real_pair_ready_legacy_and_old_owner(
         )
         assert legacy is not None
         assert "journal_order" not in seen[-1] and "order_ids" not in seen[-1]
-        page = projection.peer_stored_history_page(
+        # JOURNAL_ORDER ALONE IS NO LONGER AN ACTIVATION: the complete
+        # declaration gates the whole peer stored-read ordering path (the
+        # transport slice's activation is re-gated), so a capable owner's
+        # ready facts must NOT surface to a journal_order-only request — the
+        # answer is byte-identically today's legacy ``unsupported``.
+        partial = projection.peer_stored_history_page(
             a.root,
             device_id=b.identity.device_id,
             session_id=SESSION,
@@ -91,10 +96,30 @@ def test_real_pair_ready_legacy_and_old_owner(
             journal_order=True,
             order_ids=[ids[0], "absent"],
         )
-        assert page is not None
+        assert partial is not None
         assert seen[-1]["journal_order"] is True
         assert seen[-1]["order_ids"] == [ids[0], "absent"]
+        assert "peer_journal_source" not in seen[-1]
+        assert partial["journal_order_state"] == "unsupported"
+        assert "journal_generation" not in partial
+        assert json.dumps({k: v for k, v in partial.items() if k != "journal_order_state"}) == (
+            json.dumps({k: v for k, v in legacy.items() if k != "journal_order_state"})
+        )
+        # THE COMPLETE DECLARATION IS THE ACTIVATION.
+        page = projection.peer_stored_history_page(
+            a.root,
+            device_id=b.identity.device_id,
+            session_id=SESSION,
+            limit=2,
+            open_frame=open_frame,
+            journal_order=True,
+            order_ids=[ids[0], "absent"],
+            peer_journal_source=True,
+        )
+        assert page is not None
+        assert seen[-1]["peer_journal_source"] is True
         assert page["journal_order_state"] == "ready"
+        assert page["peer_journal_source"] is True
         index = ti.fresh_resident(b.root, SESSION)
         assert index is not None
         assert page["journal_generation"] == index.journal_generation
@@ -112,9 +137,24 @@ def test_real_pair_ready_legacy_and_old_owner(
         assert json.dumps(repeat) == json.dumps(legacy)
 
         def old_owner(owner_link: relay.PeerLink, frame: dict[str, Any]) -> Any:
+            # An OLD owner ignores the whole new vocabulary: it answers the
+            # request it has always answered. Its reply carries no ACK, which
+            # is exactly why a complete viewer must read absence as
+            # ``unsupported`` — never infer completeness from any other key.
             return original(
                 owner_link,
-                {k: v for k, v in frame.items() if k not in {"journal_order", "order_ids"}},
+                {
+                    k: v
+                    for k, v in frame.items()
+                    if k
+                    not in {
+                        "journal_order",
+                        "order_ids",
+                        "peer_journal_source",
+                        "source_read",
+                        "expected_journal_generation",
+                    }
+                },
             )
 
         monkeypatch.setitem(b._handlers, "net_session_history", old_owner)
@@ -126,6 +166,7 @@ def test_real_pair_ready_legacy_and_old_owner(
             open_frame=open_frame,
             journal_order=True,
             order_ids=ids,
+            peer_journal_source=True,
         )
         assert old == {**legacy, "journal_order_state": "unsupported"}
         # Stored reads take no runtime lease: no registry/runtime artifact appears.
@@ -153,11 +194,28 @@ def test_real_pair_ready_legacy_and_old_owner(
         )
         bridge = DesktopSessionBridge(a.root, SESSION, "", remote_row=row)
         monkeypatch.setitem(b._handlers, "net_session_history", observe)
-        desktop = asyncio.run(
+        # LEGACY: journal_order alone keeps the wire page's own unsupported —
+        # the transport slice's activation is re-gated behind the complete
+        # declaration, so the installed UI's bytes are untouched.
+        legacy_desktop = asyncio.run(
             bridge.history(journal_order=True, order_ids=ids, limit=2, open_frame=open_frame)
+        )
+        assert legacy_desktop.get("journal_order_state") == "unsupported"
+        assert "journal_generation" not in legacy_desktop
+        # COMPLETE: the stored owner's ready facts ride the page, validated
+        # through the real DTO the installed UI consumes.
+        desktop = asyncio.run(
+            bridge.history(
+                journal_order=True,
+                order_ids=ids,
+                limit=2,
+                open_frame=open_frame,
+                peer_journal_source=True,
+            )
         )
         assert HistoryPage.model_validate(desktop).journal_generation == index.journal_generation
         assert desktop["journal_ordinals"] == {id_: index.journal_rows[id_] for id_ in ids}
+        assert desktop["peer_journal_source"] is True
         # A ready cold page must remain repairable after the facade hydrates.
         # This is a real stored owner hop with a synthetic hydrated wire window;
         # no strict display-window DTO or recovery publication changes are needed.
@@ -177,7 +235,13 @@ def test_real_pair_ready_legacy_and_old_owner(
             ),
         )
         warm = asyncio.run(
-            bridge.history(journal_order=True, order_ids=ids, limit=2, open_frame=open_frame)
+            bridge.history(
+                journal_order=True,
+                order_ids=ids,
+                limit=2,
+                open_frame=open_frame,
+                peer_journal_source=True,
+            )
         )
         assert warm == desktop
         monkeypatch.setattr(desktop_module.time, "time", lambda: 1700000000.0)
@@ -191,7 +255,13 @@ def test_real_pair_ready_legacy_and_old_owner(
         assert len(seen) == prior_calls, "absent opt-in must not add a stored hop"
         monkeypatch.setitem(b._handlers, "net_session_history", old_owner)
         old_warm = asyncio.run(
-            bridge.history(journal_order=True, order_ids=ids, limit=2, open_frame=open_frame)
+            bridge.history(
+                journal_order=True,
+                order_ids=ids,
+                limit=2,
+                open_frame=open_frame,
+                peer_journal_source=True,
+            )
         )
         assert json.dumps(old_warm) == json.dumps({**unasked, "journal_order_state": "unsupported"})
         # A not-ready or unservable owner cannot replace the legacy wire page.
@@ -200,7 +270,13 @@ def test_real_pair_ready_legacy_and_old_owner(
                 projection, "peer_stored_history_page", lambda *args, **kwargs: unavailable
             )
             fallback = asyncio.run(
-                bridge.history(journal_order=True, order_ids=ids, limit=2, open_frame=open_frame)
+                bridge.history(
+                    journal_order=True,
+                    order_ids=ids,
+                    limit=2,
+                    open_frame=open_frame,
+                    peer_journal_source=True,
+                )
             )
             assert fallback == old_warm
     finally:
@@ -234,10 +310,26 @@ def test_building_and_changed_page_witness_stay_unsupported(
     _seed_journal(b.root, SESSION, ["", "", ""])
     # Hold the real refresh scheduling edge still, not a fabricated index.
     monkeypatch.setattr(ti, "start_refresh", lambda *args: None)
+    # AN UNDECLARED journal_order read is today's plain page: NO state key at
+    # all (the VIEWER half states the legacy ``unsupported``), no coordinates,
+    # and the refresh is not even started for a caller that can never receive
+    # its facts.
     page = _read(b, journal_order=True, **({"open_frame": True} if open_frame else {}))
-    assert page["journal_order_state"] == "unsupported"
+    assert "journal_order_state" not in page
     assert "journal_generation" not in page and "journal_ordinals" not in page
     assert all("journal_seq" not in row for row in page["entries"])
+    # THE COMPLETE DECLARATION GETS THE HONEST BUILDING — the wake is the
+    # availability lane — and never a fabricated ordinal or generation.
+    declared = _read(
+        b,
+        journal_order=True,
+        peer_journal_source=True,
+        **({"open_frame": True} if open_frame else {}),
+    )
+    assert declared["journal_order_state"] == "building"
+    assert declared["peer_journal_source"] is True
+    assert "journal_generation" not in declared and "journal_ordinals" not in declared
+    assert all("journal_seq" not in row for row in declared["entries"])
 
 
 def test_shared_join_refuses_a_different_read_witness(peer_pair: Devices) -> None:
@@ -319,12 +411,19 @@ def test_real_pair_wrong_owner_and_denied_read_leak_no_metadata(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("capable, events", [(False, True), (True, True), (True, False)])
-async def test_remote_attach_declares_journal_order_only_when_negotiated(tmp_path, capable, events):
-    from local_operator.session.runtime.types import (
-        JOURNAL_ORDER_CAPABILITY,
-        SessionRecord,
-    )
+@pytest.mark.parametrize(
+    "capabilities, events",
+    [
+        ([], True),  # an old runtime: NEITHER key is declared
+        (["journal-order-v1"], True),  # partial: still NEITHER (the correction)
+        (["journal-order-v1", "peer-journal-source-v1"], True),  # complete
+        (["journal-order-v1", "peer-journal-source-v1"], False),  # events off
+    ],
+)
+async def test_remote_attach_declares_complete_order_only_when_negotiated(
+    tmp_path, capabilities, events
+):
+    from local_operator.session.runtime.types import SessionRecord
 
     frames = []
     done = asyncio.Event()
@@ -362,14 +461,17 @@ async def test_remote_attach_declares_journal_order_only_when_negotiated(tmp_pat
         control_port=0,
         control_key="synthetic-unused-key",
         protocol=4,
-        capabilities=[JOURNAL_ORDER_CAPABILITY] if capable else [],
+        capabilities=list(capabilities),
     )
     client = projection.RemoteSessionClient(
         lambda value: None, lambda reason: None, facts=facts, events=events
     )
+    complete = "peer-journal-source-v1" in capabilities
     try:
         await client.connect(record, SESSION)
-        assert frames[0]["auth"].get("journal_order") is (True if capable and events else None)
+        declared = True if complete and events else None
+        assert frames[0]["auth"].get("journal_order") is declared
+        assert frames[0]["auth"].get("peer_journal_source") is declared
     finally:
         client.close()
         await asyncio.wait_for(done.wait(), 2)

@@ -3760,6 +3760,8 @@ def project_indexed_source_subset(
                 break
             bodies[key] = {
                 "id": key,
+                # The stored row's OWN entry time — the wire row's ``ts``.
+                "ts": row.ts,
                 "journal_seq": index.journal_rows[key],
                 # Keep the writer's discriminator explicit beside the typed
                 # body; a custom dump alone can parse as a default-user Message.

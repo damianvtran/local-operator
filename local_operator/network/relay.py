@@ -144,7 +144,11 @@ from local_operator.network.types import (
 )
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session import open_trace
-from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_VERSION
+from local_operator.session.runtime.types import (
+    HEARTBEAT_INTERVAL_S,
+    PEER_JOURNAL_SOURCE_FLAG,
+    PROTOCOL_VERSION,
+)
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
@@ -3071,6 +3075,33 @@ SESSION_HISTORY_HOP_S = 6.0
 #: a session for minutes; a page read has no such tail.)
 SESSION_HISTORY_CLIENT_MARGIN_S = 2.0
 
+#: The complete peer-source contract's typed purposes (docs/DESKTOP_API.md
+#: §"Complete peer-source contract"). ONE set, read by both the local-control
+#: and the authenticated-owner boundary so neither can accept a purpose the
+#: other refuses.
+SOURCE_READ_PURPOSES: frozenset[str] = frozenset({"metadata", "payload", "availability"})
+
+#: How long one deferred availability continuation waits for the owner's index
+#: refresh before answering unavailable. MUST stay under
+#: :func:`session_history_hop_bound_s` (a test pins the ordering): the asking
+#: relay gives up at the hop, and a wait that outlasts its own caller reports
+#: "no answer" instead of "not ready yet" — the exact inversion this lane
+#: exists to avoid. It is a BOUND, not a promise: an index still building past
+#: it answers unavailable and the client asks again on its next meaningful
+#: wake, never per token render.
+SOURCE_AVAILABILITY_WAIT_S = 4.0
+
+#: The most availability continuations one relay holds at once. Past it the
+#: lane answers a bounded busy/unavailable rather than queueing without end;
+#: the shared slow workers are never touched by this lane at all.
+SOURCE_AVAILABILITY_MAX_PENDING = 16
+
+#: Encoded-byte headroom kept between a payload read's own fit and the reply
+#: budget: the wire envelope adds the ACK, state and coordinate keys the
+#: subset's own check never counted. A unit displaced by this headroom is
+#: reported ``remaining`` (honest, retried smaller), never silently trimmed.
+SOURCE_REPLY_HEADROOM_BYTES = 2048
+
 
 def session_history_hop_bound_s() -> float:
     """How long THIS relay waits for a peer to answer a stored-page read.
@@ -3176,6 +3207,110 @@ def validate_journal_order(raw: Any, ids: Any) -> tuple[bool, list[str] | None]:
             "protocol_error", "order_ids must be a list of at most 512 ids of 1..128 characters"
         )
     return enabled, ids
+
+
+def _empty_source_page() -> dict[str, Any]:
+    """The frozen four-key envelope a source-fact answer rides.
+
+    A source read is NOT a page: it carries facts (or bounded bodies) and an
+    impossible-shaped window, and a client must never fold it as one. The
+    cursor flags are the honest constants for "this is not a cursor read".
+    """
+    return {"entries": [], "has_more": False, "cursor_missing": False, "has_newer": None}
+
+
+def validate_peer_journal_source(raw: Any) -> bool:
+    """THE complete-contract declaration, shared by BOTH stored-read boundaries.
+
+    ``peer_session_history`` validates what a caller put on the LOCAL control
+    frame (``RelayServer._ctl_peer_history``) and ``net_session_history``
+    validates what a granted PEER put on the frame
+    (``RelayServer._op_session_history``) — one function for the same reason
+    :func:`validate_history_limit` is one: the two halves of one read must not
+    answer "what is a valid declaration?" differently.
+
+    ABSENT means NO. A viewer that did not declare the complete contract gets
+    today's byte-compatible path and every complete-semantics field is omitted
+    from the answer. Present, the accepted spellings are JSON ``true`` and
+    ``1``; anything else is refused BY NAME rather than coerced, because a
+    silently read ``false`` would collapse "I did not ask" and "I asked for
+    no" into one frame while the build this flag gates cannot tell them apart.
+    """
+    if raw is None:
+        return False
+    if raw is True or (isinstance(raw, int) and not isinstance(raw, bool) and raw == 1):
+        return True
+    raise MeshRefusal(
+        "protocol_error",
+        f"peer_journal_source must be 1 (true) when present, not {raw!r}",
+    )
+
+
+def validate_source_read(raw: Any) -> str | None:
+    """THE purpose decision, shared by both halves of a stored read.
+
+    ``None`` — absent — is today's page exactly. The three purposes are the
+    complete contract's typed reads (docs/DESKTOP_API.md "Complete peer-source
+    contract"): ``metadata`` (facts only, no body/cursor/frontend effects),
+    ``payload`` (bounded fresh bodies plus same-read coordinates) and
+    ``availability`` (the deferred readiness wait, served by the dispatcher
+    lane). A value that is present but is not one of the three is refused BY
+    NAME: answering a page to a caller that asked for a purpose would be a
+    different answer than the one requested, and silently ignoring the key is
+    how a mixed build comes to believe it read source facts it never received.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw in SOURCE_READ_PURPOSES:
+        return raw
+    raise MeshRefusal(
+        "protocol_error",
+        f"source_read must be one of {', '.join(sorted(SOURCE_READ_PURPOSES))}, not {raw!r}",
+    )
+
+
+def validate_expected_generation(raw: Any) -> str | None:
+    """The payload purpose's REQUIRED domain expectation (metadata: optional).
+
+    An opaque equality token — never parsed, never compared for freshness. It
+    names the domain the caller's already-loaded bodies belong to, which is
+    what fences a body from being reattested under a rebuilt source. A
+    malformed shape is refused here, at both boundaries, so the two halves of
+    one read cannot disagree about what a valid expectation is; the payload
+    purpose's requirement that one be PRESENT is enforced by
+    :func:`validate_source_read_request`.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str) and 1 <= len(raw) <= 128:
+        return raw
+    raise MeshRefusal(
+        "protocol_error",
+        "expected_journal_generation must be a 1..128 character string when present",
+    )
+
+
+def validate_source_read_request(
+    source_read: str | None, declared: bool, order_ids: list[str] | None, expected: str | None
+) -> None:
+    """The purpose's own required-shape rules, ONE spelling for both boundaries.
+
+    A purpose IS a complete read, so it requires the complete declaration; a
+    ``payload`` read fetches bodies, so it cannot be served without the IDs to
+    fetch and the generation those bodies must belong to. Refusing at the
+    requesting relay too (not only at the owner) keeps a malformed request
+    from spending a hop, and the shared function is what stops the two ends
+    drifting into different opinions about what "payload" requires.
+    """
+    if source_read is None:
+        return
+    if not declared:
+        raise MeshRefusal("protocol_error", "source_read requires peer_journal_source")
+    if source_read == "payload":
+        if not order_ids:
+            raise MeshRefusal("protocol_error", "payload requires order_ids")
+        if expected is None:
+            raise MeshRefusal("protocol_error", "payload requires expected_journal_generation")
 
 
 def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
@@ -4273,6 +4408,16 @@ class RelayServer:
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: THE DEFERRED SOURCE-AVAILABILITY LANE (complete peer-source
+        #: contract): one coalesced wait per session per wave, admitted up to
+        #: ``SOURCE_AVAILABILITY_MAX_PENDING``, every answer sent from the page
+        #: loop after fresh rechecks. ``_source_wait_keys`` is the once-answer
+        #: dedupe: a repeated (link, req) never registers a second waiter, so a
+        #: duplicate wire request can never receive two replies for one ``req``.
+        self._source_wait_lock = threading.Lock()
+        self._source_waiters: dict[str, list[tuple["PeerLink", dict[str, Any]]]] = {}
+        self._source_wait_keys: set[tuple[str, Any]] = set()
+        self._source_wait_total = 0
         #: The ONE event loop every stored-page read runs on, and the lock that
         #: builds it once (see ``_page_loop_locked``). Lazy for the same reason the
         #: slow pool is: most relays never serve ``net_session_history``. The lock
@@ -5772,6 +5917,16 @@ class RelayServer:
             return wire.refusal_frame(
                 req, f"{granted.action} is only valid on a link that is still pairing"
             )
+        # THE COMPLETE CONTRACT'S DEFERRED LANE, decided HERE and not in the
+        # handler: an availability read must release the link's reader AND the
+        # shared slow workers while it waits (proof B), so it cannot ride
+        # ``_run_handler`` — whose ``None`` result means an EMPTY ACK, a
+        # shortcut the proof rejected — and it cannot ride ``_dispatch_slow``
+        # (four shared workers, and a held source wait must never starve
+        # prompt or live traffic on the link). The frame is authorised above
+        # like every other op; the continuation re-checks at answer time.
+        if carrier == "net_session_history" and frame.get("source_read") == "availability":
+            return self._dispatch_source_availability(link, frame)
         # AUTHORISED FIRST, OFF-LOADED SECOND: a slow op is decided on the reader
         # like every other op (the chokepoint stays single-threaded per link and
         # a refused frame costs no worker), and only its HANDLER leaves the reader.
@@ -5949,6 +6104,161 @@ class RelayServer:
             slots.release()
             return wire.refusal_frame(req, f"this device's relay is stopping; {op} was not started")
         return None
+
+    # -- the deferred source-availability lane (complete peer-source contract) --
+
+    def _dispatch_source_availability(
+        self, link: PeerLink, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Admit one availability wait onto the deferred lane; ``None`` means sent-later.
+
+        The authoriser already ran (this is called from ``dispatch`` after
+        ``check``). What is decided HERE is admission: the declaration, the
+        session's existence on this disk, the pending cap and the once-answer
+        key. The answer itself leaves from the page loop after fresh rechecks,
+        which is why nothing is sent on this call — a `None` return is the
+        reader sending nothing, exactly like an admitted slow op.
+        """
+        req = frame.get("req")
+        if not validate_peer_journal_source(frame.get(PEER_JOURNAL_SOURCE_FLAG)):
+            return wire.refusal_frame(req, "source_read=availability requires peer_journal_source")
+        session_id = str(frame.get("session_id") or "")
+        if not session_id:
+            return wire.refusal_frame(req, "net_session_history must name a session_id")
+        if not (self.root / "sessions" / session_id).is_dir():
+            # The chokepoint's session scope already refused ids this device
+            # does not hold; this restates the same fact where the work would
+            # start, and answers in the same shape as every other refusal.
+            return wire.refusal_frame(
+                req, f"{self._own_label()} does not hold a session {session_id}"
+            )
+        key = (link.link_id, req)
+        with self._source_wait_lock:
+            if key in self._source_wait_keys:
+                # A DUPLICATE WIRE REQUEST IS NOT A SECOND ANSWER: the first
+                # registration owns the reply, and a second frame for the same
+                # ``req`` would land as a stray on the requester.
+                return None
+            if self._source_wait_total >= SOURCE_AVAILABILITY_MAX_PENDING:
+                # Bounded busy, never a hang and never queued without end: the
+                # client reads it as unavailable and asks again later. A FULL
+                # ack frame, not a bare detail — every other arm of ``dispatch``
+                # returns a frame, and a bare dict has no ``req`` for the
+                # caller's waiter to match (measured as "no reply" before this).
+                return {
+                    "op": "ack",
+                    "req": req,
+                    "detail": {
+                        "source_available": False,
+                        "journal_order_state": "unavailable",
+                        "reason": "busy",
+                        PEER_JOURNAL_SOURCE_FLAG: True,
+                    },
+                }
+            waiters = self._source_waiters.setdefault(session_id, [])
+            waiters.append((link, dict(frame)))
+            self._source_wait_keys.add(key)
+            self._source_wait_total += 1
+            first = len(waiters) == 1
+        if first:
+            self._start_source_availability_flight(session_id)
+        return None
+
+    def _start_source_availability_flight(self, session_id: str) -> None:
+        """Schedule the ONE coalesced wait for a session's wave, on the page loop.
+
+        Every later ask in the same wave joins the waiters list instead of
+        scheduling a second continuation, so N simultaneous viewers cost ONE
+        refresh join. The submit is taken under ``_page_loop_lock`` for the
+        reason ``_stored_page_read`` documents: a ``stop`` landing between
+        choosing the loop and submitting to it must hand this read the live
+        loop or a fresh one, never a closed one.
+        """
+        try:
+            with self._page_loop_lock:
+                loop = self._page_loop_locked()
+                asyncio.run_coroutine_threadsafe(self._source_availability_flight(session_id), loop)
+        except Exception:  # noqa: BLE001 — a lane that cannot start must still ANSWER
+            # The relay is stopping or the loop refused the submit; settle the
+            # waiters NOW with the honest unavailable rather than leaving them
+            # registered against a flight that will never run.
+            self._settle_source_waiters(session_id, ready=False)
+
+    async def _source_availability_flight(self, session_id: str) -> None:
+        """Wait bounded for the existing refresh, then answer every waiter once.
+
+        The join is the SAME ``transcript_index.start_refresh`` single-flight
+        the owner's own reads use — no new scanner, queue or service. The wait
+        is ``SOURCE_AVAILABILITY_WAIT_S`` — a bound, not a promise — and it is
+        shielded so a cancelled waiter can never cancel the shared refresh out
+        from under another joiner. A refresh that fails, or an index still
+        absent at the bound, is an honest ``unavailable``.
+        """
+        from local_operator.session import transcript_index as index_module
+
+        ready = False
+        try:
+            task, _ = index_module.start_refresh(self.root, session_id)
+            await asyncio.wait_for(asyncio.shield(task), SOURCE_AVAILABILITY_WAIT_S)
+            ready = index_module.fresh_resident(self.root, session_id) is not None
+        except Exception:  # noqa: BLE001 — a failed refresh is an honest "not ready"
+            ready = False
+        self._settle_source_waiters(session_id, ready=ready)
+
+    def _settle_source_waiters(self, session_id: str, *, ready: bool) -> None:
+        """Take one session's waiters out of the table and answer each exactly once."""
+        with self._source_wait_lock:
+            waiters = self._source_waiters.pop(session_id, [])
+            for link, frame in waiters:
+                self._source_wait_keys.discard((link.link_id, frame.get("req")))
+            self._source_wait_total -= len(waiters)
+        for link, frame in waiters:
+            self._answer_source_availability(link, frame, ready=ready)
+
+    def _answer_source_availability(
+        self, link: PeerLink, frame: dict[str, Any], *, ready: bool
+    ) -> None:
+        """The ONE answer a waiter gets, after fresh rechecks.
+
+        Every check runs AGAIN here because the wait awaited: the link may be
+        gone, the member's grant may have been revoked, the session may have
+        moved or been deleted. A failed recheck still sends its one bounded
+        answer (a refusal) rather than silence, so the caller is never left
+        waiting on a reply that will not come; a CLOSED link is the one case
+        with nothing to send. There is deliberately no immediate-cancellation
+        protocol for a timed-out requester: the observer persists to this
+        answer, which is the lane's actual cleanup bound.
+        """
+        req = frame.get("req")
+        if not link.alive:
+            return
+        try:
+            self.authorizer.check(link.context, frame)
+        except Refusal as refusal:
+            link.send(wire.refusal_frame(req, refusal.sentence))
+            return
+        session_id = str(frame.get("session_id") or "")
+        if not (self.root / "sessions" / session_id).is_dir():
+            link.send(
+                wire.refusal_frame(
+                    req, f"{self._own_label()} no longer holds a session {session_id}"
+                )
+            )
+            return
+        link.send(
+            {
+                "op": "ack",
+                "req": req,
+                "detail": {
+                    "source_available": ready,
+                    "journal_order_state": "ready" if ready else "unavailable",
+                    # The ACK is the complete contract's own: this IS a complete
+                    # result (the owner honours the contract), not a legacy page
+                    # a viewer must not mistake for one.
+                    PEER_JOURNAL_SOURCE_FLAG: True,
+                },
+            }
+        )
 
     def slow_request_timeout(self, op: str) -> float | None:
         """How long a REQUESTER should wait for ``op``, or ``None`` for the default.
@@ -7477,6 +7787,31 @@ class RelayServer:
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
         )
+        # THE COMPLETE CONTRACT'S TYPED PURPOSES, decided before any page work:
+        # a purpose IS a complete read, so it requires the declaration, and the
+        # required-shape rules live in ONE shared validator so this boundary
+        # and the local-control one cannot drift. A purpose answers from the
+        # resident index with no cursor/window/frontend/body effects; the page
+        # path below stays byte-identical for every request without one.
+        source_declared = validate_peer_journal_source(frame.get(PEER_JOURNAL_SOURCE_FLAG))
+        source_read = validate_source_read(frame.get("source_read"))
+        expected_generation = validate_expected_generation(frame.get("expected_journal_generation"))
+        validate_source_read_request(source_read, source_declared, order_ids, expected_generation)
+        if source_read == "availability":
+            # The dispatcher's deferred lane owns this purpose; reaching the
+            # handler means the lane did not run, which is a build defect and
+            # must not be answered with a page.
+            raise MeshRefusal(
+                "protocol_error", "availability is served by the deferred source lane"
+            )
+        if source_read is not None:
+            return self._source_read_detail(
+                session_id,
+                source_read=source_read,
+                order_ids=order_ids or [],
+                expected_generation=expected_generation,
+                req=frame.get("req"),
+            )
         # ``open_frame`` IS BUILT HERE NOW (the facts half of ``DESKTOP_API.md``
         # §"The open frame"; #2109 carried the flag across the stored-page seam
         # and named this call site). With the flag the same rows this op already
@@ -7496,6 +7831,7 @@ class RelayServer:
                 before_id=before_id,
                 limit=limit,
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                complete=source_declared,
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -7536,7 +7872,13 @@ class RelayServer:
             "has_newer": page.has_newer,
         }
         if journal_order:
-            self._stored_journal_order(detail, session_id, page.source_signature, order_ids or [])
+            self._stored_journal_order(
+                detail,
+                session_id,
+                page.source_signature,
+                order_ids or [],
+                complete=source_declared,
+            )
         return fit_session_history_reply(frame.get("req"), detail)
 
     def _frame_memo_key(
@@ -7568,6 +7910,7 @@ class RelayServer:
         limit: int,
         journal_order: bool = False,
         order_ids: list[str] | None = None,
+        complete: bool = False,
     ) -> dict[str, Any]:
         """The owner-side build of the open frame, over the rows this op already reads.
 
@@ -7803,7 +8146,9 @@ class RelayServer:
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
         if journal_order:
             source = sources[0] if sources and all(s == sources[0] for s in sources) else None
-            self._stored_journal_order(answer, session_id, source, order_ids or [])
+            self._stored_journal_order(
+                answer, session_id, source, order_ids or [], complete=complete
+            )
         if memo_key is not None and answer["runs_state"] == "ready":
             # ONLY A FRAME WITH ITS FACTS COMPLETE IS MEMOIZED. A ``building``
             # answer (cold index: ``_stored_frame_index`` answered None) is the
@@ -7836,20 +8181,183 @@ class RelayServer:
         session_id: str,
         source: tuple[int, int, float] | None,
         ids: list[str],
+        *,
+        complete: bool = False,
     ) -> None:
         """Owner truth plus explicit viewer opt-in; no receiver-side authority.
 
-        Peer readiness/correction forwarding is a later slice. Unlike a local
-        bridge, this path MUST NOT advertise building: the installed UI treats
-        it as journalMode and could hold debt with no wake to settle it. Start
-        only the existing index refresh, and preserve legacy unsupported until
-        a subsequent read can prove page/index equality. No runtime is started.
+        ``complete`` IS THE NEGOTIATED PERMISSION TO ANSWER ``building``. The
+        installed UI activates journalMode from any non-``unsupported`` state
+        and then waits for a wake; without the complete contract there is no
+        wake on the peer path, so a legacy answer must degrade to
+        ``unsupported`` (a subsequent read can still prove equality). Under
+        the complete declaration the availability lane IS the wake, so a cold
+        index answers an honest ``building`` — no generation, no fabricated
+        ordinals — and the ACK marks the answer as a complete result. A
+        witness mismatch with a RESIDENT index is neither: the page's rows
+        were read before a concurrent rewrite, which is ``unavailable`` with
+        ``reconcile`` so the client re-reads rather than adopting stale facts.
+
+        No runtime is started by any branch: this is the stored read's own
+        index, and ``_stored_frame_index`` only ever starts a scan.
         """
-        from local_operator.session.transcript_index import apply_journal_order
+        if not complete:
+            # NO DECLARATION, NO JOIN, AND NO WORK: without the complete
+            # contract the answer stays the plain page — no row coordinates,
+            # no state — which is the exact reply this op gave before the
+            # transport slice, and the viewer half states the legacy
+            # ``unsupported`` itself. Starting a scan for a caller that can
+            # never receive its facts would be work with no reader.
+            return
+        from local_operator.session.transcript_index import (
+            apply_journal_order,
+            fresh_resident,
+        )
 
         self._stored_frame_index(session_id)
-        if not apply_journal_order(self.root, session_id, answer, source, list(dict.fromkeys(ids))):
-            answer["journal_order_state"] = "unsupported"
+        answer[PEER_JOURNAL_SOURCE_FLAG] = True
+        if apply_journal_order(self.root, session_id, answer, source, list(dict.fromkeys(ids))):
+            return
+        if fresh_resident(self.root, session_id) is None:
+            answer["journal_order_state"] = "building"
+        else:
+            answer["journal_order_state"] = "unavailable"
+            answer["reconcile"] = True
+
+    def _source_read_detail(
+        self,
+        session_id: str,
+        *,
+        source_read: str,
+        order_ids: list[str],
+        expected_generation: str | None,
+        req: Any,
+    ) -> dict[str, Any]:
+        """The complete contract's typed read off the SAME resident index.
+
+        ``metadata`` answers facts only — state, generation, requested-ID
+        ordinals and the missing set when ready — and never a page, cursor,
+        window or frontend effect: an empty ``entries`` list is the shape, and
+        a client must not fold this answer into a transcript. ``payload``
+        answers fresh bounded bodies plus same-read coordinates through
+        ``project_indexed_source_subset``, whose per-ID partition (present /
+        missing / unavailable / remaining) is the answer's own; companion
+        conversation payloads are named separately under
+        ``source_dependency_ids`` with their bodies under
+        ``dependency_entries``, never smuggled among requested rows.
+
+        ``building`` IS answered here, and only here: the DISPATCHED peer path
+        for a completed negotiation has the availability lane as its wake, so
+        an honest building (no generation) is settleable — unlike the legacy
+        ``journal_order`` page path, which still degrades to ``unsupported``
+        because the installed UI would hold that state with no wake.
+
+        EXPECTED-GENERATION MISMATCH is answered as ``unavailable`` with the
+        CURRENT generation and ``reconcile``: the caller's loaded bodies belong
+        to another domain and must never be reattested against this one; the
+        generation rides the answer so the client knows a re-read is owed, not
+        as an authority to install.
+        """
+        directory = self.root / "sessions" / session_id
+        if not (directory / TRANSCRIPT_FILENAME).exists():
+            # No journal on this disk: there is no source to read, and that is
+            # an ANSWER (the page arm's own empty page), not a build in
+            # flight. Nothing claims ready — a ready state promises a coherent
+            # index, and there is none — and the lane's client settles its
+            # debt honestly instead of waiting on a scan that cannot succeed.
+            return {
+                **_empty_source_page(),
+                "journal_order_state": "unavailable",
+                PEER_JOURNAL_SOURCE_FLAG: True,
+            }
+        index = self._stored_frame_index(session_id)
+        if index is None:
+            return {
+                **_empty_source_page(),
+                "journal_order_state": "building",
+                PEER_JOURNAL_SOURCE_FLAG: True,
+            }
+        generation = index.journal_generation
+        if expected_generation is not None and expected_generation != generation:
+            return {
+                **_empty_source_page(),
+                "journal_order_state": "unavailable",
+                "journal_generation": generation,
+                "reconcile": True,
+                PEER_JOURNAL_SOURCE_FLAG: True,
+            }
+        if source_read == "metadata":
+            unique = list(dict.fromkeys(order_ids))
+            ordinals = {id_: index.journal_rows[id_] for id_ in unique if id_ in index.journal_rows}
+            missing = [id_ for id_ in unique if id_ not in index.journal_rows]
+            detail: dict[str, Any] = {
+                **_empty_source_page(),
+                "journal_order_state": "ready",
+                "journal_generation": generation,
+                PEER_JOURNAL_SOURCE_FLAG: True,
+            }
+            if ordinals:
+                detail["journal_ordinals"] = ordinals
+            if missing:
+                detail["journal_missing_ids"] = missing
+            return detail
+
+        from local_operator.session.transcript import project_indexed_source_subset
+
+        subset = project_indexed_source_subset(
+            directory,
+            index,
+            order_ids,
+            expected_generation=generation,
+            encoded_budget=SESSION_HISTORY_REPLY_BUDGET_BYTES - SOURCE_REPLY_HEADROOM_BYTES,
+        )
+        if subset is None:
+            # Nothing could be proven servable under the bound — an honest
+            # unavailable, never a fabricated partial page.
+            return {
+                **_empty_source_page(),
+                "journal_order_state": "unavailable",
+                PEER_JOURNAL_SOURCE_FLAG: True,
+            }
+
+        def _wire_entry(body: dict[str, Any]) -> dict[str, Any]:
+            # The settled source-derived body rides the HistoryEntry envelope
+            # so one page shape serves both the ordinary read and this one; the
+            # stored row's OWN entry time is the only honest ts (ts_source
+            # ``entry``), and ``journal_seq`` is the same-read coordinate.
+            return {
+                "id": body["id"],
+                "ts": body["ts"],
+                "type": "message",
+                "payload": body["message"],
+                "ts_source": "entry",
+                "journal_seq": body["journal_seq"],
+            }
+
+        detail = {
+            **_empty_source_page(),
+            "entries": [_wire_entry(body) for body in subset["entries"]],
+            "journal_order_state": "ready",
+            "journal_generation": generation,
+            "journal_ordinals": subset["journal_ordinals"],
+            "source_present_ids": subset["present"],
+            "source_missing_ids": subset["missing"],
+            "source_unavailable_ids": subset["unavailable"],
+            "source_remaining_ids": subset["remaining"],
+            "source_dependency_ids": subset["source_dependency_ids"],
+            "dependency_entries": [_wire_entry(body) for body in subset["dependency_entries"]],
+            PEER_JOURNAL_SOURCE_FLAG: True,
+        }
+        if subset["retry_ids"]:
+            # The explicit smaller-batch retry the subset computed; never a
+            # silent truncation and never an identical re-request.
+            detail["source_retry_ids"] = subset["retry_ids"]
+        if session_history_reply_bytes(req, detail) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+            # The subset fits itself with headroom; this is the belt-and-braces
+            # refusal for a read that STILL cannot ride one link record —
+            # refused by name, never trimmed.
+            raise MeshRefusal("page_too_large", "this source read cannot fit one link record")
+        return detail
 
     def _stored_frame_index(self, session_id: str) -> Any:
         """The transcript-index facts for one open-frame page, or ``None`` (cold).
@@ -11129,6 +11637,49 @@ class RelayServer:
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
         )
+        # THE COMPLETE CONTRACT'S DECLARATION AND PURPOSES, validated by the
+        # SAME shared decisions the owner op uses (see their own docs): the
+        # local-control boundary refuses a malformed purpose or expectation
+        # before a hop is spent, exactly as the authenticated-owner boundary
+        # does when a granted peer sends one.
+        source_declared = validate_peer_journal_source(frame.get(PEER_JOURNAL_SOURCE_FLAG))
+        source_read = validate_source_read(frame.get("source_read"))
+        expected_generation = validate_expected_generation(frame.get("expected_journal_generation"))
+        validate_source_read_request(source_read, source_declared, order_ids, expected_generation)
+        if source_declared:
+            # THE COMPLETE CONTRACT IS NEGOTIATED PER LINK, never assumed. The
+            # owner relay advertises ``peer-journal-source-v1`` in its relay
+            # handshake (``wire.LINK_CAPABILITIES``); an owner that did not
+            # advertise it keeps today's bytes — asking anyway would get its
+            # familiar page, which a complete reader must never mistake for a
+            # complete result. The link is dialled here only when the new
+            # fields are actually being sent, so a legacy read still takes the
+            # existing path below without touching this gate.
+            link = self._ensure_link(self._resolve_peer(str(frame.get("peer") or "")))
+            if link is not None and wire.PEER_JOURNAL_SOURCE_V1 not in link.capabilities:
+                if source_read == "availability":
+                    return {
+                        "source_available": False,
+                        "journal_order_state": "unsupported",
+                        PEER_JOURNAL_SOURCE_FLAG: False,
+                    }
+                if source_read is not None:
+                    return {
+                        **_empty_source_page(),
+                        "journal_order_state": "unsupported",
+                        PEER_JOURNAL_SOURCE_FLAG: False,
+                    }
+                # A PAGE READ (``journal_order`` plus the declaration) still
+                # SERVES ITS PAGE: the page itself never needed the complete
+                # contract, so the new fields are simply not sent — the owner
+                # answers today's bytes and the viewer states ``unsupported``
+                # beside rows the user can still read. Refusing the whole read
+                # here would trade a readable page for an empty one.
+                source_declared = False
+            # ``link is None`` falls through to ``_local_peer_call``, whose own
+            # ``peer_unreachable`` refusal is the honest answer for a peer that
+            # cannot be reached — not "unsupported", which would blame the
+            # peer's build for a transport failure.
         return self._local_peer_call(
             "net_session_history",
             str(frame.get("peer") or ""),
@@ -11136,6 +11687,9 @@ class RelayServer:
             session_id=str(frame.get("session_id") or ""),
             before_id=(str(frame["before_id"]) if frame.get("before_id") else None),
             limit=limit,
+            **({PEER_JOURNAL_SOURCE_FLAG: True} if source_declared else {}),
+            **({"source_read": source_read} if source_read else {}),
+            **({"expected_journal_generation": expected_generation} if expected_generation else {}),
             # THE FLAG RIDES ONLY WHEN IT WAS ASKED FOR. Absent, the frame this
             # device sends is today's byte-for-byte, so a peer older than the
             # flag reads the request it has always read; present, it is one
