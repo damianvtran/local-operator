@@ -2739,6 +2739,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Best-effort removal of those same two artefacts (partial bundle + lock) "
         "after a failed create or verify, so the next pass starts clean",
+    ),  # -- owned_process: the managed owner's own files -----------------------
+    # Every path here is built from the run root the CALLER passed (``--run-root``,
+    # refused when volatile) or from the real passwd home's LaunchAgents plus this
+    # attempt's unique owner label. More importantly, os.open(O_CREAT|O_EXCL)
+    # produces a REGULAR temp file, and replacing a directory with that file
+    # fails; Path.unlink also refuses directories. These exact call counts
+    # therefore cannot remove a session directory, even under a surprising root.
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "os.replace",
+        "Atomic write of one owner-path file: <target> and its same-directory .tmp sibling",
+    ),
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "<path>.unlink",
+        "Clears the same-directory .tmp sibling this call itself created",
+    ),
+    (
+        "local_operator/owned_process.py::_retire_launchd_attempt",
+        "<path>.unlink",
+        "The plist THIS start attempt wrote, under the real <home>/Library/LaunchAgents",
+    ),
+    (
+        "local_operator/owned_process.py::retire_owned_job",
+        "<path>.unlink",
+        "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
     ),
 )
 

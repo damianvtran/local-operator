@@ -22,7 +22,13 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
@@ -182,6 +188,40 @@ def canonical_params_digest(method: AdapterMethod, params: ProtocolModel) -> Dig
     return canonical_digest(f"adapter-rpc-params-{method}-v1", params)
 
 
+class CoreSourcePin(ProtocolModel):
+    """The core-source identity a native-caller selector pins (blueprint §4).
+
+    WHY IT RIDES THE SELECTOR. The arm's correctness lives in the CORE tree
+    (SDK, session arm, loop, configure, subagent, action tool), not only in
+    the adapter wheel the selector already pins; without this field a selector
+    could launch against a tree that predates the merged caller composition
+    and the episode would attribute its outcomes to a caller that never ran.
+
+    THE COMPATIBILITY RULE, same shape as ``max_type_chars`` below: the field
+    is OPTIONAL so an OLD selector still parses -- the session engagement's
+    preflight is what REFUSES a missing pin, before any allocation, so an old
+    selector fails loudly instead of being silently mis-attributed. A NEW
+    selector sent to an OLD adapter worker fails closed at the hello
+    handshake (``extra="forbid"``), before prepare/reset can allocate, which
+    is why the schema version is not bumped for it -- that handshake is the
+    compatibility gate for the old-worker direction.
+    """
+
+    #: The checkout commit the selector was built from: a full SHA or a
+    #: reasonably abbreviated prefix of one, hex only (validated -- the
+    #: earlier accept-anything shape let a malformed extension through, and a
+    #: verification that reads "the declared string is PREFIXED BY the actual
+    #: commit" is not a check). A version string or a generation name is
+    #: never substituted; when the RUNNING install cannot answer git (a
+    #: wheel), verification records ``commit_source="unavailable"`` instead
+    #: of pretending the commit was checked.
+    commit: str = Field(min_length=7, max_length=40, pattern=r"^[0-9a-f]{7,40}$")
+    #: sha256 per pinned core module. The exact key set is
+    #: ``source_pin.CORE_SOURCE_KEYS`` and verification refuses partial or
+    #: over-broad pins rather than reading coverage holes as a pass.
+    module_hashes: dict[str, Digest]
+
+
 class AdapterSelector(ProtocolModel):
     """Exact wheel and interpreter selection; ranges and fallback are absent."""
 
@@ -196,6 +236,31 @@ class AdapterSelector(ProtocolModel):
     workspace: str = Field(min_length=1, max_length=4096)
     workspace_digest: Digest
     route_capability: RouteCapability
+    #: The core-tree identity the arm must prove before allocation (see
+    #: ``local_operator.evaluation.source_pin``). ``None`` parses ONLY for
+    #: old selectors; the session engagement refuses those at preflight.
+    core_source: CoreSourcePin | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_core_source(self, handler: Any, info: Any) -> Any:
+        """Omit ``core_source`` from the wire when it is absent (R5).
+
+        TARGETED, and deliberately not ``exclude_none``: only THIS field's
+        null is dropped, so every other field's canonical bytes are exactly
+        what they were before the field existed. Without this, an old
+        selector parsed by the NEW worker echoed ``core_source: null`` in the
+        handshake and the OLD parent -- whose model forbids unknown keys --
+        refused the handshake before allocation (measured, review round 1).
+        With it, an absent pin never appears on the wire in either direction;
+        a PRESENT pin still rides, and an old worker refuses it at hello
+        (fail-closed, before prepare/reset can allocate), which is the one
+        direction documented as incompatible.
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("core_source") is None:
+            data.pop("core_source", None)
+        return data
 
     @field_validator("python_executable", "workspace")
     @classmethod
