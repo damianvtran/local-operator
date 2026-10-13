@@ -269,13 +269,18 @@ class MeshCredentialClient:
         if not self.network_id:
             return self._placement
         stamp = self._stat_placement()
-        if stamp is None or stamp == self._placement_stamp:
+        if stamp == self._placement_stamp:
             return self._placement
         with self._placement_lock:
             if stamp != self._placement_stamp:
-                self._placement = PlacementDocument.load(
-                    self.network_id, self.root, self_device=self.self_device
+                self._placement = (
+                    PlacementDocument.load(self.network_id, self.root, self_device=self.self_device)
+                    if stamp is not None
+                    else None
                 )
+                # Changed/deleted placement invalidates permission and generation;
+                # never serve a cached bearer across a withdrawal.
+                self.grants.clear()
                 self._placement_stamp = stamp
         return self._placement
 
@@ -446,6 +451,9 @@ class MeshCredentialClient:
             # countdown, so the two are recorded separately.
             owner_retry_after_ms=error.retry_after_ms,
         )
+        from local_operator.network.credentials.effective import note_resolution
+
+        note_resolution(self.root, key, error)
         self._save_state()
 
     def _bounded(self, grant: Grant) -> Grant:
@@ -466,6 +474,9 @@ class MeshCredentialClient:
         return grant
 
     def _remember_grant(self, key: str, grant: Grant) -> None:
+        from local_operator.network.credentials.effective import note_resolution
+
+        note_resolution(self.root, key, grant)
         self.state.note_grant(key, grant.grant_id, owner_device=grant.credential_ref.owner_device)
         self._save_state()
 
@@ -500,13 +511,14 @@ class MeshCredentialClient:
         bearer this process is holding; checking it after the dial would defeat it.
         """
         label = provider or key
-        cached = self.grants.get(key, session_id)
-        if cached is not None:
-            return cached
-        refusal = self.cached_refusal(key)
-        if refusal is not None:
-            return self._render(refusal, key, label)
+        # A grant TTL is not an upstream credential generation. Re-resolve with
+        # the sole refresh owner on every request so rotation/logout cannot hide
+        # behind a live cache. Concurrent calls still coalesce at facade/owner.
+        # Refusal observations are for diagnosis, not a login-negative cache:
+        # the owner may have signed in since the last request. Forced refresh
+        # therefore also always reaches the sole refresh owner.
         if not self.should_borrow(key):
+            self.grants.drop(key)
             return BrokerError(
                 code="not_a_holder",
                 key=key,
@@ -514,6 +526,12 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message="",
             )
+        # Quota is owner-stated backpressure, not a missing-login negative
+        # cache. Respect its interval except for an explicit refresh.
+        if not force_refresh:
+            refusal = self.cached_refusal(key)
+            if refusal is not None and refusal.code == "quota_blocked":
+                return self._render(refusal, key, label)
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -567,8 +585,13 @@ class MeshCredentialClient:
         the other hop is DOWN the borrow still succeeds.
         """
         label = provider or key
-        refusal = self.cached_refusal(key)
-        if refusal is not None:
+        # Leg 2 shares the repair contract: missing-login observations cannot
+        # hide a new login; only owner-stated quota backpressure may short circuit.
+        # Validate current permission before trusting even that observation.
+        refusal = (
+            self.cached_refusal(key) if self.should_borrow(key) and not force_refresh else None
+        )
+        if refusal is not None and refusal.code == "quota_blocked":
             return self._detail_error(self._render(refusal, key, label))
         if not self.should_borrow(key):
             return self._detail_error(
@@ -903,13 +926,17 @@ class MeshCredentialClient:
 
     def _offline(self, key: str, label: str, *, owner: str = "") -> BrokerError:
         device = owner or self.owner_of(key)
-        return BrokerError(
+        error = BrokerError(
             code="owner_offline",
             key=key,
             owner_device=device,
             owner_device_name=self.owner_label(key),
             retry_after_ms=BROKER_ERROR_TTL_MS["owner_offline"],
         )
+        from local_operator.network.credentials.effective import note_resolution
+
+        note_resolution(self.root, key, error)
+        return error
 
     def _render(self, error: BrokerError, key: str, label: str) -> BrokerError:
         """Fill in the person-facing sentence. The one place messages.py is reached.

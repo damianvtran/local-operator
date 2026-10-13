@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Protocol
 
 from local_operator.network.credentials.client import MeshCredentialClient, key_for
-from local_operator.network.credentials.placement import placement_for_store
 from local_operator.network.credentials.types import (
     BrokerError,
     Grant,
@@ -110,15 +109,12 @@ class CredentialSource(Protocol):
 
 
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
-    """The store a session should use: plain, or mesh-aware when this device borrows.
+    """The session's local-first resolver, hot-capable when placement arrives.
 
-    THE SHARED CONSTRUCTION SITE — ``session_factory``, the exec preflight and the
-    Radient resolvers — and the only place the 0-peer guarantee is enforced. It
-    returns ``AuthStore`` — the class the call site used before this slice existed
-    — unless there is a placement entry naming a credential that ANOTHER device
-    owns and this one is a holder for. A device that owns everything it knows
-    about, or holds nothing, therefore takes the old path with the old object, and
-    ``type(build_auth_store(cfg)) is AuthStore`` is the test that pins it.
+    Construction cannot decide whether a session will ever borrow: owner login,
+    reconnect and placement convergence may all happen after it starts. The
+    facade delegates unchanged to the local store until borrowing is eligible;
+    discovery reads local placement only, never dials or constructs a network.
 
     ``db_path`` PASSES THROUGH to the local ``AuthStore`` and its default keeps
     every pre-existing caller byte-identical (``None`` = the store's own
@@ -133,15 +129,15 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     """
     from local_operator.providers.auth_store import AuthStore
 
-    found = placement_for_store(config_dir)
-    if found is None:
-        return AuthStore(db_path=db_path, config_dir=config_dir)
-    _network_id, document = found
-    client = MeshCredentialClient.for_this_device(config_dir)
-    if client is None:  # pragma: no cover - placement_for_store is the same predicate
-        return AuthStore(db_path=db_path, config_dir=config_dir)
+    # Placement is mutable while a session is alive. Capturing its absence here
+    # permanently stranded pre-login sessions on the local-only resolver. Keep
+    # the local tiers unchanged, but defer broker construction to the first read
+    # that can actually borrow; no network client exists on a zero-peer device.
     return MeshAwareAuthStore(
-        AuthStore(db_path=db_path, config_dir=config_dir), mesh=client, config_dir=config_dir
+        AuthStore(db_path=db_path, config_dir=config_dir),
+        mesh=None,
+        config_dir=config_dir,
+        discover_mesh=True,
     )
 
 
@@ -154,15 +150,17 @@ class MeshAwareAuthStore:
         *,
         mesh: CredentialSource | None,
         config_dir: Path | None = None,
+        discover_mesh: bool = False,
     ) -> None:
         self._local = local
-        self._mesh = mesh
+        self._mesh_delegate = mesh
+        self._discover_mesh = discover_mesh
         self.config_dir = config_dir
         #: One future per ``(provider, session_id)`` so several provider calls in one
         #: turn share ONE borrow (design §3.5). Without it a turn issues one request
         #: per provider call, and each is a round trip to a device that may be
         #: refreshing.
-        self._grants: dict[tuple[str, str], asyncio.Future[Any]] = {}
+        self._grants: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         #: The synthetic id of the credential last borrowed for ``(provider,
         #: session_id)``, so a later failure can be attributed to the BORROW rather
         #: than to a local row with a coincidentally similar id.
@@ -179,6 +177,15 @@ class MeshAwareAuthStore:
         #: session factory (see :meth:`set_binding_reader`). ``None`` — every
         #: other construction site — reads as "no row", the pre-slice behaviour.
         self._binding_reader: Callable[[str], Any] | None = None
+
+    @property
+    def _mesh(self) -> CredentialSource | None:
+        # A missing document is not a permanent negative cache. Discovery must
+        # remain hot even for a session created before the device was bridged.
+        if self._mesh_delegate is None and self._discover_mesh:
+
+            self._mesh_delegate = MeshCredentialClient.for_this_device(self.config_dir)
+        return self._mesh_delegate
 
     # -- the serve sink (the durable credential binding's feed) --------------
 
@@ -422,17 +429,31 @@ class MeshAwareAuthStore:
         here — the CLIENT caches grants (15 min, in memory), which is where the TTL
         belongs because it is a fact about the token rather than about the turn.
         """
-        if self._mesh is None or not self._mesh.should_borrow(key):
+        from local_operator.network.credentials.effective import (
+            effective_access,
+            note_resolution,
+        )
+
+        mesh = self._mesh
+        if mesh is None:
+            return None
+        if key == provider:
+            if not effective_access(provider, root=self.config_dir, mesh=mesh).eligible:
+                return None
+        elif not mesh.should_borrow(key):
             return None
         pair = (key, session_id)
-        existing = self._grants.get(pair)
+        # An explicit repair must not join an ordinary resolve already in flight.
+        # The owner uses the same force discriminator for its refresh lease.
+        slot_pair = (key, session_id, force_refresh)
+        existing = self._grants.get(slot_pair)
         if existing is not None and not existing.done():
             return await asyncio.shield(existing)
         loop = asyncio.get_running_loop()
         slot: asyncio.Future[Any] = loop.create_future()
-        self._grants[pair] = slot
+        self._grants[slot_pair] = slot
         try:
-            grant = await self._mesh.grant_async(
+            grant = await mesh.grant_async(
                 key,
                 session_id=session_id,
                 model_id=model_id,
@@ -447,6 +468,8 @@ class MeshAwareAuthStore:
             self._refusals.pop(key, None)
         elif isinstance(grant, BrokerError):
             self._refusals[key] = grant
+        if key == provider and isinstance(grant, (Grant, BrokerError)):
+            note_resolution(self.config_dir, provider, grant)
         slot.set_result(grant)
         return grant
 
@@ -880,8 +903,9 @@ class MeshAwareAuthStore:
         self._local.close()
 
     def _mesh_close(self) -> None:
-        if self._mesh is not None:
-            self._mesh.close()
+        # Closing a never-borrowing session must not construct a new client.
+        if self._mesh_delegate is not None:
+            self._mesh_delegate.close()
 
     def __getattr__(self, name: str) -> Any:
         """Everything else goes to the local store.

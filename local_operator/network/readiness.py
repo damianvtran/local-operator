@@ -769,7 +769,27 @@ def _bounded_observation(row: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any]:
+def selected_model_fact(root: Path, selector: str, *, session_id: str = "") -> dict[str, Any]:
+    """The requested session selector, never silently replaced by a peer default.
+
+    Readiness is read-only: eligible permission remains unverified until native
+    runtime resolution succeeds. This uses the same keyless reading as the UI.
+    """
+    from local_operator.providers.model_access import serving_model_access_here
+
+    claim = serving_model_access_here(selector, config_dir=root)
+    return {
+        "selector": selector,
+        "session_id": session_id,
+        "provider": claim.provider if claim is not None else "",
+        "state": claim.effective_state if claim is not None else "absent",
+        "usable": claim is not None and claim.state == "ok",
+    }
+
+
+def collect_peer_facts(
+    root: Path, *, home: Path | None = None, selector: str = "", session_id: str = ""
+) -> dict[str, Any]:
     """Everything the viewer needs from THIS device, as facts. Names only."""
     model = default_model_fact(root)
     provider = str(model.get("hosting") or "")
@@ -781,6 +801,9 @@ def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any
             "resolved": model["resolved"],
             "reason": model["reason"],
         },
+        "selected_model_access": (
+            selected_model_fact(root, selector, session_id=session_id) if selector else None
+        ),
         "provider": provider,
         # The provider is the ``provider`` key above; the fact is three-valued
         # (True / False / None = the store could not be read).
@@ -2816,7 +2839,12 @@ def _split_endpoint(endpoint: str) -> tuple[str, int]:
 
 
 def _ask_readiness(
-    server: "RelayServer", link: Any, *, timeout: float = READINESS_OP_TIMEOUT_S
+    server: "RelayServer",
+    link: Any,
+    *,
+    timeout: float = READINESS_OP_TIMEOUT_S,
+    selector: str = "",
+    session_id: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """Ask the peer for its facts. Returns ``(facts, "")`` or ``(None, reason)``."""
     request = {
@@ -2824,6 +2852,8 @@ def _ask_readiness(
         "req": server._next_relay_req(),  # noqa: SLF001
         "locality": "remote",
     }
+    if selector:
+        request.update(selector=selector, session_id=session_id)
     reply = link.request(request, timeout=timeout)
     if reply is None:
         return None, "the readiness request did not arrive before the bound"
@@ -2842,6 +2872,8 @@ def _peer_checks(
     server: "RelayServer",
     viewer: Viewer,
     deadline: float | None,
+    selector: str = "",
+    session_id: str = "",
 ) -> list[dict[str, Any]]:
     """Every readiness row for ONE member: reachability, then capabilities."""
     peer_label = _label(member)
@@ -2849,6 +2881,19 @@ def _peer_checks(
     rows, link = _reachability_rows(
         member, record=record, server=server, deadline=deadline, since=since
     )
+    selected_row: dict[str, Any] | None = None
+    if selector:
+        selected_row = _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability="selected_model_credential",
+            ok=False,
+            code="owner_unavailable" if link is None else "pending",
+            detail=f"{selector}: selected access has not been verified",
+            source=SOURCE_UNKNOWN,
+        )
+        selected_row.update(selector=selector, session_id=session_id)
+        rows.append(selected_row)
     if link is None:
         # NO LINK, SO NOTHING WAS ASKED — and the build row degrades with the
         # rest: its source is the handshake, and there was no handshake.
@@ -2887,7 +2932,9 @@ def _peer_checks(
     timeout = (
         READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
     )
-    facts, problem = _ask_readiness(server, link, timeout=timeout)
+    facts, problem = _ask_readiness(
+        server, link, timeout=timeout, selector=selector, session_id=session_id
+    )
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
@@ -2895,12 +2942,32 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    selected = facts.get("selected_model_access")
+    if selected_row is not None:
+        selected = (
+            selected
+            if isinstance(selected, Mapping) and selected.get("selector") == selector
+            else {}
+        )
+        state = _bounded(selected.get("state") or "pending", 80)
+        row = _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability="selected_model_credential",
+            ok=selected.get("usable") is True,
+            code=state,
+            detail=f"{selector}: {state}",
+            source=SOURCE_PEER,
+        )
+        selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
     return rows
 
 
-def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
+def compose(
+    server: "RelayServer", *, peer: str = "", selector: str = "", session_id: str = ""
+) -> dict[str, Any]:
     """The ``peer_readiness`` local op's body: the readiness report.
 
     Row order is doctor's (identity → network → membership → per member:
@@ -2959,7 +3026,13 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
                     continue
                 checks.extend(
                     _peer_checks(
-                        member, record=record, server=server, viewer=viewer, deadline=deadline
+                        member,
+                        record=record,
+                        server=server,
+                        viewer=viewer,
+                        deadline=deadline,
+                        selector=selector,
+                        session_id=session_id,
                     )
                 )
     finally:
@@ -3206,8 +3279,12 @@ def make_handler(server: "RelayServer") -> Any:
         # The link is unused: every fact is this device's own, and the handler
         # never sends a request over the link it is serving (the deadlock guard
         # ``PeerLink.request`` states).
-        del link, frame
-        return collect_peer_facts(server.root)
+        del link
+        return collect_peer_facts(
+            server.root,
+            selector=_bounded(frame.get("selector") or "", 240),
+            session_id=_bounded(frame.get("session_id") or "", 80),
+        )
 
     return _handle
 
@@ -3216,7 +3293,12 @@ def local_handler(server: "RelayServer") -> Any:
     """The ``peer_readiness`` local op: compose the report for one or every peer."""
 
     def _handle(frame: dict[str, Any]) -> dict[str, Any]:
-        return compose(server, peer=str(frame.get("peer") or ""))
+        return compose(
+            server,
+            peer=str(frame.get("peer") or ""),
+            selector=_bounded(frame.get("selector") or "", 240),
+            session_id=_bounded(frame.get("session_id") or "", 80),
+        )
 
     return _handle
 

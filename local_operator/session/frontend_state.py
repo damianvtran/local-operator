@@ -3104,6 +3104,22 @@ class FrontendModelAccess(BaseModel):
     #: not (no stored row, no env key). One word, so a renderer branches on a
     #: value rather than parsing a sentence.
     state: Literal["ok", "signed_out", "temporarily_unavailable"]
+    #: Additive native-access vocabulary. Older clients keep reading ``state``;
+    #: updated clients distinguish borrow convergence/refusal from local logout.
+    #: No holder row alone can produce ``effective_borrow``.
+    effective_state: (
+        Literal[
+            "local",
+            "eligible_borrow_unverified",
+            "effective_borrow",
+            "pending",
+            "owner_unavailable",
+            "withdrawn",
+            "device_bound",
+            "absent",
+        ]
+        | None
+    ) = None
     #: The selected model's provider id (``anthropic``), not a display name.
     provider: str
     #: The provider's human name for the band's sentence ("Not signed in to
