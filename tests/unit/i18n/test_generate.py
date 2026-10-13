@@ -61,6 +61,54 @@ def test_ts_key_map_reuses_icu_argument_types(i18n_generate) -> None:
     assert "bundledEnglish" not in output
 
 
+def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
+    generated, i18n_generate
+) -> None:
+    """The bundle is driven by the EXPLICIT owned list, not by whatever `relay.*`
+    files a fixture tree happens to hold.
+
+    ``relay.login`` is SSR-only (the daemon paints it before the SPA exists) and
+    ``wire.*`` is served, so neither may land in the client bundle. A fixture
+    that carries only those must emit an empty ``BUNDLED_OWNED`` — proving the
+    emission is namespace-list driven, not a glob over ``relay.*``.
+    """
+    root, emitted = generated
+    for namespace in ["relay.login", "wire.exec", "relay.demo"]:
+        (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
+    planned = i18n_generate._planned_files(emitted)
+    bundle = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"]
+    assert "export const BUNDLED_OWNED" in bundle
+    assert "relay.login" not in bundle and "wire.exec" not in bundle and "relay.demo" not in bundle
+    # The owned child namespace reaches it only through the explicit list.
+    (root / "en" / "relay.shell.json").write_text(
+        json.dumps({"relay.shell.list.empty": "no sessions running"})
+    )
+    with_shell = i18n_generate._planned_files(emitted)
+    shell_bundle = with_shell[
+        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
+    ]
+    assert '"relay.shell"' in shell_bundle and "no sessions running" in shell_bundle
+    assert "relay.login" not in shell_bundle and "wire." not in shell_bundle
+
+
+def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
+    """Drift/ownership pin against the COMMITTED tree (not a fixture).
+
+    The bundle that ships must be the explicit owned namespace, whole, and
+    nothing else — the client-side half of "no implicit wire prose bundled".
+    """
+    bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
+        encoding="utf-8"
+    )
+    en = json.loads((REPO / "local_operator/i18n/catalogues/en/relay.shell.json").read_text())
+    namespace = "relay.shell"
+    assert '"relay.shell": {' in bundle
+    for key, message in en.items():
+        assert key.startswith(f"{namespace}.")
+        assert json.dumps(message) in bundle, key
+    assert "wire." not in bundle and "relay.login" not in bundle
+
+
 def test_ts_plan_only_owns_wire_and_relay_types(generated, i18n_generate) -> None:
     root, emitted = generated
     for namespace in ["wire.demo", "relay.demo", "tui.demo"]:
