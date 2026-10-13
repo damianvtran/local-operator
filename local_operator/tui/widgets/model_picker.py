@@ -679,10 +679,18 @@ class ModelPicker(Static):
             if row.reasoning_default_effort:
                 clauses[1].append("default " + row.reasoning_default_effort)
             if row.modalities:
-                for direction in ("input", "output"):
+                # ``in``/``out``, not ``input``/``output``: the canonical
+                # six-rung Muse line measured 74 cells, and the picker's content
+                # width is 73 at 100 columns (76 at 80) — the full words clipped
+                # mid-value (``… · output te…``) on the widest supported screen
+                # while fitting the narrow one, which reads as accidental
+                # (design round 1, D1). Six cells saved put the whole line
+                # inside the cap; a genuinely longer ladder still takes the
+                # designed ellipsis.
+                for direction, word in (("input", "in"), ("output", "out")):
                     values = row.modalities.get(direction)
                     if values:
-                        clauses[1].append(direction + " " + "/".join(values))
+                        clauses[1].append(word + " " + "/".join(values))
             if row.family:
                 clauses[2].append(row.family)
             if row.release_date:

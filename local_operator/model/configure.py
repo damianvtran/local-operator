@@ -945,11 +945,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # The consequence to accept is that this can NARROW: `openai/gpt-5.4-pro`
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
-    listing_levels = (
-        info.reasoning_efforts
-        if canonical == "meta-muse" and info is not None and info.reasoning_efforts is not None
-        else _listing_effort(canonical, model_name)
-    )
+    listing_levels = _listing_effort(canonical, model_name)
     # The native endpoint documents none/low/high/max, high by default. Scope
     # this to the route: aggregators own their own effort gate (and defaults).
     # Both the ladder and the echo rule come from ``model.configure``'s own
@@ -2103,7 +2099,14 @@ def info_from_discovered_model(
     if row.reasoning is not None:
         info.reasoning = row.reasoning
     if provider == "meta-muse":
-        info.reasoning_efforts = row.reasoning_efforts
+        # The ladder does NOT ride ModelInfo: a non-scalar field would make the
+        # paint path's shallow copy share state with its memo, and the
+        # second-hand price leg could then leak an aggregator's route answer
+        # onto a direct provider's model (pinned by
+        # ``tests/unit/model/test_registry.py`` and ``test_catalogue.py``).
+        # The listing read above has already warmed ``_listing_effort`` through
+        # :func:`_remember_listing_effort`, which is the channel
+        # ``build_model_spec`` and ``context_spec_for_access`` read.
         info.reasoning_default_effort = row.reasoning_default_effort
     elif provider == "deepseek" and row.reasoning_default_effort is not None:
         info.reasoning_default_effort = row.reasoning_default_effort
@@ -3143,19 +3146,23 @@ def context_spec_for_access(
             "context_metadata_resolved": True,
             "max_output_tokens": info.max_tokens,
         }
-        if info.reasoning_efforts is not None:
+        # The ladder comes from the LISTING MEMO, never from ModelInfo: a
+        # non-scalar field would break the paint path's shallow-copy isolation
+        # and could leak a second-hand route's answer onto a direct model (the
+        # guards in tests/unit/model/test_registry.py and test_catalogue.py).
+        # The resolve above has just read the same document, so the memo is
+        # warm wherever the document was.
+        ladder = _listing_effort(spec.provider, spec.model_id)
+        if ladder is not None:
             update.update(
                 {
-                    "reasoning_efforts": list(info.reasoning_efforts),
+                    "reasoning_efforts": list(ladder),
                     "reasoning_default_effort": info.reasoning_default_effort,
                 }
             )
         # Silence from an unavailable catalogue must preserve the caller's
         # existing ladder; an explicit empty native ladder means no effort.
-        if (
-            info.reasoning_efforts is not None
-            and spec.reasoning_effort not in info.reasoning_efforts
-        ):
+        if ladder is not None and spec.reasoning_effort not in ladder:
             update["reasoning_effort"] = info.reasoning_default_effort
         for field in ("supports_tools", "supports_images", "supports_audio_input", "reasoning"):
             value = getattr(info, field, None)

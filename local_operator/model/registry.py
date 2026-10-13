@@ -265,9 +265,6 @@ class ModelInfo(BaseModel):
     supports_tools: Optional[bool] = None
     reasoning: Optional[bool] = None
     reasoning_default_effort: Optional[str] = None
-    # A selected-account catalogue's ladder must travel with its ModelInfo;
-    # a selector-only paint memo cannot safely represent two Meta accounts.
-    reasoning_efforts: tuple[str, ...] | None = None
     supports_prompt_cache: bool = False
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None

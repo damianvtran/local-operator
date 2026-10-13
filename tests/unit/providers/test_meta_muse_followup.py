@@ -48,11 +48,16 @@ def test_meta_selected_spec_uses_native_context_and_effort_not_codex_budget(monk
             max_tokens=128000,
             reasoning=True,
             supports_tools=False,
-            reasoning_efforts=("medium", "high"),
             reasoning_default_effort="high",
         )
 
     monkeypatch.setattr(configure, "resolve_model_info", info)
+    # The real resolver warms the listing memo while reading the account
+    # document (``info_from_discovered_model`` -> ``_remember_listing_effort``);
+    # this stub replaces that read, so the warm is explicit. The ladder must
+    # NOT ride ModelInfo: a non-scalar field breaks the paint path's
+    # shallow-copy isolation (tests/unit/model/test_catalogue.py pins it).
+    configure._store_listing_effort("meta-muse", "muse-fixture", ("medium", "high"))
     spec = configure.ModelSpec(
         provider="meta-muse", model_id="muse-fixture", context_window=128000, reasoning_effort="max"
     )
@@ -237,6 +242,44 @@ def test_picker_detail_is_selected_native_plain_text_with_bounded_cell_width():
     assert "output 128,000" in text and "tools no" in text and "medium/high" in text
     assert "released 2026-10-12" in text
     assert all(row.cell_len <= 35 for row in widget._native_detail_rows(35))
+
+
+def test_the_canonical_six_rung_detail_line_fits_the_pickers_widest_cap():
+    """D1: the six-rung line clipped mid-value at the 73-cell widest cap.
+
+    The finder's canonical shape (six effort variants, text/image in, text out)
+    measured 74 cells against a 73-cell content width at 100 columns — full at
+    80, ``… · output te…`` at 100 — so the modality labels give six cells back
+    and the whole line fits the cap it is widest against.
+    """
+    from local_operator.model.ranking import ModelRow
+    from local_operator.tui.widgets.model_picker import ModelPicker
+
+    widget = ModelPicker(on_choose=lambda row: None)
+    widget.set_rows(
+        [
+            ModelRow(
+                provider="meta-muse",
+                model_id="muse-fixture",
+                label="Native fixture",
+                max_output_tokens=128000,
+                supports_tools=True,
+                supports_images=True,
+                reasoning=True,
+                reasoning_efforts=("minimal", "low", "medium", "high", "xhigh", "max"),
+                family="fixture-family",
+                release_date="2026-10-12",
+                modalities={"input": ["text", "image"], "output": ["text"]},
+            )
+        ]
+    )
+    widget.open("muse-fixture")
+    rows = widget._native_detail_rows(73)
+    assert len(rows) == 3
+    detail = rows[1].plain
+    assert "in text/image" in detail and "out text" in detail
+    assert "\u2026" not in detail, detail
+    assert rows[1].cell_len <= 73
 
 
 @pytest.mark.asyncio

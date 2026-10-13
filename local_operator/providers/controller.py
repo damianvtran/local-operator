@@ -2321,10 +2321,34 @@ class ProviderController:
         priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
         for definition, models in listed:
             connected = usable is None or definition.id in usable
+            # The native-detail channel reaches LISTING rows only. For an id the
+            # shipped registry describes, frame one is the registry's answer:
+            # byte-identical to ``static_catalogue()`` with nothing cached
+            # (``test_the_first_frame_with_nothing_cached_is_the_shipped_rows``)
+            # and still untouched when a cached listing mentions the id
+            # (``test_a_listing_only_rows_prices_reach_the_first_frame``). The
+            # live pass is what upgrades a shipped row; a listing-only id has no
+            # registry answer to defer to, so it carries the full detail block.
+            shipped = static_models(credential_provider_id(definition.id))
             for model in models:
                 # The price chain's answer, where it has one, for a row the SHIPPED
                 # registry does not describe (see `_price_listing_only_rows`).
                 model = priced.get((definition.id, model.id), model)
+                details: dict[str, Any] = {}
+                if model.id not in shipped:
+                    details = {
+                        "max_output_tokens": model.max_tokens,
+                        "supports_tools": model.supports_tools,
+                        "supports_images": model.supports_images,
+                        "supports_audio_input": model.supports_audio_input,
+                        "reasoning": model.reasoning,
+                        "reasoning_efforts": model.reasoning_efforts,
+                        "reasoning_default_effort": model.reasoning_default_effort,
+                        "family": model.family,
+                        "release_date": model.release_date,
+                        "modalities": model.modalities,
+                        "variants": model.variants,
+                    }
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
@@ -2334,23 +2358,13 @@ class ProviderController:
                         context_window=max(0, model.context_window),
                         default_context_window=model.default_context_window,
                         max_context_window=model.max_context_window,
-                        max_output_tokens=model.max_tokens,
-                        supports_tools=model.supports_tools,
-                        supports_images=model.supports_images,
-                        supports_audio_input=model.supports_audio_input,
-                        reasoning=model.reasoning,
-                        reasoning_efforts=model.reasoning_efforts,
-                        reasoning_default_effort=model.reasoning_default_effort,
-                        family=model.family,
-                        release_date=model.release_date,
-                        modalities=model.modalities,
-                        variants=model.variants,
                         input_price=_price(model.input_price, definition, free=model.free),
                         output_price=_price(model.output_price, definition, free=model.free),
                         connected=connected,
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
                         routed=model.routed,
                         time_of_use=model.time_of_use,
+                        **details,
                     )
                 )
         return entries
