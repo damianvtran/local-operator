@@ -4924,9 +4924,19 @@ class ServingSessionHandle(SessionHandle):
 
         current = self._session.model
         effective = getattr(self._session, "effective_model", None) or current
+        # A session with no spec yet has NOTHING established: an absent model
+        # cannot affirm a provider, and this handle is the one live-switch
+        # surface with no picker, no catalogue and no config file in front of it
+        # -- any client can send any pair, including on a session that has not
+        # chosen a model yet. Degrade to "nothing established" rather than
+        # raising AttributeError out of the admission: the refusal that belongs
+        # here is the one ``build_model_spec`` raises BELOW (the decision-only
+        # sentence ``test_the_wire_op_refuses_a_decision_only_provider`` pins),
+        # and rehome/peer switches must still be able to land.
+        established = {spec.provider for spec in (current, effective) if spec is not None}
         require_owner_provider(
             provider,
-            established={current.provider, effective.provider},
+            established=established,
             native=native_chat_provider_ids(),
         )
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)

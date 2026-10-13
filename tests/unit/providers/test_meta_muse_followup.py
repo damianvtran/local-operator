@@ -315,9 +315,13 @@ async def test_attached_owner_refusal_preserves_primary_and_new_bind_is_rechecke
         def effective_model(self):
             return primary.model_copy()
 
-        def _read_state_field(self, name):
-            assert name == "model_catalogue"
+        def runtime_model_catalogue(self):
             return []  # Truncated/absent inventory is not a negative support claim.
+
+        def _read_state_field(self, name):
+            # The real store refuses non-scalar fields through this accessor;
+            # mirror it so this double cannot re-hide that misuse.
+            raise KeyError(f"{name!r} is not a copy-free state field")
 
     facade = object.__new__(Facade)
     facade._client = Client()

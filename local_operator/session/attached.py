@@ -9053,7 +9053,12 @@ class AttachedSession:
         from local_operator.update import installed_build
 
         effective = self.effective_model
-        rows = self._read_state_field("model_catalogue") or []
+        # The canonical reader (``runtime_model_catalogue``), NOT
+        # ``_read_state_field``: that accessor serves the store's copy-free
+        # allow-list only, and a non-scalar field like ``model_catalogue``
+        # raises through it on the real store (the routed arm caught this in
+        # CI's fork e2e, round 1).
+        rows = self.runtime_model_catalogue()
         positive = {str(row.get("provider") or "") for row in rows if isinstance(row, dict)}
         build = installed_build()
         owner_ref = getattr(record, "source_ref", "")

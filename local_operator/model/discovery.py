@@ -2463,13 +2463,36 @@ def _available_models(
         mapped = _rows_from_payload(document, capture)
         return mapped is not None and not _lists_id(mapped, want_id)
 
+    def refetch_if(document: Mapping[str, object], age_s: float) -> bool:
+        """``lacks_want_id`` plus Muse's fresh-on-open, decided in the READER.
+
+        A caller that SHORTENS the hard TTL is asking for an answer fresher than
+        any reuse window can promise — discovery's own documented meaning for
+        ``ttl_s`` ("a caller that wants a fresher answer NOW (the model picker)
+        passes a shorter ``ttl_s``", see :func:`available_models`). For Muse
+        that request is honoured literally: the authenticated listing is the
+        only place a newly eligible id can appear, and the picker-open refresh
+        is the documented behaviour (``docs/META_MUSE.md``, "Catalogue freshness
+        and existing conversations").
+
+        It lives HERE rather than as a ``ttl_s`` override in the catalogue
+        controller, whose ``PICKER_TTL_S`` stays the single statement of picker
+        freshness and whose TTL must reach every provider untouched
+        (``test_the_picker_ttl_is_the_only_ttl_override``). Everything below
+        still bounds it: the cross-process fetch lease, the failure backoff and
+        the stale-cache fallback.
+        """
+        return lacks_want_id(document, age_s) or (
+            provider_id == "meta-muse" and ttl_s < DEFAULT_TTL_S
+        )
+
     listing = read_listing(
         key,
         fetch,
         soft_ttl_s=soft_ttl_s,
         ttl_s=ttl_s,
         cache_dir=cache_dir,
-        refetch_if=lacks_want_id,
+        refetch_if=refetch_if,
         revalidate=revalidate,
     )
     payload = listing.payload

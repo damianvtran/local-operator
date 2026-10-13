@@ -2295,7 +2295,16 @@ class ProviderController:
                 meta_scope = getattr(self, "_meta_catalogue_scope", None)
                 store = getattr(self, "auth_store", None)
                 if store is not None:
-                    rows = store.list_credentials("meta-muse")
+                    try:
+                        rows = store.list_credentials("meta-muse")
+                    except (sqlite3.Error, OSError):
+                        # An unreadable store cannot establish a unique account,
+                        # and this method runs on the keystroke that opens a
+                        # picker: painting every row unfiltered is the honest
+                        # "cannot tell" (``usable_providers``' own ``None`` means
+                        # the same one level up), and the live pass records the
+                        # scope it actually selected.
+                        rows = []
                     scopes = {
                         str(
                             row.data.get("account_id")
@@ -2708,12 +2717,15 @@ class ProviderController:
                 "is_oauth": is_oauth,
                 "account_id": account_id,
             }
-            if definition.id == "meta-muse":
-                # A user-open/explicit live refresh must see newly eligible IDs
-                # without waiting 15 minutes. Existing leases/backoff/stale
-                # fallback still bound failures; first paint stays offline.
-                kwargs["ttl_s"] = 0
-            elif ttl_s is not None:
+            if ttl_s is not None:
+                # The caller's TTL reaches EVERY provider untouched, so
+                # ``PICKER_TTL_S`` stays the single statement of picker freshness
+                # (``test_the_picker_ttl_is_the_only_ttl_override``). Muse's
+                # fresh-on-open is the READER's rule: a shortened TTL makes
+                # discovery refetch its authenticated listing instead of reusing
+                # a young document (``discovery._available_models``), with the
+                # fetch lease, failure backoff and stale-cache fallback
+                # unchanged.
                 kwargs["ttl_s"] = ttl_s
             if endpoint is not None:
                 kwargs["base_url"] = endpoint
