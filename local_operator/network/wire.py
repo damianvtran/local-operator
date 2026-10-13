@@ -121,8 +121,21 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "pair-offer-v1",
     "mesh-update-v1",
     "zlib-records-v1",
+    # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
+    # build that can serve typed source purposes (metadata/payload/availability)
+    # on the stored-history op, and it is what a viewer's relay checks BEFORE
+    # forwarding the new fields: an OLD peer never advertised it, and asking
+    # anyway would be a request the far side answers with its familiar page —
+    # which a complete viewer must never mistake for a complete result. Named
+    # here so the tuple, the ask condition and the tests read ONE spelling.
+    "peer-journal-source-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
+#: The complete peer-source stored-read capability (``relay.py``'s source
+#: purposes). The runtime-record half of the same promise lives in
+#: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
+#: negotiated surfaces (relay link and runtime record), never a role/grant.
+PEER_JOURNAL_SOURCE_V1 = "peer-journal-source-v1"
 #: The peer-readiness op's capability (``readiness.py``). It is advertised by
 #: every build that ships ``net_readiness``, and it is what a viewer's relay
 #: checks before asking: an OLD peer never advertised it, and asking anyway

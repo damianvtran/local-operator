@@ -9,7 +9,7 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { retainConfigStream, useLanguage } from "./store";
+import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 class FakeEventSource {
 	static instances: FakeEventSource[] = [];
@@ -35,6 +35,49 @@ const configOk = () =>
 	});
 
 describe("retainConfigStream", () => {
+	it("starts English with unknown backend, without device-language inference or catalogue fetching", async () => {
+		vi.resetModules();
+		const fresh = await import("./store");
+		const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+		vi.stubGlobal("navigator", { language: "ur-PK", languages: ["ur-PK"] });
+		fresh.initializeLocaleMetadata();
+		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
+		// revision 1, not 0: the SPA's OWN English bundle (relay.shell) is
+		// registered at module init, and that is a same-locale content
+		// registration which repaints through the one store channel. The
+		// semantic claims this test exists for — no device-language inference,
+		// no fetch, English/LTR UI under an unknown backend — are unchanged.
+		expect(result.current).toEqual({ backendLocale: null, uiLocale: "en", direction: "ltr", revision: 1 });
+		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+		expect(fetchMock).not.toHaveBeenCalled(); unmount();
+	});
+	it("keeps backend fr separate from English UI and publishes same-locale registration via existing subscription", async () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(configOk()));
+		initializeLocaleMetadata();
+		const languageHook = renderHook(() => useLanguage());
+		const snapshotHook = renderHook(() => useLocaleSnapshot());
+		const close = retainConfigStream();
+		try {
+			await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+			const source = FakeEventSource.instances[0];
+			act(() => { source.listeners.get("config")?.({ data: JSON.stringify({ language: "fr" }) } as MessageEvent); });
+			expect(languageHook.result.current).toBe("fr");
+			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			const previous = snapshotHook.result.current;
+			act(() => { messageRuntime.registerWire("wire.exec", "fr", { "wire.exec.error_line": "Fixture {error}" }); });
+			expect(snapshotHook.result.current.revision).toBe(previous.revision + 1);
+			const registered = snapshotHook.result.current;
+			for (const invalid of ["auto", "fr-CA", "bogus", ""]) act(() => { source.listeners.get("config")?.({ data: JSON.stringify({ language: invalid }) } as MessageEvent); });
+			expect(snapshotHook.result.current).toBe(registered);
+			expect(languageHook.result.current).toBe("fr");
+		} finally { close(); languageHook.unmount(); snapshotHook.unmount(); }
+		const offline = renderHook(() => useLocaleSnapshot());
+		expect(offline.result.current.backendLocale).toBe("fr");
+		expect(offline.result.current.uiLocale).toBe("en");
+		offline.unmount();
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 		FakeEventSource.instances = [];

@@ -6,6 +6,13 @@ export type MessageParams = {
   "relay.login.page.title": undefined;
   "relay.login.password.label": undefined;
   "relay.login.submit.label": undefined;
+  "relay.shell.list.connecting": undefined;
+  "relay.shell.list.empty": undefined;
+  "relay.shell.list.section.active": undefined;
+  "relay.shell.list.section.previous": undefined;
+  "relay.shell.list.theme": undefined;
+  "relay.shell.session.connecting": undefined;
+  "relay.shell.session.waiting": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
   "wire.errors.agents.agent_not_found": undefined;

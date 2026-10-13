@@ -3103,7 +3103,7 @@ class FrontendModelAccess(BaseModel):
     #: ``ok`` — the selected provider is usable here; ``signed_out`` — it is
     #: not (no stored row, no env key). One word, so a renderer branches on a
     #: value rather than parsing a sentence.
-    state: Literal["ok", "signed_out"]
+    state: Literal["ok", "signed_out", "temporarily_unavailable"]
     #: The selected model's provider id (``anthropic``), not a display name.
     provider: str
     #: The provider's human name for the band's sentence ("Not signed in to
@@ -3114,7 +3114,10 @@ class FrontendModelAccess(BaseModel):
 
 
 def model_access_claim(
-    selector: str | None, usable: Collection[str] | None
+    selector: str | None,
+    usable: Collection[str] | None,
+    *,
+    saved: Collection[str] | None = None,
 ) -> FrontendModelAccess | None:
     """The claim a host publishes for ``selector``, or ``None`` for "no claim".
 
@@ -3135,7 +3138,15 @@ def model_access_claim(
     provider = selector.partition("/")[0]
     definition = get_provider_definition(provider)
     return FrontendModelAccess(
-        state="ok" if provider in usable else "signed_out",
+        state=(
+            "ok"
+            if provider in usable
+            else (
+                "temporarily_unavailable"
+                if saved is not None and provider in saved
+                else "signed_out"
+            )
+        ),
         provider=provider,
         label=definition.name if definition is not None else provider,
     )
@@ -7149,6 +7160,14 @@ class FrontendStateStore:
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
             ),
+            # A fallback delta must not carry the former primary's accusation.
+            # The owner access publisher will replace it with the serving claim.
+            model_access=(
+                current.model_access
+                if current.model_access is None
+                or current.model_access.provider == getattr(effective, "provider", None)
+                else None
+            ),
             # THROUGH THE HELPER, and this site is the one that made the whole
             # channel look broken (review round 2): ``refresh_from_session`` runs
             # from ``observe_event`` at the END of both the message and the turn,
@@ -7662,6 +7681,26 @@ class FrontendStateStore:
                     # ``Any``, and a duck-typed entry from an embedding host
                     # need not have the attribute.
                     "routed": bool(getattr(entry, "routed", False)),
+                    # Optional native facts must survive canonical adoption too;
+                    # otherwise desktop live rows are rich while a session's
+                    # own first-frame/completion projection drops the details.
+                    **{
+                        field: getattr(entry, field, None)
+                        for field in (
+                            "max_output_tokens",
+                            "supports_tools",
+                            "supports_images",
+                            "supports_audio_input",
+                            "reasoning",
+                            "reasoning_efforts",
+                            "reasoning_default_effort",
+                            "family",
+                            "release_date",
+                            "modalities",
+                            "variants",
+                        )
+                        if getattr(entry, field, None) is not None
+                    },
                     # The row's time-of-use schedule, carried for the same reason
                     # as ``routed`` above and left out of the original round trip
                     # by oversight (review round 1, MINOR 1): without it an

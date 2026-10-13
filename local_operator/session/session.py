@@ -15788,6 +15788,10 @@ class Session:
         # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
+            # This builder is the real per-turn host boundary, including child
+            # sessions. Repeated provider/tool batches share this one context;
+            # the next attention turn gets an empty receipt scope and new id.
+            send_turn_id=uuid.uuid4().hex,
             # The session's confinement root, when it has one: every local
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).

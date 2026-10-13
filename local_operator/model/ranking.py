@@ -89,6 +89,19 @@ class ModelRow:
     #: field in the middle of that sequence silently re-binds every caller's
     #: arguments.
     listing_name: str = dataclasses.field(default="", kw_only=True)
+    #: Only the highlighted-model detail region reads these optional facts;
+    #: row ranking and concise list geometry do not change.
+    max_output_tokens: int = dataclasses.field(default=0, kw_only=True)
+    supports_tools: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_images: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_audio_input: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_efforts: tuple[str, ...] | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_default_effort: str | None = dataclasses.field(default=None, kw_only=True)
+    family: str | None = dataclasses.field(default=None, kw_only=True)
+    release_date: str | None = dataclasses.field(default=None, kw_only=True)
+    modalities: dict[str, list[str]] | None = dataclasses.field(default=None, kw_only=True)
+    variants: dict[str, dict[str, object]] | None = dataclasses.field(default=None, kw_only=True)
     context_window: int = 0
     default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     max_context_window: int | None = dataclasses.field(default=None, kw_only=True)

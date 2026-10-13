@@ -262,6 +262,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/owned_process.py": (
+        2,
+        "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
+        "status live under. The run root is the caller's own durable ``--run-root`` "
+        "(refused when volatile) and never a session directory; the segment carries no "
+        "translated text -- machine state about ONE managed process, not a session entry. "
+        "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
+        "lease path, not a pathname or a translated/copyable session entry",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/paths.py": (
         5,

@@ -1,0 +1,37 @@
+{
+  "relay.shell.list.empty": {
+    "role": "empty-list placeholder",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. Rendered when the list SSE is connected and no rows exist; the sibling key carries the pre-connection state."
+  },
+  "relay.shell.list.connecting": {
+    "role": "empty-list pre-connection placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered while the list stream has not delivered a first frame; paired with relay.shell.list.empty."
+  },
+  "relay.shell.list.section.active": {
+    "role": "list section heading",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. The section order and membership come from the daemon; this is only the heading."
+  },
+  "relay.shell.list.section.previous": {
+    "role": "list section heading",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. The section order and membership come from the daemon; this is only the heading."
+  },
+  "relay.shell.list.theme": {
+    "role": "theme button accessible name",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. Accessible label for the ◐ theme control; the glyph itself is not translated."
+  },
+  "relay.shell.session.waiting": {
+    "role": "session view placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is connected but has not delivered a frame yet."
+  },
+  "relay.shell.session.connecting": {
+    "role": "session view pre-connection placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is not connected; paired with relay.shell.session.waiting."
+  }
+}

@@ -88,6 +88,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -522,6 +523,210 @@ def _pid_from_print(printed: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+class JobState(str, Enum):
+    """The supervisor's ONE observation, not an inference from missing PID data."""
+
+    LIVE = "live"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class JobObservation:
+    state: JobState
+    pid: int | None
+    reason: str
+    loaded_no_restart: bool | None = None
+
+
+def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
+    """Loaded policy from a complete, supported job print, never disk bytes.
+
+    launchd caches a plist at bootstrap: restoring KeepAlive=False on disk
+    does NOT change the loaded job (review reproduced a real restart). Only
+    this SAME target/PID snapshot can prove policy. Parse top-level entries,
+    not substrings in arguments/environment/nested coalitions. Unsupported,
+    duplicate or truncated shapes are unknown, and strong admission refuses.
+    The supported neutral shape is the utility's actual full launchctl print;
+    future fields/flags are unknown rather than assumed non-triggering.
+    """
+    lines = [line for line in body.splitlines() if line.strip()]
+    if len(lines) < 3 or lines[0] != f"{target} = {{" or lines[-1] != "}":
+        return None
+    fields: dict[str, str] = {}
+    structured = {
+        "arguments",
+        "environment",
+        "inherited environment",
+        "default environment",
+        "resource coalition",
+        "jetsam coalition",
+        "event triggers",
+        "event channels",
+    }
+    sections: list[int] = []
+    section_key = ""
+    for line in lines[1:-1]:
+        if sections:
+            # Recognizing a field NAME cannot certify its VALUE grammar:
+            # scalar arguments/environment previously became positive proof.
+            # Track every nested closure at its exact indentation. Arguments
+            # are opaque leaf strings (including embedded braces), never map
+            # headers; map sections use the supervisor's keyed grammar.
+            depth = len(line) - len(line.lstrip("\t"))
+            content = line[depth:]
+            if section_key == "arguments":
+                if line == "\t}":
+                    sections.pop()
+                elif depth != 2:
+                    return None
+            elif content == "}":
+                if depth != sections[-1]:
+                    return None
+                sections.pop()
+            elif depth != sections[-1] + 1:
+                return None
+            else:
+                # Env uses => with an OPAQUE string value: a suffix " = {"
+                # inside that value is not a map opener. Other supported map
+                # sections use =; only its entire value { opens a child. Bind
+                # the delimiter to section context, never skip arbitrary =>
+                # text in a coalition/trigger or interpret payload substrings.
+                environment = section_key in {
+                    "environment",
+                    "inherited environment",
+                    "default environment",
+                }
+                key, delimiter, value = content.partition(" => " if environment else " = ")
+                if not delimiter or not key.strip() or (" = " if environment else " => ") in key:
+                    return None
+                if not environment and value == "{":
+                    sections.append(depth)
+            continue
+        if not line.startswith("\t") or line.startswith("\t\t"):
+            return None
+        entry = line[1:].split(" = ", 1)
+        if len(entry) != 2 or not entry[0] or entry[0] in fields:
+            return None
+        key, value = entry
+        if (key in structured) != (value == "{"):
+            return None
+        fields[key] = value
+        if key in structured:
+            section_key = key
+            sections.append(1)
+    if sections or fields.get("pid") != str(pid) or fields.get("state") != "running":
+        return None
+    properties = fields.get("properties")
+    if properties is None:
+        return None
+    flags = [part.strip() for part in properties.split("|")]
+    if any(not flag for flag in flags) or len(set(flags)) != len(flags):
+        return None
+    if "keepalive" in flags or any(
+        key in fields
+        for key in ("run interval", "event triggers", "event channels", "calendar interval")
+    ):
+        return False
+    if not set(flags) <= {"runatload", "inferred program"}:
+        return None
+    neutral = {
+        "active count",
+        "path",
+        "type",
+        "state",
+        "program",
+        "arguments",
+        "working directory",
+        "stdout path",
+        "stderr path",
+        "inherited environment",
+        "default environment",
+        "environment",
+        "domain",
+        "asid",
+        "minimum runtime",
+        "exit timeout",
+        "runs",
+        "pid",
+        "immediate reason",
+        "forks",
+        "execs",
+        "initialized",
+        "trampolined",
+        "started suspended",
+        "proxy started suspended",
+        "checked allocations",
+        "checked allocations reason",
+        "checked allocations flags",
+        "last exit code",
+        "last terminating signal",
+        "resource coalition",
+        "jetsam coalition",
+        "spawn type",
+        "jetsam priority",
+        "jetsam memory limit (active)",
+        "jetsam memory limit (inactive)",
+        "jetsamproperties category",
+        "jetsam thread limit",
+        "cpumon",
+        "sanitizer flags",
+        "properties",
+    }
+    required = {
+        "active count",
+        "path",
+        "type",
+        "state",
+        "program",
+        "arguments",
+        "environment",
+        "domain",
+        "runs",
+        "pid",
+        "spawn type",
+        "properties",
+    }
+    if not required <= fields.keys() or fields.get("type") != "LaunchAgent":
+        return None
+    return True if set(fields) <= neutral else None
+
+
+def observe_job(*, label: str, path: Path, run: Callable[..., object]) -> JobObservation:
+    """One guarded launchctl snapshot: live, positively absent, or unknown.
+
+    A failed PID reading is NOT death. A caller that probes twice can combine
+    the first unavailable answer with a second running answer and still call
+    the owner lost (the native-caller review reproduced exactly that). Keep
+    state/PID/reason together from ONE call; legacy boolean/PID APIs below
+    merely project it. Refusal, timeout and incomplete output remain unknown,
+    never permission to tear down an owner or a physical descendant tree.
+    """
+    if not is_own_plist(path, label):
+        return JobObservation(JobState.UNKNOWN, None, "job address is not verified")
+    result, _ = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None:
+        return JobObservation(JobState.UNKNOWN, None, "supervisor did not answer")
+    code = getattr(result, "returncode", None)
+    if code == 113:
+        return JobObservation(JobState.ABSENT, None, "registration is absent")
+    if code != 0:
+        return JobObservation(JobState.UNKNOWN, None, "supervisor reading is unavailable")
+    body = _text(getattr(result, "stdout", ""))
+    pid = _pid_from_print(body)
+    if pid is not None and pid > 0:
+        return JobObservation(
+            JobState.LIVE,
+            pid,
+            "supervisor reports a running PID",
+            loaded_no_restart=_loaded_no_restart(body, f"{job_domain()}/{label}", pid),
+        )
+    state = re.search(r"(?m)^\s*state\s*=\s*([^\r\n]+)$", body)
+    if state is not None and state.group(1).strip() in ("not running", "exited"):
+        return JobObservation(JobState.ABSENT, None, "supervisor reports a stopped job")
+    return JobObservation(JobState.UNKNOWN, None, "supervisor output has no conclusive PID/state")
+
+
 def job_pid(*, label: str, path: Path, run: Callable[..., object]) -> int | None:
     """The pid launchd is running for ``label``, or ``None``.
 
@@ -550,14 +755,7 @@ def job_pid(*, label: str, path: Path, run: Callable[..., object]) -> int | None
     ``None`` on a refusal, which sends callers down the path they took before this
     existed. Never raises: an unanswerable supervisor has no pid.
     """
-    if not is_own_plist(path, label):
-        return None
-    result, _ = _call(run, "print", f"{job_domain()}/{label}")
-    if result is None:
-        return None
-    if getattr(result, "returncode", 1) != 0:
-        return None
-    return _pid_from_print(_text(getattr(result, "stdout", "")))
+    return observe_job(label=label, path=path, run=run).pid
 
 
 def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:
@@ -726,6 +924,31 @@ def kickstart(*, label: str, path: Path, run: Callable[..., object]) -> bool:
         return False
     result, _ = _call(run, "kickstart", "-k", f"{job_domain()}/{label}")
     return result is not None and getattr(result, "returncode", 1) == 0
+
+
+def bootout_job(*, label: str, path: Path, runner: Callable[..., object]) -> bool:
+    """Unregister ONE loaded job, and never bring it back.
+
+    :func:`reload_job` owns the bootout + bootstrap PAIR for the rewrite case;
+    this is the single-purpose unregister for a caller whose job must stay
+    gone -- the failed-start cleanup of a session-unique owner job, where a
+    bootstrap would be the exact opposite of what is wanted. Wired from the
+    same primitives (``_call`` + ``_wait_for_label_release``) so there is no
+    second spelling of "has launchd let go yet".
+
+    Applies :func:`is_own_plist` exactly as :func:`kickstart` does, and for
+    the same reproduced reason: from a redirected home, addressing
+    ``gui/<uid>/<label>`` by label alone reaches the OPERATOR's job. False on
+    a refusal, an absent job, or a launchctl refusal; never raises.
+    """
+    if not is_own_plist(path, label):
+        return False
+    target = f"{job_domain()}/{label}"
+    result, _ = _call(runner, "bootout", target)
+    accepted = result is not None and getattr(result, "returncode", 1) == 0
+    if accepted:
+        _wait_for_label_release(target, runner)
+    return accepted
 
 
 def reload_job(
