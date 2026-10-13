@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Iterator
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -345,7 +346,7 @@ def test_posix_binds_with_so_reuseaddr_as_before(monkeypatch: pytest.MonkeyPatch
 
 
 def test_serve_drops_the_agent_shell_markers_before_serving(
-    captured_server: dict[str, object], monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A DAEMON IS A HOSTING PLANE, not a chat the agent that started it opened.
 
@@ -358,6 +359,14 @@ def test_serve_drops_the_agent_shell_markers_before_serving(
     time, so the daemon's own environment has to be free of the markers BEFORE
     it serves — a returned copy would leave the leak exactly where it was.
 
+    TIMING IS THE SUBJECT, so the environment is captured from INSIDE the fake
+    server body rather than read after ``serve_command`` returns (review round 1,
+    F1). A strip that lands AFTER uvicorn would have started serving leaves the
+    window during which the daemon mints sessions marked, and an assertion made
+    after the call would never see it — the mutation would still pass. Reading
+    the captured snapshot at the moment the server is invoked, and requiring the
+    marker to be gone THERE, is what makes a late strip fail.
+
     All THREE names go for the SERVE path, and the escape hatch is the
     difference from the child-facing helper rather than an oversight: a daemon
     that inherited the QA escape would waive the refusal for the operator's own
@@ -365,6 +374,8 @@ def test_serve_drops_the_agent_shell_markers_before_serving(
     dropped the environment would break every spawn the daemon makes, in a way
     no "marker absent" assertion would notice.
     """
+    import uvicorn
+
     from local_operator.agent_shell import (
         AGENT_SHELL_ENV,
         ALLOW_NESTED_SESSION_ENV,
@@ -377,17 +388,32 @@ def test_serve_drops_the_agent_shell_markers_before_serving(
     monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
     monkeypatch.setenv("SERVE_KEEP_THIS", "yes")
 
-    assert serve_command("127.0.0.1", 0, False) == 0
-    assert captured_server, "the fake uvicorn run must have been reached"
+    # The state of the daemon's OWN environment at the instant it would have
+    # started serving. Replaces the `captured_server` fixture's stub so this is
+    # the thing the serve call reaches, and so the snapshot is taken before the
+    # call can return.
+    at_serve: dict[str, object] = {}
 
-    assert AGENT_SHELL_ENV not in os.environ
-    assert MAY_DELEGATE_ENV not in os.environ
-    assert ALLOW_NESTED_SESSION_ENV not in os.environ
-    assert os.environ["SERVE_KEEP_THIS"] == "yes"
-    # The predicate the factory consults at session-build time, read from the
-    # SAME live mapping the daemon will read: with the markers gone it is False,
-    # so a session this server mints is NOT stamped ``agent-shell``.
-    assert agent_shell_opened_run() is False
+    def fake_run(server: object, sockets: list[socket.socket] | None = None) -> None:
+        at_serve["env"] = dict(os.environ)
+        at_serve["opened_run"] = agent_shell_opened_run()
+
+    monkeypatch.setattr(uvicorn.Server, "run", fake_run)
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    assert at_serve, "the fake uvicorn run must have been reached"
+
+    env_at_serve = cast(dict[str, str], at_serve["env"])
+    assert AGENT_SHELL_ENV not in env_at_serve
+    assert MAY_DELEGATE_ENV not in env_at_serve
+    assert ALLOW_NESTED_SESSION_ENV not in env_at_serve
+    assert env_at_serve["SERVE_KEEP_THIS"] == "yes"
+    # The predicate the factory consults at session-build time, evaluated against
+    # the SAME live mapping the daemon will read, AT THE MOMENT IT SERVES: with
+    # the markers gone it is False, so a session this server mints is NOT stamped
+    # ``agent-shell``. A strip placed after this point leaves it True here and
+    # fails the test.
+    assert at_serve["opened_run"] is False
 
 
 def test_a_serve_started_without_the_markers_is_unchanged(
