@@ -381,6 +381,7 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.enabled"] = DEFAULT_ENABLED
     consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
+    consumers["aida.cadence.interval_hours"] = aida_proactive.DEFAULT_INTERVAL_HOURS
     consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES

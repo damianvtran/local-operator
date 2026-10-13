@@ -291,6 +291,8 @@ async def edit_wake(
     *,
     cwd: str | None = None,
     now_ms: int | None = None,
+    request_id: str = "",
+    expected_request_id: str | None = None,
 ) -> WakeWriteOutcome:
     """Change an existing schedule's message and/or bounds.
 
@@ -306,16 +308,25 @@ async def edit_wake(
     ) -> tuple[str, list[WakeSchedule], int | None]:
         if not any(schedule.id == wake_id for schedule in existing):
             raise _unknown_wake(wake_id, existing)
+        # Only engine-owned phase switches opt in. Ordinary edits retain their
+        # arm origin. Compare under the existing write lock, not in the caller:
+        # an intervening same-id arm is not ours to overwrite or roll back.
+        target = next(row for row in existing if row.id == wake_id)
+        if expected_request_id is not None and (target.request_id or "") != expected_request_id:
+            raise WakeWriteError("wake origin changed before edit", status=STATUS_CONFLICT,
+                                 code="wake_conflict")
         built = build_wake_edit(dict(request), existing, wake_id, now)
         if "error" in built:
             raise _refusal(built)
         row = built["schedule"]
+        if request_id:
+            row = row.model_copy(update={"request_id": request_id})
         # IN PLACE: a row that moved to the end of the list on every edit would
         # reorder the page under the user for a message-only change.
         updated = [row if schedule.id == wake_id else schedule for schedule in existing]
         return row.id, updated, row.next_due_at
 
-    return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms)
+    return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms, intent=request_id)
 
 
 # ---------------------------------------------------------------------------

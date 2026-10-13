@@ -100,6 +100,12 @@ ROW_PREFIX = "aida-"
 CUSTOM_ENTRY_TYPE = "aida_proactive"
 
 DEFAULT_CADENCE_AT = "08:30"
+# Zero deliberately keeps the calendar-based default; positive values are elapsed
+# hours, not local clock hours. Whole hours bound the cost of provider-backed turns.
+DEFAULT_INTERVAL_HOURS = 0
+MAX_INTERVAL_HOURS = 168
+_CADENCE_ORIGIN = "aida-cadence:v1:"
+_HOUR_MS = 3_600_000
 DEFAULT_MAX_EXTRA_PER_DAY = 2
 DEFAULT_MIN_GAP_MINUTES = 90
 #: The two boolean defaults this engine reads. ``DEFAULT_ENABLED`` is also the
@@ -143,7 +149,7 @@ QUIET_CLAUSE = (
 #: and route escalation requests through the tray rather than arming wakes
 #: directly (so the engine keeps its single-writer property).
 CADENCE_MESSAGE = (
-    "Daily proactive check-in. Review the operator's current state — active and "
+    "Configured cadence check-in. Review the operator's current state — active and "
     "stale sessions, projects and workstreams, scheduled wakes, usage signals, and "
     "anything you started earlier that is still in flight — and report ONLY what "
     "needs the operator's action, in a few short lines. Lead with ONE short "
@@ -309,6 +315,7 @@ class CadencePolicy:
     at: str
     max_extra_per_day: int
     min_gap_minutes: int
+    interval_hours: int = DEFAULT_INTERVAL_HOURS
 
 
 def _read_aida_section(config_dir: Path | str) -> Mapping[str, Any]:
@@ -351,6 +358,11 @@ def policy(config_dir: Path | str) -> CadencePolicy:
         gap = int(gap) if gap is not None else DEFAULT_MIN_GAP_MINUTES
     except (TypeError, ValueError):
         gap = DEFAULT_MIN_GAP_MINUTES
+    interval = cadence.get("interval_hours", DEFAULT_INTERVAL_HOURS)
+    # Settings validates writes; hand-edited YAML must obey the same contract,
+    # including rejecting bool (an int subclass) rather than arming hourly.
+    if type(interval) is not int or not 0 <= interval <= MAX_INTERVAL_HOURS:
+        interval = DEFAULT_INTERVAL_HOURS
     paused = bool(cadence.get("paused", DEFAULT_PAUSED))
     return CadencePolicy(
         enabled=enabled,
@@ -358,6 +370,7 @@ def policy(config_dir: Path | str) -> CadencePolicy:
         at=at,
         max_extra_per_day=max(0, max_extra),
         min_gap_minutes=max(0, gap),
+        interval_hours=interval,
     )
 
 
@@ -381,7 +394,13 @@ def parse_cadence_at(at: str) -> tuple[int, int] | None:
     return hour, minute
 
 
-def next_cadence_ms(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> int:
+def next_cadence_ms(
+    now_ms: int,
+    at: str = DEFAULT_CADENCE_AT,
+    *,
+    interval_hours: int = DEFAULT_INTERVAL_HOURS,
+    anchor_ms: int | None = None,
+) -> int:
     """The next local occurrence of ``at`` after ``now_ms``, in epoch ms.
 
     Local wall clock, on the calendar — ``datetime`` arithmetic over today's
@@ -390,6 +409,10 @@ def next_cadence_ms(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> int:
     falls back to :data:`DEFAULT_CADENCE_AT`, logged once per call site's
     patience — it is read per arm, so the log is throttled to DEBUG.
     """
+    if interval_hours:
+        every = interval_hours * _HOUR_MS
+        anchor = now_ms if anchor_ms is None else anchor_ms
+        return anchor + max(1, (now_ms - anchor) // every + 1) * every
     clock = parse_cadence_at(at)
     if clock is None:
         logger.debug("aida: invalid cadence time %r; using %s", at, DEFAULT_CADENCE_AT)
@@ -542,23 +565,155 @@ def session_class_reactive(config_dir: Path | str, session_id: str) -> bool:
     return session_action_class(root / "sessions" / session_id, registry=registry) != PROACTIVE
 
 
-def cadence_schedule(
-    now_ms: int, at: str = DEFAULT_CADENCE_AT, *, config_dir: Path | str
-) -> WakeSchedule:
-    """The cadence row: one-shot, due at the next ``at``.
+def _validated_phase(raw: Any) -> dict[str, int] | None:
+    """Fail closed on future versions/corruption; never reinterpret an owed row."""
+    if not isinstance(raw, Mapping):
+        return None
+    keys = ("interval_hours", "anchor_ms", "due_ms")
+    if set(raw) != set(keys) or any(type(raw.get(key)) is not int for key in keys):
+        return None
+    phase = {key: raw[key] for key in keys}
+    if not 0 <= phase["interval_hours"] <= MAX_INTERVAL_HOURS:
+        return None
+    if phase["anchor_ms"] < 0 or phase["due_ms"] <= phase["anchor_ms"]:
+        return None
+    every = phase["interval_hours"] * _HOUR_MS
+    if every and (phase["due_ms"] - phase["anchor_ms"]) % every:
+        return None
+    return phase
 
-    ``created_at`` carries ``now`` so the scheduler's stable ordering keeps it
-    where it was planted; ``next_due_at`` is the next occurrence, never "now"
-    (a due-now cadence would fire inside ``LOAD_GRACE_MS`` of an ensure, which
-    is a boot-time turn nobody asked for). ``config_dir`` is REQUIRED — the
+
+def _phase_origin(phase: Mapping[str, int]) -> str:
+    return _CADENCE_ORIGIN + ":".join(
+        str(phase[key]) for key in ("interval_hours", "anchor_ms", "due_ms")
+    )
+
+
+def cadence_phase(row: WakeSchedule | None) -> dict[str, int] | None:
+    """Read our reserved v1 ARM ORIGIN, never a generic scheduler field.
+
+    request_id is opaque to the shared wake writer, but is its retry/rollback
+    identity. Include DUE as well as mode/anchor: retries of one arm settle that
+    exact arm; a later occurrence must not falsely settle as its predecessor.
+    The row commits origin and due atomically in the authoritative transcript.
+    Loading may shift due to grace; origin deliberately retains the owed instant.
+    Unknown/malformed versions preserve present rows instead of re-timing them.
+    """
+    if row is None or row.id != CADENCE_ID or not row.request_id:
+        return None
+    if not row.request_id.startswith(_CADENCE_ORIGIN):
+        return None
+    parts = row.request_id[len(_CADENCE_ORIGIN):].split(":")
+    if len(parts) != 3 or any(not part.isascii() or not part.isdecimal() for part in parts):
+        return None
+    try:
+        return _validated_phase(dict(zip(
+            ("interval_hours", "anchor_ms", "due_ms"), (int(part) for part in parts), strict=True,
+        )))
+    except ValueError:
+        return None
+
+
+def remember_cadence(
+    config_dir: Path | str, schedules: Sequence[WakeSchedule], *, held: bool = False,
+) -> None:
+    """Mirror a COMMITTED row (or record an intentional hold), never retirement.
+
+    Called only after the transcript append, except before an intentional pause
+    removes its row. A crash before this mirror leaves the transcript origin as
+    authority. No ordinary boot/event/turn writes when the receipt is unchanged.
+    """
+    row = next((row for row in schedules if row.id == CADENCE_ID), None)
+    phase = cadence_phase(row)
+    if row is None or (phase is None and row.request_id):
+        return
+    with state.locked(config_dir):
+        raw = state.read_state(config_dir) or {}
+        if phase is None and not any(raw.get(key) for key in ("cadence_phase", "cadence_pending")):
+            return
+        fields = {"cadence_phase": phase, "cadence_pending": None, "cadence_held": held}
+        if any(raw.get(key) != value for key, value in fields.items()):
+            state.update_state(config_dir, **fields)
+
+
+def _transcript_cadence(config_dir: Path | str, session_id: str) -> WakeSchedule | None:
+    """The authoritative snapshot, not a potentially stale/missing wake index."""
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import read_latest_custom_entry
+
+    entry = read_latest_custom_entry(Path(config_dir) / "sessions" / session_id,
+                                     WAKE_SCHEDULES_CUSTOM_TYPE)
+    if entry is None:
+        return None
+    for raw in entry.payload.get("details", {}).get("schedules", []):
+        if isinstance(raw, Mapping) and raw.get("id") == CADENCE_ID:
+            return WakeSchedule.model_validate(raw)
+    return None
+
+
+def cadence_schedule(
+    now_ms: int,
+    at: str = DEFAULT_CADENCE_AT,
+    *,
+    config_dir: Path | str,
+    interval_hours: int = DEFAULT_INTERVAL_HOURS,
+    existing: WakeSchedule | None = None,
+    cadence_fired: WakeSchedule | None = None,
+) -> WakeSchedule:
+    """One-shot cadence, calendar-based by default or on an elapsed-hour grid.
+
+    ``created_at`` keeps the scheduler's stable ordering. An owed interval is
+    retained (or recovered into a short grace), never advanced without an
+    accepted occurrence. Its origin pins the unshifted anchor/due through load.
+    ``config_dir`` is REQUIRED — the
     message composes the R25 nudge clause through :func:`cadence_message`, and
     a caller that could skip it would be a second path that arms a row without
     the ledger moving.
     """
+    phase = cadence_phase(existing)
+    if existing is not None:
+        # An owed occurrence survives mode switches, including a load-time grace
+        # shift (its origin retains the ORIGINAL due). Unknown origins are not an
+        # invitation to rewrite another arm's identity or to bring a fire forward.
+        owed = min(existing.next_due_at, phase["due_ms"] if phase else existing.next_due_at)
+        if owed <= now_ms or (existing.request_id and phase is None):
+            return existing
+        old_interval = phase["interval_hours"] if phase else DEFAULT_INTERVAL_HOURS
+        if old_interval == interval_hours:
+            return existing
+    if not interval_hours and existing is None and cadence_fired is None:
+        # Daily installs keep the original one-shot construction, without paying
+        # for a phase ledger or changing their legacy origin/default semantics.
+        due = next_cadence_ms(now_ms, at)
+        origin = None
+    else:
+        raw = state.read_state(config_dir) or {}
+        fired_phase = cadence_phase(cadence_fired)
+        pending = _validated_phase(raw.get("cadence_pending"))
+        saved = _validated_phase(raw.get("cadence_phase"))
+        source = fired_phase if cadence_fired is not None else pending or saved
+        if source and source["interval_hours"] != interval_hours:
+            source = None
+        anchor = source["anchor_ms"] if source else now_ms
+        if cadence_fired is not None or raw.get("cadence_held") or source is None:
+            due = next_cadence_ms(now_ms, at, interval_hours=interval_hours, anchor_ms=anchor)
+        else:
+            # Absence alone is NOT retirement. A first-arm/persist failure leaves
+            # this pending due owed; do not infer delivery from wall time or index.
+            due = source["due_ms"]
+        phase = {"interval_hours": interval_hours, "anchor_ms": anchor, "due_ms": due}
+        origin = _phase_origin(phase)
+        # Prepare BEFORE row persistence. It never spends an occurrence: existing
+        # transcript rows outrank this mirror, and only an accepted fire advances.
+        with state.locked(config_dir):
+            latest = state.read_state(config_dir) or {}
+            if latest.get("cadence_pending") != phase:
+                state.update_state(config_dir, cadence_pending=phase)
     return WakeSchedule(
         id=CADENCE_ID,
         message=cadence_message(config_dir, now_ms),
-        next_due_at=next_cadence_ms(now_ms, at),
+        next_due_at=max(due, now_ms + 1_000) if due <= now_ms else due,
+        request_id=origin,
         every_ms=None,
         created_at=now_ms,
         # NOTIFY IS THE POINT OF THIS ROW: with no surface attached, a
@@ -622,6 +777,9 @@ def filter_on_load(
         return list(schedules)
     if not hold_active(config_dir) and not class_reactive:
         return list(schedules)
+    pol = policy(config_dir)
+    if pol.paused or class_reactive:
+        remember_cadence(config_dir, schedules, held=True)
     kept = [s for s in schedules if not is_aida_row(s.id)]
     if len(kept) != len(schedules):
         logger.info(
@@ -742,6 +900,7 @@ def reconcile(
     now_ms: int | None = None,
     class_reactive: bool = False,
     attended: bool = True,
+    cadence_fired: WakeSchedule | None = None,
 ) -> ReconcileResult:
     """The in-session full-list reconcile. Pure file side effects: the ledger.
 
@@ -784,6 +943,8 @@ def reconcile(
     pol = policy(config_dir)
     notes: list[str] = []
     if not pol.enabled or pol.paused or class_reactive:
+        if pol.paused or class_reactive:
+            remember_cadence(config_dir, original, held=True)
         kept = [s for s in original if not is_aida_row(s.id)]
         if pol.paused and any(s.id == GREETING_WAKE_ID for s in original):
             # THE ONE-TIME GREETING DIES WITH THE PAUSE (review round 1, m1).
@@ -866,7 +1027,7 @@ def reconcile(
                     # cadence row may not be in ``kept`` yet (it is appended
                     # last), so its would-be due time is computed rather than
                     # looked up.
-                    cadence_due = _cadence_due(kept, pol, now)
+                    cadence_due = _cadence_due(kept, pol, now, config_dir=config_dir)
                     too_close = any(
                         abs(row.next_due_at - due) < gap_ms for row in kept if is_aida_row(row.id)
                     ) or (cadence_due is not None and abs(cadence_due - due) < gap_ms)
@@ -911,7 +1072,7 @@ def reconcile(
     # skipped (an existing install) and legacy ledgers, so only a genuinely
     # first-run install waits — and an existing cadence row is never dropped
     # by this gate, only not created.
-    if not any(row.id == CADENCE_ID for row in kept) and _cadence_allowed(config_dir):
+    if any(row.id == CADENCE_ID for row in kept) or _cadence_allowed(config_dir):
         # REUSE the existing cadence row whenever one exists — rebuilding it
         # would mint a new ``created_at`` on every reconcile, which makes
         # ``changed`` permanently true (so a watcher tick or an after-turn
@@ -923,12 +1084,14 @@ def reconcile(
         # UPGRADE for a legacy row lives above, OUTSIDE this creation-only
         # block — review MAJOR-1: inside, it never ran for an established
         # install.)
-        existing = next((row for row in original if row.id == CADENCE_ID), None)
-        kept.append(
-            existing
-            if existing is not None
-            else cadence_schedule(now, pol.at, config_dir=config_dir)
+        existing = next((row for row in kept if row.id == CADENCE_ID), None)
+        candidate = cadence_schedule(
+            now, pol.at, config_dir=config_dir, interval_hours=pol.interval_hours,
+            existing=existing, cadence_fired=cadence_fired,
         )
+        kept = [candidate if row.id == CADENCE_ID else row for row in kept]
+        if existing is None:
+            kept.append(candidate)
 
     # -- the one-time greeting, armed only once a PERSON asked for it --------
     # A live session is the ONLY writer that can arm it when the owner holds
@@ -981,7 +1144,10 @@ def reconcile(
     )
 
 
-def _cadence_due(rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int) -> int | None:
+def _cadence_due(
+    rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int,
+    *, config_dir: Path | str,
+) -> int:
     """The cadence row's due time, or the time it *would* be armed for.
 
     Used only by the spacing check: the cadence row may not exist yet in the
@@ -991,7 +1157,18 @@ def _cadence_due(rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int) 
     for row in rows:
         if row.id == CADENCE_ID:
             return row.next_due_at
-    return next_cadence_ms(now_ms, pol.at)
+    if pol.interval_hours:
+        raw = state.read_state(config_dir) or {}
+        for key in ("cadence_pending", "cadence_phase"):
+            phase = _validated_phase(raw.get(key))
+            if phase and phase["interval_hours"] == pol.interval_hours:
+                if raw.get("cadence_held"):
+                    return next_cadence_ms(
+                        now_ms, pol.at, interval_hours=pol.interval_hours,
+                        anchor_ms=phase["anchor_ms"],
+                    )
+                return max(phase["due_ms"], now_ms + 1_000)
+    return next_cadence_ms(now_ms, pol.at, interval_hours=pol.interval_hours)
 
 
 async def append_notes(transcript: Any, notes: Sequence[str]) -> None:
@@ -1550,6 +1727,7 @@ async def ensure_armed(
         STATUS_CONFLICT,
         WakeWriteError,
         arm_wake,
+        edit_wake,
         repair_index,
     )
 
@@ -1574,6 +1752,9 @@ async def ensure_armed(
         ids = _row_ids(entry)
         aida_ids = [i for i in ids if is_aida_row(i)]
         if not pol.enabled or pol.paused or class_reactive:
+            if pol.paused or class_reactive:
+                current = _transcript_cadence(root, session_id)
+                remember_cadence(root, [current] if current else [], held=True)
             if aida_ids:
                 await _cancel_ids(root, session_id, aida_ids, now_ms=now)
             if not pol.enabled:
@@ -1597,6 +1778,29 @@ async def ensure_armed(
         if wake_store.is_held(entry):
             return "held"
         result = "present"
+        current = _transcript_cadence(root, session_id)
+        if current is None and pol.interval_hours:
+            # Index presence is not an arm receipt either. A stale projection
+            # must not prevent recovery of an interval's durable pending due.
+            ids.discard(CADENCE_ID)
+        if current is not None:
+            # The transcript wins even if a crash left its derived index behind.
+            if CADENCE_ID not in ids:
+                await repair_index(root, session_id)
+                ids.add(CADENCE_ID)
+            candidate = cadence_schedule(
+                now, pol.at, config_dir=root, interval_hours=pol.interval_hours, existing=current,
+            )
+            if candidate != current:
+                await edit_wake(
+                    root, session_id, CADENCE_ID,
+                    {"at": _iso_due(candidate.next_due_at), "message": candidate.message,
+                     "notify": True},
+                    now_ms=now, request_id=candidate.request_id or "",
+                    expected_request_id=current.request_id or "",
+                )
+                result = "armed"
+            remember_cadence(root, [candidate])
         if CADENCE_ID not in ids and not _cadence_allowed(root):
             # First run, greeting not yet delivered: the boot paths call this
             # on every launch, and arming here would schedule a headless 08:30
@@ -1605,12 +1809,15 @@ async def ensure_armed(
             result = "waiting"
         elif CADENCE_ID not in ids:
             try:
+                candidate = cadence_schedule(
+                    now, pol.at, config_dir=root, interval_hours=pol.interval_hours,
+                )
                 await arm_wake(
                     root,
                     session_id,
                     {
-                        "message": cadence_message(root, now),
-                        "at": _iso_due(next_cadence_ms(now, pol.at)),
+                        "message": candidate.message,
+                        "at": _iso_due(candidate.next_due_at),
                         # Same contract as ``cadence_schedule``: the row may
                         # banner; the settle-time veto reads her actual reply
                         # before one is raised.
@@ -1618,7 +1825,9 @@ async def ensure_armed(
                     },
                     wake_id=CADENCE_ID,
                     now_ms=now,
+                    request_id=candidate.request_id or "",
                 )
+                remember_cadence(root, [candidate])
                 result = "armed"
             except WakeWriteError as exc:
                 if exc.status == 503:
@@ -1721,7 +1930,8 @@ async def _drain_tray_external(
             and is_aida_row(str(raw["id"]))
             and isinstance(raw.get("next_due_at"), int)
         ]
-        cadence_due = next_cadence_ms(now, pol.at)
+        current = _transcript_cadence(root, session_id)
+        cadence_due = _cadence_due([current] if current else [], pol, now, config_dir=root)
         # ``enumerate``, not ``requests.index(request)`` (review round 2,
         # NIT-1): ``list.index`` resolves to the FIRST EQUAL item, so a tray
         # holding duplicate entries would re-restore an already-processed one
@@ -1933,6 +2143,8 @@ async def pause(
     from local_operator.wakes import store as wake_store
 
     entry = wake_store.read_entry(root, session_id)
+    current = _transcript_cadence(root, session_id)
+    remember_cadence(root, [current] if current else [], held=True)
     aida_ids = _aida_ids(entry)
     # PAUSE CANCELS PENDING PATIENCE CYCLES (§8.2.4): a paused assistant must
     # not keep a hidden timer nagging on her behalf, and a cycle that cannot
