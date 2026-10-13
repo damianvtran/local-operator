@@ -134,10 +134,23 @@ Keep two independent monotonic revisions per owner/network/credential/account:
 | Material/state generation | rotation, expiry repair, logout, absence, withdrawal | Invalidate stale borrowed material/status evidence |
 | Login-chain/authorization revision | new native login, explicit scope change, authorized re-enable | Evidence for one bounded MCP retry/reconnect |
 
-Persist owner generations using existing `SyncState` locking/reset handling;
-recipient observations carry owner identity, epoch and acknowledged generations.
-Lost state cannot reset authority or make a lower generation win: use the existing
-safe generation adoption protocol, and fail closed on unverifiable recovery.
+Reuse existing `SyncState` **locking and bounds only**, not copy-material reset
+semantics. Lifecycle material/state generations and login-chain/authorization
+revisions both remain forward-only. In particular, do not reuse `fingerprint`
+(`credentials/sync.py:240–254`), equal-material-digest comparison, downward adoption
+(`sync.py:1637–1660`, `record_ack:718–741`), or counter clamping. Those belong to
+existing copy classes and are incompatible with metadata-only lifecycle events.
+
+Proposed authenticated recovery uses owner-authored persisted checkpoints and
+recipient high-water observations bound to that owner/network/epoch/context. For
+each revision independently, choose `max(proven_owner, proven_recipient) + 1`
+only after authenticating the baseline and within the strict bounds below; never
+adopt a member's bare claimed number as authority. Lower/reset or unprovable state
+reports `needs_authoritative_baseline`, blocks positive lifecycle application and
+grants for the affected context, and never upgrades consent or erases a deny.
+A recovery jump above 2**20, overflow or exhausted headroom fails closed and
+requires an authoritative checkpoint repair, not wraparound/downward adoption.
+This is a **proposed new recovery validator**, not an existing implemented guarantee.
 
 Negotiate proposed `credential-lifecycle-v1` on both ends of the existing peer
 capability advertisement. Reuse `net_broker` and its membership/epoch/locality/
@@ -162,6 +175,40 @@ Old peers receive no new kinds. Preserve their existing finite grants, but repor
 `unsupported` for automatic lifecycle behavior. Capability absence is not no-login
 and must not cause repeated unknown-kind requests or wider legacy fallback grants.
 New optional grant/status context must not reinterpret old expiry or scope fields.
+
+### Proposed lifecycle validator and limits (not implemented)
+
+Add `credentials.types.validate_lifecycle_frame` for the new kinds; the current
+`on_broker` dispatch does not implement this validator. Validate the entire frame
+and every entry **before any policy, placement, generation or acknowledgement
+mutation**. The negotiated v1 schema has exact envelope/payload allowlists: reject
+unknown keys (including token/material/hash fields), missing required keys, wrong
+types, duplicate JSON/object/context keys, invalid IDs, nonfinite values and
+oversized frames. Reject, never truncate, coerce or clamp. No material-derived hash
+is needed to compare metadata or recover revisions. This needs a **proposed
+lifecycle-aware strict-decode hook** at `network/wire.py:694–737` (`LinkCrypto.open`)
+to retain authenticated plaintext size/depth/duplicate-key evidence before it is
+lost by the current `json.loads`; typed validation then runs at `on_broker`.
+A validator receiving only the existing decoded dict cannot prove those checks.
+
+| Field/resource | Proposed bound/rejection contract |
+|---|---|
+| Whole decoded lifecycle JSON frame | At most 16,384 UTF-8 bytes, measured before parsing; maximum nesting depth 4 |
+| Batch/cardinality | 1–8 unique credential/account-context entries per frame; maximum 8 displayed inventory rows per approval page; pagination preserves the explicitly approved subset, never silently approves omitted rows |
+| Network/device identity | Exact `n_` + 24 hex / `d_` + 32 hex characters, also matched to the authenticated link and receipt |
+| `credential_key` | 1–200 UTF-8 bytes, no NUL/control characters; must match the typed provider/MCP key parser, not an arbitrary URL/secret selector |
+| `account_scope_ref`, consent `scope_ref`, approval/provenance opaque references | 1–256 ASCII bytes from `[A-Za-z0-9_.:/-]`; resolved locally to exact approved principal/account/tenant context; an unknown required reference refuses |
+| State | Exact declared enum (`available`, `absent`, `withdrawn`, `unsupported`, `non_portable`); not free-form provider text |
+| `req`, `policy_revision`, material generation, login-chain revision | Positive JSON integers, never bool/string/float; at most `2**53 - 2**20 - 1`, retaining headroom and rejecting overflow before mutation |
+| `expires_at` | Null for no asserted expiry, otherwise integer epoch milliseconds in `[0, 2**53 - 1]`; never an effective-access claim by itself |
+| Recovery advance | Positive forward difference at most 2**20 for each counter, with a verified authoritative baseline; no bare peer-number adoption |
+
+`ANNOUNCE_CAP=8` and headroom concepts are grounded in `sync.py:116–138`; the
+specific string/frame/depth/schema/recovery checks above are **new proposed
+requirements**, not claims about current validation. Invalid context, oversized
+input, unknown fields and excessive forward revisions must leave all authority,
+placement, generation and ack state byte-identical. Logging names the refusal
+code/context reference only, never the rejected raw frame or secret fields.
 
 ## Reconciliation and runtime ownership
 
@@ -260,6 +307,10 @@ Implementation review/independent QA must execute these fail-first cells:
 | Logout/re-login vs revoke/local-only | Availability resumes only with consent; sticky denies never auto-regrant |
 | Crash between deny and placement | Owner refuses while stale holder still exists; retry converges |
 | Both nodes reboot; missed offline updates | Consent/generations survive, fresh native resolve re-establishes effective state |
+| Withdrawal while recipient is offline | Recipient misses revoke/local-only; on reconnect owner denies future borrows before stale placement converges. Replay a pre-withdrawal `available` announcement/grant and stale ack; reject stale authority, keep sticky deny, never auto-regrant even on a later login |
+| Borrowed native OAuth versus API-key HTTP wire | Capture actual outbound endpoint and redacted header names/presence plus account/subscription identity. OpenAI OAuth uses the native Codex responses route and subscription scope headers; API-key mode uses its configured API route without OAuth-only headers. Back with actual response/side effect, not only `OAuthAccess` metadata |
+| Wrong-mode/endpoint negative control | Force borrowed OAuth onto the API-key route/header shape and API key onto OAuth-only route/scope in an isolated controlled HTTP fixture; assertions must fail or wire reject. Restore native selection and prove the discriminating request passes; no credential/header values enter evidence |
+| Lifecycle validator rejection and recovery | Unknown/material/hash keys, missing/invalid account/scope references, wrong ID/types, duplicate entries/keys, >8 entries, >16,384 bytes, depth >4, integer overflow and >2**20/unproven recovery jump all reject before mutation. Lower/reset revision needs authoritative baseline; no digest-based/downward recovery |
 | Reverse-link-only owner reachability | Real authenticated owner-established link carries metadata and grants despite failed fresh dial |
 | Old peer/missing capability | Existing finite grant works; automatic inheritance is explicitly unsupported |
 | Wrong recipient/epoch, MITM/tamper/replay | No material or authority mutation; encrypted transport refuses |
@@ -269,6 +320,14 @@ Implementation review/independent QA must execute these fail-first cells:
 | OpenAI `gpt-6.1-sol` + RemoteUI | Real mesh turn, then rotation on same running session; selected/effective state parity and rendered artifacts |
 | Old 0.70.12 busy reader/writer | Compatibility fence blocks migration; no silent plaintext resurrection |
 | Approved storage migration fault matrix | Crash-safe references, encrypted ciphertext, no synthetic plaintext in active DB/WAL/logs, compatible rollback |
+
+Native-wire acceptance is grounded in `providers/clients.py:2671–2708`
+(`_request_base_url`, `_headers`) and `CODEX_RESPONSES_URL:2462`, not a new wire
+mode. Capture header names/presence and assert synthetic account/subscription
+binding; redact Authorization and other values. The isolated negative fixture
+must discriminate mode/endpoint errors before later real-mesh acceptance. Offline
+withdrawal tests assert denial of **future borrows**; they do not claim to retract
+a leaked upstream bearer or make the historical grant cryptographically unusable.
 
 No paid calls/install/restart are required to review this document. Real E2E and
 rendered validation are later implementation gates when operational holds lift.
