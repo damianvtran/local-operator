@@ -9786,6 +9786,35 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     if not _serve_bind_is_loopback_only(host):
         return _refuse_non_loopback_bind(host, port)
 
+    # A DAEMON IS A HOSTING PLANE, NOT A CHAT AN AGENT OPENED. This process is
+    # about to become the ``lop serve`` daemon the operator's front ends (the
+    # desktop app's backend, the phone relay's child, the TUI server) talk to,
+    # and IT mints the sessions for the operator's OWN conversations through the
+    # shared composition root. The ``bash`` tool stamps every command an agent
+    # runs with the agent-shell markers, and when such a shell started this
+    # daemon those markers ride along in ``os.environ`` — which is what made
+    # :func:`local_operator.agent_shell.agent_shell_opened_run` true at
+    # session-build time, stamping the operator's New Chat sessions
+    # ``origin.json = {"origin": "agent-shell"}`` and hiding them from the
+    # desktop sidebar, the phone list and the ``/resume`` picker.
+    #
+    # The markers describe the COMMAND THAT STARTED THIS PROCESS; a long-lived
+    # server is not that command, and the sessions it creates are the operator's
+    # gestures, so the claim must not survive into them. Drawn here, at the SERVE
+    # entry point, because a process cannot un-inherit an environment variable
+    # any later — the daemon's own ``dict(os.environ)`` spawns (the mobile relay
+    # and the runtime launcher) would carry the markers on.
+    #
+    # SERVE ONLY. ``lop exec``, ``--workstream`` and the QA escape hatch stamp
+    # exactly as before: those ARE commands an agent's shell ran, and the whole
+    # point of the guard and its stamp is to keep their sessions out of the
+    # operator's list. See :func:`agent_shell.drop_agent_shell_marker_from_environ`
+    # for why all THREE names go (the escape hatch included) and why the removal
+    # is in place rather than a returned copy.
+    from local_operator.agent_shell import drop_agent_shell_marker_from_environ
+
+    drop_agent_shell_marker_from_environ()
+
     try:
         import uvicorn
     except ImportError:

@@ -1952,6 +1952,25 @@ promoted later by editing it — start it as a workstream instead — while
 `lop exec --resume <id>` of a workstream does not re-stamp and therefore keeps the
 row listed. `docs/EXEC.md` owns the flag table and the full semantics.
 
+**A DAEMON is a hosting plane, not a chat an agent opened, so `lop serve` drops
+the markers before it serves.** The desktop app's own backend, the phone relay's
+child and a TUI server all mint the operator's sessions through the shared
+composition root — but a long-lived server is not "a command an agent's `bash`
+tool call ran", and when such a shell launched the daemon (the common shape:
+the app inherits the environment of whatever started it) the markers rode along
+in `os.environ`, so every session the daemon created was stamped `agent-shell`
+and hidden. That is the 2026-10-13 sidebar regression: an app launched from an
+agent's shell hid the operator's own New Chats. The fix is at the SERVE entry
+point (`cli.serve_command` calls `agent_shell.drop_agent_shell_marker_from_environ`,
+which reuses `without_agent_shell_marker` for the two names it defines and also
+drops `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`), and it is a PROCESS-level strip
+because a process cannot un-inherit an environment variable any later. SCOPE:
+SERVE ONLY — `lop exec`, `--workstream` and the escape hatch still stamp exactly
+as the paragraphs above say, because those ARE commands an agent's shell ran;
+only the daemon's own MINT (a session it creates for a front end) is exempt. A
+runtime the daemon SPAWNS for an agent's marked command still stamps, because
+that child is started by the command, not by the daemon's mint.
+
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
 it inherits the marker and every inner run would be refused, which reads as a
