@@ -423,9 +423,7 @@ async def test_the_replay_preheat_spawns_no_runtime(tmp_path, monkeypatch):
     with pytest.raises(AssertionError):
         launch._spawn_runtime("s", "cwd", defer_materialise=False)
     with pytest.raises(AssertionError):
-        await LocalOwner.engage(
-            object.__new__(LocalOwner), cwd="cwd", warm=cast(WarmErrand, None)
-        )
+        await LocalOwner.engage(object.__new__(LocalOwner), cwd="cwd", warm=cast(WarmErrand, None))
     # The armed probes above are the ONLY thing allowed to have moved the flag, and
     # they have: reset it so the assertion below is about the PREHEAT alone.
     spawned["called"] = False
@@ -515,8 +513,12 @@ async def test_a_reader_joining_an_in_flight_preheat_does_not_parse_twice(tmp_pa
         return await replay_cache.load_cold_replay(
             key,
             lambda: asyncio.to_thread(
-                counted, root / "sessions" / "s1",
-                key=key, want_checkpoint=True, through_id=None, strict_cut=False,
+                counted,
+                root / "sessions" / "s1",
+                key=key,
+                want_checkpoint=True,
+                through_id=None,
+                strict_cut=False,
             ),
         )
 
