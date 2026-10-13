@@ -342,3 +342,69 @@ def test_posix_binds_with_so_reuseaddr_as_before(monkeypatch: pytest.MonkeyPatch
         pytest.skip("this host is Windows, where the exclusive option is the correct one")
     calls = _recorded_bind_options(monkeypatch)
     assert ("setsockopt", socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in calls
+
+
+def test_serve_drops_the_agent_shell_markers_before_serving(
+    captured_server: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DAEMON IS A HOSTING PLANE, not a chat the agent that started it opened.
+
+    The regression this pins (operator, 2026-10-13): the desktop app's own
+    backend inherits the ``bash`` tool's markers from whichever agent shell
+    launched the app, and ``lop serve`` then stamped every session it minted —
+    the operator's New Chat included — ``origin.json = {"origin": "agent-shell"}``,
+    so the sidebar, the phone list and the picker dropped them. The guard
+    (``agent_shell.agent_shell_opened_run``) reads ``os.environ`` at session-build
+    time, so the daemon's own environment has to be free of the markers BEFORE
+    it serves — a returned copy would leave the leak exactly where it was.
+
+    All THREE names go for the SERVE path, and the escape hatch is the
+    difference from the child-facing helper rather than an oversight: a daemon
+    that inherited the QA escape would waive the refusal for the operator's own
+    chats. The unrelated variable is asserted present, because a strip that also
+    dropped the environment would break every spawn the daemon makes, in a way
+    no "marker absent" assertion would notice.
+    """
+    from local_operator.agent_shell import (
+        AGENT_SHELL_ENV,
+        ALLOW_NESTED_SESSION_ENV,
+        MAY_DELEGATE_ENV,
+        agent_shell_opened_run,
+    )
+
+    monkeypatch.setenv(AGENT_SHELL_ENV, "1")
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
+    monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
+    monkeypatch.setenv("SERVE_KEEP_THIS", "yes")
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    assert captured_server, "the fake uvicorn run must have been reached"
+
+    assert AGENT_SHELL_ENV not in os.environ
+    assert MAY_DELEGATE_ENV not in os.environ
+    assert ALLOW_NESTED_SESSION_ENV not in os.environ
+    assert os.environ["SERVE_KEEP_THIS"] == "yes"
+    # The predicate the factory consults at session-build time, read from the
+    # SAME live mapping the daemon will read: with the markers gone it is False,
+    # so a session this server mints is NOT stamped ``agent-shell``.
+    assert agent_shell_opened_run() is False
+
+
+def test_a_serve_started_without_the_markers_is_unchanged(
+    captured_server: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's own terminal opens the daemon with nothing to strip.
+
+    A same-code control for the test above: the strip must be a no-op on an
+    ordinary environment, not a rewrite of it. Asserts a plain variable AND that
+    the escape hatch a harness would set is still removed (the daemon's rule is
+    unconditional), which is the half a "nothing to strip" reading would miss.
+    """
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    monkeypatch.setenv("SERVE_ORDINARY", "1")
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    assert os.environ.get("SERVE_ORDINARY") == "1"
+    assert AGENT_SHELL_ENV not in os.environ
