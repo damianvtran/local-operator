@@ -20,6 +20,7 @@ import pytest
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamReasoningDelta,
@@ -608,6 +609,55 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_google_boundary_after_primary_exhaustion_is_rendered_for_target() -> None:
+    """A fallback must normalize its own family, not reuse the primary wire."""
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body["model"] == "gpt-4o":
+            return httpx.Response(429, json={"error": {"message": "quota exhausted"}})
+        assert body["messages"][-1]["role"] == "user"
+        content = body["messages"][-1]["content"]
+        text = content if isinstance(content, str) else "".join(p.get("text", "") for p in content)
+        # The selector itself may visit Google with an ordinary user prompt;
+        # the continued conversation is the request that needs this boundary.
+        if any(m["role"] == "assistant" for m in body["messages"]):
+            assert "harness continuation" in text
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    original = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o"),
+        messages=[Message.user("Say OK."), Message.assistant("OK.")],
+    )
+    auth = FakeAuth({"openai": ["synthetic-primary"], "openrouter": ["synthetic-fallback"]})
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {"default": ["openrouter/google/gemini-4-argon"]},
+        }
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return OpenAICompatClient("https://synthetic.invalid/v1", http_client=http)
+
+        events = [e async for e in stream_with_failover(original, auth, settings, client_for)]
+    assert bodies[0]["messages"][-1]["role"] == "assistant"
+    assert bodies[-1]["model"] == "google/gemini-4-argon"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "OK" for e in events)
+    assert original.messages[-1].role == "assistant"
 
 
 async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -> None:
