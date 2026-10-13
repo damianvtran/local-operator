@@ -128,11 +128,16 @@ def _frontmatter_span(text: str) -> tuple[str, int, int]:
 
 
 def _scalar(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        or type(value) is bool
-        or (type(value) in (int, float) and math.isfinite(value))
-    )
+    if isinstance(value, str) or type(value) is bool:
+        return True
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # Python can parse integers that overflow the server's JSON numeric
+        # representation. Refuse them by name, not an uncaught conversion error.
+        return False
 
 
 def _strings(value: Any) -> bool:
@@ -144,13 +149,37 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
     try:
         # Even safe YAML aliases create alternate byte/semantic projections.
         # V1 does not transfer anchors, aliases, tags or merge-key expansion.
+        depth = 0
         for token in yaml.scan(block):
+            if isinstance(
+                token,
+                (
+                    yaml.tokens.FlowSequenceStartToken,
+                    yaml.tokens.FlowMappingStartToken,
+                    yaml.tokens.BlockSequenceStartToken,
+                    yaml.tokens.BlockMappingStartToken,
+                ),
+            ):
+                depth += 1
+                # Valid v1 metadata is flat and needs at most three collection
+                # levels. Bound invalid nesting BEFORE recursive construction.
+                if depth > 8:
+                    raise _invalid("skill frontmatter is too deeply nested")
+            elif isinstance(
+                token,
+                (
+                    yaml.tokens.FlowSequenceEndToken,
+                    yaml.tokens.FlowMappingEndToken,
+                    yaml.tokens.BlockEndToken,
+                ),
+            ):
+                depth -= 1
             if isinstance(
                 token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken)
             ):
                 raise _invalid("skill frontmatter does not support YAML tags or aliases")
         meta = yaml.load(block, Loader=_StrictLoader)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         raise _invalid("SKILL.md has invalid YAML frontmatter") from None
     if not isinstance(meta, dict) or set(meta) - _ALLOWED_KEYS:
         raise _invalid("SKILL.md has unsupported frontmatter keys")
@@ -213,7 +242,13 @@ class SkillDocument:
             # Preserve submitted case/Unicode spelling, but reject filesystem
             # aliases before APFS normalization can overwrite another entry.
             key = unicodedata.normalize("NFC", file.path).casefold()
-            if key in seen:
+            if key in seen or any(
+                key.startswith(previous + "/") or previous.startswith(key + "/")
+                for previous in seen
+            ):
+                # Files cannot also be ancestor directories, including aliases
+                # after APFS-style case/NFC normalization. Validate the complete
+                # manifest before any staged mkdir can encounter FileExistsError.
                 raise _invalid("skill paths collide after Unicode/case normalization")
             seen.add(key)
             size = len(_text_bytes(file.content))
@@ -266,7 +301,7 @@ class SkillDocument:
                 return result
 
             raw = json.loads(value.decode("utf-8", errors="strict"), object_pairs_hook=unique)
-        except (UnicodeError, ValueError) as exc:
+        except (UnicodeError, ValueError, RecursionError) as exc:
             if isinstance(exc, SkillValidationError):
                 raise
             raise _invalid("skill manifest must be valid UTF-8 JSON") from None

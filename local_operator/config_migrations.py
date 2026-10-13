@@ -69,6 +69,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from local_operator.config_writer import serialized_config_path_write
+
 logger = logging.getLogger(__name__)
 
 #: Left behind by the one release candidate that stamped (PR #645 round 5,
@@ -100,6 +102,7 @@ _RETIRED_CEILINGS = (
 _REAP_UNUSED_FLAT = "session.reap_unused"
 
 
+@serialized_config_path_write
 def migrate_session_cleanup(config_dir: Path) -> list[str]:
     """Pin the old reapers OFF and opt the user out of the new cleanup policy.
 
