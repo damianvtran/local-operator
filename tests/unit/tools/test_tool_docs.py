@@ -300,7 +300,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "read": 349,
     "read_variable": 71,
     "secret": 188,
-    "send": 697,
+    # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
+    # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
+    "send": 783,
     "sessions": 802,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
