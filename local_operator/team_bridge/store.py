@@ -2681,6 +2681,61 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def due_screening_holds(
+        self, owner: OwnerSnapshot, *, now: float, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """DUE quarantine rows for the connector's client-local retry (H4).
+
+        §13.4's hold policy — "purely local quarantine, no server verdict,
+        retry with backoff" — needs a consumer; this is the timing read for
+        the smallest one. Local metadata only (never a server poll): a NULL
+        ``retry_at`` (a hold written before any schedule existed) counts as
+        due so it cannot be stranded. Read under the live-owner fence; a
+        fenced or missing owner reads empty.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                if self._live_generation(conn, owner) != owner.enrollment_generation:
+                    return []
+                rows = conn.execute(
+                    "SELECT message_id, hold_code, retry_at, created_at FROM screening_holds "
+                    "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
+                    "ORDER BY COALESCE(retry_at, created_at) LIMIT ?",
+                    (_owner_key(owner), float(now), int(limit)),
+                ).fetchall()
+                return [
+                    {
+                        "message_id": row["message_id"],
+                        "hold_code": row["hold_code"],
+                        "retry_at": row["retry_at"],
+                        "created_at": row["created_at"],
+                    }
+                    for row in rows
+                ]
+        except sqlite3.Error:
+            return []
+
+    def advance_hold_retry(self, owner: OwnerSnapshot, message_id: str, *, retry_at: float) -> bool:
+        """Re-schedule ONE still-held message's next attempt (H4 backoff).
+
+        CONDITIONAL on the row still existing: a re-screen that succeeded
+        commits its receipt and DELETES the hold, so re-scheduling here must
+        never resurrect a quarantine for a delivered message (rowcount is the
+        answer, not an assumption). Live-owner fenced.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            updated = conn.execute(
+                "UPDATE screening_holds SET retry_at = ? " "WHERE owner_key = ? AND message_id = ?",
+                (float(retry_at), _owner_key(owner), message_id),
+            )
+            return bool(updated.rowcount)
+
     #: Consecutive provider failures that open the account breaker, and the
     #: fixed finite backoff ladder (seconds) it walks per further failure.
     BREAKER_THRESHOLD = 3

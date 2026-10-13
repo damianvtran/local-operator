@@ -15,6 +15,7 @@ import plistlib
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -111,18 +112,38 @@ def test_install_renders_own_label_to_temp_only(tmp_path) -> None:
     assert install_mod.SYSTEMD_UNIT.endswith(".service")
     task = install_mod.render_task_xml(config_dir)
     assert install_mod.TASK_NAME in task and "<LogonTrigger>" in task
-    # The real install target is named but NEVER written by rendering:
+    # The real install target is named but NEVER written by rendering. The
+    # target MAY exist from a real install on an operator machine — the
+    # property is that THIS code never creates or touches it: existence is
+    # unchanged across a render, and the module exposes no install/bootstrap
+    # execution path at all (render-only by API shape, not by machine state).
     assert install_mod.plist_path().name == "com.local-operator.bridge-connector.plist"
-    assert not install_mod.plist_path().exists() or True  # never asserted as written
+    existed_before = install_mod.plist_path().exists()
+    install_mod.write_plist(config_dir, tmp_path / "rendered-again")
+    assert install_mod.plist_path().exists() == existed_before
+    assert not hasattr(install_mod, "install") and not hasattr(install_mod, "bootstrap")
 
 
 def test_connector_import_stays_bounded() -> None:
     """The import pin: module scope must not pull the session/model graphs."""
 
+    heavy = [
+        "local_operator.session.session",
+        "local_operator.model.configure",
+        "local_operator.mobile.peer_send",
+        "local_operator.session.runtime.launch",
+        "local_operator.team_bridge.scheduler",
+        "local_operator.team_bridge.screening",
+    ]
     code = (
-        "import local_operator.team_bridge.connector, sys;"
-        "assert 'local_operator.session.session' not in sys.modules;"
-        "assert 'local_operator.model.configure' not in sys.modules;"
+        "import local_operator.team_bridge.connector as c,"
+        " local_operator.team_bridge.connector.loop,"
+        " local_operator.team_bridge.connector.wake, sys;"
+        f"heavy = {heavy!r};"
+        "loaded = [m for m in heavy if m in sys.modules];"
+        "assert not loaded, loaded;"
+        # The ONE light exception at module scope is pinned in the positive:
+        "assert 'local_operator.harness.message_types' in sys.modules;"
         "print('BOUND_OK')"
     )
     proc = subprocess.run(
@@ -391,3 +412,160 @@ def test_new_message_type_registered() -> None:
 
     assert TEAM_BRIDGE_MESSAGE_TYPE == "team_bridge_message"
     assert TEAM_BRIDGE_MESSAGE_TYPE != "peer_message"
+
+
+# -- H4-A2: due-hold retry with bounded backoff -------------------------------
+
+
+def test_due_hold_is_redriven_to_deliver(tmp_path, monkeypatch) -> None:
+    """A DUE quarantine re-enters the SAME spine and delivers on success."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path, disposition="deliver")
+    store.persist_hold(owner, "bmsg_h", "screening_hold", retry_at=time.time() - 5)
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+    )
+    assert result["due"] == 1
+    assert result["outcomes"] == [{"message_id": "bmsg_h", "action": "delivered"}]
+    assert record["delivered"] and record["acks"] == ["read"]
+    # Delivered: the backoff counter resets (no stale growth next time).
+    assert "bmsg_h" not in loop_mod._RETRY_ATTEMPTS
+
+
+def test_not_due_hold_is_skipped(tmp_path, monkeypatch) -> None:
+    """A future `retry_at` is local metadata, not a reason to spend."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    store.persist_hold(owner, "bmsg_future", "screening_hold", retry_at=time.time() + 3600)
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+    )
+    assert result == {"due": 0, "outcomes": []}
+    assert record["screened"] == 0  # nothing re-read, nothing re-screened
+
+
+def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
+    """Held again → the gap doubles per failure and stops at the cap."""
+
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path, disposition="hold")
+    store.persist_hold(owner, "bmsg_f", "screening_hold", retry_at=time.time() - 5)
+    first = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+    )
+    assert first["outcomes"][0]["action"] == "hold"
+    row_one = store.screening_hold(owner, "bmsg_f")
+    assert row_one is not None
+    gap_one = row_one["retry_at"] - time.time()
+    assert 0 < gap_one <= loop_mod.RETRY_BASE_S + 5
+    # Make it due again; the second failure must ADVANCE the gap (bounded 2x).
+    store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
+    asyncio.run(loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None))
+    row_two = store.screening_hold(owner, "bmsg_f")
+    assert row_two is not None
+    gap_two = row_two["retry_at"] - time.time()
+    assert gap_two > gap_one
+    # At the attempt cap the gap can never exceed RETRY_MAX_S.
+    loop_mod._RETRY_ATTEMPTS["bmsg_f"] = loop_mod.RETRY_MAX_ATTEMPTS
+    store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
+    asyncio.run(loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None))
+    row_three = store.screening_hold(owner, "bmsg_f")
+    assert row_three is not None
+    assert row_three["retry_at"] - time.time() <= loop_mod.RETRY_MAX_S + 5
+    loop_mod._RETRY_ATTEMPTS.pop("bmsg_f", None)
+
+
+def test_budget_exhaustion_hold_uses_the_same_due_path(tmp_path, monkeypatch) -> None:
+    """Early (pre-attempt) holds retry identically — same due mechanism."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path, disposition="deliver")
+    store.persist_hold(owner, "bmsg_b", "budget_exhausted", retry_at=time.time() - 1)
+    result = asyncio.run(
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+    )
+    assert result["outcomes"] == [{"message_id": "bmsg_b", "action": "delivered"}]
+    assert record["screened"] == 1
+
+
+def test_cancel_during_retry_keeps_claim_releasable(tmp_path, monkeypatch) -> None:
+    """Cancellation propagates and the spine's finally releases the claim."""
+
+    store, owner = _enroll(tmp_path)
+    started = asyncio.Event()
+
+    async def slow_screen(owner_, item, *, config_dir, auth_store, settings=None):
+        started.set()
+        await asyncio.sleep(30)
+        raise AssertionError("never reached")
+
+    async def fake_fetch(owner_, message_id, *, config_dir, access, auth_store):
+        return _item("hello")
+
+    async def fake_message(owner_, message_id, *, config_dir, access, client=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(message_id=message_id)
+
+    monkeypatch.setattr(pull_mod, "message", fake_message)
+    monkeypatch.setattr(wake_mod, "fetch_item", fake_fetch)
+    monkeypatch.setattr(wake_mod, "screen_item", slow_screen)
+    store.persist_hold(owner, "bmsg_c", "screening_hold", retry_at=time.time() - 5)
+
+    async def run() -> None:
+        task = asyncio.ensure_future(
+            loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    # The claim was released on the cancellation path: a FRESH token can take
+    # the same message without waiting out the TTL.
+    store.claim(owner, "bmsg_c", "sess_cos", f"connector:{uuid.uuid4()}", expiry=time.time() + 60)
+
+
+# -- H4-A2 minor: typed delivery selection (no string inspection) -------------
+
+
+def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkeypatch) -> None:
+    """History predicate picks live-vs-cold; both call typed entry points."""
+
+    from types import SimpleNamespace
+
+    from local_operator.mobile import peer_send as peer_mod
+    from local_operator.session.runtime import launch as launch_mod
+
+    owner = SimpleNamespace(account_id="acc_x")
+    calls: dict[str, Any] = {}
+
+    async def fake_outcome(record, *, session_id, text, mode, wake, sender):
+        calls["live"] = {"session_id": session_id, "wake": wake, "text": text}
+        return SimpleNamespace(detail="delivered (live)", state="delivered")
+
+    async def fake_engage(session_id, cwd, work, *, config_dir):
+        calls["cold"] = {"session_id": session_id, "work": type(work).__name__, "text": work.text}
+        return SimpleNamespace(state="started")
+
+    monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: True)
+    monkeypatch.setattr(peer_mod, "deliver_peer_message_outcome", fake_outcome)
+    out_live = asyncio.run(
+        wake_mod.deliver_wake(owner, "payload-1", session_id="sess_cos", config_dir=tmp_path)
+    )
+    assert out_live == "delivered (live)" and calls["live"]["wake"] is True
+
+    monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: False)
+    monkeypatch.setattr(launch_mod, "engage_runtime", fake_engage)
+    out_cold = asyncio.run(
+        wake_mod.deliver_wake(owner, "payload-2", session_id="sess_cos", config_dir=tmp_path)
+    )
+    assert "started" in out_cold
+    assert calls["cold"] == {
+        "session_id": "sess_cos",
+        "work": "PeerMessageErrand",
+        "text": "payload-2",
+    }

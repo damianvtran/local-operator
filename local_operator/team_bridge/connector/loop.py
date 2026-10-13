@@ -51,6 +51,16 @@ MAX_WALK_PAGES = 200
 #: request for the full wait window; a fresh poll is the contract's shape.
 REISSUE_DELAY_S = 0.2
 
+#: Held-item retry (§13.4 "retry with backoff"): base gap, cap, max attempts,
+#: and the batch bound per turn. The per-message counter lives in THIS process;
+#: a restart re-bases at RETRY_BASE_S — bounded and safe, because the gap only
+#: schedules the next LOCAL re-screen and never grants delivery authority.
+RETRY_BASE_S = 60.0
+RETRY_MAX_S = 3600.0
+RETRY_MAX_ATTEMPTS = 11
+RETRY_BATCH_LIMIT = 8
+_RETRY_ATTEMPTS: dict[str, int] = {}
+
 
 async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str, Any]:
     """Drive the inbox pagination to a terminal page, then complete it.
@@ -80,6 +90,69 @@ async def resync_walk(owner: Any, *, config_dir: Path, access: Any) -> dict[str,
     return {"pages": pages}
 
 
+async def retry_due_holds(
+    owner: Any,
+    *,
+    config_dir: Path,
+    access: Any,
+    auth_store: Any,
+    settings: Any = None,
+    limit: int = RETRY_BATCH_LIMIT,
+) -> dict[str, Any]:
+    """ONE bounded pass over DUE client-local holds (§13.4 retry-with-backoff).
+
+    Mechanism: read the native ``screening_holds`` timing (local metadata
+    only — never a server poll), then re-drive each DUE item through the SAME
+    spine (``handle_message_available``), whose fetch performs the single
+    documented message-bytes re-read per due item. Outcomes:
+
+    * delivered / bounced — the receipt commit deletes the hold row; the
+      in-process attempt counter resets;
+    * held AGAIN — ``retry_at`` advances by a bounded doubling gap (60 s →
+      3600 s cap; counter capped at RETRY_MAX_ATTEMPTS);
+    * ``badge_only`` / ``claimed_elsewhere`` — the row is left for the next
+      due window or the other claimant.
+
+    Fail-closed: this path can never deliver or ack a held item itself; the
+    spine's own laws decide (and a hold still never wakes). ``CancelledError``
+    propagates — per-claim release lives in the spine's ``finally``.
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    store = Store(config_dir)
+    due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
+    outcomes: list[dict[str, Any]] = []
+    for row in due:
+        message_id = row["message_id"]
+        outcome = await handle_message_available(
+            owner,
+            message_id,
+            config_dir=config_dir,
+            auth_store=auth_store,
+            access=access,
+            settings=settings,
+        )
+        action = outcome.get("action")
+        if action in ("delivered", "bounce"):
+            _RETRY_ATTEMPTS.pop(message_id, None)
+        elif action == "hold":
+            attempts = _RETRY_ATTEMPTS.get(message_id, 0)
+            gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            try:
+                store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+            except StoreRefused:
+                pass  # fenced owner: the next live pass owns the row
+            _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
+        outcomes.append({"message_id": message_id, "action": action})
+    if len(_RETRY_ATTEMPTS) > 512:
+        # Bound the counter map: it is a scheduling aid, not state worth growth.
+        _RETRY_ATTEMPTS.clear()
+    return {"due": len(due), "outcomes": outcomes}
+
+
 async def run_iteration(
     owner: Any,
     *,
@@ -88,7 +161,7 @@ async def run_iteration(
     auth_store: Any,
     settings: Any = None,
 ) -> dict[str, Any]:
-    """ONE loop turn: one read, the drained refs, the walk when due.
+    """ONE loop turn: due-hold retries, one read, the drained refs, the walk.
 
     Returns metadata only (counts/actions) — no body, no excerpt.
     """
@@ -96,12 +169,28 @@ async def run_iteration(
     from local_operator.team_bridge import pull as _pull
     from local_operator.team_bridge.store import Store
 
+    # Held-item retries run FIRST and on every turn (their own `retry_at`
+    # gates them): a quarantine must not wait for fresh traffic to retry, and
+    # a 204 timeout is not a reason to skip it. Local metadata only.
+    retries = await retry_due_holds(
+        owner,
+        config_dir=config_dir,
+        access=access,
+        auth_store=auth_store,
+        settings=settings,
+    )
     store = Store(config_dir)
     state = store.sync_state(owner)
     after = state["feed_seq"] or None
     batch = await _pull.events(owner, config_dir=config_dir, access=access, after=after)
     if batch is None:
-        return {"events": 0, "reissued": True, "resync": False, "handled": []}
+        return {
+            "events": 0,
+            "reissued": True,
+            "resync": False,
+            "handled": [],
+            "retries": retries,
+        }
     refs = _pull.drain_feed_refs(owner, config_dir=config_dir, upto_seq=batch["cursor"])
     handled: list[dict[str, Any]] = []
     for ref in refs:
@@ -134,6 +223,7 @@ async def run_iteration(
         "resync": resync,
         "walk": walk,
         "handled": handled,
+        "retries": retries,
     }
 
 

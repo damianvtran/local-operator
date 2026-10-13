@@ -2,8 +2,10 @@
 
 IMPORT BOUND — deliberate, and pinned by tests (the wake supervisor's
 import-graph pin is the precedent). Module scope in this package imports ONLY
-stdlib plus the bridge stack (``client``/``pull``/``store``/``types``), so
-``python -m local_operator.team_bridge.connector`` boots without the session,
+stdlib plus the bridge stack (``client``/``pull``/``store``/``types``) and the
+ONE light constant module ``harness.message_types`` (no session/model graph),
+so ``python -m local_operator.team_bridge.connector`` boots without the
+session,
 runtime, model or provider graphs. Everything heavier — the screening
 composition (which resolves a provider selection), the runtime launch
 machinery, the local delivery primitive — is imported LAZILY inside the
