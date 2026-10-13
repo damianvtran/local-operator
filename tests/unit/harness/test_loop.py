@@ -4110,7 +4110,7 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
 
 def _interrupted_events(
     *,
-    served: ModelSpec | None = None,
+    attempted: ModelSpec | None = None,
     partial: str = "The answer is ",
     call: StreamToolCallDelta | None = None,
 ) -> list[StreamEvent]:
@@ -4118,15 +4118,13 @@ def _interrupted_events(
 
     A wordless ``finish_reason 'error'`` is not an exception on this path -- it
     reaches the loop as an ordinary ``StreamEndEvent`` carrying the
-    ``retryable_interruption`` marker the client set (see
-    ``providers/clients.py``). These events are built the way the client builds
-    them, marker included, so deleting the client's marker flips these tests.
+    ``retryable_interruption`` marker the client set AND the fault-only
+    ``attempted_selector`` the failover stamps (the effective route of the
+    attempt that served the failure; the measured route emits NO
+    ``StreamModelEvent``). These events are built the way the stack builds
+    them, marker and selector included, so deleting either flips these tests.
     """
-    from local_operator.harness.types import StreamModelEvent
-
     events: list[StreamEvent] = []
-    if served is not None:
-        events.append(StreamModelEvent(model=served))
     events.append(StreamTextDelta(delta=partial))
     if call is not None:
         events.append(call)
@@ -4135,6 +4133,7 @@ def _interrupted_events(
             stop_reason="error",
             error="provider reported a mid-stream failure (finish_reason 'error')",
             retryable_interruption=True,
+            attempted_selector=attempted,
         )
     )
     return events
@@ -4159,7 +4158,7 @@ async def test_a_bare_error_end_continues_the_turn_on_the_same_route() -> None:
                 tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
                 StreamEndEvent(stop_reason="toolUse"),
             ],
-            _interrupted_events(served=served),
+            _interrupted_events(attempted=served),
             [StreamTextDelta(delta="42."), StreamEndEvent(stop_reason="stop")],
         ]
     )
@@ -4212,7 +4211,7 @@ async def test_a_complete_call_in_a_failed_end_stays_terminal() -> None:
     script = ScriptedStream(
         [
             _interrupted_events(
-                served=MODEL,
+                attempted=MODEL,
                 call=tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
             )
         ]
@@ -4238,7 +4237,7 @@ async def test_an_incomplete_call_in_a_failed_end_is_dropped_and_never_executes(
     script = ScriptedStream(
         [
             _interrupted_events(
-                served=MODEL,
+                attempted=MODEL,
                 call=tool_call_delta(0, id="c1", name="echo", args=""),
             ),
             [StreamTextDelta(delta="42."), StreamEndEvent(stop_reason="stop")],
@@ -4265,7 +4264,7 @@ async def test_repeated_bare_error_ends_exhaust_the_shared_budget() -> None:
     The budget is shared with the connectivity family on purpose: it bounds the
     RUN's tolerance for streams dying mid-answer, not one family's.
     """
-    script = ScriptedStream([_interrupted_events(served=MODEL)] * 4)
+    script = ScriptedStream([_interrupted_events(attempted=MODEL)] * 4)
     config = make_config(script)
     events = []
     async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
@@ -4285,7 +4284,7 @@ async def test_a_spent_recovery_window_refuses_a_second_continuation(
     import local_operator.harness.loop as loop_module
 
     monkeypatch.setattr(loop_module, "INTERRUPTED_RECOVERY_WINDOW_MS", 0.0)
-    script = ScriptedStream([_interrupted_events(served=MODEL)] * 3)
+    script = ScriptedStream([_interrupted_events(attempted=MODEL)] * 3)
     config = make_config(script)
     events = []
     async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
@@ -4326,6 +4325,7 @@ async def test_the_recovery_window_aborts_an_in_flight_stalled_stream(
                         stop_reason="error",
                         error="provider reported a mid-stream failure (finish_reason 'error')",
                         retryable_interruption=True,
+                        attempted_selector=MODEL,
                     )
                     return
                 yield StreamTextDelta(delta="more ")
@@ -4385,6 +4385,54 @@ async def test_normal_and_refusal_ends_keep_their_old_behavior() -> None:
     assert len(refusal_script.requests) == 1  # refusals are never continued
     ends = [e for e in events if isinstance(e, AgentEndEvent)]
     assert ends and ends[0].error == "refused"
+
+
+@pytest.mark.asyncio
+async def test_a_marked_end_without_an_effective_selector_refuses() -> None:
+    """UNKNOWN route REFUSES: the recovery never guesses from the request model.
+
+    After a sticky handoff or a driver fallback the request can name A while
+    B served the failure, so a pin built from the request model would re-ask a
+    route the failure never saw -- a silent rewrite wearing a same-route
+    label. The loop therefore continues ONLY when the fault-only selector is
+    present; absent it the turn ends exactly as before the feature.
+    """
+    script = ScriptedStream([_interrupted_events(attempted=None)] * 2)
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+    assert len(script.requests) == 1  # no re-ask without a known selector
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is not None
+
+
+@pytest.mark.asyncio
+async def test_the_recovery_pins_the_effective_selector_not_the_request_model() -> None:
+    """The C5 handoff case at loop level: request A, served by B, re-ask B.
+
+    The marked end carries the failover's per-attempt selector (B); the
+    session's current model still resolves to the turn's request (A), and the
+    switch gate passes on that. The re-ask must name B, not A.
+    """
+    requested = MODEL  # config.model below resolves to this
+    served = ModelSpec(provider="test", model_id="m-fallback")
+    script = ScriptedStream(
+        [
+            _interrupted_events(attempted=served),
+            [StreamTextDelta(delta="42."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+    assert len(script.requests) == 2
+    assert script.requests[1].same_route_retry is True
+    assert script.requests[1].model == served  # B, the effective route
+    assert script.requests[0].model == requested  # A was merely the request
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is None
 
 
 @pytest.mark.asyncio

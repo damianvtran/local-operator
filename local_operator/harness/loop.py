@@ -1635,7 +1635,7 @@ class AgentLoop:
                     assistant, stop_reason, stream_error = None, "stop", None
                     turn_connectivity_loss = False
                     turn_retryable_interruption = False
-                    turn_served_model: "ModelSpec | None" = None
+                    turn_attempted_selector: "ModelSpec | None" = None
                     nameless_call_drops = 0
                     # The spec this call was BUILT with, which is not
                     # ``config.model`` whenever the host resolves per call. The
@@ -1678,7 +1678,7 @@ class AgentLoop:
                             turn_model = event.model
                             turn_connectivity_loss = event.connectivity_loss
                             turn_retryable_interruption = event.retryable_interruption
-                            turn_served_model = event.served_model
+                            turn_attempted_selector = event.attempted_selector
                             nameless_call_drops = event.nameless_call_drops
                         else:
                             yield event
@@ -1763,16 +1763,21 @@ class AgentLoop:
                                 call for call in assistant.tool_calls if call.arguments
                             ]
                             current = self._current_model(config)
-                            # The pin is the route this turn ATTEMPTED -- its
-                            # request model. ``StreamModelEvent`` may refine it,
-                            # but it is NOT required: the measured OpenRouter
-                            # route never publishes one (QA w1 discriminator),
-                            # and requiring it made this whole gate inert on
-                            # the very route that motivated the fix. A user
-                            # model switch since the fault still cancels the
-                            # recovery choice.
+                            # The pin is the EFFECTIVE API selector of the
+                            # failed attempt, carried FAULT-ONLY on the marked
+                            # end by the failover frame that already holds the
+                            # per-attempt spec (``StreamEndEvent.
+                            # attempted_selector``). UNKNOWN means REFUSE: the
+                            # loop must never guess the route from the
+                            # request's model -- after a sticky handoff or
+                            # driver fallback the request can name A while B
+                            # served the failure, and a re-ask of A would be a
+                            # silent route rewrite wearing a same-route label.
+                            # A user model switch since the fault still cancels
+                            # the recovery choice.
                             interrupted_gates_ok = (
                                 not complete_calls
+                                and turn_attempted_selector is not None
                                 and turn_model is not None
                                 and current.provider == turn_model.provider
                                 and current.model_id == turn_model.model_id
@@ -1801,7 +1806,7 @@ class AgentLoop:
                                     )
                                 pending_interrupted_recovery = _InterruptedRecovery(
                                     requested=turn_model,
-                                    served=turn_served_model,
+                                    attempted=turn_attempted_selector,
                                 )
                             # TRUNCATED calls are dropped; COMPLETE ones are not.
                             # A call still being dictated when the socket died is
@@ -2997,6 +3002,7 @@ class AgentLoop:
         #: The bare-error finish marker carried off ``StreamEndEvent``; see
         #: the event field for why it is an eligibility, not a cause.
         retryable_interruption = False
+        attempted_selector: "ModelSpec | None" = None
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -3011,14 +3017,14 @@ class AgentLoop:
             preparing_at = time.monotonic()
             model = self._current_model(config)
             # Same-route recovery pin: re-ask the interrupted turn on the
-            # route that turn actually ATTEMPTED. That route is the failed
-            # request's model; a ``StreamModelEvent`` REFINES the pin when the
-            # provider publishes one, but the measured OpenRouter route never
-            # does, so absence must fall back to the attempted route instead
-            # of disabling the pin -- a serving event is provenance, never a
-            # precondition. PINNED ONLY when the host's resolution still
+            # EFFECTIVE API selector of the failed attempt -- the fault-only
+            # selector the failover stamped onto the marked end
+            # (``attempted_selector``), which is the route that actually
+            # carried the failure. The gate armed this pin only when that
+            # selector exists, so an unknown route has already refused rather
+            # than guess. PINNED ONLY when the host's resolution still
             # matches the failed turn's requested spec -- ``same_route_retry``
-            # would otherwise force a model the host (or the user) has since
+            # would otherwise force a route the host (or the user) has since
             # switched AWAY from, which is a rewrite the flag must never
             # perform. A mismatch cancels the choice and the turn proceeds
             # ordinary.
@@ -3028,7 +3034,7 @@ class AgentLoop:
                     model.provider == recovery.requested.provider
                     and model.model_id == recovery.requested.model_id
                 ):
-                    model = recovery.served or recovery.requested
+                    model = recovery.attempted
                     same_route_retry = True
             system_blocks = await self._current_system_blocks(context, config, model)
             # Resolving the prompt can publish a durable host-state update
@@ -3423,6 +3429,9 @@ class AgentLoop:
                     provider_payload = event.provider_payload
                     error = event.error
                     retryable_interruption = bool(getattr(event, "retryable_interruption", False))
+                    attempted_selector = (
+                        event.attempted_selector if retryable_interruption else None
+                    )
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
@@ -3590,6 +3599,7 @@ class AgentLoop:
             error=error,
             connectivity_loss=connectivity_loss,
             retryable_interruption=retryable_interruption,
+            attempted_selector=attempted_selector,
             served_model=served_model,
             model=request_model,
             nameless_call_drops=nameless_call_drops,
@@ -5703,13 +5713,15 @@ class _InterruptedRecovery:
     ``requested`` is the spec the failed turn's request was built from -- the
     pin is cancelled when the host no longer resolves to it (a user switch),
     because continuing on the old route would overrule a decision the user
-    just made. ``served`` is what actually served the failed attempt (a
-    rotation or fallback makes it differ from ``requested``): the re-ask goes
-    back to THAT machine's provider/model, never to a guessed one.
+    just made. ``attempted`` is the EFFECTIVE API selector of the attempt
+    that actually served the failure, carried FAULT-ONLY on the marked end
+    by the failover (a sticky handoff or fallback makes it differ from
+    ``requested``): the re-ask goes back to THAT route, never to a guessed
+    one. Armed only when the selector is known -- unknown refuses upstream.
     """
 
     requested: "ModelSpec"
-    served: "ModelSpec | None"
+    attempted: "ModelSpec | None"
 
 
 @dataclass
@@ -5734,6 +5746,9 @@ class _ModelTurnResult:
     #: -- an eligibility for the same bounded continuation, with the narrower
     #: gates the run loop applies (no complete call, known serving spec).
     retryable_interruption: bool = False
+    #: Effective API selector of the MARKED attempt (fault-only; stamped by
+    #: the failover on the forwarded end). The recovery pin without a guess.
+    attempted_selector: "ModelSpec | None" = None
     #: The spec that actually served this turn, when the client reported one;
     #: the interrupted-turn recovery pins it (see ``_InterruptedRecovery``).
     served_model: "ModelSpec | None" = None

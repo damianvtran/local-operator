@@ -3795,6 +3795,16 @@ class StreamEndEvent(BaseModel):
     #: the wire. Defaults False, so every other end shape keeps the existing
     #: terminal behaviour byte-for-byte until the loop decides otherwise.
     retryable_interruption: bool = False
+    #: Effective API selector of the attempt that produced a MARKED end.
+    #: FAULT-ONLY: stamped by ``providers/failover.py`` on the forwarded end
+    #: (the frame that already holds the per-attempt ``spec``) and the value
+    #: the interrupted-turn recovery pins its re-ask to. It names the
+    #: ATTEMPTED API route -- never a claim about the underlying provider,
+    #: quantization or checkpoint behind it -- and ``None`` means UNKNOWN, in
+    #: which case the recovery REFUSES rather than guessing the route from the
+    #: request's model (after a sticky handoff or driver fallback the request
+    #: can name A while B served the failure).
+    attempted_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):
