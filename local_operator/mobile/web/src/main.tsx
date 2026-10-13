@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./app";
 import { initWideView } from "./lib/viewport";
 import { initTheme } from "./theme";
+import { initializeLocaleMetadata } from "./store";
 import "./styles/index.css";
 
 /* Apply the persisted theme before first paint — the attribute is what
@@ -12,6 +13,9 @@ initTheme();
 /* The persisted wide view, for the same reason: the meta has to be right before the
    first layout or the page paints once at the default width and reflows. */
 initWideView();
+// UI copy is English until an audited own bundle is available; never label
+// this first paint with backend preference or a browser/device locale guess.
+initializeLocaleMetadata();
 
 /* Note: private-storage cleanup on sign-out is NOT wired here. The SPA never
    renders a logout control, and the login screen is a separate server-rendered

@@ -424,6 +424,26 @@ class _RecordingSession:
         self._sinks.append(sink)
         return lambda: None
 
+    def subscribe_requests(self, handler: Any) -> Any:
+        # The owning contract's observer surface; this double drives no
+        # provider requests, so the registration is inert.
+        del handler
+        return lambda: None
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        # The owning contract's explicit join: no child work exists here, so
+        # the receipt is honestly complete (the score gate requires it).
+        del timeout_s
+        return SimpleNamespace(
+            complete=True,
+            reason=reason,
+            elapsed_ms=0.0,
+            pending_job_ids=(),
+            errors=(),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
+
     def set_tool_confinement(self, root: Any) -> None:
         del root
 

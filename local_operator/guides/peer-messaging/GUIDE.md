@@ -18,8 +18,9 @@ Two entry points, one wire:
 - **`lop send`** — the shell command for HUMANS at a terminal (further below).
   Mailbox by default; `--wake` opts in to waking.
 
-They share the same target resolution and delivery semantics; the only
-difference is the default and who runs them.
+They share target resolution and wire delivery semantics. Their defaults and
+callers differ; the tool also reuses bounded, confirmed same-turn receipts
+(described below), while separate human CLI invocations remain separate acts.
 
 > **Agents: use the `send` tool. Never `bash` a `lop send`.** Three reasons,
 > and they are why the rule is worth remembering rather than looking up. The
@@ -53,6 +54,13 @@ Parameters:
 - `session` — exact session id.
 - `message` — the body; it lands in the peer's transcript as an inbound
   cross-session card. Required, and non-empty.
+- `repeat` (default **false**) — bypass same-turn confirmed local receipt reuse
+  only when the user explicitly requested a deliberate repeat. An unchanged
+  resend normally returns its original receipt without another delivery/wake/wait.
+  Reuse requires known sender/target IDs and a bounded cache (64 entries, at most
+  16KiB body + serialized receipt each); overflow fails open to actual delivery.
+  New turns, changed intent, errors/uncertainty, model switches and mesh sends
+  remain real attempts; this is not a session-lifetime or fuzzy-message filter.
 - `wake` (default **true**) — mailbox mode: wake an idle peer so it responds
   right away. `wake=False` is the quiet drop: the peer reads it on its next
   turn and stays idle (the TUI card shows this mode as `quiet`). Ignored when
@@ -75,6 +83,10 @@ rather than matched. Those words name a delegation (`task(agent='<role>')`) or a
 `hub` peer — never a session — and taking a substring hit on one is how a digest
 once landed on a session whose *title* simply contained "manager". The refusal
 names the teams that define the role and asks for a `pid`/`session`.
+
+Before a manager hands off work, verify the owner's actual job/session state:
+a queued delivery receipt is not a running worker. Resume a COMPLETED owner's
+existing history explicitly; do not spawn a duplicate actor or wait on an unknown job.
 
 Don't send a message that is only an acknowledgement or a status with no ask;
 say 'reply needed' if you need one — the receiver may stay silent (`no_reply`).

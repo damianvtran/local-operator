@@ -353,3 +353,17 @@ class Task012:
     config = [{"type": "launch", "app": "files"}]
     evaluator = {"func": os.environ["HOME"]}
 """
+
+# The ask fixture: a task with a user simulator, so the adapter's ask exchange
+# has an owner. The FakeProvider answers ``simulated user answer`` when the
+# workspace's provider config sets ``has_user_simulator``; without the dict on
+# the task, the adapter refuses the exchange (no simulator owns generation).
+SIMULATOR = """
+class Task018:
+    id = "task_simulator"
+    instruction = "Ask the user which file to edit, then finish."
+    config = [{"type": "launch", "app": "gedit"}]
+    evaluator = {"func": "check_include", "result": {"type": "vm_file", "path": "/tmp/x"}}
+    related_apps = ["gedit"]
+    user_simulator = {"instruction": "You are the helpful synthetic user."}
+"""

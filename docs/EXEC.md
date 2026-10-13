@@ -16,6 +16,24 @@ lop exec --status JOB_ID
 lop --resume SESSION_ID
 ```
 
+## Localized help and startup copy — bounded coverage
+
+At source `641a392040bf4056361228cfc3d3ad978fced3e8`,
+[#2310](https://github.com/damianvtran/local-operator/pull/2310)
+(merge `84584151d45757e084349f99f2414e487f186eaa`) extracts exactly **20**
+`cli.exec_help` keys into [English source](../local_operator/i18n/catalogues/en/cli.exec_help.json),
+with a context sidecar and generated per-key Python functions. This is the bounded
+exec/help/startup-copy surface, **not translation of all CLI commands or help**.
+
+Argument-parser construction resolves help language lazily through the read-only
+config reader: config → `LOP_LANG` → OS → `en`, then shipped eligibility. Missing
+namespace/key copy falls back to English source and formatting; unavailable or
+undecodable config uses the default `auto` chain, not a config repair. For example,
+`LOP_LANG=fr lop exec --help` may still show English where that namespace is absent.
+Commands, flags, machine JSON keys, codes and event tokens keep their contracts;
+localized prose must not be parsed as a machine identifier. See [the i18n HOWTO](I18N.md)
+for source versus installed-version coverage, partial locales and release gates.
+
 ## Startup options and precedence
 
 | Option | Contract |

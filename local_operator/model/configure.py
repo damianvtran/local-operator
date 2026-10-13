@@ -59,6 +59,7 @@ from local_operator.model.registry import (
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
+    meta_muse_family_model_info,
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
@@ -125,6 +126,10 @@ UNKNOWN_MAX_OUTPUT = 8_192
 #: 160k compaction threshold on a model with 1M of room.
 _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
     "anthropic": anthropic_family_model_info,
+    # Muse ids reach here when discovery surfaces a tier this build's
+    # registry has not been taught (a new Spark point release, Wonder
+    # Full). Limits are inherited, prices are not — see the resolver.
+    "meta-muse": meta_muse_family_model_info,
 }
 
 #: Per-provider fallback templates for an id neither the registry nor a family
@@ -1930,7 +1935,11 @@ def _oauth_listing_token(
 
         storage = credential_provider_id(provider)
         store = (
-            shared_auth_store(config_dir=base) if provider == "meta-muse" else shared_auth_store()
+            shared_auth_store(
+                db_path=base / "auth.db" if base is not None else None, config_dir=base
+            )
+            if provider == "meta-muse"
+            else shared_auth_store()
         )
         rows = store.list_credentials(provider=storage)
         for row in reversed(rows):
@@ -2094,7 +2103,17 @@ def info_from_discovered_model(
         info.supports_tools = row.supports_tools
     if row.reasoning is not None:
         info.reasoning = row.reasoning
-    if provider == "deepseek" and row.reasoning_default_effort is not None:
+    if provider == "meta-muse":
+        # The ladder does NOT ride ModelInfo: a non-scalar field would make the
+        # paint path's shallow copy share state with its memo, and the
+        # second-hand price leg could then leak an aggregator's route answer
+        # onto a direct provider's model (pinned by
+        # ``tests/unit/model/test_registry.py`` and ``test_catalogue.py``).
+        # The listing read above has already warmed ``_listing_effort`` through
+        # :func:`_remember_listing_effort`, which is the channel
+        # ``build_model_spec`` and ``context_spec_for_access`` read.
+        info.reasoning_default_effort = row.reasoning_default_effort
+    elif provider == "deepseek" and row.reasoning_default_effort is not None:
         info.reasoning_default_effort = row.reasoning_default_effort
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
     # Presence survives the listing cache: zero-price/false flags and valid
@@ -2566,14 +2585,28 @@ def resolve_model_info(
         # cloud memo's provider/id pair. Paint from the endpoint-scoped cache.
         return local_model_info(provider, model_id)
     bucket = int(time.time() // DEFAULT_TTL_S)
-    if provider == "openai":
+    if provider in ("openai", "meta-muse"):
         from local_operator.model.discovery import _cache_key
 
         credential = (
             credential if credential is not None else _catalogue_credential(provider, base=base)
         )
-        scope = _cache_key("openai", account_scoped=credential[1], account_id=credential[2])
-        if credential[1] and not credential[2]:
+        # Meta metadata belongs to the selected subscription account, never
+        # the ambient account or Codex's scope/header convention.
+        account_id = credential[2]
+        if provider == "meta-muse" and not account_id and credential[0]:
+            import hashlib
+
+            account_id = "credential:" + hashlib.sha256(credential[0].encode()).hexdigest()
+        scope = _cache_key(provider, account_scoped=credential[1], account_id=account_id)
+        if provider == "meta-muse":
+            from local_operator.model.catalogue import _cache_path, _document_stamp
+
+            # Existing file identity changes on a refreshed account document.
+            # A daily memo bucket must not hide newly returned limits/efforts;
+            # this needs neither a global epoch nor paint-triggered network IO.
+            scope = f"{scope}:{_document_stamp(_cache_path(scope, None))}"
+        if provider == "openai" and credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
@@ -3069,14 +3102,16 @@ def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
 
 
 def context_spec_for_access(
-    spec: ModelSpec, access: Any, settings: Mapping[str, Any] | None
+    spec: ModelSpec, access: Any, settings: Mapping[str, Any] | None, *, base: Path | None = None
 ) -> ModelSpec:
     """Resolve limits for the credential actually selected by the dispatch path.
 
     No wire override exists: Codex's maximum is a local budgeting ceiling.
     Sampling, effort and public API routing stay on the caller's original spec.
     """
-    if spec.provider != "openai":
+    if spec.provider not in ("openai", "meta-muse"):
+        return spec
+    if access is None and spec.provider == "meta-muse":
         return spec
     if access is None:
         return spec.model_copy(
@@ -3092,15 +3127,53 @@ def context_spec_for_access(
     # the public limit rather than retaining that conservative unknown budget.
     # Codex dispatch's account header is org_id; older records may retain only
     # account_id, so use it only when the wire identity is absent.
-    credential = (access.access_token, access.kind == "oauth", access.org_id or access.account_id)
-    info = resolve_model_info(spec.provider, spec.model_id, credential=credential)
+    account = access.org_id or access.account_id
+    if spec.provider == "meta-muse":
+        account = account or access.email
+    credential = (access.access_token, access.kind == "oauth", account)
+    info = resolve_model_info(spec.provider, spec.model_id, credential=credential, base=base)
     window = (
         info.context_window
         if info.context_window and info.context_window > 0
         else UNKNOWN_CONTEXT_WINDOW
     )
-    if not _openai_use_max_context_window(settings) and info.default_context_window:
+    if (
+        spec.provider == "openai"
+        and not _openai_use_max_context_window(settings)
+        and info.default_context_window
+    ):
         window = info.default_context_window
+    if spec.provider == "meta-muse":
+        # Selected-account native limits/capabilities are authoritative. Do not
+        # apply Codex's optional max-budget setting or emit its identity headers.
+        update: dict[str, Any] = {
+            "context_window": window,
+            "context_metadata_resolved": True,
+            "max_output_tokens": info.max_tokens,
+        }
+        # The ladder comes from the LISTING MEMO, never from ModelInfo: a
+        # non-scalar field would break the paint path's shallow-copy isolation
+        # and could leak a second-hand route's answer onto a direct model (the
+        # guards in tests/unit/model/test_registry.py and test_catalogue.py).
+        # The resolve above has just read the same document, so the memo is
+        # warm wherever the document was.
+        ladder = _listing_effort(spec.provider, spec.model_id)
+        if ladder is not None:
+            update.update(
+                {
+                    "reasoning_efforts": list(ladder),
+                    "reasoning_default_effort": info.reasoning_default_effort,
+                }
+            )
+        # Silence from an unavailable catalogue must preserve the caller's
+        # existing ladder; an explicit empty native ladder means no effort.
+        if ladder is not None and spec.reasoning_effort not in ladder:
+            update["reasoning_effort"] = info.reasoning_default_effort
+        for field in ("supports_tools", "supports_images", "supports_audio_input", "reasoning"):
+            value = getattr(info, field, None)
+            if value is not None:
+                update[field] = value
+        return spec.model_copy(update=update)
     return spec.model_copy(
         update={
             "context_window": window,
@@ -4847,7 +4920,7 @@ class SessionStreamFn:
 
     async def resolve_context_model(self, model: ModelSpec) -> ModelSpec:
         """Budget against the same selected credential as dispatch, before compaction."""
-        if model.provider != "openai":
+        if model.provider not in ("openai", "meta-muse"):
             return model
         import asyncio
 
@@ -4866,7 +4939,13 @@ class SessionStreamFn:
             model_id=model.model_id,
             scoped_blocks=True,
         )
-        return await asyncio.to_thread(context_spec_for_access, model, access, self._settings)
+        return await asyncio.to_thread(
+            context_spec_for_access,
+            model,
+            access,
+            self._settings,
+            base=getattr(self._auth_store, "_config_dir", None),
+        )
 
     async def preflight_usage(self, model: ModelSpec, *, consume_boundary: bool = True) -> None:
         """Check reliable OAuth quota once per user-message boundary.

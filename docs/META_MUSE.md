@@ -49,6 +49,35 @@ fixtures exercise safety boundaries but are not live billing/entitlement proof;
 a live meter and a human dashboard attribution check are distinct sources and
 must be reported as such.
 
+## Catalogue freshness and existing conversations
+
+A user-opened live model picker refreshes Muse's authenticated listing even
+when its successful cache is young. Existing fetch leases, failure backoff and
+stale-cache fallback still apply; this is fresh-on-open, not a push feed or a
+quota/inference poll. Network-free first paint uses only a metadata-identified
+account document (or the controller's last actual selected listing scope), not
+an arbitrary sweep of other accounts. Native names, family/release date,
+modalities, output limits, capability denials and effort variants survive the
+cache and additive desktop/canonical detail rows. Missing facts remain unknown.
+Selected-account metadata scopes session limits and effort; Codex's optional
+maximum-budget setting and account headers do not apply to Muse.
+
+An installed update does not change code already loaded by a running
+conversation. A healthy newly sealed Muse sign-in cannot be read by an older
+owner that never implemented that provider. New owners advertise native
+provider support; a stale legacy owner without positive support evidence
+refuses a new builtin choice **before changing the conversation**, with
+`runtime_upgrade_needed` rather than a missing-sign-in diagnosis. This does not
+restrict new model IDs under an affirmed provider or custom compatible hosts.
+Use a new conversation, or let the existing runtime reach its normal idle
+update boundary and resume the same conversation. Busy work is never forcibly
+restarted; no plaintext credential migration or new sign-in is the repair.
+The composer access notice follows the effective serving route while preserving
+the selected primary, and a saved but unavailable sign-in is distinguished
+from one that is absent. Device approval displays the complete backend privacy,
+unsupported-integration and billing disclosure as inert text; copying the code
+remains the explicit browser-opening gesture.
+
 ## Safety boundaries
 
 - This provider has **no `META_API_KEY`/`MODEL_API_KEY` environment leg**, no

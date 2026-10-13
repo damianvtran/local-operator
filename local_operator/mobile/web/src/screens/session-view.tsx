@@ -48,6 +48,7 @@ import { AgentScreen } from "./agent-view";
 import {
 	applySessionPin,
 	clearSessionPinMark,
+	messageRuntime,
 	retainProjectionStream,
 	retainSessionListStream,
 	usePinMarks,
@@ -819,7 +820,9 @@ export function SessionScreen({
 				    the wait is a wait — it leaves with the first row. */}
 				<div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3">
 					<p className="text-body-sm text-ink-dim">
-						{connected ? "waiting for projection…" : "connecting to session…"}
+						{connected
+							? messageRuntime.t("relay.shell.session.waiting")
+							: messageRuntime.t("relay.shell.session.connecting")}
 					</p>
 				</div>
 				<ComposerFrame />

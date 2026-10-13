@@ -212,6 +212,30 @@ operator's real store, and the SDK makes that unrepresentable by accident:
 Prove inheritance the way the apparatus does: print the resolved store path
 (`local_operator.paths.config_dir()`), not the config that should produce it.
 
+## Localized startup refusals — source-revision capability
+
+At source `641a392040bf4056361228cfc3d3ad978fced3e8`,
+[#2317](https://github.com/damianvtran/local-operator/pull/2317)
+(merge `7c29e7c3f2c0507f21bb3ca566cf6901b110c113`) extracts exactly **four**
+[English `wire.errors.sdk_startup` keys](../local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json):
+`attach_hosting_unconfigured`, `attach_runtime_missing`, `profile_attach_failed`
+and `tool_inventory_mismatch`, with context and generated Python functions.
+This does not translate every SDK validation/refusal or add a typed exception API.
+
+Only these refusal paths lazily resolve language, **after public root isolation**:
+they reuse the manager scoped to the explicit `SessionRoots`, then follow
+config → `LOP_LANG` → OS → `en` and shipped eligibility. Missing namespace/key
+copy uses English source and formatting. Internal `Msg` values are rendering
+inputs; callers still receive a plain, **one-argument `SessionSpecError`** and
+read its human-readable text with `str(error)`. No public `{code, params, text}`
+exception envelope, new exception fields or locale parameter is introduced.
+
+This describes that source revision, not a promise about an older installed SDK.
+The measured 2026-10-13 UTC installed 0.70.10 snapshot predates this slice; verify
+installation contains it before relying on localized SDK refusals. No provider
+request is needed to inspect version/source identity. See [the i18n HOWTO](I18N.md)
+for the distinct source, tag, publication and installation observations.
+
 ## Scope of this first release, stated plainly
 
 Published **additive-stable** (in-repo; no PyPI split, no semver promise).

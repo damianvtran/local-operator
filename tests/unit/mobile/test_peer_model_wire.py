@@ -435,8 +435,10 @@ def test_the_json_payload_is_one_field_wider() -> None:
     as the second deliberate field, and PR-B (``sessions-remote-tools.md``
     §3B) adds ``peer`` as the third — the mesh delivery path: a send to a
     session on another device drives a turn there and returns the owner's
-    reply. All are pinned EXACTLY, so a further field cannot arrive without
-    this line moving and a reviewer seeing why.
+    reply. ``repeat`` is the fourth intentional addition: only an explicit
+    user-requested force send bypasses confirmed same-turn receipt reuse.
+    All are pinned EXACTLY, so a further field cannot arrive without this
+    line moving and a reviewer seeing why.
     """
     from local_operator.tools.builtin import SendParams
 
@@ -451,4 +453,10 @@ def test_the_json_payload_is_one_field_wider() -> None:
         "now",
         "patience",
         "peer",
+        "repeat",
     }
+    repeat = SendParams.model_json_schema()["properties"]["repeat"]
+    assert repeat["type"] == "boolean"
+    assert repeat["default"] is False
+    assert "confirmed same-turn" in repeat["description"]
+    assert "only on explicit user request" in repeat["description"]

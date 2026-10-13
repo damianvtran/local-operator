@@ -1300,6 +1300,16 @@ class ToolContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     cwd: str = "."
+    #: Explicit host-owned attention-turn identity. No value means the host has
+    #: not opted into confirmed send reuse; never infer a turn from a call id
+    #: or the session's lifetime. Hosts create a fresh context/scope per turn.
+    send_turn_id: str | None = Field(default=None, frozen=True)
+    #: Only confirmed local deliveries live here, never in process-global or
+    #: persistent storage. Off wire and isolated from another attention turn.
+    #: Key: turn, sender SID, resolved target SID, exact body, mode, wake, patience.
+    confirmed_send_receipts: dict[tuple[str, str, str, str, str, bool, int | None], ToolResult] = (
+        Field(default_factory=dict, exclude=True, repr=False)
+    )
     #: This session's own ``scratchpad://`` root (``<session dir>/scratchpad``),
     #: absolute, or ``None`` on a host with no session directory. The scratchpad
     #: is scratch the AGENT owns: ``read``/``write``/``edit`` take
