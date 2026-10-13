@@ -321,6 +321,15 @@ SESSION_SEND_NOTICE_MESSAGE_TYPE = "session_send_notice"
 #: graph, and the shared renderer must reach it without session code at all.
 PEER_MESSAGE_MESSAGE_TYPE = "peer_message"
 
+#: ``CustomMessage.custom_type`` of a TEAM BRIDGE wake (H4): the designated
+#: chief-of-staff session receives ONE inbound wake per screened inbox
+#: delivery, carrying the §11.4 bounded payload (envelope + excerpt + message
+#: id + ``body_sha256``). A DEDICATED type rather than a ``peer_message`` per
+#: contract §13.4 ("it must not overload the wake/peer types"): surfaces can
+#: render bridge provenance honestly and the LLM-visible family stays a
+#: deliberate list (see ``session.py``'s ``PEER_FAMILY_INPUT_TYPES``).
+TEAM_BRIDGE_MESSAGE_TYPE = "team_bridge_message"
+
 #: ``CustomMessage.custom_type`` of a hub message in either direction. The
 #: shared renderer renders it as a user message carrying ``details["text"]``
 #: (see ``_default_convert_to_llm``); persisted like any other message entry, so
