@@ -1388,7 +1388,7 @@ export function SessionListScreen() {
 					<input
 						value={query}
 						onChange={(event) => setQuery(event.target.value)}
-						placeholder="Search conversations…"
+						placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
 					{/* THE ONE-GESTURE CLEAR, in a STICKY band. The marks it acts on live
@@ -1553,7 +1553,7 @@ export function SessionListScreen() {
 									: messageRuntime.t("relay.shell.list.connecting")}
 							</p>
 							<p className="text-body-sm text-ink-dim">
-								start one below, or from the TUI on your machine
+								{messageRuntime.t("relay.session.list.empty_hint")}
 							</p>
 						</div>
 					) : (
@@ -1588,7 +1588,7 @@ export function SessionListScreen() {
 							    one where the screen would otherwise be a wordless void. */}
 							{pinned.length + active.length + previous.length === 0 ? (
 								<p className="px-2 py-4 text-center text-body-sm text-ink-dim">
-									no matching conversations
+									{messageRuntime.t("relay.session.list.no_matches")}
 								</p>
 							) : null}
 						</div>
@@ -1612,7 +1612,9 @@ export function SessionListScreen() {
 					aria-busy={starting}
 					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated disabled:text-ink-disabled"
 				>
-					{starting ? "starting…" : "new session"}
+					{starting
+						? messageRuntime.t("relay.session.list.start_busy")
+						: messageRuntime.t("relay.session.list.start_idle")}
 				</button>
 				{/* U10 (mobile UX batch): the entry point the file's own contract
 				    describes. `#/past` — searchable, resumable history — was reachable

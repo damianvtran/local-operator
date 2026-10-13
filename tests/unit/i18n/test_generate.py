@@ -94,19 +94,51 @@ def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
 def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
     """Drift/ownership pin against the COMMITTED tree (not a fixture).
 
-    The bundle that ships must be the explicit owned namespace, whole, and
+    The bundle that ships must be the explicit owned namespaces, whole, and
     nothing else — the client-side half of "no implicit wire prose bundled".
+    C2 adds ``relay.session`` beside ``relay.shell``; both are the SPA's own
+    copy and both must be present and complete.
     """
     bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
         encoding="utf-8"
     )
-    en = json.loads((REPO / "local_operator/i18n/catalogues/en/relay.shell.json").read_text())
-    namespace = "relay.shell"
-    assert '"relay.shell": {' in bundle
-    for key, message in en.items():
-        assert key.startswith(f"{namespace}.")
-        assert json.dumps(message) in bundle, key
+    for namespace in ("relay.shell", "relay.session"):
+        en = json.loads(
+            (REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text()
+        )
+        assert f'"{namespace}": {{' in bundle
+        for key, message in en.items():
+            assert key.startswith(f"{namespace}.")
+            assert json.dumps(message) in bundle, key
     assert "wire." not in bundle and "relay.login" not in bundle
+
+
+def test_committed_relay_session_namespace_is_whole_and_generated() -> None:
+    """The relay.session key module, TS key map and en catalogue agree exactly.
+
+    Drift/ownership pin against the COMMITTED tree: every authored key must be
+    reachable as a generated Python ``Msg`` function and a typed TS key, and no
+    generated artifact may carry a key the catalogue does not (a hand edit that
+    desynced one of the three would otherwise ship a dead key or a missing one).
+    """
+    namespace = "relay.session"
+    en = json.loads(
+        (REPO / f"local_operator/i18n/catalogues/en/{namespace}.json").read_text()
+    )
+    module = (REPO / "local_operator/i18n/keys/relay_session.py").read_text(encoding="utf-8")
+    ts = (REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts").read_text(encoding="utf-8")
+    for key in en:
+        assert key.startswith(f"{namespace}.")
+        assert f'Msg("{key}",' in module, key
+        assert f'"{key}":' in ts, key
+    # The Python module owns ONLY this namespace's keys.
+    import re as _re
+
+    for match in _re.finditer(r'Msg\("([^"]+)"', module):
+        assert match.group(1).startswith(f"{namespace}."), match.group(1)
+    # relay.session is registered in the generated package __init__.
+    init = (REPO / "local_operator/i18n/keys/__init__.py").read_text(encoding="utf-8")
+    assert "relay_session" in init
 
 
 def test_ts_plan_only_owns_wire_and_relay_types(generated, i18n_generate) -> None:
