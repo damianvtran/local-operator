@@ -43,6 +43,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import string
 import tempfile
@@ -299,6 +300,7 @@ from local_operator.session.spend import (
 )
 from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
+from local_operator.session.tool_readiness import ToolReadiness, ToolReadinessStatus
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -10993,6 +10995,81 @@ class Session:
         diagnosed as a harness fault rather than as the declaration it is.
         """
         return tuple(tool.name for tool in self._tools)
+
+    async def wait_for_tools(
+        self, required: Sequence[str], *, timeout_s: float = 30.0
+    ) -> ToolReadiness:
+        """Wait, bounded, until named tools are reachable; report honestly.
+
+        See :mod:`local_operator.session.tool_readiness` for the WHY and the
+        full contract. The short form: the SDK's own gate for callers that
+        must not race MCP's asynchronous discovery. Reads the LIVE enforced
+        inventory first (an already-reachable name -- built-in or connected --
+        returns ready WITHOUT waiting on unrelated servers), then, only when
+        something is still missing, awaits the owning session's existing
+        discovery settle ONCE, bounded. A timeout leaves discovery running
+        (``pending`` here, not a cancellation); a settled-but-absent name, a
+        typo, or a manager-less session reads ``missing``; a manager failure
+        never reads ready. Cancellation of the CALLER propagates and does not
+        disturb the discovery it was waiting on.
+        """
+
+        # Names are validated BEFORE any wait: a malformed request must not
+        # consume the bound (or pay a settle) before refusing. Dedup keeps the
+        # caller's order so `required`/`present`/`missing` partition exactly.
+        if isinstance(required, str) or not isinstance(required, Sequence):
+            raise ValueError("wait_for_tools requires a sequence of tool names, not a bare string")
+        names: list[str] = []
+        for name in required:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("every required tool name must be a non-empty string")
+            if name not in names:
+                names.append(name)
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("timeout_s must be a finite number >= 0")
+        required_names = tuple(names)
+
+        inventory = self.tool_inventory
+        present = tuple(name for name in required_names if name in inventory)
+        if len(present) == len(required_names):
+            return ToolReadiness(
+                status="ready",
+                required=required_names,
+                present=present,
+                missing=(),
+                discovery_settled=None,
+            )
+
+        manager = self.mcp_manager
+        settled: bool | None = None
+        if manager is not None:
+            try:
+                settled = await manager.wait_settled(timeout_s)
+            except Exception:  # noqa: BLE001 - a reduced manager must not read ready;
+                # CancelledError (BaseException) still propagates to the caller.
+                settled = None
+
+        inventory = self.tool_inventory
+        present = tuple(name for name in required_names if name in inventory)
+        missing = tuple(name for name in required_names if name not in inventory)
+        if not missing:
+            status: ToolReadinessStatus = "ready"
+        elif manager is None or settled is True:
+            # Nothing is going to add the name: settled discovery without it,
+            # or no discovery machinery at all. A typo or an excluded name
+            # lands here and never widens the inventory.
+            status = "missing"
+        else:
+            # Still in flight (timed out, or the manager failed mid-wait):
+            # honest pending, and a later fresh call may still read ready.
+            status = "pending"
+        return ToolReadiness(
+            status=status,
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=settled,
+        )
 
     @property
     def attached_profile_tools(self) -> tuple[str, ...]:
