@@ -79,11 +79,22 @@ from local_operator.session.placement import (
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
+    PEER_JOURNAL_SOURCE_CAPABILITY,
+    PEER_JOURNAL_SOURCE_FLAG,
     SessionRecord,
 )
 from local_operator.supplements.contract import SUPPLEMENTS_CAPABILITY
 
 logger = logging.getLogger(__name__)
+
+#: THIS BUILD'S SIDE OF THE COMPLETE-CONTRACT GATE: the receiver vocabulary —
+#: the desktop DTOs and the strict omission every marshal path owes an old
+#: viewer — carries the peer-source field family (docs/DESKTOP_API.md "Complete
+#: peer-source contract"). A constant rather than a runtime probe because "does
+#: this build know the family" is a BUILD question: a build without the reader
+#: does not ship this declaration either. The dynamic half remains the OWNER's
+#: advertised capability string, checked per dial below.
+PEER_SOURCE_RECEIVER_SUPPORTED = True
 
 # ---------------------------------------------------------------------------
 # The local op vocabulary this module drives (declared in network/types.py)
@@ -1247,11 +1258,22 @@ class RemoteSessionClient(AttachClient):
         auth: dict[str, Any] = {}
         if self._events:
             auth["events"] = True
-            # Match the local attach's capability AND viewer declaration. This
-            # is carriage, not authority: only the authenticated owner can emit
-            # coordinates, and legacy owners/viewers see no added auth key.
-            if JOURNAL_ORDER_CAPABILITY in capabilities:
+            # THE COMPLETE CONTRACT GATES THE WHOLE PEER ORDER DECLARATION, and
+            # that is a correction rather than a widening: this dial used to
+            # declare ``journal_order`` against any runtime advertising
+            # ``journal-order-v1``, which asks a peer runtime for the LOCAL
+            # order vocabulary without the complete peer contract behind it —
+            # a partial request whose facts a peer viewer has no negotiated
+            # path to settle. Both keys ride together, and only when the OWNER
+            # advertises BOTH strings; otherwise NEITHER is declared and the
+            # attach carries no new peer order request at all.
+            if (
+                PEER_SOURCE_RECEIVER_SUPPORTED
+                and JOURNAL_ORDER_CAPABILITY in capabilities
+                and PEER_JOURNAL_SOURCE_CAPABILITY in capabilities
+            ):
                 auth["journal_order"] = True
+                auth[PEER_JOURNAL_SOURCE_FLAG] = True
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in capabilities:
@@ -1348,6 +1370,7 @@ def peer_stored_history_page(
     open_frame: bool = False,
     journal_order: bool = False,
     order_ids: list[str] | None = None,
+    peer_journal_source: bool = False,
 ) -> dict[str, Any] | None:
     """One page of a PEER's stored journal, or ``None`` when it cannot be served.
 
@@ -1397,6 +1420,9 @@ def peer_stored_history_page(
         # did not ask sends today's frame, byte-for-byte.
         **({"open_frame": True} if open_frame else {}),
         **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+        # THE COMPLETE DECLARATION RIDES ONLY WHEN ASKED FOR: absent, this
+        # relay forwards today's bytes to the owner exactly as it always has.
+        **({PEER_JOURNAL_SOURCE_FLAG: True} if peer_journal_source else {}),
     )
     if not reply or reply.get("refused"):
         return None
@@ -1419,21 +1445,120 @@ def peer_stored_history_page(
         if key in reply:
             page[key] = reply[key]
     if journal_order:
-        # Only a ready owner page activates ordering. Until peer readiness wakes
-        # land, building/unverifiable/old-owner replies remain legacy unsupported
-        # rather than strand the renderer in journalMode with no correction.
-        if reply.get("journal_order_state") == "ready" and reply.get("journal_generation"):
+        # TWO NEGOTIATIONS, EACH WITH ITS OWN WHOLE ANSWER.
+        #
+        # COMPLETE (the request declared ``peer_journal_source``): the owner's
+        # own state rides through — ``ready`` / ``building`` / ``unavailable``
+        # — but ONLY behind the per-response ACK. A reply without
+        # ``peer_journal_source: true`` is not a complete result: an owner
+        # relay that did not negotiate the contract answers its familiar page,
+        # and surfacing that as source facts would be exactly the manufacture
+        # this contract forbids. Under the complete gate a ``building`` answer
+        # is settleable (the availability lane is the wake), so it is carried
+        # honestly rather than degraded.
+        #
+        # LEGACY (no declaration): ``unsupported``, byte-identically to before
+        # this change. The installed UI sends ``journal_order`` without the new
+        # declaration, and its peer pages must not activate ordering that has
+        # no negotiated wake behind it.
+        if peer_journal_source and reply.get(PEER_JOURNAL_SOURCE_FLAG) is True:
             for key in (
                 "journal_order_state",
                 "journal_generation",
                 "journal_ordinals",
                 "journal_missing_ids",
+                "reconcile",
+                PEER_JOURNAL_SOURCE_FLAG,
             ):
                 if key in reply:
                     page[key] = reply[key]
+            page.setdefault("journal_order_state", "unsupported")
         else:
             page["journal_order_state"] = "unsupported"
     return page
+
+
+def peer_source_read(
+    root: Path | None,
+    *,
+    device_id: str,
+    session_id: str,
+    purpose: str,
+    order_ids: list[str] | None = None,
+    expected_generation: str | None = None,
+) -> dict[str, Any] | None:
+    """One typed source purpose (``metadata``/``payload``) on the stored hop.
+
+    THE COMPLETE DECLARATION IS SENT AND THE OWNER'S ACK IS REQUIRED. A reply
+    without ``peer_journal_source: true`` is not a complete result — an older
+    owner relay answers its familiar page, and a capable owner's relay degrades
+    honestly to ``unsupported`` — so this returns ``None`` for it and the
+    caller states ``unsupported`` rather than surfacing a page as source
+    facts. The owner's own answer is already page-shaped (the frozen four-key
+    envelope plus source facts), so a successful reply is passed through whole.
+
+    ``availability`` never rides this door; the bridge's coalesced wait is
+    :func:`peer_source_availability`.
+
+    BLOCKING — dials this device's relay control socket. Callers on a loop hand
+    it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # The SAME read-sized bound every stored read pays: the owner's
+        # purposes answer off its resident index or its deferred lane, never a
+        # spawn, and a client that gave up first would report no answer about
+        # a relay still working.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        source_read=purpose,
+        **{PEER_JOURNAL_SOURCE_FLAG: True},
+        **({"order_ids": order_ids} if order_ids else {}),
+        **({"expected_journal_generation": expected_generation} if expected_generation else {}),
+    )
+    if not reply or reply.get("refused"):
+        return None
+    if reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
+        return None
+    return reply
+
+
+def peer_source_availability(root: Path | None, *, device_id: str, session_id: str) -> str:
+    """One bounded availability wait through the owner's deferred lane.
+
+    Returns one of the contract's three signals — ``ready`` / ``unavailable``
+    / ``unsupported`` — and NEVER a generation or a row: availability is a
+    wake decision, and the authoritative read is what mints a domain. A missing
+    relay, a refusal or an expired hop reads as ``unavailable``: the caller's
+    next meaningful wake asks again, which is the bound the lane documents.
+
+    BLOCKING — dials this device's relay control socket. Callers on a loop hand
+    it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # OUTLASTS THE OWNER'S OWN WAIT (``SOURCE_AVAILABILITY_WAIT_S``) BY THE
+        # SAME CLIENT MARGIN EVERY READ PAYS: the owner answers at its bound,
+        # and a client that gave up first would report no answer about a relay
+        # that answered.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        source_read="availability",
+        **{PEER_JOURNAL_SOURCE_FLAG: True},
+    )
+    if not reply or reply.get("refused"):
+        return "unavailable"
+    if reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
+        return "unsupported"
+    return "ready" if reply.get("source_available") is True else "unavailable"
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:
