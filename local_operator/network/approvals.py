@@ -1727,8 +1727,28 @@ def sweep(*, root: Path | None = None, now: float | None = None) -> dict[str, in
                     record = _load_raw(approval_id, root)
                     if _materialize_expiry(record, moment, root):
                         materialized += 1
-                    if record.get("state") in TERMINAL_STATES and (
-                        moment - _terminal_at(record) >= TERMINAL_PRUNE_AGE_S
+                    # Executed scoped permission is durable authority, not an
+                    # onboarding-window lease. Keep its signed immutable intent
+                    # and execution proof for the owner-local scope reference;
+                    # ordinary terminal requests retain the existing prune rule.
+                    what = record.get("what")
+                    permission_source = (
+                        isinstance(what, dict)
+                        and isinstance(what.get("credential_inheritance"), dict)
+                        and any(
+                            receipt.get("step") == "credential_inheritance"
+                            and receipt.get("ok") is True
+                            and receipt.get("digest") == record.get("request_digest")
+                            and str(receipt.get("detail", "")).startswith(
+                                "EXECUTED: scoped permission prepared"
+                            )
+                            for receipt in record.get("receipts", [])
+                        )
+                    )
+                    if (
+                        not permission_source
+                        and record.get("state") in TERMINAL_STATES
+                        and (moment - _terminal_at(record) >= TERMINAL_PRUNE_AGE_S)
                     ):
                         _append_index_row(
                             {
