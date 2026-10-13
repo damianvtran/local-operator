@@ -112,6 +112,21 @@ def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
+def _pypi_payload(version: str, files: list[dict[str, object]]) -> dict[str, object]:
+    return {"info": {"version": version}, "urls": files, "releases": {version: files}}
+
+
+def _wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "filename": f"local_operator-{version}-py3-none-any.whl",
+        "packagetype": "bdist_wheel",
+        "yanked": False,
+        "url": f"https://files.pythonhosted.org/packages/local_operator-{version}-py3-none-any.whl",
+    }
+    entry.update(overrides)
+    return entry
+
+
 def _pypi_transport(
     status: int = 200, version: str = "0.28.0", delay: float = 0
 ) -> httpx.MockTransport:
@@ -120,9 +135,16 @@ def _pypi_transport(
             raise httpx.TimeoutException("timed out")
         if status != 200:
             return httpx.Response(status, text="nope")
-        return httpx.Response(status, json={"info": {"version": version}})
+        # A READY release by default: PyPI's document names a version long
+        # before its files land, so a stub without ``urls`` would model the
+        # race, not the normal case every caller below means to exercise.
+        return httpx.Response(status, json=_pypi_payload(version, [_wheel(version)]))
 
     return httpx.MockTransport(handler)
+
+
+def _transport_for(payload: dict[str, object]) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
 
 
 def _client(transport: httpx.MockTransport) -> httpx.Client:
@@ -180,6 +202,46 @@ def test_check_latest_newer_same_older(tmp_path: Path) -> None:
         assert older.latest == "0.26.0"
 
 
+def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> None:
+    """The 2026-10-12 race: ``info.version`` moved, its files had not.
+
+    Each payload below is a shape PyPI really serves during/after an
+    upload; only the last may be advertised, because only it names an
+    artifact the installer can download.
+    """
+    not_ready = [
+        _pypi_payload("0.28.0", []),
+        _pypi_payload(
+            "0.28.0",
+            [
+                {
+                    "filename": "local_operator-0.28.0.tar.gz",
+                    "packagetype": "sdist",
+                    "yanked": False,
+                    "url": "https://files.pythonhosted.org/packages/local_operator-0.28.0.tar.gz",
+                }
+            ],
+        ),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", yanked=True)]),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", url="")]),
+        {"info": {"version": "0.28.0"}},
+    ]
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        for payload in not_ready:
+            result = check_latest(
+                force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+            )
+            assert result.latest is None, payload
+            assert result.behind is False, payload
+        ready = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+        )
+        assert ready.latest == "0.28.0"
+        assert ready.behind is True
+
+
 def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
         failed = check_latest(
@@ -207,7 +269,12 @@ def test_corrupt_cache_is_missing(tmp_path: Path) -> None:
 def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time() - TTL_S - 10, "payload": {"version": "0.28.0"}}),
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
         encoding="utf-8",
     )
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
@@ -219,7 +286,9 @@ def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
 def test_fresh_cache_skips_get(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        json.dumps(
+            {"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}
+        ),
         encoding="utf-8",
     )
     hits = {"n": 0}
@@ -232,6 +301,31 @@ def test_fresh_cache_skips_get(tmp_path: Path) -> None:
         result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
     assert hits["n"] == 0
     assert result.latest == "0.28.0"
+
+
+def test_unready_cache_entry_does_not_skip_get(tmp_path: Path) -> None:
+    """A pre-gate cache entry names a version but proves no readiness.
+
+    Without this, an install that cached a just-published version minutes
+    before upgrading would keep advertising it for the rest of the TTL
+    even though its files may still not exist.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(200, json=_pypi_payload("0.28.0", []))
+
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
+    assert hits["n"] == 1
+    assert result.latest is None
+    assert result.behind is False
 
 
 def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
@@ -247,6 +341,9 @@ def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
     assert result.latest == "0.28.0"
     written = json.loads(cache.read_text(encoding="utf-8"))
     assert written["payload"]["version"] == "0.28.0"
+    # The readiness the fetch proved, so a later cached read may advertise
+    # without re-asking PyPI (see test_unready_cache_entry_does_not_skip_get).
+    assert written["payload"]["ready"] is True
 
 
 class _MetadataDist:
