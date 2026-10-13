@@ -108,6 +108,7 @@ from local_operator.incidents import (
 from local_operator.mcp.manager import McpManager
 from local_operator.session.session import Session
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from local_operator.session.tool_readiness import ToolReadiness
 from local_operator.session.transcript import Transcript
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
@@ -1444,12 +1445,33 @@ class TestActionToolGate:
             EpisodeSession,
             _await_action_tool,
         )
+        from local_operator.session.tool_readiness import ToolReadiness
 
         class _Session:
             def __init__(self) -> None:
                 self._tools: list[Any] = [SimpleNamespace(name="bash")]
                 self.mcp_startup = None
                 self.mcp_manager = None
+                self.readiness_calls = 0
+
+            async def wait_for_tools(
+                self, required: Any, *, timeout_s: float = 30.0
+            ) -> ToolReadiness:
+                # Faithful mirror of the canonical contract for this double:
+                # no manager, so already-present names read ready and the rest
+                # read missing.
+                self.readiness_calls += 1
+                names = {tool.name for tool in self._tools}
+                required_names = tuple(required)
+                present = tuple(n for n in required_names if n in names)
+                missing = tuple(n for n in required_names if n not in names)
+                return ToolReadiness(
+                    status="ready" if not missing else "missing",
+                    required=required_names,
+                    present=present,
+                    missing=missing,
+                    discovery_settled=None,
+                )
 
         class _Declaration:
             tool_name = "mcp__episode_actions_apply_actions"
@@ -1459,11 +1481,50 @@ class TestActionToolGate:
         record = cast(Any, SimpleNamespace(write=lambda *a, **k: None))
         declaration = cast(Any, _Declaration())
         assert await _await_action_tool(handle, declaration, record) is False
+        # The arm routes through the typed readiness call, not a private
+        # manager/inventory composition of its own.
+        assert session.readiness_calls == 1
 
         # The tool arriving in the LIVE inventory -- the same list the first
         # request publishes from -- flips the gate without a reopen.
         session._tools.append(SimpleNamespace(name=_Declaration.tool_name))
         assert await _await_action_tool(handle, declaration, record) is True
+        assert session.readiness_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_the_gate_refuses_while_discovery_is_pending(self) -> None:
+        """A manager still connecting reads pending, and pending is a refusal.
+
+        The typed status makes the distinction observable; the arm must not
+        prompt into a session whose action tool may never arrive.
+        """
+        from local_operator.evaluation.session_arm import (
+            EpisodeSession,
+            _await_action_tool,
+        )
+        from local_operator.session.tool_readiness import ToolReadiness
+
+        class _Session:
+            def __init__(self) -> None:
+                self.mcp_startup = None
+
+            async def wait_for_tools(
+                self, required: Any, *, timeout_s: float = 30.0
+            ) -> ToolReadiness:
+                return ToolReadiness(
+                    status="pending",
+                    required=tuple(required),
+                    present=(),
+                    missing=tuple(required),
+                    discovery_settled=False,
+                )
+
+        class _Declaration:
+            tool_name = "mcp__episode_actions_apply_actions"
+
+        handle = EpisodeSession(session=_Session(), roots=_roots_free(), _context=_AsyncContext())
+        record = cast(Any, SimpleNamespace(write=lambda *a, **k: None))
+        assert await _await_action_tool(handle, cast(Any, _Declaration()), record) is False
 
     @pytest.mark.asyncio
     async def test_tool_names_are_live_not_frozen(self) -> None:
@@ -1874,6 +1935,25 @@ class _ScriptedSession:
 
     def set_tool_confinement(self, root: Any) -> None:
         del root
+
+    async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
+        # The arm's first-request gate now calls the typed owning API
+        # (``Session.wait_for_tools``). This double drives no discovery
+        # manager, so it spells the same no-manager semantics: names already
+        # in the live inventory read ready; anything else reads missing.
+        # Nothing here waits, so the bound is unused.
+        del timeout_s
+        names = {tool.name for tool in self._tools}
+        required_names = tuple(required)
+        present = tuple(n for n in required_names if n in names)
+        missing = tuple(n for n in required_names if n not in names)
+        return ToolReadiness(
+            status="ready" if not missing else "missing",
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=None,
+        )
 
     def request_graceful_cancel(self, reason: str = "cancelled") -> None:
         self.cancels.append(reason)

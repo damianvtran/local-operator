@@ -236,6 +236,44 @@ installation contains it before relying on localized SDK refusals. No provider
 request is needed to inspect version/source identity. See [the i18n HOWTO](I18N.md)
 for the distinct source, tag, publication and installation observations.
 
+## Required-tool readiness — wait before you prompt
+
+MCP discovery is asynchronous: servers deferred past the startup gate connect
+on background continuations, so an inventory read right after `open_session`
+can catch a declared tool still arriving — and the first model request
+publishes its tool array once per turn, so a prompt that wins that race is
+answered with "Tool not found". Owning sessions expose a typed, bounded gate
+instead of leaving each caller to hand-roll a manager wait plus an inventory
+read:
+
+```python
+async with sdk.open_session(spec, roots=roots) as session:
+    readiness = await session.wait_for_tools(
+        ["mcp__episode_actions_apply_actions"], timeout_s=30.0
+    )
+    if readiness.status != "ready":
+        raise RuntimeError(
+            f"action tool not reachable: {readiness.missing} ({readiness.status})"
+        )
+```
+
+`status` is `ready` (every name is in the live enforced inventory — already,
+or after one bounded discovery wait), `pending` (still missing while
+discovery is in flight) or `missing` (discovery settled without it, or no
+discovery manager exists). The result also partitions the request into
+`present`/`missing` name tuples and reports whether discovery had settled.
+
+Details that matter: already-reachable names — built-ins included — return
+ready immediately without waiting on unrelated slow servers; a timeout
+reports `pending` and never cancels discovery, so a later fresh call can
+still read ready; failed, misspelled or declaration-excluded names read
+`missing` and never widen the inventory; a manager failure never reads ready;
+caller cancellation propagates and leaves discovery alive. This is
+point-in-time readiness, not a lifetime guarantee against later disconnects.
+Attached viewers cannot wait on another process's discovery, so the API
+lives on `OwningSessionProtocol` only (see
+`local_operator/session/tool_readiness.py`).
+
 ## Scope of this first release, stated plainly
 
 Published **additive-stable** (in-repo; no PyPI split, no semver promise).
