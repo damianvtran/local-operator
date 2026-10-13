@@ -33,7 +33,10 @@ import pytest
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
-from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    PEER_MESSAGE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import (
     AgentToolUpdate,
     Message,
@@ -53,6 +56,7 @@ from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
     PeerMessageBlock,
+    TeamBridgeBlock,
     TranscriptView,
     UserBlock,
 )
@@ -533,3 +537,88 @@ def test_the_hidden_set_is_decided_in_one_place() -> None:
         "local_operator/tui/session_presentation.py",
         "local_operator/tui/widgets/subagent_view.py",
     }, sorted(predicate_users)
+
+
+# ---------------------------------------------------------------------------
+# The inbound TEAM BRIDGE receipt (H4e-render, §13.4's own provenance kind)
+# ---------------------------------------------------------------------------
+
+
+def _bridge_history_row() -> Any:
+    """The persisted shape a ``/resume`` reads back: a custom BRIDGE row."""
+    return SimpleNamespace(
+        role=None,
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        id="bridge-1",
+        text="",
+        tool_calls=None,
+        content=[],
+        details={
+            "body": "org note",
+            "sender": {"account_id": "acc_org", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_row_replays_as_its_own_card(hide_cross_session) -> None:
+    """§13.4: the bridge wake paints as a DISTINCT card, never the peer one.
+
+    ``TeamBridgeBlock`` subclasses ``PeerMessageBlock`` (the receipt mechanics
+    are shared on purpose), so the discriminating assertions are ``type(...)``
+    and the classes: a regression that collapsed the bridge kind back onto the
+    peer card would satisfy ``isinstance`` and fail here.
+    """
+    session = FakeSession()
+    session._history = [_bridge_history_row()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, TeamBridgeBlock) for b in _blocks(app)),
+            what="the bridge card",
+        )
+        cards = [b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]
+        assert len(cards) == 1
+        assert cards[0].text() == "org note"
+        assert "team-bridge-block" in cards[0].classes
+        assert "peer-message-block" not in cards[0].classes
+        # No PLAIN peer card for the bridge row: the kind is preserved, not
+        # overloaded.
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+        # The claim set consumed the row at the END of the boot pass, exactly
+        # like the peer branch's (single-paint is per pass; the live path's
+        # dedup is ``_live_peer_receipts``).
+        assert "bridge-1" in app._resume_mounted_ids
+        # A fresh resume of the same history stays TYPE-STABLE: every replayed
+        # card for that row is the bridge card — a regression to the peer kind
+        # would paint a plain ``PeerMessageBlock`` here.
+        app._project_settled_rows(list(session._history))
+        for _ in range(5):
+            await pilot.pause()
+        assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_bridge_row_mounts_nothing_under_the_gate(hide_cross_session) -> None:
+    """``hide_cross_session`` gating matches the peer branch: consumed, hidden."""
+    hide_cross_session(True)
+    session = FakeSession()
+    session._history = [_bridge_history_row()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _wait_for(
+            pilot, lambda: "bridge-1" in app._resume_mounted_ids, what="the boot replay pass"
+        )
+        assert [b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)] == []
+
+        hide_cross_session(False)
+        app._project_settled_rows(list(session._history))
+        await _wait_for(
+            pilot,
+            lambda: any(isinstance(b, TeamBridgeBlock) for b in _blocks(app)),
+            what="the re-projected bridge card",
+        )
+        assert len([b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]) == 1

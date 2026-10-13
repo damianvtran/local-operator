@@ -4178,7 +4178,10 @@ async def _drain_inbox_into(handle: object) -> int:
     # Imported HERE, like the server import lower in this module: the server
     # imports this file at module scope, so a top-level import would close a
     # cycle (and the drain is the only caller).
-    from local_operator.session.runtime.server import receives_message_id
+    from local_operator.session.runtime.server import (
+        receives_custom_type,
+        receives_message_id,
+    )
 
     receive = cast(Callable[..., Awaitable[str]], probed)
     delivered = 0
@@ -4209,6 +4212,13 @@ async def _drain_inbox_into(handle: object) -> int:
                 # keyword" means.
                 if receives_message_id(handle):
                     fields["message_id"] = getattr(line, "message_id", "") or None
+                # The declared PROVENANCE kind rides the same probe discipline:
+                # only a live spool row carries one, only a handle whose literal
+                # signature takes it receives it, and the serving boundary
+                # re-validates before anything stamps it. Rows an older build
+                # wrote have no key and read as "" — never forwarded.
+                if receives_custom_type(handle):
+                    fields["custom_type"] = getattr(line, "custom_type", "") or None
                 await receive(line.text, **fields)
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")

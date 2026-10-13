@@ -543,12 +543,18 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
     owner = SimpleNamespace(account_id="acc_x")
     calls: dict[str, Any] = {}
 
-    async def fake_outcome(record, *, session_id, text, mode, wake, sender):
-        calls["live"] = {"session_id": session_id, "wake": wake, "text": text}
+    async def fake_outcome(record, *, session_id, text, mode, wake, sender, custom_type=None):
+        calls["live"] = {
+            "session_id": session_id,
+            "wake": wake,
+            "text": text,
+            "custom_type": custom_type,
+        }
         return SimpleNamespace(detail="delivered (live)", state="delivered")
 
     async def fake_engage(session_id, cwd, work, *, config_dir):
         calls["cold"] = {"session_id": session_id, "work": type(work).__name__, "text": work.text}
+        calls["cold_errand"] = work
         return SimpleNamespace(state="started")
 
     monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: True)
@@ -557,6 +563,9 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
         wake_mod.deliver_wake(owner, "payload-1", session_id="sess_cos", config_dir=tmp_path)
     )
     assert out_live == "delivered (live)" and calls["live"]["wake"] is True
+    # H4e-render: the bridge provenance kind rides the REAL call — the receive
+    # side stamps it on the row (§13.4's own card), never a generic peer kind.
+    assert calls["live"]["custom_type"] == "team_bridge_message"
 
     monkeypatch.setattr(peer_mod, "session_has_durable_history", lambda sid: False)
     monkeypatch.setattr(launch_mod, "engage_runtime", fake_engage)
@@ -569,3 +578,4 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
         "work": "PeerMessageErrand",
         "text": "payload-2",
     }
+    assert calls["cold_errand"].custom_type == "team_bridge_message"

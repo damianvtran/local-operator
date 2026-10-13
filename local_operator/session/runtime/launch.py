@@ -175,6 +175,11 @@ class PeerMessageErrand:
     wake: bool = False
     sender: dict[str, Any] = field(default_factory=dict)
     command_id: str = ""
+    #: The sender's declared PROVENANCE kind (H4e-render), forwarded to the
+    #: receiver's ``send_peer_message`` on delivery. Empty means "no
+    #: declaration", and the client then omits the key entirely — the frame a
+    #: pre-carriage errand produced, byte for byte.
+    custom_type: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,6 +879,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             wake=work.wake,
             sender=work.sender,
             message_id=work.command_id or None,
+            custom_type=work.custom_type or None,
         )
         return detail, False
 

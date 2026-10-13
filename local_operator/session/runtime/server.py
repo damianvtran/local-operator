@@ -1416,6 +1416,27 @@ def receives_message_id(target: Any) -> bool:
     return "message_id" in parameters
 
 
+def receives_custom_type(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes a ``custom_type``.
+
+    The ``receives_message_id`` discipline, one field over: the dispatch asks
+    the HANDLE and both hosts ask the SESSION OBJECT their handle wraps before
+    handing the keyword on, so a reduced double or an older build never sees a
+    keyword its literal signature would refuse. VAR_KEYWORD answers NO for the
+    same reason as above (swallowing the type would silently stamp the default
+    and lose the provenance this carriage exists for); no method at all also
+    answers NO — the dispatch refuses that session with its own sentence.
+    """
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "custom_type" in parameters
+
+
 def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """The ``(detail, extra)`` an op's answer contributes to its ack frame.
 
@@ -7490,6 +7511,31 @@ class RuntimeServer:
             # entirely, leaving this op byte-identical.
             if receives_message_id(h):
                 fields["message_id"] = frame.get("message_id")
+            # PROVENANCE CARRIAGE (H4e-render): a sender-declared ``custom_type``
+            # is VALIDATED against the client-local allowlist before anything
+            # is forwarded — an unknown value is a typed refusal, never coerced
+            # (a wrong provenance kind on the receiving card is worse than a
+            # refused send), and a frame without the key stays byte-identical.
+            # The allowlist import is IN-FUNCTION: this module keeps its import
+            # weight off the happy path, and the common frame never carries the
+            # field at all.
+            custom_type = frame.get("custom_type")
+            if custom_type is not None:
+                from local_operator.harness.message_types import (
+                    PEER_DELIVERABLE_CUSTOM_TYPES,
+                )
+
+                if (
+                    not isinstance(custom_type, str)
+                    or custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES
+                ):
+                    raise ValueError(
+                        "peer_message carries an unknown custom_type; "
+                        "refusing to stamp a provenance kind the receiver "
+                        "cannot verify"
+                    )
+                if receives_custom_type(h):
+                    fields["custom_type"] = custom_type
             return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The

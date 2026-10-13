@@ -3324,6 +3324,37 @@ class PeerMessageBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+class TeamBridgeBlock(PeerMessageBlock):
+    """A screened TEAM BRIDGE wake from a Radient org member, as its own card.
+
+    Contract §13.4: a bridge wake is a NEW provenance kind and "must not
+    overload the wake/peer types". It therefore REUSES the peer card's receipt
+    mechanics wholesale — fold width, sender sanitizing, body preview, the
+    expanded family — and differs only in what a reader (and any stylesheet or
+    front-end matcher) keys on: its own classes and its own name column
+    (``org`` instead of ``peer``). Structurally correct and deliberately not
+    gold-plated: a designer round follows at review time for the visual pass.
+
+    The transport guarantees the provenance: the custom type rides the peer
+    delivery frame, is validated against the client-local allowlist at every
+    hop, and reaches this branch only as ``TEAM_BRIDGE_MESSAGE_TYPE`` — an
+    unknown kind is refused before a row exists, so this class never has to
+    guess between "bridge" and "peer".
+    """
+
+    EXPANDED_CLASS = "bridge-expanded"
+    tool_name = "org"
+
+    def __init__(
+        self, body: str, sender: dict[str, object] | None = None, *, fold_width: int = 0
+    ) -> None:
+        super().__init__(body, sender, fold_width=fold_width)
+        # The peer class is the base's, not ours: a matcher keying on
+        # ``peer-message-block`` must not paint an org card, and vice versa.
+        self.remove_class("peer-message-block")
+        self.add_class("team-bridge-block")
+
+
 class QuietGroupBlock(ExpandableActionBlock):
     """One bar over a run of consecutive delivery receipts (design
     ``docs/design/quiet-turns.md`` §5, slice S5).

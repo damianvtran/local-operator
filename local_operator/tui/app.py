@@ -472,7 +472,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
+from local_operator.tui.widgets.status_line import (
+    AGENT_PROFILE_CELLS,
+)
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -511,6 +513,12 @@ from local_operator.tui.widgets.tool_card import (
     clean_intent,
     parse_duration,
 )
+
+# Re-exported for the replay fold: ``session_presentation`` imports its block
+# vocabulary from this module (the sibling convention), and a bridge row must
+# replay as its own card (§13.4). This module mounts none itself yet, so the
+# import is deliberately unused here.
+from local_operator.tui.widgets.transcript import TeamBridgeBlock  # noqa: F401
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,

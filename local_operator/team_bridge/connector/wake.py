@@ -247,6 +247,10 @@ async def deliver_wake(
             mode="mailbox",
             wake=True,
             sender=sender,
+            # THE PROVENANCE KIND (H4e-render): the receiving session stamps
+            # this on the row, so the card is a bridge message rather than a
+            # generic peer one (§13.4). Re-validated at every hop.
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         )
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement
@@ -260,7 +264,13 @@ async def deliver_wake(
     outcome = await engage_runtime(
         session_id,
         "",
-        PeerMessageErrand(text=payload, mode="mailbox", wake=True, sender=sender),
+        PeerMessageErrand(
+            text=payload,
+            mode="mailbox",
+            wake=True,
+            sender=sender,
+            custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        ),
         config_dir=config_dir,
     )
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
