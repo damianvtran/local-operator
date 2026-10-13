@@ -126,7 +126,12 @@ def _ecosystem_roots(home: Path) -> list[Path]:
     return [candidate for candidate in candidates if candidate.is_dir()]
 
 
-def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None) -> list[Path]:
+def default_skill_roots(
+    cwd: Path | None = None,
+    *,
+    boundary: Path | None = None,
+    config_dir: Path | None = None,
+) -> list[Path]:
     """Compute the default discovery roots for a working directory.
 
     Walks up from ``cwd`` to the filesystem root collecting
@@ -142,6 +147,11 @@ def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None
     priority over ecosystem ones, matching the collision rule in
     :func:`discover_skills`.
 
+    ``config_dir`` injects the active profile's managed native root after
+    project roots and before the home/ecosystem roots. Omit it for the historic
+    root list; when it is the home-native config directory, ordering and dedupe
+    are unchanged. It is clipped by ``boundary`` just like other user roots.
+
     ``boundary`` is the world boundary a bounded caller validated (the
     benchmark's SDK world — see ``SessionSpec.world_root``). When set, the
     walk stops AT the boundary: the ancestors above it (the operator's or
@@ -154,6 +164,11 @@ def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None
     call and keeps the historical behaviour exactly.
     """
     start = (cwd or Path.cwd()).resolve()
+    home = Path.home().resolve()
+    # Hub installs belong to the ACTIVE profile, not an environment-derived
+    # guess. Explicit injection keeps overridden profiles discoverable while
+    # preserving existing project/ecosystem precedence and world containment.
+    managed = Path(config_dir).expanduser().resolve() / "skills" if config_dir else None
 
     candidates: list[Path] = []
     if boundary is not None:
@@ -166,28 +181,36 @@ def default_skill_roots(cwd: Path | None = None, *, boundary: Path | None = None
         # Walk cwd → boundary INCLUSIVE; every root above the world is outside it.
         current = start
         while True:
-            candidates.append(current / _SKILLS_SUBDIR)
+            candidate = current / _SKILLS_SUBDIR
+            if managed in (None, home / _SKILLS_SUBDIR) or candidate != home / _SKILLS_SUBDIR:
+                candidates.append(candidate)
             if current == world:
                 break
             current = current.parent
-        home = Path.home().resolve()
+        if managed is not None and managed.is_relative_to(world):
+            candidates.append(managed)
         if home == world or home.is_relative_to(world):
             candidates.append(home / _SKILLS_SUBDIR)
             candidates.extend(_ecosystem_roots(home))
         # Appended LAST = weakest, exactly as in the unclipped walk.
         candidates.append(PACKAGED_SKILL_ROOT)
     else:
-        home = Path.home().resolve()
         # Walk cwd → filesystem root; every ancestor gets a candidate, so
         # project-local roots work even outside $HOME.
         current = start
         while True:
-            candidates.append(current / _SKILLS_SUBDIR)
+            candidate = current / _SKILLS_SUBDIR
+            # Home is global, even when cwd happens to live under it. Defer it
+            # behind the injected profile root; other ancestor projects win.
+            if managed in (None, home / _SKILLS_SUBDIR) or candidate != home / _SKILLS_SUBDIR:
+                candidates.append(candidate)
             if current.parent == current:  # reached "/"
                 break
             current = current.parent
         # Global native root, then ecosystem roots: the deepest project root
         # wins collisions, and native beats imported.
+        if managed is not None:
+            candidates.append(managed)
         candidates.append(home / _SKILLS_SUBDIR)
         candidates.extend(_ecosystem_roots(home))
         # Appended LAST = weakest: it is the only root the user did not author,

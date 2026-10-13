@@ -2104,7 +2104,7 @@ async def _setup_knowledge(
         # happened to start in -- every other consumer here already takes the
         # session's cwd, and this one silently did not.
         hooks.skill_roots = default_skill_roots(
-            Path(cwd) if cwd is not None else None, boundary=world_root
+            Path(cwd) if cwd is not None else None, boundary=world_root, config_dir=config_dir
         )
         hooks.world_root = world_root
         #: The baseline the freshness checks compare against, taken HERE because the

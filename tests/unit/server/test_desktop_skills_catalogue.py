@@ -86,6 +86,15 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # The suite allow-lists this variable (read-only dirs), but a cell asserting
     # exact rows cannot tolerate an inherited extra root it never wrote.
     monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
+    from local_operator.skills.api import default_skill_roots
+
+    # Owned scratch lives beneath the operator's real home, unlike pytest's
+    # historical /tmp root. Bound this synthetic world so the intentional
+    # ancestor walk cannot import actual authored skills into fixture assertions.
+    monkeypatch.setattr(
+        "local_operator.skills.default_skill_roots",
+        lambda cwd=None, **kwargs: default_skill_roots(cwd, boundary=tmp_path, **kwargs),
+    )
     app = FastAPI()
     app.include_router(desktop_catalogues.router)
     app.state.config_manager = SimpleNamespace(config_dir=home / ".local-operator")
@@ -96,6 +105,19 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         headers={"Authorization": f"Bearer {TOKEN}"},
     ) as client:
         yield SimpleNamespace(client=client, app=app, home=home, tmp=tmp_path)
+
+
+async def test_overridden_profile_catalogue_reads_only_its_managed_root(env) -> None:
+    profile = env.tmp / "active-profile"
+    other = env.tmp / "other-profile"
+    env.app.state.config_manager.config_dir = profile
+    _write_skill(profile / "skills", "active_alias", "Active profile skill")
+    _write_skill(other / "skills", "other_alias", "Other profile skill")
+    response = await env.client.get("/v1/desktop/skills", params={"cwd": str(env.home)})
+    assert response.status_code == 200
+    names = {row["name"] for row in _data(response)["skills"]}
+    assert "active_alias" in names
+    assert "other_alias" not in names
 
 
 def _data(response) -> dict[str, Any]:
