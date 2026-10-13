@@ -3112,6 +3112,7 @@ class FrontendModelAccess(BaseModel):
             "local",
             "eligible_borrow_unverified",
             "effective_borrow",
+            "expired",
             "pending",
             "owner_unavailable",
             "withdrawn",
@@ -3120,6 +3121,14 @@ class FrontendModelAccess(BaseModel):
         ]
         | None
     ) = None
+    #: Keyless borrow context, explicitly historical. A failed/expired reading
+    #: retains the last successful grant's bound but NEVER marks it usable.
+    #: Epoch seconds; None means this process has not observed that fact.
+    owner_device: str = ""
+    owner_label: str = ""
+    observed_at: float | None = None
+    last_grant_at: float | None = None
+    last_grant_expires_at: float | None = None
     #: The selected model's provider id (``anthropic``), not a display name.
     provider: str
     #: The provider's human name for the band's sentence ("Not signed in to

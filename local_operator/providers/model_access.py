@@ -261,7 +261,9 @@ def serving_model_access_here(
                 if access.usable
                 else claim.state if effective_state == "absent" else "temporarily_unavailable"
             )
-            return claim.model_copy(update={"state": state, "effective_state": effective_state})
+            return claim.model_copy(
+                update={"state": state, "effective_state": effective_state, **access.context()}
+            )
     except sqlite3.ProgrammingError:
         raise
     except (sqlite3.Error, OSError):
