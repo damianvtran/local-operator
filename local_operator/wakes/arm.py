@@ -313,8 +313,9 @@ async def edit_wake(
         # an intervening same-id arm is not ours to overwrite or roll back.
         target = next(row for row in existing if row.id == wake_id)
         if expected_request_id is not None and (target.request_id or "") != expected_request_id:
-            raise WakeWriteError("wake origin changed before edit", status=STATUS_CONFLICT,
-                                 code="wake_conflict")
+            raise WakeWriteError(
+                "wake origin changed before edit", status=STATUS_CONFLICT, code="wake_conflict"
+            )
         built = build_wake_edit(dict(request), existing, wake_id, now)
         if "error" in built:
             raise _refusal(built)
