@@ -261,3 +261,46 @@ service, domain, payload queue, runtime lease, permission or view-grant expansio
 is authorized. Complete-core review/QA precedes separate UI adoption. The UI
 continuity amendment must separate metadata facts from rank/body/causal-owner
 admission and retain later source demand while admitting valid earlier facts.
+
+
+### Bounded structural source-body subset (unpublished implementation)
+
+The same transcript-index cache schema now proposes version 7: raw ranges and
+body-free structural facts share the existing full/suffix scanner. Facts are
+extracted from already parsed JSON before hidden-row and assistant-call
+classification loses identity. Inverse prune/call/compaction/duplicate views are
+built once with the resident index or cache load, not by a payload request.
+No notices, arguments, preserved text or message bodies enter the new table.
+Suffix facts follow the existing window-row cut; last-ID ranges alone never
+certify duplicate identities. The reader's segment row count is not a whole
+journal count after incremental re-derivation.
+
+The separate internal source-body getter discovers a complete ordinary
+non-ask call unit and its last effective prune through the captured cut, reads
+only those ranges on one source-coherent FD, and reuses the actual per-row
+replay operation. It does not build an incomplete selected Transcript or infer
+context/preserve graphs. Preserved candidates, ambiguous/ask/divert/hidden or
+cross-cut units, opaque causal scope, unknown global scope, supplements and
+unbounded legacy media expansion are terminal unavailable. Inline media and
+artifact references retain their real typed body. A wholly historical ordinary
+unit may have an audit-equivalent body; units crossing the governing cut cannot
+be partially certified. A raw prune is named as a dependency, never leaked as
+an unsolicited conversation row.
+
+Each original raw ID has exactly one of present/missing/unavailable/remaining.
+Missing requires proven source absence; unproven identity scope is envelope
+unavailable. Intrinsic units over 512 unique IDs, 512 KiB raw bytes or an empty
+encoded frame are unavailable. Aggregate budgets defer complete units as
+remaining, with a smaller requested-ID retry batch that leaves room for explicit
+dependencies. Huge units must not starve later small units. Encoded metadata is
+never silently trimmed, and expanded media is never dropped to manufacture fit.
+All body reads inherit the existing inode/size/mtime limitation, including
+stat-preserving external rewrites. Publication still requires current view,
+client, expected-domain and body-owed revision fences after awaits.
+
+This implements no public DTO, complete capability, availability lane or UI
+fallback/admission policy. Initial unprovable tails must decline optimization
+before new-domain adoption. Later unavailable units retain known/provisional
+records and require explicit source-unconfirmed reconcile; unavailable is not
+missing, reset, or a reason to poll an old peer. Metadata bootstrap remains
+lookup facts/domain only, never rank/causal-owner admission on an old body.

@@ -242,7 +242,13 @@ def test_fd_path_replacement_and_budget_refuse_unverified_payload(tmp_path, monk
     directory = _write(tmp_path, [entry])
     index = _index(tmp_path)
     limited = read_indexed_raw_rows(directory, index, ["row", "absent"], max_bytes=1)
-    assert limited == {"rows": [], "missing": ["absent"], "remaining": ["row"], "bytes": 0}
+    assert limited == {
+        "rows": [],
+        "missing": ["absent"],
+        "remaining": [],
+        "unavailable": ["row"],
+        "bytes": 0,
+    }
     original = Path.stat
     path = directory / "transcript.jsonl"
 
