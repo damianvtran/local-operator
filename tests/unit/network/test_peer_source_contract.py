@@ -1123,3 +1123,95 @@ async def test_bridge_replay_strips_the_delta_family_per_subscriber(tmp_path: Pa
             else:
                 for key in HISTORY_DELTA_FAMILY_KEYS:
                     assert key not in delta["payload"], key
+
+
+# ---------------------------------------------------------------------------
+# The purposes through the PRODUCT's own door (QA round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bridge_door_metadata_and_payload_carry_ids_to_the_owner(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The typed purposes through ``DesktopSessionBridge.history`` — the read door.
+
+    QA round 1 (Q1): the purpose frames were composed WITHOUT ``journal_order``,
+    and the relay forwards ``order_ids`` only beside a truthy flag, so ids
+    validated at the local boundary were dropped one hop later — metadata
+    answered a factless ``ready`` (no ``journal_ordinals`` /
+    ``journal_missing_ids``) and payload was refused as if no ids were sent.
+    The author's purpose cells called the owner handler with ``journal_order``
+    already on the frame, which is why the targeted set could not see it. This
+    cell drives the PRODUCT door over a real pair and asserts BOTH the wire
+    composition (the owner really received the flag and the ids) and the
+    owner's requested-id facts on the bridge's answer.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
+
+    a, b, _, _ = peer_pair
+    ids = _seed_journal(b.root, SESSION, ["", "", ""])
+    # The index build awaits inline: ``_ready`` runs its own loop and cannot
+    # be called from this async cell.
+    task, _ = ti.start_refresh(b.root, SESSION)
+    index = await task
+    assert index is not None and ti.fresh_resident(b.root, SESSION) is not None
+    record, _, _ = _pair(peer_pair, monkeypatch, role="read")
+    host, port = _listen(b)
+    link = _dial_to(a, record, host, port)
+    seen: list[dict[str, Any]] = []
+    original = b._handlers["net_session_history"]
+
+    def observe(owner_link: relay.PeerLink, frame: dict[str, Any]) -> Any:
+        seen.append(dict(frame))
+        return original(owner_link, frame)
+
+    monkeypatch.setitem(b._handlers, "net_session_history", observe)
+    row = SessionRow(
+        id=SESSION,
+        mtime=0,
+        name="",
+        live_state="idle",
+        locality="remote",
+        owner_device=b.identity.device_id,
+        owner_device_name=b.identity.device_id,
+        reachable=True,
+        unreachable_reason="",
+    )
+    bridge = DesktopSessionBridge(a.root, SESSION, "", remote_row=row)
+    try:
+        metadata = await bridge.history(
+            limit=2,
+            journal_order=True,
+            order_ids=[ids[0], "gone"],
+            peer_journal_source=True,
+            source_read="metadata",
+        )
+        # THE WIRE COMPOSITION IS THE FIX: the owner saw the opt-in AND the ids.
+        assert seen[-1]["journal_order"] is True, seen[-1]
+        assert seen[-1]["order_ids"] == [ids[0], "gone"], seen[-1]
+        assert metadata["journal_order_state"] == "ready", metadata
+        assert metadata["journal_generation"] == index.journal_generation
+        assert metadata["journal_ordinals"] == {ids[0]: index.journal_rows[ids[0]]}, metadata
+        assert metadata["journal_missing_ids"] == ["gone"], metadata
+        assert metadata["entries"] == [] and metadata["has_more"] is False
+
+        payload = await bridge.history(
+            limit=2,
+            journal_order=True,
+            order_ids=[ids[0], "absent"],
+            peer_journal_source=True,
+            source_read="payload",
+            expected_journal_generation=index.journal_generation,
+        )
+        assert seen[-1]["journal_order"] is True, seen[-1]
+        assert seen[-1]["order_ids"] == [ids[0], "absent"], seen[-1]
+        assert payload["journal_order_state"] == "ready", payload
+        assert payload["source_present_ids"] == [ids[0]], payload
+        assert payload["source_missing_ids"] == ["absent"], payload
+        assert [row_["id"] for row_ in payload["entries"]] == [ids[0]], payload
+        assert payload["entries"][0]["ts_source"] == "entry"
+        assert payload["entries"][0]["journal_seq"] == index.journal_rows[ids[0]]
+    finally:
+        link.close()

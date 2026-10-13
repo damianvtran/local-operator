@@ -1361,9 +1361,12 @@ class DesktopSessionBridge:
         #: reconcile correction), published only after rechecking this bridge.
         self._source_wait_task: asyncio.Task[Any] | None = None
         #: Whether the LAST flight failed for the current wave. A failed wait
-        #: is not retried on every sweep — only a meaningful change (a ready
-        #: result, or a non-building state) re-arms the lane, which is the
-        #: "never retry per token render" rule in one boolean.
+        #: is not retried on every sweep, and ONLY a ``ready`` answer clears
+        #: this latch — ``unavailable``/``unsupported`` neither clear nor arm
+        #: it (arming is a later ``building`` once the latch is clear), which
+        #: is the "never retry per token render" rule in one boolean. A build
+        #: that outruns the lane's bound therefore settles through the
+        #: renderer's own re-read cadence, not through a poll of ours.
         self._source_wait_failed = False
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()

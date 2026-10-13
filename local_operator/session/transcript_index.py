@@ -891,9 +891,6 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     messages = raw.get("messages")
     if not isinstance(checkpoints, list) or not isinstance(messages, list):
         return None
-    facts = raw.get("source_projection_facts")
-    if not valid_source_projection_facts(facts, scan, raw.get("journal_rows")):
-        return None
     raw_ranges = raw.get("journal_ranges")
     raw_rows = raw.get("journal_rows")
     if (
@@ -905,6 +902,13 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     if any(
         not isinstance(id_, str) or type(seq) is not int or seq < 0 for id_, seq in raw_rows.items()
     ):
+        return None
+    # The isinstance narrows for the TYPE CHECKER the same shape the validator
+    # already refuses at runtime (it answers False for a non-list): one
+    # condition, so the facts map reaching the constructor is provably the
+    # list the validator just accepted.
+    facts = raw.get("source_projection_facts")
+    if not isinstance(facts, list) or not valid_source_projection_facts(facts, scan, raw_rows):
         return None
     size = sig.get("size")
     if type(size) is not int or any(

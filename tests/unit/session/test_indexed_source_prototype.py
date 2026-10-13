@@ -128,6 +128,7 @@ def test_actual_owner_projection_equivalence_only_when_complete_closure_is_bound
     partial = read_indexed_raw_rows(directory, index, [target])
     assert partial is not None
     unsafe = _entry_to_message(partial["rows"][0], attachments)
+    assert unsafe is not None
     settled = next(m for m in owner.build_llm_history() if m.id == target)
     assert (
         unsafe.model_dump() != settled.model_dump()

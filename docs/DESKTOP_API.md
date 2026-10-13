@@ -2847,15 +2847,19 @@ updates must change order even when payload bytes did not change, and omitted
 metadata on a live update cannot clear a known coordinate.
 
 
-## Proposed complete peer-source contract (not advertised)
+## Complete peer-source contract (advertised; no consumer until the UI slice)
 
-This is a contract-first prototype, not shipped capability support. Existing
-remote `journal_order` alone must remain byte-compatible unsupported when this
-work is integrated. Local ordering and local mobile partial negotiation remain
-unchanged. The proposed `peer-journal-source-v1` capability and explicit
-`peer_journal_source` query/declaration require complete runtime/receiver support
-and authenticated owner acknowledgment; neither is currently advertised here.
-Every new field must be omitted for legacy viewers on live and replay paths.
+`peer-journal-source-v1` IS advertised by this build — on every relay link
+(`network/wire.py`), on the runtime record (`session/runtime/serving.py` +
+`runtime/server.py`) and as the `peer_journal_source` feature key
+(`server/features.py`). ADVERTISING IS NOT ACTIVATION: every read still passes
+the four-part gate — owner advertisement, viewer declaration, authenticated
+session source, per-response acknowledgment — and absent any half the answer
+stays the legacy bytes. A remote `journal_order` alone remains
+byte-compatible unsupported, and local ordering and local mobile partial
+negotiation are unchanged. The recovery envelope's source facts are
+receiver-side implemented and inert until a UI slice consumes them. Every new
+field is omitted for legacy viewers on live and replay paths.
 
 The authority bootstrap uses the existing session GET but applies only source
 metadata via `applyJournalOrderMetadata`: install the equality-only order domain
@@ -2875,7 +2879,7 @@ Proposed purposes on the existing view-authorized stored-history RPC:
 | page | Verified bounded page; explicit page acceptance only |
 | metadata | Requested raw-ID facts only; no body/cursor/frontend effects |
 | payload | Expected accepted generation REQUIRED; fresh projected bodies and same-read coordinates together |
-| availability | One bounded deferred index refresh/join signal; no rows or generation authority |
+| availability | One bounded deferred index refresh/join signal (4 s owner wait, inside the read-sized hop); no rows or generation authority. A build past the bound answers bounded `unavailable` beside the explicit reconcile correction and the client latch re-arms on the next `ready` answer — never a dead `building`, never a per-token poll |
 
 Requested IDs plus explicit dependency IDs are bounded at 512. Missing means
 proven absent, unavailable means present but unsafe/unprojectable, remaining
@@ -2884,7 +2888,7 @@ limits include every metadata map. Raw-ID lookup demand unions canonical,
 quarantined and loaded-body-owed IDs BEFORE the no-debt/no-generation guard.
 No alias, clock, wire sequence or receiver disk supplies source authority.
 
-Proof prerequisites before DTO extension or capability advertisement:
+Proof prerequisites the advertisement was gated on (held before this slice shipped):
 
 * Extend the SAME index with validated raw-ID byte ranges, retaining no bodies;
   FD-before/after, path identity and index source must agree for bounded reads.
