@@ -3127,22 +3127,21 @@ async def _await_action_tool(
     tool>" (measured: the whole pilot turn failed exactly that way when the
     prompt went out ~10 ms after open). So the arm waits, bounded, and REFUSES
     to prompt when the tool never arrives: absence is a loud, recorded failure,
-    never a silent episode that cannot act.
+    never a silent episode that cannot act. The wait is the SDK's typed
+    ``Session.wait_for_tools``: the arm no longer hand-rolls the manager +
+    live-inventory composition, so this gate and every external caller share
+    ONE readiness definition.
     """
 
-    manager = getattr(handle.session, "mcp_manager", None)
-    settled: bool | None = None
-    if manager is not None:
-        try:
-            settled = await manager.wait_settled(timeout_s)
-        except Exception:  # noqa: BLE001 - a reduced manager must not break the arm
-            settled = None
-    present = declaration.tool_name in handle.tool_names
-    startup = getattr(handle.session, "mcp_startup", None)
+    session = handle.session
+    readiness = await session.wait_for_tools((declaration.tool_name,), timeout_s=timeout_s)
+    present = readiness.status == "ready"
+    startup = getattr(session, "mcp_startup", None)
     record.write(
         "mcp_settle",
         {
-            "settled": settled,
+            "settled": readiness.discovery_settled,
+            "readiness_status": readiness.status,
             "action_tool_present": present,
             "configured": list(getattr(startup, "configured", ()) or ()),
             "connected": list(getattr(startup, "connected", ()) or ()),
