@@ -98,6 +98,7 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -651,7 +652,9 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
 #: collapses every non-wake/monitor input into one "internal" class, so the
 #: peer-quiet rule in ``_finalize_attention_notify`` reads the finer
 #: ``_run_input_types`` record instead of widening that class vocabulary.
-PEER_FAMILY_INPUT_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE})
+PEER_FAMILY_INPUT_TYPES = frozenset(
+    {PEER_MESSAGE_MESSAGE_TYPE, HUB_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE}
+)
 
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):

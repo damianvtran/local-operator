@@ -1001,6 +1001,34 @@ class Store:
                 return None
             return {"consent_version": version, "consent_ref": ref}
 
+    def designated_session_for(self, owner: OwnerSnapshot) -> str | None:
+        """The designated CoS session id under the live-owner/generation fence.
+
+        READ-ONLY accessor (H4) over the column H2's seam writes
+        (``commit_enrollment(..., cos_session_id=...)``). The wake authority is
+        the NATIVE enrollment record, never a generic settings preference: a
+        preference with no committed enrollment reads ``None`` here, and a
+        fenced or superseded generation reads ``None`` too, so a stale owner
+        snapshot cannot name a wake destination. Empty/missing values are
+        ``None`` (no destination — arrivals badge only, per §5.6).
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT designated_session FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (_owner_key(owner), owner.enrollment_generation),
+            ).fetchone()
+            if row is None:
+                return None
+            value = row["designated_session"]
+            if not isinstance(value, str) or not value:
+                return None
+            return value
+
     def current_generation_is_live(self, owner: OwnerSnapshot) -> bool:
         """Public fence probe (R6/Q15): is THIS snapshot's enrollment
         generation still the live one? Used to pick the accurate typed hold
