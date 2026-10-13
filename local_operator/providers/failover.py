@@ -3845,6 +3845,26 @@ def _stamp_input_refusal_recovery(event: StreamEvent, degradations: Sequence[str
     return event.model_copy(update={"provider_payload": payload})
 
 
+def _stamp_attempted_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Carry the effective API selector on a MARKED wordless end.
+
+    WHY. The interrupted-turn recovery re-asks the route that actually served
+    the failure, and on these turns no ``StreamModelEvent`` exists to name it
+    (measured: the OpenRouter route ends wordlessly without one), while the
+    REQUEST's model can name a different route than the one that served -- a
+    sticky handoff or a driver fallback makes exactly that split. This frame
+    is the only place that holds the truth (``spec`` -- the per-attempt
+    selector, already consumed by the sibling stampers), so the end itself
+    carries it forward and the loop never guesses. FAULT-ONLY: an unmarked
+    end is returned unchanged, so every ordinary turn's events stay
+    byte-for-byte what they were. The selector is the ATTEMPTED API route,
+    not proof of the underlying provider/quantization.
+    """
+    if not isinstance(event, StreamEndEvent) or not event.retryable_interruption:
+        return event
+    return event.model_copy(update={"attempted_selector": spec})
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -4388,6 +4408,7 @@ async def stream_with_failover(
                 async for event in client.stream(current_request, key, oauth_access=access):
                     stamped = _stamp_serving_spec(event, spec)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
+                    stamped = _stamp_attempted_selector(stamped, spec)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
