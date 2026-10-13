@@ -967,15 +967,56 @@ class ActionBridge:
         if self._attempted_kind is None:
             self._attempted_kind = kind
 
+    def _reserve_message_group(self, message: Message) -> None:
+        """Charge the completed root message's group at its own boundary.
+
+        WHY THIS EXISTS BESIDE THE TURN-END CHARGE (R1 C1, measured on the
+        real stack: ``wire_calls=2`` for a local-tool-only Nth group, with
+        the extra turn's tool executing). The loop asks its graceful-cancel
+        question at the end-of-tools boundary BEFORE it yields
+        ``TurnEndEvent`` (``loop.py``: the check precedes the event). A stop
+        requested when the sink sees that TurnEnd is therefore first READ at
+        the next boundary -- one more root request went out. The completed
+        message is the earliest boundary that precedes the loop's check:
+        charging here -- before its calls are validated or dispatched --
+        both keeps the attempted-group accounting identical for every
+        call-set outcome and lets the sink's MessageEnd stop be read before
+        the next root prediction. The Nth message's own calls still dispatch
+        and pair; the graceful cancel is honoured only after the batch
+        completes.
+
+        TYPED, never guessed: a message whose ``stop_reason`` is ``"error"``
+        did not complete (wordless provider fault) and is never charged;
+        call-set kinds (batch/finish/ask/refusal) are written by the calls
+        themselves exactly as before; the message id keeps multi-call and
+        duplicate folds once.
+        """
+
+        if message.stop_reason == "error":
+            return
+        key = f"message:{message.id}"
+        if key in self._attempted_keys:
+            return
+        if self._attempted_groups >= self.max_steps:
+            return
+        self._attempted_keys.add(key)
+        self._attempted_groups += 1
+        self._attempted_current = key
+        self._attempted_kind = None
+        self._attempted_recorded = False
+
     def _finalize_output_group(self) -> None:
         """Charge/record the turn's group at its end boundary.
 
         Two duties, one boundary (``TurnEndEvent``/``AgentEndEvent``):
 
         * a group the STREAM completed without any bridge call -- a
-          local-tool-only turn or terminal prose -- is charged here, once,
-          keyed by its assistant message (kind ``local-tool``/
-          ``prose-terminal``);
+          local-tool-only turn or terminal prose -- was already charged at
+          its message's own boundary (``_reserve_message_group``); its
+          call-less kind (``local-tool``/``prose-terminal``) is stamped
+          HERE, because the charge deliberately precedes any call-set
+          classification, and this method is the next boundary that knows
+          the message never reached ``call``;
         * the row of an already-reserved group is written here with the
           outcome kind its calls recorded (admitted batch, ask, finish,
           refusal class, read-back loss...).
@@ -1003,6 +1044,13 @@ class ActionBridge:
             return
         key = f"message:{message.id}"
         if key in self._attempted_keys:
+            # Charged at the message's own boundary (``_reserve_message_
+            # group``): a call-less turn gets its typed kind NOW -- the
+            # message carries the only facts the old turn-end charge read.
+            # First-writer-wins keeps every call-set kind (batch, finish,
+            # refusal class) exactly as the calls recorded it.
+            if key == self._attempted_current:
+                self._mark_group_kind("local-tool" if message.tool_calls else "prose-terminal")
             self._record_output_group()
             return
         if faulted:
@@ -1012,7 +1060,8 @@ class ActionBridge:
         self._attempted_keys.add(key)
         self._attempted_groups += 1
         self._attempted_current = key
-        self._attempted_kind = "local-tool" if message.tool_calls else "prose-terminal"
+        self._attempted_kind = None
+        self._mark_group_kind("local-tool" if message.tool_calls else "prose-terminal")
         self._attempted_recorded = False
         self._record_output_group()
 
@@ -1100,6 +1149,15 @@ class ActionBridge:
             # isinstance check is what tells the type checker so.
             if isinstance(message, Message) and message.role == "assistant":
                 self._last_assistant_message = message
+                # EARLIEST boundary, BEFORE this message's calls are
+                # validated or dispatched: the charge lands here so the
+                # sink's MessageEnd stop (in ``run_session_episode``) is
+                # read by the loop's own boundary check before it spends
+                # the NEXT root request. A turn-end charge was first read
+                # one boundary late and let a local-tool-only Nth group's
+                # request through (R1 C1: wire_calls=2, the extra tool
+                # executed).
+                self._reserve_message_group(message)
         if isinstance(event, (TurnEndEvent, AgentEndEvent)):
             self._finalize_output_group()
 
@@ -2516,7 +2574,7 @@ async def run_session_episode(
             # fail-closed fallback for any call that still arrives; the check
             # is a state test, never a tool-call-name heuristic (the
             # declaration names the ONE action tool the arm installed itself).
-            # The stop seam (audit §48), two branches:
+            # The stop seam (audit §48), three branches:
             # * the action tool's own result -- the boundary the R3 rounds
             #   pinned: fires on the Nth ADMITTED epoch's paired result
             #   regardless of the terminal ``end_requested``, so a terminal
@@ -2524,15 +2582,37 @@ async def run_session_episode(
             #   groups are covered too (their error result still ends
             #   through the action tool); the attempted clock raises the
             #   same boundary for groups the admitted count has not reached;
-            # * a TurnEnd -- the ONLY boundary a local-tool-only (or
-            #   prose-only) Nth group has -- fires while the episode is still
-            #   LIVE (``end_requested is None``): a completed terminal turn
-            #   has nothing left to stop.
+            # * the completed message itself, when it carries NO action-tool
+            #   call -- a TurnEnd-fired request was read one boundary LATE
+            #   (the loop asks its graceful question BEFORE yielding the
+            #   event, ``loop.py``), so a local-tool-only Nth group let one
+            #   more root request go out and its tool run (R1 C1, measured
+            #   wire_calls=2). Requested AT MessageEnd, the loop's
+            #   end-of-tools check reads it before the next prediction,
+            #   while the message's own calls still dispatch and pair (the
+            #   cancel is honoured only after the batch completes). Typed
+            #   non-completion (``stop_reason == "error"``) is never a
+            #   group;
+            # * a TurnEnd -- kept as the backstop for any driver path that
+            #   produced no MessageEnd fold -- fires while the episode is
+            #   still LIVE (``end_requested is None``): a completed
+            #   terminal turn has nothing left to stop.
             if (
                 not budget_stop_sent
                 and handle is not None
                 and (
                     (
+                        isinstance(event, MessageEndEvent)
+                        and isinstance(event.message, Message)
+                        and event.message.role == "assistant"
+                        and event.message.stop_reason != "error"
+                        and not any(
+                            call.name == declaration.tool_name for call in event.message.tool_calls
+                        )
+                        and bridge.end_requested is None
+                        and bridge.attempted_groups >= config.max_steps
+                    )
+                    or (
                         isinstance(event, ToolExecutionEndEvent)
                         and event.tool_name == declaration.tool_name
                         and (

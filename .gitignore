@@ -63,5 +63,8 @@ scratch/
 bench/
 
 # In-repo worktrees (one per parallel lane): untracked lane trees, never
-# part of the shipped package.
-.worktrees/
+# part of the shipped package. Root-anchored (``/.worktrees/``): the lane
+# trees live at the repository root only, and an unanchored pattern would
+# demand a mirror rule in mobile/web/.gitignore (whose tree-mirror guard
+# requires it) for a rule that can never apply inside that subtree.
+/.worktrees/
