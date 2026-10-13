@@ -411,7 +411,7 @@ async def test_connectivity_resume_still_fires_without_a_cancel() -> None:
 
     assert stream.calls == 2, "the resume request must still be spent"
     notices = [event.text for event in events if isinstance(event, NoticeEvent)]
-    assert any("resuming the turn (1/3)" in text for text in notices)
+    assert any("resuming the turn on the same route (1/3)" in text for text in notices)
     ends = [event for event in events if isinstance(event, AgentEndEvent)]
     assert ends and not ends[-1].aborted
 

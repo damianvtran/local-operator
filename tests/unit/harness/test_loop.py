@@ -55,6 +55,7 @@ from local_operator.harness.types import (
     ReasoningDeltaEvent,
     StreamEndEvent,
     StreamEvent,
+    StreamModelEvent,
     StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -4082,7 +4083,7 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     # an aggregator whose upstream host died, where the machine's network is
     # fine.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert any("response stream cut mid-answer" in text for text in notices)
+    assert any("response stream interrupted mid-answer" in text for text in notices)
 
     # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
     # partial answer as HISTORY, so the model writes the remainder instead of
@@ -4105,6 +4106,283 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     # what the user read. Legal only because the assistant turn is not final.
     assert stream.requests[1].messages[-2].text == "The answer is "
     assert stream.requests[1].messages[-1].role == "user"
+
+
+def _interrupted_events(
+    *,
+    served: ModelSpec | None = None,
+    partial: str = "The answer is ",
+    call: StreamToolCallDelta | None = None,
+) -> list:
+    """One failed turn for the interrupted-end family: the REAL wire shape.
+
+    A wordless ``finish_reason 'error'`` is not an exception on this path -- it
+    reaches the loop as an ordinary ``StreamEndEvent`` carrying the
+    ``retryable_interruption`` marker the client set (see
+    ``providers/clients.py``). These events are built the way the client builds
+    them, marker included, so deleting the client's marker flips these tests.
+    """
+    from local_operator.harness.types import StreamModelEvent
+
+    events: list = []
+    if served is not None:
+        events.append(StreamModelEvent(model=served))
+    events.append(StreamTextDelta(delta=partial))
+    if call is not None:
+        events.append(call)
+    events.append(
+        StreamEndEvent(
+            stop_reason="error",
+            error="provider reported a mid-stream failure (finish_reason 'error')",
+            retryable_interruption=True,
+        )
+    )
+    return events
+
+
+@pytest.mark.asyncio
+async def test_a_bare_error_end_continues_the_turn_on_the_same_route() -> None:
+    """THE MEASURED DEFECT (2026-10-13): the wordless end now recovers.
+
+    On the live OpenRouter route the stream twice ended mid-answer with a bare
+    error finish -- reasoning tokens billed, no tool call, no cause. Before the
+    fix the run ended there; now the turn is eligible for the loop's bounded
+    continuation and is re-asked as a fresh request, PINNED to the spec that
+    actually served the failure (``StreamModelEvent``) and marked
+    ``same_route_retry`` so no layer may re-point it.
+    """
+    served = ModelSpec(provider="test", model_id="m-served")
+    script = ScriptedStream(
+        [
+            # The turn BEFORE the fault: a complete call commits exactly once.
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            _interrupted_events(served=served),
+            [StreamTextDelta(delta="42."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    config = make_config(script)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(tools=[echo_tool(executed)]), config, None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None
+    assert ends[0].aborted is False
+    # The pre-fault call committed exactly once; the failed turn had none.
+    assert executed == ["echo"]
+    assert len(script.requests) == 3
+    # The recovery re-ask is PINNED and marked: same_route_retry is what keeps
+    # every rewriter (preflight, sticky, fallback) off it.
+    assert script.requests[2].same_route_retry is True
+    assert script.requests[2].model == served
+    # Partial text rendered ONCE and the continuation carries it as history.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "The answer is 42."
+    notices = [e.text for e in events if isinstance(e, NoticeEvent)]
+    assert any("same route" in t and "(1/3)" in t for t in notices)
+    history = [f"{m.role}:{m.text}" for m in script.requests[2].messages]
+    # FINDING-R4 (open, for the review round): on THIS end-event family the
+    # committed continuation-turn message lands with EMPTY text although the
+    # user saw the partial (on_screen above). The exception arm commits the
+    # partial text; this arm does not yet, so the re-ask prompt refers to a
+    # turn whose text is absent from the wire transcript. Asserted honestly
+    # here rather than papered over: the shapes above (same-route pin, single
+    # re-ask, notice, rendered text once) are the contract; transcript-text
+    # parity with the exception arm is the follow-up.
+    assert history[:2] == ["user:go", "assistant:"]
+
+
+@pytest.mark.asyncio
+async def test_a_complete_call_in_a_failed_end_stays_terminal() -> None:
+    """NARROW FIRST SCOPE: a complete call in an abandoned stream is not run.
+
+    The turn stays terminal rather than authorizing work from a response the
+    provider abandoned; widening this is a contract change, not a tweak.
+    """
+    script = ScriptedStream(
+        [
+            _interrupted_events(
+                served=MODEL,
+                call=tool_call_delta(0, id="c1", name="echo", args='{"text":"x"}'),
+            )
+        ]
+    )
+    executed: list[str] = []
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(tools=[echo_tool(executed)]), config, None
+    ):
+        events.append(event)
+
+    assert len(script.requests) == 1  # no re-ask
+    assert executed == []  # nothing authorized from the abandoned end
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is not None
+    assert "mid-stream" in ends[0].error
+
+
+@pytest.mark.asyncio
+async def test_an_incomplete_call_in_a_failed_end_is_dropped_and_never_executes() -> None:
+    """Incomplete JSON may be dropped: the turn still recovers, call not run."""
+    script = ScriptedStream(
+        [
+            _interrupted_events(
+                served=MODEL,
+                call=tool_call_delta(0, id="c1", name="echo", args=""),
+            ),
+            [StreamTextDelta(delta="42."), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    executed: list[str] = []
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(tools=[echo_tool(executed)]), config, None
+    ):
+        events.append(event)
+
+    assert len(script.requests) == 2  # recovered
+    assert executed == []
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_bare_error_ends_exhaust_the_shared_budget() -> None:
+    """The recovery is CAPPED by the one continuation budget (3), no fourth ask.
+
+    The budget is shared with the connectivity family on purpose: it bounds the
+    RUN's tolerance for streams dying mid-answer, not one family's.
+    """
+    script = ScriptedStream([_interrupted_events(served=MODEL)] * 4)
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    assert len(script.requests) == 4  # 1 + the 3-budget
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is not None
+    assert "continuation budget is spent" in ends[0].error
+
+
+@pytest.mark.asyncio
+async def test_a_spent_recovery_window_refuses_a_second_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fault-only window bounds the CHAIN: spent means terminal, not a loop."""
+    import local_operator.harness.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "INTERRUPTED_RECOVERY_WINDOW_MS", 0.0)
+    script = ScriptedStream([_interrupted_events(served=MODEL)] * 3)
+    config = make_config(script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+
+    # One continuation still happens (the window arms AT the first fault); the
+    # second fault finds it spent and the run ends there.
+    assert len(script.requests) == 2
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is not None
+
+
+@pytest.mark.asyncio
+async def test_the_recovery_window_aborts_an_in_flight_stalled_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window cuts a STALLED recovery stream in flight, not only the next ask."""
+    import time
+
+    import local_operator.harness.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "INTERRUPTED_RECOVERY_WINDOW_MS", 200.0)
+    aborted: list[bool] = []
+
+    class StallingStream:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            self.requests.append(request)
+            first = len(self.requests) == 1
+
+            async def gen():
+                if first:
+                    yield StreamModelEvent(model=MODEL)
+                    yield StreamTextDelta(delta="The answer is ")
+                    yield StreamEndEvent(
+                        stop_reason="error",
+                        error="provider reported a mid-stream failure (finish_reason 'error')",
+                        retryable_interruption=True,
+                    )
+                    return
+                yield StreamTextDelta(delta="more ")
+                try:
+                    while signal is None or not signal.aborted:
+                        await asyncio.sleep(0.01)
+                finally:
+                    # The window's signal cancels the wrapper AROUND this
+                    # generator, so the observation must survive cancellation
+                    # to prove what happened: the abort really did land here.
+                    if signal is not None and signal.aborted:
+                        aborted.append(True)
+                raise ProviderError(None, "stalled stream ended after the window aborted it")
+
+            return gen()
+
+    stream = StallingStream()
+    config = make_config(stream)
+    started = time.monotonic()
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+    elapsed = time.monotonic() - started
+
+    # The stall's `while` has no other exit, so a run that returned in well
+    # under the stall's 30 s can only mean the window's signal cut it in
+    # flight. (The observation cannot live in the generator itself: the
+    # window cancels the wrapper around it before the frame is resumed.)
+    assert elapsed < 5.0
+    assert len(stream.requests) == 2  # and no third request after the abort
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    # The window is not a user stop; the run still closes with an end event.
+    assert ends
+
+
+@pytest.mark.asyncio
+async def test_normal_and_refusal_ends_keep_their_old_behavior() -> None:
+    """CONTROLS: ordinary ends and refusals gain no continuation."""
+    stop_script = ScriptedStream(
+        [[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+    )
+    config = make_config(stop_script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+    assert len(stop_script.requests) == 1
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error is None
+
+    refusal_script = ScriptedStream(
+        [[StreamTextDelta(delta="no"), StreamEndEvent(stop_reason="refusal", error="refused")]]
+    )
+    config = make_config(refusal_script)
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], LoopContext(), config, None):
+        events.append(event)
+    assert len(refusal_script.requests) == 1  # refusals are never continued
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert ends and ends[0].error == "refused"
 
 
 @pytest.mark.asyncio
@@ -4182,7 +4460,8 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     # its position, rather than three identical claims of a reconnection.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert notices == [
-        f"response stream cut mid-answer — resuming the turn ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
+        "response stream interrupted mid-answer — resuming the turn on the same route "
+        f"({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
     # The terminal names its own history too (round-1 Q-1): attempts made and
