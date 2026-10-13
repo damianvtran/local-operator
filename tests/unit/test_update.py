@@ -163,7 +163,7 @@ def _pypi_transport(
     return httpx.MockTransport(handler)
 
 
-def _transport_for(payload: dict[str, object]) -> httpx.MockTransport:
+def _transport_for(payload: dict[str, Any]) -> httpx.MockTransport:
     return httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
 
 
@@ -257,9 +257,7 @@ def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> Non
             force=True,
             cache_dir=tmp_path,
             client=_client(
-                _transport_for(
-                    _pypi_payload("0.28.0", [_wheel("0.28.0"), _mac_wheel("0.28.0")])
-                )
+                _transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0"), _mac_wheel("0.28.0")]))
             ),
         )
         assert ready.latest == "0.28.0"
@@ -384,9 +382,7 @@ def test_cached_latest_ignores_unready_entries(tmp_path: Path) -> None:
     )
     assert cached_latest(cache_dir=tmp_path) == (None, None)
     cache.write_text(
-        json.dumps(
-            {"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}
-        ),
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
         encoding="utf-8",
     )
     version, _age = cached_latest(cache_dir=tmp_path)
@@ -437,9 +433,7 @@ def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
 def test_fresh_cache_skips_get(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps(
-            {"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}
-        ),
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
         encoding="utf-8",
     )
     hits = {"n": 0}

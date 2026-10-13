@@ -752,9 +752,7 @@ def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
     named = _named_pypi_version(payload)
     if named is None:
         return _PypiRead(version=None)
-    return _PypiRead(
-        version=_ready_pypi_version(payload), answered=True, named_version=named
-    )
+    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
 
 
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
