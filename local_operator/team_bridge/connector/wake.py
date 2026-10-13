@@ -230,11 +230,17 @@ async def deliver_wake(
     exception; the primitive still refuses any other unstarted target.
     """
 
-    from local_operator.mobile.peer_send import deliver_peer_message
+    from local_operator.mobile.peer_send import (
+        deliver_peer_message_outcome,
+        session_has_durable_history,
+    )
 
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
-    try:
-        return await deliver_peer_message(
+    if session_has_durable_history(session_id):
+        # Live, or cold WITH durable history: the primitive owns delivery and
+        # answers with the TYPED outcome — no exception-type or message-string
+        # inspection (the unengaged distinction is a state, not an error).
+        outcome = await deliver_peer_message_outcome(
             None,
             session_id=session_id,
             text=payload,
@@ -242,25 +248,22 @@ async def deliver_wake(
             wake=True,
             sender=sender,
         )
-    except RuntimeError as failure:
-        # A cold target with no durable history is exactly the designated-CoS
-        # case the engagement rule exempts: engage a runtime WITH the message
-        # as the errand work. ``unengaged_refusal`` is the only refusal this
-        # retry covers; anything else is not ours to convert.
-        if "unengaged" not in str(failure):
-            raise
-        from local_operator.session.runtime.launch import (
-            PeerMessageErrand,
-            engage_runtime,
-        )
+        return str(outcome.detail)
+    # Cold with NO durable history: exactly the designated-CoS engagement
+    # exception. The typed history predicate — never an error string — selects
+    # this branch, and the errand CARRIES the message (WakeErrand never does).
+    from local_operator.session.runtime.launch import (
+        PeerMessageErrand,
+        engage_runtime,
+    )
 
-        outcome = await engage_runtime(
-            session_id,
-            "",
-            PeerMessageErrand(text=payload, mode="mailbox", wake=True, sender=sender),
-            config_dir=config_dir,
-        )
-        return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
+    outcome = await engage_runtime(
+        session_id,
+        "",
+        PeerMessageErrand(text=payload, mode="mailbox", wake=True, sender=sender),
+        config_dir=config_dir,
+    )
+    return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
 async def handle_message_available(
@@ -321,10 +324,19 @@ async def handle_message_available(
             }
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
-            if receipt is not None:
-                await ack_read(
-                    owner, message_id, "blocked", receipt, config_dir=config_dir, access=access
-                )
+            if receipt is None:
+                # Fail CLOSED under a NAMED refusal: a bounce without its
+                # verdict receipt cannot ack `blocked` with the frozen tuple,
+                # and a silent no-op would strand the item with no local
+                # reason. A hold keeps it visible and retryable (H4-A2).
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": "bounce_receipt_missing",
+                }
+            await ack_read(
+                owner, message_id, "blocked", receipt, config_dir=config_dir, access=access
+            )
             return {"action": "bounce", "message_id": message_id}
         if disposition != "deliver" or receipt is None:
             return {"action": "hold", "message_id": message_id, "code": "screening_unknown"}
