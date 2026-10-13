@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -14,12 +15,15 @@ from local_operator.config import ConfigManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.usage import (
+    META_MUSE_ALLOWANCE_NOTE,
+    META_MUSE_NO_OBSERVATION_NOTE,
+    UsageReport,
     fetch_usage,
     meta_muse_usage_report,
     usage_supported,
 )
 from local_operator.server.desktop import require_desktop
-from local_operator.server.routes import desktop_catalogues
+from local_operator.server.routes import desktop_catalogues, desktop_quota
 from local_operator.server.routes.auth import get_desktop_auth
 from local_operator.server.utils.desktop_auth import DesktopAuth
 
@@ -65,6 +69,10 @@ def test_missing_or_damaged_receipt_is_an_unknown_provider_row(raw):
     report = meta_muse_usage_report({"subscription_observation": raw})
     assert report.provider == "meta-muse"
     assert report.limits == []
+    assert report.fetched_at == 0
+    from local_operator.providers.quota_notice import report_is_fresh
+
+    assert not report_is_fresh(report, int(time.time() * 1000))
     assert "No allowance observation" in (report.notes or "")
 
 
@@ -147,6 +155,7 @@ async def test_controller_shared_cache_and_desktop_payload_include_muse(
         app = FastAPI()
         app.state.config_manager = ConfigManager(tmp_path)
         app.include_router(desktop_catalogues.router)
+        app.include_router(desktop_quota.router)
         app.dependency_overrides[get_desktop_auth] = lambda: auth
         app.dependency_overrides[require_desktop] = lambda: None
         async with original_client(
@@ -158,7 +167,50 @@ async def test_controller_shared_cache_and_desktop_payload_include_muse(
                 rows = response.json()["result"]["reports"]
                 assert [row["provider"] for row in rows] == ["deepseek", "meta-muse", "meta-muse"]
                 assert [row["state"] for row in rows] == ["available", "available", "unavailable"]
+                assert [row["notes"] for row in rows] == [
+                    None,
+                    META_MUSE_ALLOWANCE_NOTE,
+                    META_MUSE_NO_OBSERVATION_NOTE,
+                ]
+                assert rows[2]["fetched_at"] == 0
+                assert rows[2]["age_ms"] is None
+            # An account with no receipt is not a live quota confirmation.
+            # Remove only the synthetic observed account to discriminate that
+            # source decision from the sibling's real observation timestamp.
+            observed_account = store.list_credentials("meta-muse")[0]
+            store.delete_credential(observed_account.id)
+            response = await client.get("/v1/desktop/quota-notice?provider=meta-muse&refresh=true")
+            assert response.status_code == 200, response.text
+            assert response.json()["result"]["source"] == "cached"
+            assert response.json()["result"]["age_ms"] is None
         assert network == ["https://api.deepseek.com/user/balance"] * 2
     finally:
         controller.close()
         await auth.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,note",
+    [
+        ("meta-muse", "upstream private error text"),
+        ("meta-muse", ["malformed cached note"]),
+        ("deepseek", META_MUSE_ALLOWANCE_NOTE),
+    ],
+)
+async def test_public_usage_does_not_expose_arbitrary_or_misattributed_notes(provider, note):
+    # Retaining fixed Muse provenance must not open the general error-copy
+    # boundary, even if another provider happens to use the identical text.
+    report = UsageReport(provider=provider, notes=note)
+    controller = SimpleNamespace(cached_usage_reports=lambda _: [report], close=lambda: None)
+    auth = SimpleNamespace(controller=lambda: controller)
+    app = FastAPI()
+    app.include_router(desktop_catalogues.router)
+    app.dependency_overrides[get_desktop_auth] = lambda: auth
+    app.dependency_overrides[require_desktop] = lambda: None
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+    ) as client:
+        response = await client.get("/v1/desktop/usage")
+        assert response.status_code == 200
+        assert response.json()["result"]["reports"][0]["notes"] is None

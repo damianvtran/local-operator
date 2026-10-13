@@ -42,6 +42,11 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.providers.usage import (
+    META_MUSE_ALLOWANCE_NOTE,
+    META_MUSE_NO_OBSERVATION_NOTE,
+    META_MUSE_USAGE_NOTES,
+)
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -788,6 +793,26 @@ def build_usage_body(  # noqa: ANN001
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
         account_note = _account_status_note(report, now_ms, header_ms)
+        muse_note = (
+            report.notes
+            if report.provider == "meta-muse"
+            and isinstance(report.notes, str)
+            and report.notes in META_MUSE_USAGE_NOTES
+            else None
+        )
+        if muse_note and cell_len(muse_note) + 2 > width:
+            # A passive snapshot's source is a correctness qualifier, not
+            # decoration. Compact the WORDS before the layout drops meters.
+            # Fold an ordinary age into the same retained row on short panes;
+            # re-auth/unavailable remedies keep their separate status priority.
+            if muse_note == META_MUSE_ALLOWANCE_NOTE:
+                age = ""
+                if account_note.startswith("last known "):
+                    age = f" ({account_note.removeprefix('last known ')})"
+                    account_note = ""
+                muse_note = f"Sign-in snapshot{age}; r won't update Muse"
+            elif muse_note == META_MUSE_NO_OBSERVATION_NOTE:
+                muse_note = "No sign-in allowance observed"
         if account_note:
             # The two-cell indent is part of the budget the note has to fit in.
             account_note = _fit_status_note(account_note, max(1, width - 2))
@@ -804,9 +829,18 @@ def build_usage_body(  # noqa: ANN001
             cuts.add(len(lines))
             notes.add(len(lines) - 1)
         if report.notes:
-            note = Text(f"  {report.notes}", style=dim)
+            # Muse's source/unknown explanation must travel with its meters
+            # just like an age note. Generic endpoint notes remain decoration;
+            # this does not retune another provider or the theme's dim palette.
+            note = Text(
+                f"  {muse_note or report.notes}",
+                style=Style(color=theme_mod.semantic_color("fg")) if muse_note else dim,
+            )
             note.truncate(max(1, width), overflow="ellipsis")
             lines.append(note)
+            if muse_note:
+                cuts.add(len(lines))
+                notes.add(len(lines) - 1)
         if not report.limits:
             lines.append(Text("  no windows reported", style=dim))
             cuts.add(len(lines))

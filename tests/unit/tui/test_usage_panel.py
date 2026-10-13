@@ -2724,3 +2724,51 @@ async def test_the_scrolled_panel_never_leads_with_an_annotation() -> None:
             if panel.view_offset == before:
                 break
     assert frames > 8, f"premise: this size scrolls far enough to cut mid-block ({frames})"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_muse_source_survives_compaction_with_its_meters(stale) -> None:
+    from local_operator.providers.usage import META_MUSE_ALLOWANCE_NOTE
+
+    now = 200 * 60_000
+    report = _report(
+        _percent("meta-muse:window", "5 hour", 31, shared=True),
+        _percent("meta-muse:weekly", "7 day", 12, shared=True),
+        provider="meta-muse",
+    )
+    report.fetched_at = now - (120 * 60_000 if stale else 0)
+    report.notes = META_MUSE_ALLOWANCE_NOTE
+    body = build_usage_body([report], 48, now, now)
+    panel = UsagePanel()
+    panel._offset = 0
+    rows, _ = panel._window_rows(body, 4)
+    text = "\n".join(row.plain for row in rows)
+    assert "Sign-in snapshot" in text and "r won't update Muse" in text
+    assert "31%" in text and "12%" in text
+    if stale:
+        assert "2h ago" in text
+    source = next(row for row in body.lines if "Sign-in snapshot" in row.plain)
+    assert source.style == Style(color=theme_mod.semantic_color("fg"))
+
+
+def test_unknown_muse_explanation_survives_compaction_without_inventing_numbers() -> None:
+    from local_operator.providers.usage import META_MUSE_NO_OBSERVATION_NOTE
+
+    report = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
+    body = build_usage_body([report], 48, 200 * 60_000)
+    panel = UsagePanel()
+    panel._offset = 0
+    rows, _ = panel._window_rows(body, 2)
+    text = "\n".join(row.plain for row in rows)
+    assert "No allowance observation recorded." in text
+    assert "%" not in text
+    assert body.notes
+    assert rows[1].style == Style(color=theme_mod.semantic_color("fg"))
+
+
+def test_other_provider_notes_remain_decorative() -> None:
+    report = UsageReport(provider="deepseek", notes="nonessential endpoint detail")
+    body = build_usage_body([report], 48, 200 * 60_000)
+    assert not body.notes
+    source = next(row for row in body.lines if "nonessential" in row.plain)
+    assert source.style == Style(color=theme_mod.semantic_color("dim"))
