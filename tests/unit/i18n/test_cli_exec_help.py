@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import asyncio
+import gc
 import importlib
 import importlib.util
 import inspect
@@ -62,12 +64,8 @@ def test_bootstrap_never_repairs_or_activates(tmp_path, monkeypatch, payload, ex
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
 
 
-@pytest.mark.parametrize(
-    "payload, expected", [(b"values:\n  language: fr\n", "fr"), (b"\xff\xfe", "es")]
-)
-@pytest.mark.parametrize("argv", [["--help"], ["exec", "--help"], ["--version"]])
-def test_real_entrypoint_exits_without_startup_side_effects(
-    tmp_path, monkeypatch, capsys, payload, expected, argv
+def _run_real_entrypoint(
+    tmp_path, monkeypatch, capsys, payload, expected, argv, *, gc_in_main=False
 ):
     helper = _bootstrap()
     from local_operator import cli
@@ -88,12 +86,28 @@ def test_real_entrypoint_exits_without_startup_side_effects(
     resolved = []
 
     def record_locale():
+        if gc_in_main:
+            # Models the collector firing at an arbitrary allocation inside the
+            # entrypoint, which is when CPython finalises whatever garbage is
+            # still waiting from earlier tests.
+            gc.collect()
         locale = actual_resolve()
         resolved.append(locale)
         return locale
 
     monkeypatch.setattr(helper, "help_locale", record_locale)
     previous = text.active_locale()
+    # cli.main() replaces the root logger's handlers with a stderr StreamHandler
+    # (configure_cli_logging) whose stream is capsys's buffer for this test. A
+    # coroutine/Task leaked by an EARLIER test (e.g. a pending Session
+    # "persist-subagent-roster" task) is only finalised when the collector next
+    # runs, and asyncio reports that through the root logger: collected before
+    # main() it lands in pytest's own capture handlers, collected after it lands
+    # in the captured stderr this test asserts is empty. Drain that garbage now,
+    # while logging still routes to pytest, so the assertion below sees only what
+    # the entrypoint itself wrote. Nothing is silenced: a record the entrypoint
+    # emits still fails the test.
+    gc.collect()
     with pytest.raises(SystemExit) as result:
         cli.main()
     assert result.value.code == 0
@@ -103,6 +117,60 @@ def test_real_entrypoint_exits_without_startup_side_effects(
     assert text.active_locale() == previous
     assert list(tmp_path.iterdir()) == [path]
     assert path.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "payload, expected", [(b"values:\n  language: fr\n", "fr"), (b"\xff\xfe", "es")]
+)
+@pytest.mark.parametrize("argv", [["--help"], ["exec", "--help"], ["--version"]])
+def test_real_entrypoint_exits_without_startup_side_effects(
+    tmp_path, monkeypatch, capsys, payload, expected, argv
+):
+    _run_real_entrypoint(tmp_path, monkeypatch, capsys, payload, expected, argv)
+
+
+@pytest.fixture
+def leaked_pending_roster_task():
+    """Leave a pending, unreachable-but-uncollected Task, as a prior test might.
+
+    Mirrors CI 38630407658: ``Session._persist_subagent_roster`` scheduled as
+    ``persist-subagent-roster`` on a loop that is then closed, so its finalisation
+    logs "Task was destroyed but it is pending!". Cyclic so only ``gc.collect()``
+    frees it, and the collector is held off until the test decides when it runs.
+    """
+    was_enabled = gc.isenabled()
+    gc.disable()
+    loop = asyncio.new_event_loop()
+
+    async def roster():
+        await asyncio.sleep(3600)
+
+    task = loop.create_task(roster(), name="persist-subagent-roster")
+    loop.run_until_complete(asyncio.sleep(0))
+    holder: dict[str, object] = {"task": task}
+    holder["self"] = holder
+    del task, holder
+    loop.close()
+    try:
+        yield
+    finally:
+        gc.collect()
+        if was_enabled:
+            gc.enable()
+
+
+def test_real_entrypoint_stderr_is_not_polluted_by_prior_tests_garbage(
+    tmp_path, monkeypatch, capsys, leaked_pending_roster_task
+):
+    _run_real_entrypoint(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        b"values:\n  language: fr\n",
+        "fr",
+        ["--help"],
+        gc_in_main=True,
+    )
 
 
 def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
