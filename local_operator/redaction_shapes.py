@@ -5939,6 +5939,65 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     return result
 
 
+# Consume an entire quoted token, including escaped pairs and an unterminated
+# tail, before asking the JSON decoder whether it is valid. Consuming the tail
+# prevents retrying each escaped quote in a malformed suffix (quadratic work),
+# and never recovers a valid-looking token from inside an invalid escape.
+_JSON_QUOTED_VALUE = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\\?\Z)', re.DOTALL)
+_JSON_VALUE_KEY_SUFFIX = re.compile(r"\s*:")
+
+
+def scrub_known_json_string_values(text: str, values: Iterable[Optional[str]]) -> str:
+    """Mask known literals in valid escaped JSON scalars, then serialize the copy.
+
+    This is ADDITIVE, after the original composed shape/value pass: masking a
+    short known substring first could destroy an unknown credential's shape and
+    release its remainder. No decoded shape judgement belongs here. The existing
+    shape pass and its containment learning must see the original text.
+
+    A JSON scalar denotes characters, not a permutation of them. Judge those
+    characters with the existing literal-value boundaries, without lowering the
+    unrelated transformed-spelling floor. Validate complete tokens strictly;
+    malformed escapes, keys, and unchanged spellings keep their exact bytes.
+    This does not infer semantic name spans inside tool-result prose: a name
+    byte-identical to an independently registered secret value stays masked.
+    Normal noncolliding names remain readable; names never exempt value text.
+    """
+    if "\\" not in text:
+        return text
+    ordered = sorted(
+        {value for value in values if isinstance(value, str) and value},
+        key=lambda value: (-len(value), value),
+    )
+    if not ordered:
+        return text
+    # Compile once per value, not once per scalar. The walk has the same linear
+    # value-count factor as the existing literal pass; it enumerates no encodings.
+    literals = [
+        (value, _word_pattern(value) if _is_word_like(value) else None) for value in ordered
+    ]
+
+    def judge(match: Match[str]) -> str:
+        token = match.group(0)
+        if "\\" not in token or _JSON_VALUE_KEY_SUFFIX.match(text, match.end()):
+            return token
+        try:
+            decoded = json.loads(token)
+        except ValueError:
+            return token
+        masked = decoded
+        for value, pattern in literals:
+            if value in masked:
+                masked = (
+                    pattern.sub(REDACTION_MARKER, masked)
+                    if pattern is not None
+                    else masked.replace(value, REDACTION_MARKER)
+                )
+        return token if masked == decoded else json.dumps(masked)
+
+    return _JSON_QUOTED_VALUE.sub(judge, text)
+
+
 def match_shape_names(text: str) -> list[str]:
     """The LABELS of the shapes present in ``text`` — never the values.
 
