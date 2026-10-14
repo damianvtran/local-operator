@@ -53,11 +53,14 @@ def creation_policy(values: Mapping[str, Any], kind: str) -> LinkPolicy:
     defaults = _mapping(_hub(values).get("auto_update", {}))
     if kind not in ("agent", "team", "skill"):
         raise LinkError("invalid-link-policy", "hub link kind is unsupported")
-    default = (
-        True if kind == "skill" else defaults.get("agents" if kind == "agent" else "teams", True)
-    )
+    # One switch per kind: skills have NO kind-wide shared settings key (adding one
+    # is a settings/i18n catalogue change owned by that lane), so a skill's
+    # creation default follows the SAME ``hub.auto_update.agents`` switch the
+    # runner's ``settings.auto_for('skill')`` ceiling reads. The two cannot
+    # disagree, which is what round-1 QA flagged.
+    default = defaults.get("agents" if kind in ("agent", "skill") else "teams", True)
     # Preserve an explicitly stored BOOL OFF, not truthiness of arbitrary YAML.
-    # Skills have no new shared settings key; missing means the canonical ON.
+    # Missing (or a non-bool spelling) means the ON default.
     return LinkPolicy(subscribe=default if type(default) is bool else True, auto_push=False)
 
 

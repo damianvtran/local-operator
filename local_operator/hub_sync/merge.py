@@ -153,8 +153,11 @@ class FieldInput:
     field: str
     kind: Literal["markdown", "text", "roster", "scalar"]
     base: "str | list[Any] | None"  # None = baseline unknown for this field
-    local: "str | list[Any]"
-    remote: "str | list[Any]"
+    #: ``None`` is a REMOVAL (or an absent manifest file): the decide() table
+    #: distinguishes absent from edited on every side, and the per-file skill
+    #: merge relies on it for add/remove/delete semantics.
+    local: "str | list[Any] | None"
+    remote: "str | list[Any] | None"
 
 
 @dataclass(frozen=True)
@@ -210,7 +213,9 @@ class MergeResult:
 
     field: str
     outcome: Outcome
-    merged: "str | list[Any]"
+    #: ``None`` when the merged side is ABSENT: an add/remove decision in the
+    #: file-per-field skill merge (absence is not an empty edit).
+    merged: "str | list[Any] | None"
     regions: tuple[RegionReport, ...] = ()
     warnings: tuple[str, ...] = ()
     # ``dataclasses.field``, not the bare name: this class declares a FIELD called

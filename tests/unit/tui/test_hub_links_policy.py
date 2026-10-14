@@ -9,6 +9,7 @@ direct ``action_*`` call), because round 3 found the arming key `a` could be
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from pathlib import Path
 from typing import Any
@@ -210,9 +211,9 @@ async def test_typed_ahead_banana_never_egresses(
 ) -> None:
     """D15: typed-ahead 'banana' (two `a`s) must NOT publish.
 
-    `/hub` takes focus while the user may still be typing; every letter of
-    'banana' arrives within the settle window, so the printable-key guard
-    swallows them.
+    `/hub` takes focus while the user may still be typing; a printable key can
+    never engage or dispatch (round-1 Q6 made that deterministic), so every
+    letter of 'banana' is swallowed whole.
     """
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -230,6 +231,67 @@ async def test_typed_ahead_banana_never_egresses(
         await pilot.pause()
         assert app.focused.__class__.__name__ == "HubLinksPanel"
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+
+
+@pytest.mark.asyncio
+async def test_printable_keys_never_write_until_a_bound_key_engages_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-1 Q6: engagement is DETERMINISTIC, not a wall-clock race.
+
+    QA measured the former 200 ms window being defeated at realistic cadence
+    (~65 ms/key): `/hub`, enter, then `h`, space, `a` wrote PRIVATE auto_push
+    8/8. A printable key can now never engage or dispatch; only a key the panel
+    BINDS (one harmless `down`, valid with a single link) opens the door, after
+    which `a` IS the real action.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(
+        tmp_path, visibility="org", tenant="acme", auto_push=False, attest_revision_cas=True
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app._editor()
+        editor.focus()
+        editor.load_text("/hub")
+        await pilot.press("enter")
+        await pilot.pause()
+        # The realistic cadence that defeated the old time window.
+        for key in ("h", "space", "a"):
+            await pilot.press(key)
+            await asyncio.sleep(0.065)
+        await pilot.pause()
+        assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+        # A bound key engages; the next printable IS the action.
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_card_teaches_its_engage_key_until_engaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q6: the swallowed keys have a teacher on the frame ("↑↓ to begin")."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_link(tmp_path, visibility="org", tenant="acme", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = _mounted_panel(app)
+        hint = panel._hint_row(True).plain
+        assert "↑↓ to begin" in hint, hint
+        await pilot.press("down")
+        await pilot.pause()
+        assert "↑↓ to begin" not in panel._hint_row(True).plain
 
 
 @pytest.mark.asyncio

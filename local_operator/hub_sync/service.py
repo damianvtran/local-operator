@@ -60,7 +60,7 @@ from local_operator.hub_sync.merge import (
     merge_field,
     replace_field,
 )
-from local_operator.hub_sync.report import ApplyReport, ItemMergeReport
+from local_operator.hub_sync.report import ApplyReport, ItemMergeReport, ItemOutcome
 from local_operator.hub_sync.settings import HubSyncSettings
 
 logger = logging.getLogger(__name__)
@@ -548,8 +548,8 @@ def _missing_roles(ctx: HubSyncContext, results: Sequence[MergeResult]) -> tuple
     """A roster naming a role nobody has installed is a warning, never a refusal (A7)."""
 
     roster = next((r for r in results if r.field == "members" and r.outcome == "merged"), None)
-    if roster is None or isinstance(roster.merged, str):
-        return ()  # a roster is always a list; the str arm only narrows the type
+    if roster is None or not isinstance(roster.merged, list):
+        return ()  # a roster is always a list; the other arms only narrow the type
     slots = roster.merged
     try:
         from local_operator.agent_profiles import list_seeds
@@ -575,6 +575,29 @@ def _merged_fields(c: chk.ItemCheck, report: ItemMergeReport) -> dict[str, Any]:
         if r.outcome == "merged":
             fields[r.field] = r.merged
     return fields
+
+
+def _would_empty_a_text_field(c: chk.ItemCheck, report: ItemMergeReport) -> bool:
+    """True when a merged TEXT field is empty although the baseline still has text.
+
+    The complement of the survivor proof: removals the engine EXPLAINED are still
+    removals, and auto-applying one that empties a field the hub published would
+    discard text nobody signed off on. Roster/scalar fields are not text loss and
+    keep their own rules.
+    """
+
+    if not isinstance(c.base, Mapping):
+        return False
+    merged = _merged_fields(c, report)
+    for name, merge_kind, _max_chars, _max_items in _specs(c.kind):
+        if merge_kind not in ("text", "markdown"):
+            continue
+        base_value = c.base.get(name)
+        if not (isinstance(base_value, str) and base_value.strip()):
+            continue
+        if not str(merged.get(name) or "").strip():
+            return True
+    return False
 
 
 def _write_agent(ctx: HubSyncContext, c: chk.ItemCheck, merged: Mapping[str, Any]) -> None:
@@ -640,6 +663,166 @@ def _local_fields_for_backup(c: chk.ItemCheck) -> dict[str, Any]:
     return dict(c.local or {})
 
 
+def _apply_skill(
+    ctx: HubSyncContext,
+    c: chk.ItemCheck,
+    *,
+    prefer: Prefer = "none",
+    replace: Literal[None, "remote", "local"] = None,
+    dry_run: bool = False,
+    auto: bool = False,
+    allow_llm: bool = True,
+) -> ItemMergeReport:
+    """Merge and WRITE one skill through the journaled managed-skill storage.
+
+    A skill's local copy is a managed alias directory, so the write path is the
+    crash-safe staged swap (journal + backup + concurrent-edit re-verification +
+    policy CAS) that ``ManagedSkillStorage`` owns -- NEVER a bare filesystem
+    write and never a generic-field write. The baseline advances ONLY inside that
+    same transaction (the storage finalizes it), which is what makes the old
+    "baseline moved, bytes did not" failure impossible.
+
+    Merge model (frozen): local == baseline fast-forwards to the remote document;
+    both sides changed -> per-FILE three-way merge through the shared engine;
+    any unresolved file -> a conflict report with NOTHING written and the
+    baseline NOT advanced.
+    """
+    from local_operator.hub_sync.outbound import merge_skill_document
+    from local_operator.hub_sync.skill_document import (
+        SkillDocument,
+        SkillValidationError,
+    )
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from local_operator.hub_sync.transactions import TransactionError
+
+    key = st.item_key(c.kind, c.local_id)
+
+    def fold(fn: Callable[[dict[str, Any]], None]) -> None:
+        def inner(doc: dict[str, Any]) -> None:
+            item = doc.setdefault("items", {}).get(key)
+            if item is not None:
+                fn(item)
+
+        ctx.store().mutate(inner)
+
+    def fail(cls: str, message: str, outcome: ItemOutcome = "failed") -> ItemMergeReport:
+        fold(lambda item: st.record_failure(item, cls, message))
+        return ItemMergeReport(
+            c.kind,
+            c.local_id,
+            c.name,
+            c.hub_id,
+            outcome,
+            error_class=cls,
+            message=message,
+        )
+
+    record = prov.read_baseline(ctx.config_dir, "skill", c.local_id)
+    if record is None or record.identity is None or record.local_alias is None:
+        # A legacy/unknown-origin skill link has no writer identity or alias:
+        # refusing here is exactly what keeps a baseline from advancing without
+        # a write (the invariant the QA repro tripped over).
+        return fail("baseline-unknown", "this skill link has no writer identity yet", "refused")
+    alias = record.local_alias
+
+    try:
+        local_doc = SkillDocument.from_json(dict(c.local or {}))
+        remote_doc = SkillDocument.from_json(dict(c.remote or {}))
+        base_doc = SkillDocument.from_json(dict(c.base)) if c.base else None
+    except SkillValidationError as exc:
+        return fail("merge-refused", f"the skill document is invalid: {exc}", "refused")
+
+    results: list[MergeResult] = []
+    if replace == "remote":
+        merged: SkillDocument | None = remote_doc
+    elif replace == "local":
+        merged = local_doc
+    else:
+        merged_json, results = merge_skill_document(
+            base_doc.to_json() if base_doc is not None else None,
+            local_doc.to_json(),
+            remote_doc.to_json(),
+            opts=MergeOptions(
+                prefer=prefer,
+                allow_llm=allow_llm,
+                resolver=_resolver_for(ctx, allow_llm),
+            ),
+        )
+        merged = None
+        if merged_json is not None:
+            merged = SkillDocument.from_json(dict(merged_json))
+    if merged is None:
+        message = (
+            "the merge left files neither side can keep (an edit against a removal)"
+            if results
+            else "the merged skill document is not valid"
+        )
+        return fail("merge-refused", message, "needs-review")
+
+    # Source-name space comparison: nothing to write when the merge reproduced the
+    # local document exactly (the remote and local already agree on content).
+    if merged.to_json() == local_doc.to_json() and replace is None:
+        fold(st.settle_unchanged)
+        return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
+    if dry_run:
+        return ItemMergeReport(
+            c.kind, c.local_id, c.name, c.hub_id, "would-merge", fields=tuple(results)
+        )
+
+    try:
+        local_write = merged.with_name(alias)
+        # The disk copy is alias-rendered; its fingerprint is what the storage
+        # re-verifies under its lock (a local edit since this check refuses).
+        before_fingerprint = local_doc.with_name(alias).fingerprint
+    except SkillValidationError as exc:
+        return fail(
+            "merge-refused", f"the merged skill cannot be rendered locally: {exc}", "refused"
+        )
+
+    baseline = prov.make_record(
+        "skill", c.local_id, c.hub_id, c.tenant_id, dict(c.remote or {}), "merge-pull"
+    )
+    from dataclasses import replace as dc_replace
+
+    baseline = dc_replace(
+        baseline,
+        identity=record.identity,
+        local_alias=alias,
+        remote_revision=c.remote_revision or record.remote_revision,
+    )
+    storage = ManagedSkillStorage(ctx.config_dir)
+    try:
+        storage.apply(
+            record.identity,
+            alias,
+            local_write,
+            baseline,
+            expected_fingerprint=before_fingerprint,
+            automatic=auto,
+            basis="merge-pull",
+        )
+    except (LinkError, TransactionError) as exc:
+        code = getattr(exc, "code", "hub-error")
+        return fail(str(code), str(exc))
+    except (ValueError, KeyError) as exc:
+        return fail("merge-refused", f"the result was refused: {exc}", "refused")
+    except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
+        logger.warning("hub skill apply failed for %s", c.name, exc_info=True)
+        return fail("hub-error", f"could not write the update: {exc}")
+
+    summary = _summary(results)
+    fold(lambda item: st.settle_applied(item, summary, None))
+    return ItemMergeReport(
+        c.kind,
+        c.local_id,
+        c.name,
+        c.hub_id,
+        "merged",
+        applied=True,
+        fields=tuple(results),
+    )
+
+
 def apply_one(
     ctx: HubSyncContext,
     c: chk.ItemCheck,
@@ -677,6 +860,20 @@ def apply_one(
     if c.verdict == "up-to-date" and not replace_differs:
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "up-to-date")
 
+    if c.kind == "skill":
+        # Skills write through the managed-skill transaction, not through the
+        # generic-field path: see _apply_skill for the frozen merge model and the
+        # baseline-advances-only-with-a-write invariant.
+        return _apply_skill(
+            ctx,
+            c,
+            prefer=prefer,
+            replace=replace,
+            dry_run=dry_run,
+            auto=auto,
+            allow_llm=allow_llm,
+        )
+
     report = merge_item(
         ctx,
         c,
@@ -696,7 +893,7 @@ def apply_one(
 
         ctx.store().mutate(inner)
 
-    def fail(cls: str, message: str, outcome: str = "failed") -> ItemMergeReport:
+    def fail(cls: str, message: str, outcome: ItemOutcome = "failed") -> ItemMergeReport:
         # Bind the input/config fingerprint on a prompt-too-long failure so the
         # cheap scheduled eligibility retry can refuse to re-send an unchanged
         # (still-too-long) request and only re-arm when it actually changed.
@@ -723,6 +920,17 @@ def apply_one(
         if "large-shrink" in report.warnings and not _deletion_covered(report):
             return fail(
                 "merge-refused", "the merged text is much shorter than both sides", "needs-review"
+            )
+        if _would_empty_a_text_field(c, report):
+            # A two-sided complementary removal can legitimately reach '' while the
+            # hub still holds text (each side removed what the other kept). That is
+            # not the ratio-guard's "unexplained" loss, but auto-applying it would
+            # silently discard hub-held text, so it is HELD for review; a manual
+            # apply (auto=False) stays available.
+            return fail(
+                "merge-refused",
+                "the merge would empty text the hub still has; held for review",
+                "needs-review",
             )
         if c.base is None:
             return fail(
@@ -877,6 +1085,12 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     counts = {"available": 0, "failed": 0, "updating": 0, "up-to-date": 0, "applied": 0}
     items: list[dict[str, Any]] = []
     for item in doc.get("items", {}).values():
+        kind = item.get("kind", "agent")
+        if kind not in ("agent", "team"):
+            # The legacy typed projection never learned a third kind: skill rows
+            # (and their counts) travel on the capability-gated /hub/links route
+            # only, so an older consumer can never receive an unexpected shape.
+            continue
         state = st.effective_state(item, now)
         counts[state] = counts.get(state, 0) + 1
         # An up-to-date item is listed only when it carries the sign-in fact
@@ -884,7 +1098,6 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
         # this list is the only place the UI can learn it (UX round 2, U11).
         if state == "up-to-date" and item.get("error_class") != "no-credential":
             continue
-        kind = item.get("kind", "agent")
         auto = settings.auto_for(kind)
         items.append(
             {

@@ -1034,3 +1034,29 @@ async def test_capture_round6_frames(tmp_path: Path, monkeypatch: pytest.MonkeyP
     for name in ("orphan-header-80x24", "selection-follows-link", "consent-id-pointer"):
         svg = OUT / f"{name}.svg"
         assert svg.exists() and "<svg" in svg.read_text()[:200], name
+
+
+async def test_capture_round1_engage_hint_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engage-hint frames (round-1 Q6): the card opened, NOT yet engaged.
+
+    The typed-ahead guard is deterministic (a printable key can never engage or
+    dispatch), so until a bound key arrives the card must teach the way in --
+    `↑↓ to begin` -- at both a narrow and a wide size.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+    one = [
+        dict(
+            kind="agent",
+            local_id="a1",
+            name="coder",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+    ]
+    await _capture("engage-hint-40x24", size=(40, 24), links=one)
+    await _capture("engage-hint-100x30", size=(100, 30), links=one)

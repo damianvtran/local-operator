@@ -86,6 +86,10 @@ def hint_confirm() -> Msg:
     return Msg("tui.hub_links.hint.confirm", {})
 
 
+def hint_engage() -> Msg:
+    return Msg("tui.hub_links.hint.engage", {})
+
+
 def hint_range(*, first: str, last: str, total: str) -> Msg:
     return Msg("tui.hub_links.hint.range", {"first": first, "last": last, "total": total})
 

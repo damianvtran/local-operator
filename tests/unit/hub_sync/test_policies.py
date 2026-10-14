@@ -3,6 +3,7 @@
 import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -286,3 +287,26 @@ def test_private_link_is_unaffected_by_the_carve_out(tmp_path: Path) -> None:
             ineligible_reason="unsafe-publication",
         )
     assert refusal.value.code == "unsafe-publication"
+
+
+def test_skill_creation_default_follows_the_agents_switch() -> None:
+    """Q9: the creation default and the runner ceiling read ONE switch.
+
+    Skills have no kind-wide shared settings key (adding one is a settings/i18n
+    catalogue change owned by that lane), so ``creation_policy`` must agree with
+    ``HubSyncSettings.auto_for('skill')`` -- both follow hub.auto_update.agents.
+    """
+
+    from local_operator.hub_sync.policies import creation_policy
+    from local_operator.hub_sync.settings import HubSyncSettings
+
+    off = {"hub": {"auto_update": {"agents": False, "teams": True}}}
+    assert creation_policy(off, "skill").subscribe is False
+    assert HubSyncSettings.from_values(off).auto_for("skill") is False
+    on = {"hub": {"auto_update": {"agents": True, "teams": False}}}
+    assert creation_policy(on, "skill").subscribe is True
+    # An unset or non-bool spelling is the canonical ON, on both sides.
+    unset: dict[str, Any] = {"hub": {}}
+    assert creation_policy(unset, "skill").subscribe is True
+    odd = {"hub": {"auto_update": {"agents": "yes"}}}
+    assert creation_policy(odd, "skill").subscribe is True

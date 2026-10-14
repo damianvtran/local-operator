@@ -301,6 +301,12 @@ def publish_document(
             if key in fields
         }
         return hub_team_document(row, agent_registry=agent_registry, overrides=overrides)
+    if kind == "skill":
+        from local_operator.hub_sync.skill_document import SkillDocument
+
+        # A skill's canonical merged fields ARE its wire manifest; validating it
+        # here (again) is the last refusal point before a paid preview.
+        return SkillDocument.from_json(dict(fields)).to_json()
     raise LinkError("unsupported-kind", f"{kind} publication is not implemented")
 
 

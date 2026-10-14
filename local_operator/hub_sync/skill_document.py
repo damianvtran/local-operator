@@ -93,6 +93,14 @@ def validate_path(path: Any) -> str:
         or any(c.isspace() and c not in " " for c in path)
     ):
         raise _invalid("skill path is unsafe")
+    # Format characters (Unicode category Cf, e.g. U+202E RIGHT-TO-LEFT OVERRIDE)
+    # render invisibly while carrying bytes: they can smuggle a second spelling of
+    # a path past the NFC/casefold collision rule (and past a reviewer's eyes).
+    # Unpaired surrogates are already refused by ``_text_bytes`` (strict UTF-8).
+    import unicodedata as _ud
+
+    if any(_ud.category(c) == "Cf" for c in path):
+        raise _invalid("skill path must not contain Unicode format characters")
     if len(raw) > MAX_PATH_BYTES or len(parts) > MAX_PATH_SEGMENTS:
         raise _large("skill path exceeds v1 bounds")
     if path != "SKILL.md" and (
@@ -329,7 +337,27 @@ class SkillDocument:
         optional metadata, comments, scripts and prose remain byte-for-byte;
         changing the local display alias must not become a remote rename.
         """
-        validate_name(name)
+        return self._with_frontmatter_scalar("name", name, allow_description=False)
+
+    def with_description(self, description: str) -> "SkillDocument":
+        """Re-render the frontmatter ``description`` scalar from the merged field.
+
+        Name and description are stored TWICE -- as manifest fields and as the
+        SKILL.md frontmatter -- and construction refuses a document where the two
+        disagree. A merge that edits the description field must therefore render
+        the frontmatter copy in the same write, or the merged document would be
+        invalid; only the scalar span is replaced, so prose, comments and
+        metadata stay byte-for-byte.
+        """
+        return self._with_frontmatter_scalar("description", description, allow_description=True)
+
+    def _with_frontmatter_scalar(
+        self, key: str, value: str, *, allow_description: bool
+    ) -> "SkillDocument":
+        if key == "name":
+            validate_name(value)
+        elif len(value) > MAX_DESCRIPTION_CHARS:
+            raise _invalid("skill description exceeds v1 bounds")
         files: list[SkillFile] = []
         for file in self.files:
             content = file.content
@@ -337,17 +365,19 @@ class SkillDocument:
                 block, start, _ = _frontmatter_span(content)
                 node = yaml.compose(block, Loader=_StrictLoader)
                 assert isinstance(node, yaml.MappingNode)  # validated by construction
-                value = next(value for key, value in node.value if key.value == "name")
-                left, right = start + value.start_mark.index, start + value.end_mark.index
+                scalar = next(item for k, item in node.value if k.value == key)
+                left, right = start + scalar.start_mark.index, start + scalar.end_mark.index
                 replaced = content[left:right]
                 # Block-style YAML scalar spans own their terminal newline;
                 # retain it so the next metadata key cannot join the alias.
                 separator = (
                     "\r\n" if replaced.endswith("\r\n") else "\n" if replaced.endswith("\n") else ""
                 )
-                content = content[:left] + name + separator + content[right:]
+                content = content[:left] + value + separator + content[right:]
             files.append(SkillFile(file.path, content))
-        return SkillDocument(name, self.description, tuple(files))
+        name = value if key == "name" else self.name
+        description = value if key == "description" else self.description
+        return SkillDocument(name, description, tuple(files))
 
     @classmethod
     def from_directory(cls, root: Path) -> "SkillDocument":

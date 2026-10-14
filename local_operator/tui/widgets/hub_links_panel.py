@@ -45,7 +45,6 @@ CONFIRM_EGRESS_KEY = "ctrl+y"
 #: How long after the panel takes focus a printable key is treated as typed-ahead
 #: (swallowed) rather than intent (round-3 D15). Short: the burst a fast typist
 #: produces arrives within ~200 ms of the open.
-TYPED_AHEAD_WINDOW_S = 0.2
 
 #: Tab / shift+tab are consumed by the panel (round-5 D29): they would otherwise
 #: move focus OFF the card, stranding the overlay open but unfocused so `esc`/`q`
@@ -174,13 +173,11 @@ class HubLinksPanel(Static):
         #: Whether the panel has been DELIBERATELY engaged by a control key since
         #: it opened (round-3 D15). Typed-ahead text arrives as a burst of
         #: printable keys immediately after `/hub` takes focus; the panel must
-        #: not treat that burst as policy-write commands. The first key the user
-        #: PRESSES WITH INTENT — a navigation or action key, or a printable key
-        #: after the burst settles — engages it; printable policy-write keys
-        #: (`a`/`s`) before engagement are ignored.
+        #: not treat that burst as policy-write commands. Engagement is
+        #: DETERMINISTIC (round-1 Q6, no wall-clock window): only a key the panel
+        #: BINDS (arrows, esc, r, ctrl+y) opens the door, and a printable key
+        #: never engages and never writes.
         self._engaged: bool = False
-        #: When (monotonic) the panel last took focus, for the typed-ahead window.
-        self._opened_at: float = 0.0
         # Mounted once and kept (the `/usage` rule), so it must START hidden:
         # `display` defaults True, and a visible 0-row host in the toast layer
         # still nudged the transcript one cell left before any fetch. `close()`
@@ -191,14 +188,12 @@ class HubLinksPanel(Static):
 
     def start_fetch(self) -> None:
         """Open the panel and mark a fetch in flight (kept rows, not a skeleton)."""
-        import time
 
         self._loading = True
         self._refreshing = False
         self._error = ""
         self._notice = ""
         self._engaged = False
-        self._opened_at = time.monotonic()
         # A re-fetch can change the revision under an armed prompt; drop it so a
         # confirm can never write a value the user did not see (round-4 D24).
         self._consent_link_id = None
@@ -326,17 +321,14 @@ class HubLinksPanel(Static):
 
         1. TYPED-AHEAD. `/hub` takes focus while the user may still be typing
            ahead; that literal text must never reach a policy-write key. Until
-           the panel is ENGAGED (a navigation/action key, a control key, or a
-           printable key pressed after the burst settles) a printable key is
-           swallowed. The burst window is short and real: a fast typist's
-           text arrives within ~200 ms of the open.
+           the panel is ENGAGED (a key the panel BINDS: arrows, esc, r, ctrl+y)
+           a printable key is swallowed whole — deterministically, with no time
+           window to race against. The frame teaches the door (`↑↓ to begin`).
         2. DISARM. Any key OTHER than the named confirm cancels an armed consent
            prompt (a second `a`, `s`, `r`, arrows — none may complete a
            publication). `escape` cancels the PROMPT only and leaves the overlay
            open; every other key falls through to its normal binding.
         """
-        import time
-
         key = event.key
         # D29: consume tab/shift+tab so focus cannot leave the card while it is
         # open. Left unhandled they move focus to the TranscriptView, stranding
@@ -354,24 +346,29 @@ class HubLinksPanel(Static):
         # and ENGAGE the panel, so `h<space>a` wrote policy (round-4 D23). The
         # character is the reliable signal; `event.is_printable` is Textual's own.
         printable = event.is_printable
-        # 1. Typed-ahead: a printable key in the settle window, before
-        # engagement, is swallowed entirely (no binding, no write).
-        if not self._engaged and printable:
-            if time.monotonic() - self._opened_at <= TYPED_AHEAD_WINDOW_S:
+        # 1. Typed-ahead: while the panel is NOT engaged a printable key is always
+        # swallowed — no binding, no write, no ENGAGEMENT. Round-1 Q6: the former
+        # 200 ms wall-clock window was defeated by realistic cadence (QA measured
+        # ~65 ms/key: `/hub`, enter, then `h`, space, `a` wrote private auto_push
+        # 8/8), so engagement is now DETERMINISTIC: only a key the panel BINDS
+        # (arrows, esc, r, ctrl+y — non-printable by construction) opens the door,
+        # and the card teaches it (`↑↓ to begin`). A printable key can only act
+        # AFTER such an engage, so typed-ahead text can never write.
+        if not self._engaged:
+            if printable:
                 event.stop()
                 return
-            self._engaged = True  # the burst settled; this keystroke is intent
-        elif not printable and key in {
-            # The panel's own entries are (key, action, description) tuples;
-            # Textual also accepts ``Binding`` objects, whose key is the attribute.
-            entry[0] if isinstance(entry, tuple) else entry.key
-            for entry in self.BINDINGS
-        }:
-            # D30: engage only on a key the panel BINDS (its BINDINGS is the one
-            # source of truth). `enter`, ctrl chords and F-keys are not panel
-            # commands, so they must not count as intent — otherwise a burst like
-            # `h`,enter,`a` engages and `a` writes policy.
-            self._engaged = True
+            if key in {
+                # The panel's own entries are (key, action, description) tuples;
+                # Textual also accepts ``Binding`` objects, whose key is the attribute.
+                entry[0] if isinstance(entry, tuple) else entry.key
+                for entry in self.BINDINGS
+            }:
+                # D30: engage only on a key the panel BINDS (its BINDINGS is the one
+                # source of truth). `enter`, ctrl chords and F-keys are not panel
+                # commands, so they must not count as intent — otherwise a burst like
+                # `h`,enter,`a` engages and `a` writes policy.
+                self._engaged = True
         # 2. Disarm an armed consent on any key but the confirm itself.
         if self._consent_link_id is not None and key != CONFIRM_EGRESS_KEY:
             self._consent_link_id = None
@@ -826,6 +823,11 @@ class HubLinksPanel(Static):
             return Text(_t(_k.policy_saving()), style="dim")
         width = self._content_width()
         segments: list[str] = []
+        if not self._engaged:
+            # Round-1 Q6: until a bound key engages the card, printable keys are
+            # swallowed, so the frame itself must teach the door in. Never in the
+            # drop list: without it the swallowed keys have no teacher on screen.
+            segments.append(_t(_k.hint_engage()))
         if not whole:
             total = len(self._rows)
             segments.append(

@@ -807,3 +807,52 @@ def test_record_checks_folds_an_observed_sync_contract_for_its_source(env) -> No
     doc = st.StatusStore(root).load()
     assert "https://hub.test/v1" in doc["server"]["sources"]
     assert identity.hub_source == "https://hub.test/v1"
+
+
+def test_auto_apply_holds_a_merge_that_would_empty_text_the_hub_has(env) -> None:
+    """Q5: complementary removals that empty a field are HELD for review (auto).
+
+    Each side removed what the other kept, so the engine can explain every
+    dropped span (not the ratio-guard's "unexplained" loss) -- but auto-applying
+    '' would silently discard text the hub still holds. A manual apply is not
+    gated by this rule.
+    """
+
+    ctx, _hub, _agents, _t, _root = env
+    from local_operator.hub_sync.check import ItemCheck
+
+    check = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "One rule.\n", "description": "d"},
+        remote={"instructions": "Three rules.\n", "description": "d"},
+        base={
+            "instructions": "One rule. Two rules. Three rules. Four rules.\n",
+            "description": "d",
+        },
+    )
+    held = svc.apply_one(ctx, check, auto=True, allow_llm=False)
+    assert held.outcome == "needs-review" and held.error_class == "merge-refused"
+    assert "held for review" in held.message
+    manual = svc.apply_one(ctx, check, auto=False, allow_llm=False)
+    assert "held for review" not in manual.message  # manual stays available
+
+
+def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
+    """Q7: typed older consumers of /hub/updates must never receive a skill row."""
+
+    ctx, _hub, _agents, _t, root = env
+
+    def fold(doc: dict[str, Any]) -> None:
+        items = doc.setdefault("items", {})
+        items["agent:a1"] = {"kind": "agent", "name": "a", "local_id": "a1", "state": "available"}
+        items["skill:s1"] = {"kind": "skill", "name": "s", "local_id": "s1", "state": "available"}
+
+    st.StatusStore(root).mutate(fold)
+    snapshot = svc.status_snapshot(ctx)
+    assert {row["kind"] for row in snapshot["items"]} == {"agent"}
+    assert snapshot["counts"]["available"] == 1  # the skill row is not counted either

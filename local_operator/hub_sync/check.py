@@ -598,6 +598,17 @@ def check_hub_skills(
             )
             continue
         remote = adapter.canonical_fields(document)
+        # Source-name space: the local alias is display-only, but the manifest
+        # name is part of the document the engine fingerprints and merges. Rename
+        # the LOCAL copy's name to the remote spelling for comparison so a local
+        # alias rename is not an eternal both-changed, and so the merge/write
+        # layer speaks one name; the write re-renders the alias (see _apply_skill).
+        remote_name = str(document.get("name") or "")
+        if remote_name and str(local.get("name") or "") != remote_name:
+            from local_operator.hub_sync.skill_document import SkillDocument
+
+            local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
+            local_fp = prov.fingerprint_snapshot("skill", local)
         remote_fp = prov.fingerprint_snapshot("skill", remote)
         known = record.recorded_by != prov.UNKNOWN_BASELINE
         base_fp = prov.fingerprint_fields("skill", record.fields) if known else None

@@ -264,11 +264,17 @@ async def apply(
                 )
             except _IdentityError as error:
                 raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
+            except LookupError as error:
+                # An unknown/unlinked name is a 404-able "no such thing", never
+                # the AttributeError-500 this arm used to produce.
+                raise _refusal(404, str(error)) from None
             # resolve_source MATERIALIZES the identity on the record it returns;
             # the Optional on the record type covers adopt/legacy records, not
-            # this arm.
+            # this arm. An EXPLICIT check, not ``assert``: under -O a stripped
+            # assert would return a half-built payload with a null link.
             identity = record.identity
-            assert identity is not None
+            if identity is None:
+                raise _refusal(500, "the source resolution did not record an identity")
             return {
                 "link": identity.to_json(),
                 "resolved": {
