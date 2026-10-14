@@ -13,9 +13,17 @@ The ``never fresh`` table is the other half of the contract, and the reason the 
 is not "take the last range": an ambiguous or malformed scope must degrade to
 ``unknown``. A head that is wrong but happens to sit under the live head reports a
 stale round as FRESH, which is the failure this field exists to prevent.
+
+The remediation round adds the reviewers' own cases: the ``Head:`` field's
+``"X" (was "Y")`` spelling (F1), one commit written at two prefix lengths (F2), a fold
+chain written in the other order (F3), the symbolic-range-plus-parenthesised-head
+spelling the fleet's release PRs use (Q2 recall), and a bounded-time guard for the
+long-Scope-line stall (Q1).
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -59,6 +67,16 @@ _TAIL_40 = "89abcdef0123456789abcdef0123456789abcdef"
         ("`a1b2c3d..0123456789ab` + `0123456789ab..f0e1d2c3b4a5`", "f0e1d2c3b4a5"),
         # -- mixed prefix lengths ------------------------------------------------
         ("`a1b2c3d..0123456789ab`", "0123456789ab"),
+        # -- the reviewers' recall cases (F2, F3, Q2) ---------------------------------
+        # The same commit written at two prefix lengths is one head, not two.
+        ("`aaaaaaa..ec9a5e628f4` and `bbbbbbb..ec9a5e628f4d0e1`", "ec9a5e628f4d0e1"),
+        # A fold chain written in the other order still ends at the final head.
+        ("`02eb44ef9e..fd0683986b` + fold `04f8b3e080..02eb44ef9e`", "fd0683986b"),
+        # A symbolic range whose head is named beside it: the fleet's release spelling.
+        ("`main..release-next-0-70-20` (head `3ea522cc21`)", "3ea522cc21"),
+        # One bare hash and no hex range: the only head the comment names.
+        ("`..def5678`", "def5678"),
+        ("`main... 3ea522cc21`", "3ea522cc21"),
     ],
 )
 def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
@@ -72,8 +90,11 @@ def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
         "`aaaaaaaa..bbbbbbbb` + `cccccccc..dddddddd`",
         # Range syntax with nothing well-formed in it.
         "`abc..`",
-        "`..def5678`",
         "`abcdef1..` + `def5678`",
+        # A range that returns to its own start is a cycle, not a chain.
+        "`a1b2c3d..b2c3d4e` + `b2c3d4e..a1b2c3d`",
+        # A prose ellipsis is not a range, so nothing decides between two hashes.
+        "`82adb042eb... 3ea522cc21`",
         # No range at all, and two bare hashes to choose from.
         "`82adb042eb` and `3ea522cc21`",
         # A symbolic range names no hash; freshness is unknown, never stale.
@@ -97,6 +118,9 @@ def test_an_ambiguous_scope_is_unknown_and_never_fresh(scope: str) -> None:
         ("`abc..`", "3ea522cc21f2", "3ea522cc21f2"),
         # One bare hash in Scope needs no Head field at all.
         ("`82adb042eb`", "", "82adb042eb"),
+        # The Head field's standard spelling: the head first, the earlier one after it.
+        ("", "`3ea522cc21` (was `82adb042eb`)", "3ea522cc21"),
+        ("", "`3ea522cc21f2` (one commit on top of `82adb042eb`)", "3ea522cc21f2"),
     ],
 )
 def test_the_head_field_still_resolves(scope: str, head_field: str, expected: str) -> None:
@@ -123,3 +147,17 @@ def test_the_real_2345_review_reads_fresh() -> None:
     ).passes
     assert item.reviewed_head == "3ea522cc21", "the base must never be the reviewed head"
     assert freshness(item.reviewed_head, LIVE_HEAD) == FRESHNESS_FRESH
+
+
+def test_a_long_scope_line_parses_in_bounded_time() -> None:
+    """Q1: without the leading ``\\b`` the range pattern backtracked combinatorially.
+
+    A forge commenter could put a 32 kB ``Scope:`` line on a tracked PR and stall the
+    event loop for 11.4 s (measured); with the anchor the same line takes milliseconds.
+    The bound is deliberately loose — it flags the quadratic shape, not a busy host.
+    """
+    body = "### Agent review — round 1\n\nReviewer: r\nScope: `" + "a1b2c3d.." + "z" * 32000 + "`\n"
+    start = time.perf_counter()
+    parse([Comment(id="1", created_at="2026-10-14T00:00:00Z", body=body)])
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"a 32 kB Scope line took {elapsed:.1f}s"
