@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from local_operator.harness.types import AbortSignal, StreamEndEvent
+from local_operator.harness.types import AbortSignal, StreamEndEvent, StreamEvent
 from local_operator.model.configure import SessionStreamFn
 from local_operator.providers import failover
 from local_operator.providers.failover import ProviderError
@@ -45,7 +47,7 @@ def _recorder(rows: list[Any]) -> SessionStreamFn:
     record._request_observers = RequestSubscriberHolder()
     record._request_observers.subscribe(rows.append)
     record._counts_as_child_request = False
-    record._affinity_enabled = False
+    record._affinity_enabled = lambda request: False
     record._record_usage = lambda *args, **kwargs: None
     return record
 
@@ -65,12 +67,16 @@ async def _exercise(case: str, wire: Wire, trace: ShutdownAccounting) -> list[An
             raise ProviderError(None, "synthetic refusal", kind="auth", retryable=False)
         return wire
 
-    async def cancelled() -> Any:
-        raise asyncio.CancelledError()
-        yield  # async-generator shape; no transport is reached
+    async def cancelled(*, cancel: bool) -> AsyncIterator[StreamEvent]:
+        # A reachable yield makes this an explicitly typed async generator,
+        # not an async coroutine whose return value happens to be Any. The
+        # cancellation control raises on first advancement, before transport.
+        if cancel:
+            raise asyncio.CancelledError()
+        yield StreamEndEvent(stop_reason="stop")
 
     upstream = (
-        cancelled()
+        cancelled(cancel=True)
         if case == "cancelled"
         else failover.stream_with_failover(
             request,
@@ -80,6 +86,10 @@ async def _exercise(case: str, wire: Wire, trace: ShutdownAccounting) -> list[An
             signal=signal,
         )
     )
+    if case == "cancelled":
+        assert inspect.isasyncgen(
+            upstream
+        ), "cancellation control must be an actual async generator"
     try:
         async for _event in record._record_stream(request, upstream):
             pass
