@@ -85,6 +85,10 @@ OBSERVED_STALE = "stale"
 OBSERVED_REPLAY = "replayed"
 OBSERVED_JUMP = "jump_too_large"
 OBSERVED_INVALID = "invalid"
+#: A NEW (owner, key, scope) ident refused because the table is at its bound.
+OBSERVED_TABLE_FULL = "observation_table_full"
+#: ``MeshRefusal`` code for the same condition on the owner counters side.
+TABLE_FULL = "lifecycle_table_full"
 
 
 @dataclass(frozen=True)
@@ -382,7 +386,24 @@ class LifecycleStore:
         return LifecycleDocument.from_json(self.network_id, data)
 
     def _save(self, doc: LifecycleDocument) -> None:
-        store._write_private_json(self.path, doc.to_json())
+        """Persist, refusing any document :meth:`load` would reject.
+
+        WHY: the reader treats an over-bound file as ``needs_authoritative_baseline``,
+        which locks every later call out and has no repair path. A peer chooses the
+        ``account_scope_ref`` values it announces, so the writer must hold the same
+        bounds the reader enforces; a refusal leaves the existing file byte-identical
+        (the write is staged-then-renamed, so nothing is touched before this check).
+        """
+        payload = doc.to_json()
+        if (
+            len(payload["counters"]) > MAX_ROWS
+            or len(payload["observations"]) > MAX_ROWS
+            or len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_FILE_BYTES
+        ):
+            raise MeshRefusal(
+                TABLE_FULL, "credential lifecycle table is full; nothing was changed"
+            )
+        store._write_private_json(self.path, payload)
 
     def status(self) -> str:
         return NEEDS_AUTHORITATIVE_BASELINE if self.load().needs_baseline else "ok"
@@ -411,6 +432,13 @@ class LifecycleStore:
             prev = doc.rows.get((key, scope))
             nxt = derive(prev, key, scope, facts)
             if nxt != prev:
+                # Only a NEW row grows the table; moving an existing row (a logout,
+                # a withdraw) must never be blocked by the bound, and ``_save``
+                # refuses by name if the file bound itself would be crossed.
+                if prev is None and len(doc.rows) >= MAX_ROWS:
+                    raise MeshRefusal(
+                        TABLE_FULL, "credential lifecycle table is full; nothing was changed"
+                    )
                 doc.rows[(key, scope)] = nxt
                 self._save(doc)
             return nxt
@@ -434,8 +462,17 @@ class LifecycleStore:
                 doc.high_water.get(ident), (obs.login_chain_revision, obs.material_generation)
             )
             if reason == OBSERVED:
+                # A fresh ident grows the table; an existing one only moves forward,
+                # so restrictive updates still apply when the table is full.
+                if ident not in doc.high_water and len(doc.high_water) >= MAX_ROWS:
+                    return ObservationResult(False, OBSERVED_TABLE_FULL)
                 doc.high_water[ident] = hw
-                self._save(doc)
+                try:
+                    self._save(doc)
+                except MeshRefusal as refusal:
+                    if refusal.code != TABLE_FULL:
+                        raise
+                    return ObservationResult(False, OBSERVED_TABLE_FULL)
             return ObservationResult(reason == OBSERVED, reason, hw[0], hw[1])
 
 
