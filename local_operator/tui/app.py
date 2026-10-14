@@ -528,6 +528,9 @@ from local_operator.tui.widgets.usage_panel import (
     UsagePanel,
     UsageRefreshRequested,
 )
+from local_operator.tui.widgets.hub_links_panel import (
+    HubLinksPanel,
+)
 from local_operator.tui.widgets.wake_panel import WakePanel
 
 # The band's two catalogued words are read THROUGH THE MODULE at every use
@@ -4494,6 +4497,10 @@ class OperatorApp(App[None]):
         # copy so the two cannot drift onto different keys.
         Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
         Binding("f8", "aside", "Aside", show=False),
+        # Hub links overlay. A hidden key (no i18n catalogue entry needed) so the
+        # surface is reachable now; a user-facing slash command is added with the
+        # i18n lane. Commands/keymap are the wiring point the capture rig drives.
+        Binding("ctrl+g", "hub_links", "Hub links", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
         # Pin/unpin the session under the pointer (else under the sidebar's
@@ -11660,6 +11667,12 @@ class OperatorApp(App[None]):
         # it can show its loading state.
         with Container(id="usage-host"):
             yield UsagePanel()
+        # The Hub links overlay shares the toast layer and the mount-once rule for
+        # the same reason: `/hub` opens on a keystroke, an inventory is REFERENCE
+        # the user acts on in the same breath, and taking rows from the transcript
+        # would scroll away the work they opened it to reason about.
+        with Container(id="hub-links-host"):
+            yield HubLinksPanel()
         # The goal overlay is on the same layer, mounted once and hidden, for the
         # same reasons: `/goal` with no argument is a READ of standing state the
         # user acts on in the same breath, so the card must appear on the
@@ -46210,6 +46223,84 @@ class OperatorApp(App[None]):
             restore.focus()  # type: ignore[union-attr]
         else:
             self._editor().focus()
+
+    # -- the Hub links overlay ------------------------------------------------
+    #
+    # A local-only read (no network): the inventory is enumerated from the
+    # baselines and the status store. The panel is pure presentation; THIS owns
+    # the fetch and the policy intent, exactly as the usage card splits.
+    def _hub_links_panel(self) -> HubLinksPanel | None:
+        try:
+            return self.query_one(HubLinksPanel)
+        except Exception:  # noqa: BLE001 - optional chrome
+            return None
+
+    async def action_hub_links(self) -> None:
+        """Open the Hub links overlay and paint the current inventory."""
+        panel = self._hub_links_panel()
+        if panel is None:
+            self._system_notice("hub links panel unavailable", "warning")
+            return
+        panel.start_fetch()
+        self.run_worker(
+            self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
+        )
+
+    async def _fetch_hub_links_worker(self) -> None:
+        """Read the local inventory off the loop and paint it (never raises out)."""
+        panel = self._hub_links_panel()
+        if panel is None:
+            return
+        try:
+            snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+        except Exception as error:  # noqa: BLE001 - surfaced IN the panel
+            if panel.is_open:
+                panel.show_error(f"hub links unavailable: {error}")
+            return
+        if panel.is_open:
+            panel.show_links(snapshot)
+
+    def _hub_links_snapshot_sync(self) -> dict[str, Any]:
+        from local_operator.config import ConfigManager
+        from local_operator.hub_sync import service as svc
+        from local_operator.paths import config_dir
+
+        cm = ConfigManager(config_dir())
+        ctx = svc.HubSyncContext(
+            config_dir=cm.config_dir, config_manager=cm, client_for_tenant=lambda _t: None
+        )
+        return svc.links_snapshot(ctx)
+
+    def on_hub_links_panel_dismissed(self, message: "HubLinksPanel.Dismissed") -> None:
+        message.stop()
+        self.workers.cancel_group(self, "hub-links")
+        self._editor().focus()
+
+    def on_hub_links_panel_refresh_requested(
+        self, message: "HubLinksPanel.RefreshRequested"
+    ) -> None:
+        message.stop()
+        self.run_worker(
+            self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
+        )
+
+    def on_hub_links_panel_policy_requested(
+        self, message: "HubLinksPanel.PolicyRequested"
+    ) -> None:
+        """The reserved slot's action: apply/retry/policy for a SOURCE-SCOPED link.
+
+        A legacy link has no link_id and never reaches here with an action (its
+        row is blocked); the policy menu for a confirmed link is opened by the
+        app because it owns service access. Kept as a single entry point so the
+        panel never guesses a destination.
+        """
+        message.stop()
+        if message.link_id is None:
+            self._system_notice("resolve this link's source before acting on it", "warning")
+            return
+        # The full policy editor lands with the i18n key set; the intent and
+        # routing are wired here so the panel has one destination to call.
+        self._system_notice(f"hub link {message.link_id}: {message.direction}", "info")
 
     # -- the /btw aside ------------------------------------------------------
     #

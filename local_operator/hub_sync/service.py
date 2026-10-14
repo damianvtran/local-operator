@@ -1143,11 +1143,22 @@ def _capability_auto_push(doc: Mapping[str, Any]) -> bool:
 
 
 def record_server_capabilities(ctx: HubSyncContext, capabilities: Mapping[str, Any]) -> None:
-    """Persist a verified server capability attestation (called by a probe, not a poll).
+    """Persist a VERIFIED server capability attestation. PROBE-ONLY.
 
-    The revision-CAS flag is the ONLY fact eligibility needs here; the probe that
-    produces it lives with the outbound wiring and runs against the deployed
-    server. Recording it in the status store keeps the inventory a pure local read.
+    Called by exactly one kind of caller: the outbound probe that has actually
+    spoken to the deployed server and seen its atomic revision-CAS behaviour.
+
+    SECURITY INVARIANT: this must NEVER be reachable from a route, a UI action,
+    a config key or a command. Attestation is a fact about the DEPLOYED server,
+    so a local write is only honest when a request produced it; letting a client
+    set ``revision_cas`` would let it SELF-GRANT publication eligibility, which
+    is the exact thing ``_eligibility`` exists to refuse. The persisted flag is
+    therefore read by the inventory and written solely by the probe -- there is
+    no request field for it anywhere. (Verified: this function has no route/CLI
+    caller; the probe is wired with the outbound surface.)
+
+    The revision-CAS flag is the ONLY fact eligibility needs here; recording it
+    in the status store keeps the inventory a pure local read.
     """
 
     revision_cas = bool(capabilities.get("revision_cas") is True)
