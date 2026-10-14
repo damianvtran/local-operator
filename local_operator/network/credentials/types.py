@@ -32,9 +32,11 @@ THREE FACTS THIS MODULE EXISTS TO PIN, each a decision rather than a spelling:
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 import time
 import zlib
+from collections.abc import Mapping
 from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
@@ -285,6 +287,80 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
             out[name] = entries[:64]
     return out
+
+
+#: Bounds on a credential-lifecycle metadata frame (see :func:`validate_lifecycle_frame`).
+MAX_LIFECYCLE_FRAME_BYTES = 16_384
+MAX_LIFECYCLE_FRAME_DEPTH = 4
+MAX_LIFECYCLE_CONTEXTS = 8
+
+#: Key-name fragments that mark a field as carrying credential material. No shared
+#: redaction helper exists in this module, so the list lives with its one consumer.
+_LIFECYCLE_SECRET_KEY_FRAGMENTS = (
+    "secret",
+    "token",
+    "password",
+    "private_key",
+    "bearer",
+    "api_key",
+)
+
+
+def validate_lifecycle_frame(frame: Mapping[str, Any]) -> None:
+    """Refuse a credential-lifecycle frame that is not small, shallow, plain metadata.
+
+    WHY: a lifecycle frame says that a credential's state changed (granted, revoked,
+    rotated) and for which contexts; it is METADATA ONLY and never carries the
+    credential. A frame that is oversized, deeply nested, fan-out heavy, ambiguous or
+    secret-named is therefore not a frame this protocol produces, and it is REJECTED
+    rather than truncated or clamped: trimming a peer's frame would apply a state
+    change the peer never sent. This runs BEFORE the frame is applied, so a refusal
+    leaves every store untouched.
+
+    Rejected with ``ValueError``: depth above :data:`MAX_LIFECYCLE_FRAME_DEPTH` (the
+    top-level mapping is depth 1); a ``context``/``contexts`` list longer than
+    :data:`MAX_LIFECYCLE_CONTEXTS`; a non-string key; two keys in one object that
+    collide once case and surrounding whitespace are folded (a decoded Python mapping
+    has already lost any byte-identical duplicate, so the fold is the ambiguity that
+    can still reach here); a key naming secret material; and a compact-JSON encoding
+    over :data:`MAX_LIFECYCLE_FRAME_BYTES`. Structure is walked first and depth-bounded,
+    so a pathological frame is refused before it is ever serialised.
+    """
+
+    def walk(node: Any, depth: int) -> None:
+        if isinstance(node, Mapping):
+            if depth > MAX_LIFECYCLE_FRAME_DEPTH:
+                raise ValueError(f"lifecycle frame nests deeper than {MAX_LIFECYCLE_FRAME_DEPTH}")
+            seen: set[str] = set()
+            for key, value in node.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"lifecycle frame key {key!r} is not a string")
+                folded = key.strip().lower()
+                if folded in seen:
+                    raise ValueError(f"lifecycle frame has duplicate key {key!r}")
+                seen.add(folded)
+                normalised = folded.replace("-", "_")
+                if any(fragment in normalised for fragment in _LIFECYCLE_SECRET_KEY_FRAGMENTS):
+                    raise ValueError(f"lifecycle frame key {key!r} looks like credential material")
+                if folded in ("context", "contexts") and isinstance(value, (list, tuple)):
+                    if len(value) > MAX_LIFECYCLE_CONTEXTS:
+                        raise ValueError(
+                            f"lifecycle frame has more than {MAX_LIFECYCLE_CONTEXTS} contexts"
+                        )
+                walk(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            if depth > MAX_LIFECYCLE_FRAME_DEPTH:
+                raise ValueError(f"lifecycle frame nests deeper than {MAX_LIFECYCLE_FRAME_DEPTH}")
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(frame, 1)
+    try:
+        size = len(json.dumps(frame, separators=(",", ":")).encode())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"lifecycle frame is not JSON-serialisable: {exc}") from exc
+    if size > MAX_LIFECYCLE_FRAME_BYTES:
+        raise ValueError(f"lifecycle frame is {size} bytes, over {MAX_LIFECYCLE_FRAME_BYTES}")
 
 
 # ---------------------------------------------------------------------------
