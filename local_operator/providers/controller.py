@@ -481,9 +481,11 @@ class ReadOnlyUsageSnapshot:
       ``immutable=1`` to guarantee it never WRITES, which means it cannot see an
       uncheckpointed WAL — so a non-empty ``-wal`` beside the database is the
       signal that ``reports`` may be behind, possibly still naming an account a
-      committed DELETE removed. The consumer must not present a stale inventory
-      as current; ``cached_at`` (on-disk mtime, the "as of" immutable honours)
-      lets it say how old the answer is.
+      committed DELETE removed. Staleness is DISCLOSED, not withheld: the
+      reports are still returned (a blank phone /usage on a busy desktop would
+      be the worse failure), flagged so the surface renders "cached, as of T
+      (may be out of date)" and can exclude a removed account. ``cached_at``
+      (on-disk mtime, the "as of" immutable honours) is that timestamp.
     """
 
     reports: list[UsageReport] = dataclasses.field(default_factory=list)
@@ -1007,11 +1009,6 @@ class ProviderController:
             if provider is not None
             else self._persisted_providers(store)
         )
-        if provider is None and may_be_stale:
-            # The INVENTORY is derived from possibly-deleted rows, so it must not
-            # list them as current. Withhold the list and let ``may_be_stale`` say
-            # "we cannot name the accounts right now" rather than "none exist".
-            return ReadOnlyUsageSnapshot(may_be_stale=True, cached_at=cached_at)
         out: list[UsageReport] = []
         for storage in providers:
             key = provider_cache_key(storage, self._persisted_account_fingerprint(store, storage))
@@ -1021,6 +1018,14 @@ class ProviderController:
                 # silently-shortened list that reads as "no quota".
                 return ReadOnlyUsageSnapshot(unavailable=True)
             out.extend(loaded)
+        # Staleness is DISCLOSED, not withheld. A busy desktop almost always has
+        # a non-empty ``-wal``, so withholding here would blank the phone's
+        # /usage exactly when the user wants to see credits. The rule is "never
+        # present a possibly-deleted account AS CURRENT", which a flagged,
+        # clearly-labelled snapshot satisfies: the surface renders it as "cached,
+        # as of T (may be out of date)" and can exclude a removed account. The
+        # one state that stays UNAVAILABLE is an unreadable/foreign schema, where
+        # nothing trustworthy exists to return at all.
         return ReadOnlyUsageSnapshot(
             reports=[self._without_identity(report) for report in out],
             may_be_stale=may_be_stale,
