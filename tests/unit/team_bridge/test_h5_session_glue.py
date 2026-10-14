@@ -160,6 +160,17 @@ async def _answered_bridge_ask(session, tmp_path: Path):
     )
     assert outcome["ok"] is True
     ask_id = str(outcome["details"]["ask_id"])
+    # TB-02 P1 (PR #2378): in the product the runtime's authority seam mints
+    # this one-shot grant when it ADMITS the human's `bridge_decide` frame
+    # (exercised by `test_approval_authority_seam.py`); this fixture builds the
+    # answer directly, so it stands in for that admission — the dispatcher
+    # refuses a decision carrying no grant, and these cells must keep testing
+    # the consumption/settlement machinery, not the admission.
+    from local_operator.harness.approval import mint_bridge_decide_grant
+
+    mint_bridge_decide_grant(
+        session_id=session.session_id, ask_id=ask_id, question_id=MESSAGE_ID, word="approve"
+    )
     answered = queue.respond(ask_id, {f"bridge-{MESSAGE_ID}": ["approve"]}, by="human")
     assert answered.get("ok") is True
     record = [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]

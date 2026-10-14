@@ -73,6 +73,10 @@ def _record(intents: DecideIntents, runtime, *, generation: str | None = None, a
 
 
 _SETTLE = {
+    # The FIRST state an intent can hold is already ``pending`` (the row is
+    # written before any transport), so the pending arm is a no-op — a table
+    # entry, not a missing key.
+    "pending": lambda intents, intent: None,
     "sent": lambda intents, intent: intents.mark_sent(intent.intent_id, {"id": "req_original"}),
     "transient": lambda intents, intent: intents.mark_transient(
         intent.intent_id, "bridge_unreachable"
@@ -170,10 +174,14 @@ async def test_settlement_interleavings_are_terminal_safe(
     after = intents.get(intent.intent_id)
     assert after.state == expected
     if keeps_receipt:
-        # m8: the FIRST recorded outcome and its receipt stay authoritative,
-        # byte-for-byte, through any later transient/signin/refusal.
-        assert after.receipt_json == settled.receipt_json
+        # m8: the recorded outcome's receipt is authoritative and byte-stable
+        # through any later transient/signin/refusal — never cleared, never
+        # rewritten. A transient first leaves state ``pending`` with NO receipt
+        # (that is the settled shape of a transport failure), so the receipt
+        # that must survive is the one the SUCCESS settle recorded.
         assert json.loads(after.receipt_json)["id"] == "req_original"
+        if settled.receipt_json is not None:
+            assert after.receipt_json == settled.receipt_json
 
 
 async def test_tool_has_no_decide_or_retry_authority(tmp_path, monkeypatch) -> None:

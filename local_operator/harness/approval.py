@@ -372,7 +372,7 @@ def transition_authority(command: str, args: str, *, approved: bool | None = Non
 #: from ``server.py``'s own dispatch source and asserts the two are equal, so a
 #: coder who adds an op that reaches a sink fails the suite rather than shipping
 #: an unguarded way to loosen a running gate.
-AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer"})
+AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer", "bridge_decide"})
 
 
 def frame_authority(frame: dict[str, Any]) -> Authority | None:
@@ -394,6 +394,13 @@ def frame_authority(frame: dict[str, Any]) -> Authority | None:
         # as one. ``False`` — and an absent value, which fails the dispatch on
         # its own — stays ordinary, so denying a card keeps working everywhere.
         return transition_authority("", "", approved=bool(frame.get("approved")))
+    if op == "bridge_decide":
+        # TB-02 (design memo §2): BOTH words are authority-increasing — this
+        # DIVERGES from approval_answer's asymmetry on purpose. A bridge deny is
+        # not a local gate settling in the safe direction; it is a statement of
+        # the operator's will to a third party that can suppress a legitimate
+        # request — so a deny carries exactly the authority an approve does.
+        return transition_authority("", "", approved=True)
     return transition_authority(str(frame.get("command", "")), str(frame.get("args", "")))
 
 
@@ -419,6 +426,17 @@ def signature_target(frame: dict[str, Any]) -> tuple[str, str] | None:
         return None
     if frame_authority(frame) != "authority-increasing":
         return None
+    if frame.get("op") == "bridge_decide":
+        # TB-02: the binding is the composite ask#question#word, DERIVED from
+        # the frame both ends already carry (the client asks this function what
+        # to sign; the runtime re-derives it at the same seam), so a signature
+        # minted for one request/question/word cannot be retargeted to another.
+        ask_id = frame.get("ask_id")
+        question_id = frame.get("question_id")
+        word = frame.get("word")
+        if not all(isinstance(part, str) and part for part in (ask_id, question_id, word)):
+            return "decide", ""
+        return "decide", f"{ask_id}#{question_id}#{word}"
     request_id = frame.get("request_id")
     action = "approve" if frame.get("op") == "approval_answer" else "loosen"
     return action, request_id if isinstance(request_id, str) else ""
@@ -845,6 +863,96 @@ def operator_cap_for(pid: int) -> bytes | None:
 def reset_operator_caps_for_tests() -> None:
     """Clear the process-wide table. Tests only — nothing in production calls it."""
     _OPERATOR_CAPS.clear()
+
+
+#: One-shot bridge-decision grants (TB-02 P1), keyed ``(session_id, ask_id,
+#: question_id)`` with the decision word bound in the value.
+#:
+#: MINTED by the runtime's authority seam at the moment it ADMITS a
+#: ``bridge_decide`` frame — i.e. only after the presenter proved the spawn
+#: capability or a verified operator/device signature — and CONSUMED by
+#: ``Session._dispatch_bridge_decisions`` at the point of effect. The grant —
+#: never the ask-log fold — is the proof that a human decided, so a forged
+#: fold line carries none and can neither POST nor win the ask.
+#:
+#: Memory-only, never written anywhere, dies with the process: the
+#: ``_OPERATOR_CAPS`` pattern and for the same reason (a value nothing can
+#: read cannot be forged). A CONSUMED grant is retained for the TTL so the
+#: later fold re-reads that follow consumption can still tell a verified
+#: answer from a forged one.
+_BRIDGE_DECIDE_GRANTS: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+#: How long a minted (or consumed) grant stays in the table. The mint→consume
+#: window is one answer's durable append; the consumed tail must outlive the
+#: reconcile passes that re-read the frozen row. Both are well under this.
+BRIDGE_DECIDE_GRANT_TTL_S = 300.0
+
+
+def _prune_bridge_grants(now: float) -> None:
+    stale = [
+        key
+        for key, entry in _BRIDGE_DECIDE_GRANTS.items()
+        if now - entry["at"] > BRIDGE_DECIDE_GRANT_TTL_S
+    ]
+    for key in stale:
+        _BRIDGE_DECIDE_GRANTS.pop(key, None)
+
+
+def mint_bridge_decide_grant(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> None:
+    """Record that THIS runtime admitted a human decision for this ask."""
+    import time
+
+    now = time.monotonic()
+    _BRIDGE_DECIDE_GRANTS[(str(session_id), str(ask_id), str(question_id))] = {
+        "word": str(word).strip().lower(),
+        "at": now,
+        "consumed": False,
+    }
+    _prune_bridge_grants(now)
+
+
+def consume_bridge_decide_grant(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> bool:
+    """Spend the one-shot grant for EXACTLY this word; ``False`` when absent.
+
+    Pop-then-check discipline: the decision word is part of the match, so a
+    grant minted for one word cannot be spent on the other, and a second
+    consume of the same grant fails — the m8 exact-replay rule covers the
+    (already recorded) replay, never a downgrade.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    key = (str(session_id), str(ask_id), str(question_id))
+    entry = _BRIDGE_DECIDE_GRANTS.get(key)
+    if entry is None or entry.get("consumed"):
+        return False
+    if str(entry.get("word")) != str(word).strip().lower():
+        return False
+    entry["consumed"] = True
+    entry["at"] = now
+    return True
+
+
+def bridge_decide_grant_seen(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> bool:
+    """Whether this exact decision was EVER admitted (live or consumed)."""
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    entry = _BRIDGE_DECIDE_GRANTS.get((str(session_id), str(ask_id), str(question_id)))
+    return entry is not None and str(entry.get("word")) == str(word).strip().lower()
+
+
+def reset_bridge_decide_grants_for_tests() -> None:
+    """Clear the process-wide table. Tests only — production never calls it."""
+    _BRIDGE_DECIDE_GRANTS.clear()
 
 
 class OperatorCapHandoff:

@@ -116,6 +116,9 @@ async def test_drift_refusal_performs_zero_fetches_and_cancels_inflight() -> Non
         fence_mod.authority_fence = original
     assert state == "pending"
     assert client.calls == 0
+    # ``cancel()`` only REQUESTS cancellation; the loop has to run once before
+    # the task reports itself cancelled. One yield, no weakening of the gate.
+    await asyncio.sleep(0)
     assert starting.cancelled()
     assert runtime._admission_task is None
 

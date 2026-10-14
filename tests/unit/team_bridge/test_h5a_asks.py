@@ -16,6 +16,7 @@ import pytest
 from local_operator.asks import policy
 from local_operator.asks import store as asks_store
 from local_operator.asks.queue import AskQueue, _question_shape
+from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.session.session import Session, _question_marked_human_required
 from local_operator.team_bridge.asks_bridge import (
     BRIDGE_ASK_OPTIONS,
@@ -55,9 +56,16 @@ def test_the_excerpt_is_bounded_and_flattened_client_side() -> None:
         excerpt=("line one\nline two " * 200),
     )
     text = question["question"]
-    assert "\n" in text  # the composition keeps its own separator...
-    assert text.count("\n") == 1  # ...but the excerpt contributes none of its own
-    assert len(text) <= len(f"{SENDER} · {SUMMARY}\n") + EXCERPT_MAX_CHARS + 1
+    # TB-05 (PR #2378): the §11.1 clause now rides the composition as its own
+    # line, AHEAD of the sender's excerpt — the excerpt still contributes no
+    # newline of its own.
+    assert text.count("\n") == 2  # composition separator + the untrusted-clause line
+    assert "untrusted" in text
+    assert text.index("untrusted") < text.index("line one")
+    assert (
+        len(text)
+        <= len(f"{SENDER} · {SUMMARY}\n") + len(BRIDGE_UNTRUSTED_CLAUSE) + EXCERPT_MAX_CHARS + 2
+    )
 
 
 def test_an_ask_without_the_message_id_is_refused_at_build_time() -> None:

@@ -215,15 +215,15 @@ class AskQueue:
             return {"ok": False, "error": bounds_error}
         now = self._now()
         records = self.records(now)
-        open_rows = [r for r in records if r["status"] == store.STATUS_OPEN]
-        if len(open_rows) >= policy.OPEN_ASK_CAP:
-            return {
-                "ok": False,
-                "error": (
-                    f"this session already has {len(open_rows)} open asks (the cap is "
-                    f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
-                ),
-            }
+        cap_refusal = _ask_cap_refusal(
+            records,
+            incoming_is_bridge=any(
+                str(_as_mapping(question).get("question_id") or "") for question in questions
+            ),
+        )
+        if cap_refusal:
+            return {"ok": False, "error": cap_refusal}
+        open_rows = [row for row in records if row["status"] == store.STATUS_OPEN]
         shapes = [_question_shape(q) for q in questions]
         open_secret_keys = {
             str(q.get("id"))
@@ -402,15 +402,15 @@ class AskQueue:
                             "reach": self._reach(),
                         },
                     }
-                open_rows = [r for r in rows if r["status"] == store.STATUS_OPEN]
-                if len(open_rows) >= policy.OPEN_ASK_CAP:
-                    return {
-                        "ok": False,
-                        "error": (
-                            f"this session already has {len(open_rows)} open asks (the cap "
-                            f"is {policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
-                        ),
-                    }
+                cap_refusal = _ask_cap_refusal(
+                    rows,
+                    incoming_is_bridge=any(
+                        str(_as_mapping(question).get("question_id") or "")
+                        for question in questions
+                    ),
+                )
+                if cap_refusal:
+                    return {"ok": False, "error": cap_refusal}
                 shapes = [_question_shape(q) for q in questions]
                 # THE MINT MUST AGREE WITH ITS OWN FINGERPRINT. Every later
                 # lookup compares a caller's fingerprint against the digest
@@ -1949,6 +1949,48 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     return {}
+
+
+def _ask_cap_refusal(
+    rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: bool
+) -> str:
+    """The typed cap refusal for one readiness window, split by custody (TB-13).
+
+    OPEN_ASK_CAP is the MODEL's asking capacity — "free for the model and
+    costly for the human" — and a remote sender is not the model, so bridge
+    requests ride a SEPARATE bounded budget. EACH direction is checked against
+    the INCOMING ask's own class: a sender burst never blocks the model's
+    asks, and a full model queue never blocks a waiting request. A bridge ask
+    is identified by its carriage (a non-empty ``question_id`` on any question
+    — the same predicate ``asks_bridge.bridge_pending_count`` counts by),
+    never by copy. ``""`` means the relevant budget has room.
+    """
+
+    open_rows = [row for row in rows if row["status"] == store.STATUS_OPEN]
+    bridge_rows = [
+        row
+        for row in open_rows
+        if any(
+            str(question.get("question_id") or "")
+            for question in (row.get("questions") or ())
+            if isinstance(question, Mapping)
+        )
+    ]
+    if incoming_is_bridge:
+        if len(bridge_rows) >= policy.BRIDGE_ASK_CAP:
+            return (
+                f"this session already has {len(bridge_rows)} waiting agent-messages "
+                f"requests (the cap is {policy.BRIDGE_ASK_CAP}); wait for responses "
+                f"before more arrive."
+            )
+        return ""
+    model_rows = len(open_rows) - len(bridge_rows)
+    if model_rows >= policy.OPEN_ASK_CAP:
+        return (
+            f"this session already has {model_rows} open asks (the cap is "
+            f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
+        )
+    return ""
 
 
 def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:
