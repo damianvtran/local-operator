@@ -300,6 +300,8 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     async def fake_message(owner, message_id, *, config_dir, access, client=None):
         return SimpleNamespace(message_id=message_id)
 
+    deliveries_seen_sender_display: list[object] = []
+
     async def fake_ack(owner, message_id, target, receipt, *, config_dir, access):
         record["acks"].append(target)
         # The REAL frozen intent: the confirmed outcome must resolve to THIS
@@ -316,7 +318,13 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
         _AckStore(config_dir).mark_ack_result(owner, intent_id, state="confirmed", error_code=None)
         return SimpleNamespace(state="confirmed", intent_id=intent_id)
 
-    async def fake_deliver(owner, payload, *, session_id, config_dir, bridge_meta=None):
+    async def fake_deliver(
+        owner, payload, *, session_id, config_dir, bridge_meta=None, sender_display=None
+    ):
+        # D1 grew this seam: the wake carries the member's SCREENED display
+        # fields so the receiving row can name them. Recorded so a case can
+        # assert the carriage, not just tolerate it.
+        deliveries_seen_sender_display.append(sender_display)
         record["delivered"].append(
             {"session": session_id, "payload": payload, "bridge_meta": bridge_meta}
         )
