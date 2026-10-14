@@ -238,3 +238,75 @@ def test_teams_link_refuses_a_differing_copy_until_accepted_and_then_never_delet
     sync = parser.parse_args(["teams", "sync", "--name", "release"])
     assert cli.teams_sync_command(sync, teams, root) == 0
     assert teams.get_team(team.id).instructions == "mine"
+
+
+def test_hub_links_and_link_set_parse(parser) -> None:
+    links = parser.parse_args(["hub", "links", "--kind", "agent", "--json"])
+    assert links.hub_command == "links" and links.kind == "agent" and links.json
+
+    setp = parser.parse_args(["hub", "link", "abc", "--subscribe", "false", "--auto-push", "true"])
+    assert setp.hub_command == "link" and setp.link_id == "abc"
+    assert setp.subscribe == "false" and setp.auto_push == "true"
+
+
+def test_hub_links_command_lists_a_local_link(rig, capsys) -> None:
+    root, hub, agents = rig
+    _pull_agent(agents, hub, root)
+
+    rc = cli.hub_links_command(argparse.Namespace(kind=None, json=True), root)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["capability"] == "hub_links:1"
+    assert len(payload["links"]) == 1
+    assert payload["links"][0]["hub_id"] == "h1"
+
+
+def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) -> None:
+    root, hub, agents = rig
+    _pull_agent(agents, hub, root)
+
+    # Resolve the legacy link to a confirmed identity so it has a policy revision.
+    from local_operator.config import ConfigManager
+    from local_operator.hub_sync import service as svc
+
+    cm = ConfigManager(root)
+    ctx = svc.HubSyncContext(
+        config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None, credential="ok"
+    )
+    record = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=agents.list_agents()[0].name,
+        hub_source="https://api.radienthq.com/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    link_id = record.identity.link_id
+
+    rc = cli.hub_link_set_command(
+        argparse.Namespace(
+            link_id=link_id,
+            subscribe="false",
+            auto_push=None,
+            expected_revision=None,
+            json=True,
+        ),
+        root,
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["policy"]["subscribe"] is False and out["policy"]["auto_push"] is False
+
+    # A WRONG explicit revision is refused (CAS), not applied.
+    bad = cli.hub_link_set_command(
+        argparse.Namespace(
+            link_id=link_id,
+            subscribe="true",
+            auto_push=None,
+            expected_revision="not-it",
+            json=True,
+        ),
+        root,
+    )
+    assert bad == 1
+    assert "error:" in capsys.readouterr().out

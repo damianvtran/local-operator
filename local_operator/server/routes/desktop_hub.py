@@ -219,7 +219,7 @@ async def apply(
             raise _refusal(422, "a public source resolution must not name an organization")
 
         def resolve_work(ctx: Any) -> dict[str, Any]:
-            from local_operator.clients.radient import configured_radient_base_url
+            from local_operator.providers.radient_credentials import configured_radient_base_url
             from local_operator.hub_sync.identity import LinkError as _IdentityError
             from local_operator.hub_sync.identity import approve_source
 
@@ -373,5 +373,104 @@ async def retry(
         return reply(
             await receipts(request).run(
                 "hub-retry:" + body.request_id, body.model_dump(), mutate, retry_safe=True
+            )
+        )
+
+
+class LinkPolicyPatch(Input):
+    request_id: RequestID
+    #: Both independent values are optional: a patch may set one and leave the
+    #: other, but at least one must be present (validated in the service).
+    subscribe: bool | None = None
+    auto_push: bool | None = None
+    #: The authority for the write: the revision the editor last saw. A mismatch
+    #: is a named 409 (the config was edited by someone else), never a
+    #: last-write-wins clobber.
+    expected_revision: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/v1/desktop/hub/links", response_model=CRUDResponse)
+async def links(
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+):
+    """The full local-only links inventory: every link, healthy or not. No network.
+
+    Gated on the ``hub_links:1`` capability so an older renderer never sees rows
+    it cannot act on; the legacy ``/hub/updates`` projection is unchanged.
+    """
+
+    from local_operator.hub_sync import service as svc
+
+    def read() -> dict[str, Any]:
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=lambda _tenant: None,
+        )
+        return svc.links_snapshot(ctx)
+
+    async with errors(request):
+        try:
+            return reply(await asyncio.to_thread(read))
+        except OSError as exc:
+            raise _refusal(503, f"the hub link store is unreadable: {exc}") from None
+
+
+@router.patch("/v1/desktop/hub/links/{link_id}", response_model=CRUDResponse)
+async def patch_link(
+    link_id: str,
+    body: LinkPolicyPatch,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+):
+    """Set one link's independent subscribe/auto_push, under a revision CAS.
+
+    A policy edit is LOCAL config work (no network): turning auto_push ON demands
+    a service eligibility attestation, but turning a value OFF or changing
+    subscribe never requires a working hub connection.
+    """
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.policies import update_policy
+
+    def work() -> dict[str, Any]:
+        record = None
+        for candidate in prov.iter_baselines(config_manager.config_dir):
+            if candidate.identity is not None and candidate.identity.link_id == link_id:
+                record = candidate
+                break
+        if record is None or record.identity is None:
+            raise _refusal(404, "no link with that id is known locally")
+        try:
+            snapshot = update_policy(
+                config_manager,
+                record.identity,
+                expected_revision=body.expected_revision,
+                subscribe=body.subscribe,
+                auto_push=body.auto_push,
+                # Eligibility for enabling auto_push is attested by the SERVER
+                # boundary in a later slice; until that exists, enabling is
+                # refused with the named precondition rather than faked.
+                can_enable_auto_push=False,
+            )
+        except LinkError as error:
+            code = getattr(error, "code", "") or ""
+            if code == "policy-revision-changed":
+                raise _refusal(409, str(error)) from None
+            raise _refusal(422, str(error)) from None
+        return {"link_id": link_id, "policy": snapshot.to_json()}
+
+    async def mutate() -> dict[str, Any]:
+        return await asyncio.to_thread(work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-link-policy:" + body.request_id,
+                {"link_id": link_id, **body.model_dump()},
+                mutate,
+                retry_safe=True,
             )
         )

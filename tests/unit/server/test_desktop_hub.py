@@ -248,3 +248,100 @@ async def test_capabilities_advertise_hub_updates() -> None:
     from local_operator.server.features import feature_flags
 
     assert feature_flags()["hub_updates"] == 1
+
+
+async def test_links_inventory_lists_a_healthy_link_with_capability(api):
+    """The inventory enumerates a healthy link (identity+policy+health), not just pending."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)  # a real pulled link with a baseline
+
+    # Capability advertised.
+    caps = (await client.get("/v1/capabilities")).json()["result"]
+    assert caps["features"]["hub_links"] == 1
+
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]
+    assert payload["capability"] == "hub_links:1"
+    assert len(payload["links"]) == 1
+    link = payload["links"][0]
+    assert link["kind"] == "agent"
+    assert link["hub_id"] == "h1"
+    # A healthy pass-through: a directional state and a discoverable source-scope
+    # field, so the sidebar can show a quiet mark with zero pending changes.
+    assert link["state"] in ("up-to-date", "available")
+    assert link["pull"] and link["push"]
+    # A LEGACY link has no confirmed origin identity yet (link_id present only
+    # when the record carries one); the row exposes that so the UI can offer the
+    # resolve action. ``scope_known`` tracks the tenant scope, not the full
+    # origin, so it is not the legacy marker.
+    assert link["link_id"] is None
+
+
+async def test_link_policy_patch_is_revision_checked(api):
+    """A stale revision is a named 409; the correct one writes both values independently."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)
+
+    link_id = await _resolved_link_id(client, root)
+
+    stale = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_revision="not-the-revision"),
+    )
+    assert stale.status_code == 409, stale.text
+
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"][0]
+    revision = payload["policy_revision"]
+
+    ok = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_revision=revision),
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["result"]["policy"]["subscribe"] is False
+    assert ok.json()["result"]["policy"]["auto_push"] is False
+
+
+async def test_link_policy_patch_refuses_enabling_auto_push_without_eligibility(api):
+    """Enabling auto_push demands a server eligibility attestation; refused, not faked."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)
+    link_id = await _resolved_link_id(client, root)
+    payload = next(
+        row
+        for row in (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
+        if row["link_id"] == link_id
+    )
+
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(auto_push=True, expected_revision=payload["policy_revision"]),
+    )
+    assert refused.status_code == 422, refused.text
+
+
+async def test_link_policy_patch_404s_an_unknown_link(api):
+    client, root, hub = api
+    response = await client.patch(
+        "/v1/desktop/hub/links/deadbeef",
+        json=mutation(subscribe=True, expected_revision="x"),
+    )
+    assert response.status_code == 404
+
+
+async def _resolved_link_id(client: Any, root: Path) -> str:
+    """Resolve the pulled agent's legacy link to a confirmed identity, return its id."""
+    resolved = await client.post(
+        "/v1/desktop/hub/updates/apply",
+        json=mutation(
+            kind="agent",
+            name="coder",
+            resolve_source=True,
+            hub_source="https://api.radienthq.com/v1",
+            visibility="public",
+        ),
+    )
+    assert resolved.status_code == 200, resolved.text
+    return resolved.json()["result"]["link"]["link_id"]

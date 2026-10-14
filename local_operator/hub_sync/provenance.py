@@ -318,6 +318,32 @@ def baseline_path(config_dir: Path, kind: Kind, local_id: str) -> Path:
     return baselines_dir(config_dir) / f"{kind}-{_check_id(local_id, 'local id')}.json"
 
 
+def iter_baselines(config_dir: Path) -> list[BaselineRecord]:
+    """Every readable baseline record, across kinds, sorted for a stable listing.
+
+    The identity inventory the links endpoint enumerates: a baseline IS the
+    per-origin record, so there is no second links database. An unreadable file
+    is skipped rather than failing the whole read -- one corrupt record must not
+    hide the rest, and the reader surfaces what it can.
+    """
+
+    directory = baselines_dir(config_dir)
+    try:
+        entries = sorted(directory.glob("*.json"))
+    except OSError:
+        return []
+    records: list[BaselineRecord] = []
+    for path in entries:
+        stem = path.name[: -len(".json")]
+        kind, _, local_id = stem.partition("-")
+        if kind not in ("agent", "team", "skill") or not local_id:
+            continue
+        record = read_baseline(config_dir, kind, local_id)  # type: ignore[arg-type]
+        if record is not None:
+            records.append(record)
+    return records
+
+
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
     """Temp file in the same directory + ``os.replace`` (the monitors/state shape)."""
 

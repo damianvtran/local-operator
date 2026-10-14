@@ -693,6 +693,37 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     hub_status.add_argument("--json", action="store_true", help="Emit the desktop route payload")
+    hub_links = hub_subparsers.add_parser(
+        "links",
+        help="List every hub link (healthy or not) with its source, scope and policy",
+        parents=[parent_parser],
+    )
+    hub_links.add_argument("--kind", choices=["agent", "team", "skill"], default=None)
+    hub_links.add_argument("--json", action="store_true", help="Emit the desktop links payload")
+    hub_link = hub_subparsers.add_parser(
+        "link",
+        help="Edit one hub link's independent policy",
+        parents=[parent_parser],
+    )
+    hub_link.add_argument("link_id", help="The link id from `lop hub links`")
+    hub_link.add_argument(
+        "--subscribe",
+        choices=["true", "false"],
+        default=None,
+        help="Unattended inbound synchronization for this link",
+    )
+    hub_link.add_argument(
+        "--auto-push",
+        choices=["true", "false"],
+        default=None,
+        help="Unattended outbound publication for this link",
+    )
+    hub_link.add_argument(
+        "--expected-revision",
+        default=None,
+        help="The policy revision you last saw (CAS); omitted reads it fresh first",
+    )
+    hub_link.add_argument("--json", action="store_true")
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
@@ -10435,6 +10466,109 @@ def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def _hub_links_snapshot(config_manager: ConfigManager) -> dict[str, Any]:
+    """The links inventory, computed locally (no network)."""
+
+    from local_operator.hub_sync import service as svc
+
+    ctx = svc.HubSyncContext(
+        config_dir=config_manager.config_dir,
+        config_manager=config_manager,
+        client_for_tenant=lambda _tenant: None,
+    )
+    return svc.links_snapshot(ctx)
+
+
+def hub_links_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop hub links`` — every link with its source, scope and independent policy."""
+
+    import json as _json
+
+    config_manager = ConfigManager(base_dir)
+    snapshot = _hub_links_snapshot(config_manager)
+    kind = getattr(args, "kind", None)
+    links = [link for link in snapshot["links"] if kind is None or link["kind"] == kind]
+    if getattr(args, "json", False):
+        print(_json.dumps({**snapshot, "links": links}, indent=2))
+        return 0
+    if not links:
+        print("No hub links.")
+        return 0
+    for link in links:
+        policy = link.get("policy") or {}
+        origin = link.get("source") or "(unknown origin — resolve to confirm source/scope)"
+        scope = link.get("visibility") or "unknown"
+        print(
+            f"{link['kind']}:{link['name']}  [{link['state']}]\n"
+            f"  link_id: {link.get('link_id') or '(unresolved)'}\n"
+            f"  source:  {origin}  ({scope})\n"
+            f"  policy:  subscribe={policy.get('subscribe')} auto_push={policy.get('auto_push')}\n"
+            f"  pull={link['pull']} push={link['push']}"
+        )
+    return 0
+
+
+def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop hub link set <link_id>`` — edit a link's independent policy under a CAS."""
+
+    import json as _json
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.policies import update_policy
+
+    config_manager = ConfigManager(base_dir)
+    subscribe = None if args.subscribe is None else args.subscribe == "true"
+    auto_push = None if args.auto_push is None else args.auto_push == "true"
+    if subscribe is None and auto_push is None:
+        print("error: pass --subscribe and/or --auto-push")
+        return 2
+
+    record = None
+    for candidate in prov.iter_baselines(config_manager.config_dir):
+        if candidate.identity is not None and candidate.identity.link_id == args.link_id:
+            record = candidate
+            break
+    if record is None or record.identity is None:
+        print(f"error: no link with id {args.link_id!r} is known locally")
+        return 1
+
+    revision = args.expected_revision
+    if not revision:
+        # Read the current revision unless the caller supplied one (the CAS guard).
+        snapshot = _hub_links_snapshot(config_manager)
+        row = next(
+            (link for link in snapshot["links"] if link.get("link_id") == args.link_id), None
+        )
+        revision = (row or {}).get("policy_revision")
+        if not revision:
+            print("error: could not read the current policy revision")
+            return 1
+    try:
+        result = update_policy(
+            config_manager,
+            record.identity,
+            expected_revision=revision,
+            subscribe=subscribe,
+            auto_push=auto_push,
+            # Server eligibility attestation lands with the outbound surface; until
+            # then enabling auto_push is a named refusal, never a silent no-op.
+            can_enable_auto_push=False,
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    payload = result.to_json()
+    if getattr(args, "json", False):
+        print(_json.dumps({"link_id": args.link_id, "policy": payload}, indent=2))
+    else:
+        print(
+            f"link {args.link_id}: subscribe={payload['subscribe']} "
+            f"auto_push={payload['auto_push']}"
+        )
+    return 0
+
+
 def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
@@ -14776,6 +14910,10 @@ def main() -> int:
         elif args.subcommand == "hub":
             if args.hub_command == "status":
                 return hub_status_command(args, base_dir)
+            if args.hub_command == "links":
+                return hub_links_command(args, base_dir)
+            if args.hub_command == "link":
+                return hub_link_set_command(args, base_dir)
             parser.error(f"Invalid hub command: {args.hub_command}")
         elif args.subcommand == "mobile":
             return mobile_command(args)

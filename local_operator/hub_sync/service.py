@@ -1012,3 +1012,87 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
     if len(lines) == 1:
         lines.append("  nothing pending")
     return "\n".join(lines)
+
+
+# -- links inventory (B5, new capability) ------------------------------------------------
+
+
+def links_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
+    """The ``GET /v1/desktop/hub/links`` payload: EVERY link, healthy or not.
+
+    Distinct from ``status_snapshot`` (which lists only items with attention):
+    this enumerates each confirmed link with its immutable identity, independent
+    per-link policy + revision, and its directional pull/push health, so a client
+    can show a healthy mark and offer a direct source-scoped toggle even with zero
+    pending changes. Local reads only; no network.
+    """
+    from local_operator.hub_sync import policies as pol
+    from local_operator.hub_sync import provenance as prov
+
+    try:
+        values = ctx.config_manager.get_config().values
+    except Exception:  # noqa: BLE001 - no readable config means creation defaults
+        values = {}
+    doc = ctx.store().load()
+    items = doc.get("items", {})
+    now = datetime.now(timezone.utc)
+    links: list[dict[str, Any]] = []
+    for record in prov.iter_baselines(ctx.config_dir):
+        item = items.get(st.item_key(record.kind, record.local_id), {})
+        identity = record.identity
+        policy = (
+            pol.link_policy_for(values, identity.link_id, identity.kind)
+            if identity is not None
+            else None
+        )
+        links.append(
+            {
+                "kind": record.kind,
+                "local_id": record.local_id,
+                "name": record.local_alias or record.local_id,
+                "hub_id": record.hub_id,
+                "tenant_id": record.tenant_id,
+                # ``source``/``scope`` present only for a confirmed origin; a legacy
+                # link shows its state so the UI can offer the resolve action.
+                "link_id": identity.link_id if identity is not None else None,
+                "source": identity.hub_source if identity is not None else None,
+                "visibility": identity.visibility if identity is not None else None,
+                "baseline_state": record.recorded_by,
+                "scope_known": record.scope_known,
+                "policy": policy.to_json() if policy is not None else None,
+                "policy_revision": (
+                    policy.revision(identity)
+                    if policy is not None and identity is not None
+                    else None
+                ),
+                # Directional health: a healthy link shows a quiet mark; these are
+                # the facts a source-scoped toggle and a Retry/Direction action key on.
+                "pull": _direction_state(item, "pulled", now),
+                "push": _direction_state(item, "pushed", now),
+                "state": st.effective_state(item, now),
+                "error_class": item.get("error_class"),
+                "last_checked_at": item.get("last_checked_at"),
+                "last_pulled_at": item.get("last_pulled_at"),
+                "last_pushed_at": item.get("last_pushed_at"),
+                "next_retry_at": item.get("next_retry_at"),
+            }
+        )
+    links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
+    return {
+        "generated_at": prov.now_iso(),
+        "capability": "hub_links:1",
+        "links": links,
+    }
+
+
+def _direction_state(item: Mapping[str, Any], which: Literal["pulled", "pushed"], now: Any) -> str:
+    """One direction's health: ``healthy`` | ``pending`` | ``failed`` | ``never``."""
+
+    if item.get("error_class") and which == "pulled":
+        return "failed"
+    stamp = item.get(f"last_{which}_at")
+    if stamp:
+        return "healthy"
+    if st.effective_state(item, now) == "available":
+        return "pending"
+    return "never"
