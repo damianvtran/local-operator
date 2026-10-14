@@ -172,6 +172,11 @@ AMBER_NOTICE: dict[str, str] = {
 SEND_FAULT_NOTICE = _t(copy.send_fault())
 
 
+def send_fault_notice() -> str:
+    """Resolve on use: consumers importing a string cannot follow locale rebinding."""
+    return _t(copy.send_fault())
+
+
 def amber_notice(state_word: str) -> str:
     """The amber receipt as the notice row carries it — caution INCLUDED.
 
