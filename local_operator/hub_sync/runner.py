@@ -37,7 +37,9 @@ from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
 
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
+from local_operator.hub_sync.budget import OperationBudget
 from local_operator.hub_sync.check import Link, list_links
+from local_operator.hub_sync.outbox import Outbox
 from local_operator.hub_sync.report import ItemMergeReport
 from local_operator.hub_sync.settings import HubSyncSettings
 
@@ -311,6 +313,11 @@ class HubSyncRunner:
                 elif result.error_class:
                     report.failed += 1
                     self._summarise_failure(c, result.error_class)
+            # OUTBOUND: after the inbound pass, push the items whose per-link
+            # auto_push is ON and whose push interval is due. Kept separate from
+            # the inbound loop so a subscribe=OFF/auto_push=ON link still pushes
+            # (without importing anything into local).
+            await self._push_due(ctx, checks, policies, settings, grace, doc, report)
         finally:
             await self._offload(lease.release)
         await self._offload(self._record_tick, ctx, report)
@@ -410,6 +417,101 @@ class HubSyncRunner:
         await asyncio.gather(one("agent"), one("team"))
         await self._offload(svc.record_checks, ctx, results)
         return results
+
+    async def _push_due(
+        self,
+        ctx: svc.HubSyncContext,
+        checks: Sequence[Any],
+        policies: Mapping[str, Any],
+        settings: HubSyncSettings,
+        grace: bool,
+        doc: dict[str, Any],
+        report: TickReport,
+    ) -> None:
+        """Push authored changes for links whose auto_push is ON and push is due.
+
+        A push needs an OUTBOUND RECEIPT (A/P); without one it is a first
+        publication, which is a deliberate action and never unattended. The whole
+        phase is best-effort: a transport error is recorded on the item and never
+        crashes the tick. ``push_item`` itself settles the no-op before any spend.
+        """
+        transporter = self._push_transport(ctx)
+        if transporter is None or grace:
+            return
+        for c in checks:
+            policy = policies.get(c.link_id) if c.link_id else None
+            if policy is None or not policy.auto_push:
+                continue
+            item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
+            if not st.push_due(item, settings.interval_min) or not st.auto_apply_due(item):
+                continue
+            try:
+                await self._push_one(ctx, c, transporter, report)
+            except Exception:  # noqa: BLE001 - a push must never kill the tick
+                logger.debug("hub push for %s %s failed", c.kind, c.local_id, exc_info=True)
+
+    def _push_transport(self, ctx: svc.HubSyncContext) -> Any:
+        """A configured push transport, or None when no credential/base is available."""
+
+        from local_operator.providers.radient_credentials import (
+            configured_radient_base_url,
+        )
+
+        try:
+            base = configured_radient_base_url(self._cm)
+        except Exception:  # noqa: BLE001 - no configured hub is simply no push
+            return None
+        if not base:
+            return None
+        from local_operator.hub_sync.outbox import AsyncDispatcher
+        from local_operator.hub_sync.push import HttpPushTransport
+
+        return HttpPushTransport(AsyncDispatcher(), base, {})
+
+    async def _push_one(
+        self, ctx: svc.HubSyncContext, c: Any, transporter: Any, report: TickReport
+    ) -> None:
+        """Project and push one item; record the outcome (never raises to the tick)."""
+
+        from local_operator.hub_sync.provenance import read_baseline
+        from local_operator.hub_sync.push import push_item
+
+        record = read_baseline(ctx.config_dir, c.kind, c.local_id)
+        if record is None or record.outbound is None:
+            return  # no outbound receipt: first publication is a deliberate action
+        budget = OperationBudget.start("automatic", self._operation_id(c), 1)
+        outcome = await push_item(
+            kind=c.kind,
+            local_id=c.local_id,
+            captured_local=record.outbound.local_fields,
+            accepted=record.outbound.accepted_fields,
+            current_local=c.local or {},
+            remote_latest=c.remote or {},
+            transport=transporter,
+            outbox=Outbox(ctx.config_dir),
+            operation_id=self._operation_id(c),
+            budget=budget,
+        )
+        report.skipped = None
+        self._record_push(ctx, c, outcome)
+
+    @staticmethod
+    def _operation_id(c: Any) -> str:
+        return f"push-{c.kind}-{c.local_id}"
+
+    def _record_push(self, ctx: svc.HubSyncContext, c: Any, outcome: Any) -> None:
+        """Stamp ``last_pushed_at`` on an accepted push so the interval advances."""
+
+        if outcome.state != "pushed":
+            return
+        key = st.item_key(c.kind, c.local_id)
+
+        def fold(doc: dict[str, Any]) -> None:
+            item = doc.get("items", {}).get(key)
+            if item is not None:
+                item["last_pushed_at"] = st.now_iso()
+
+        ctx.store().mutate(fold)
 
     def _first_run_grace(self, ctx: svc.HubSyncContext) -> bool:
         """True exactly once per config root: the first tick after upgrade never auto-applies."""

@@ -70,6 +70,49 @@ class RemoteRevisionChanged(RuntimeError):
     code = "remote-revision-changed"
 
 
+class HttpPushTransport:
+    """A real preview/commit transport over the abortable async dispatcher.
+
+    The route paths and the CAS header come from the module constants so a route
+    and the tool cannot drift. An HTTP 412 becomes :class:`RemoteRevisionChanged`;
+    the caller refetches and re-projects rather than resubmitting.
+    """
+
+    def __init__(self, dispatcher: Any, base_url: str, auth_header: Mapping[str, str]) -> None:
+        self._dispatcher = dispatcher
+        self._base = base_url.rstrip("/")
+        self._auth = dict(auth_header)
+
+    async def preview(self, *, kind, payload, budget):
+        response = await self._dispatcher.send(
+            "POST",
+            f"{self._base}{PREVIEW_PATH}",
+            budget=budget,
+            json_body={"kind": kind, "payload": dict(payload)},
+            headers=self._auth,
+            stage="preview",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def commit(self, *, kind, payload, expected_revision, operation_id, budget):
+        headers = dict(self._auth)
+        if expected_revision:
+            headers[ETAG_IF_MATCH] = expected_revision
+        response = await self._dispatcher.send(
+            "POST",
+            f"{self._base}{COMMIT_PATH}",
+            budget=budget,
+            json_body={"kind": kind, "payload": dict(payload), "operation_id": operation_id},
+            headers=headers,
+            stage="commit",
+        )
+        if response.status_code == 412:
+            raise RemoteRevisionChanged("remote-revision-changed")
+        response.raise_for_status()
+        return response.json()
+
+
 @dataclass(frozen=True)
 class PushOutcome:
     state: str  # "no-op" | "pushed" | "refused" | "needs-review" | "conflict"

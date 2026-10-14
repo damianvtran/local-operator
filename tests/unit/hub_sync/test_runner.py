@@ -13,7 +13,8 @@ from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.runner import HubSyncRunner
+from local_operator.hub_sync.runner import HubSyncRunner, TickReport
+from local_operator.hub_sync.settings import HubSyncSettings
 from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
 
 pytestmark = pytest.mark.asyncio
@@ -277,3 +278,50 @@ async def test_pick_skips_a_both_off_link_and_orders_retry_first(rig) -> None:
     }
     picked = runner._pick(links, {"items": {}}, policies)
     assert picked["agent"] == {"a-ok"}  # the both-off link does nothing
+
+
+async def test_push_phase_skips_links_without_an_outbound_receipt(rig, monkeypatch) -> None:
+    """A link with no (A,P) receipt is not pushed: first publication is deliberate."""
+    import dataclasses
+
+    runner, hub, agents, root, cm, _ = rig
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import push as push_mod
+    from local_operator.hub_sync.check import ItemCheck
+    from local_operator.hub_sync.identity import LinkIdentity, LinkPolicy
+
+    ident = LinkIdentity("agent", "a1", "https://hub.test/v1", "public", None, "h1")
+    calls: list[dict] = []
+
+    async def fake_push_item(**kw):
+        calls.append(kw)
+        return push_mod.PushOutcome("pushed")
+
+    monkeypatch.setattr(push_mod, "push_item", fake_push_item)
+    monkeypatch.setattr(runner, "_push_transport", lambda ctx: object())
+    # A baseline with NO outbound receipt.
+    prov.write_baseline(
+        root, prov.make_record("agent", "a1", "h1", None, {"instructions": "x"}, "adopt")
+    )
+    c = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "x"},
+        remote={},
+    )
+    c = dataclasses.replace(c, link_id=ident.link_id)
+    settings = HubSyncSettings.read_fresh(cm)
+    await runner._push_due(
+        await runner.context(),
+        [c],
+        {ident.link_id: LinkPolicy(True, True)},
+        settings,
+        False,
+        {},
+        TickReport("timer"),
+    )
+    assert calls == []  # no receipt -> not pushed
