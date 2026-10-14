@@ -117,6 +117,16 @@ try:
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
+# The console-admission section reads its copy from its own namespace for the
+# same reason as `wire.aida_cadence`: the section is new, so adding it beside
+# already-translated settings must not move those sources. Without this merge the
+# section's `_cs.*` messages resolve to their bare codes (`wire.console.title`),
+# which is what the byte-identical golden caught.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
 
 def _t(message: _Msg) -> str:
     """The resolved string for a generated settings message."""
