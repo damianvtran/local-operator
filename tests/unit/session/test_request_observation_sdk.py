@@ -45,6 +45,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.request_observation import RequestFinalObservation
+from tests.unit.session.shutdown_accounting import ShutdownAccounting
 
 _PARENT_MARKER = "PSTART-parent-turn"
 _CHILD_MARKER = "CCHILD-child-turn"
@@ -68,6 +69,7 @@ class Wire:
     def __init__(self) -> None:
         self._turns: dict[str, list[list[Any]]] = {}
         self.requests: list[ChatRequest] = []
+        self.accounting: ShutdownAccounting | None = None
 
     def script(self, scope: str, *turns: Any) -> None:
         self._turns.setdefault(scope, []).extend(turns)
@@ -100,6 +102,8 @@ class Wire:
     async def stream(
         self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
     ) -> AsyncIterator[Any]:
+        if self.accounting is not None:
+            self.accounting.transport_enter(request)
         self.requests.append(request)
         scope = self.scope_of(request)
         turns = self._turns.get(scope)
@@ -187,6 +191,28 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
     scripted = Wire()
     monkeypatch.setattr(MockClient, "stream", scripted.stream)
     return scripted
+
+
+@pytest.fixture
+def shutdown_accounting(wire: Wire, monkeypatch: pytest.MonkeyPatch) -> ShutdownAccounting:
+    """Trace only opted-in cells; every other SDK test keeps its original wire."""
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers import failover
+
+    trace = ShutdownAccounting(Wire.scope_of)
+    wire.accounting = trace
+    monkeypatch.setattr(
+        SessionStreamFn, "_record_stream", trace.wrap_record(SessionStreamFn._record_stream)
+    )
+    monkeypatch.setattr(
+        SessionStreamFn,
+        "_notify_request_final",
+        trace.wrap_final(SessionStreamFn._notify_request_final),
+    )
+    monkeypatch.setattr(
+        failover, "stream_with_failover", trace.wrap_failover(failover.stream_with_failover)
+    )
+    return trace
 
 
 def _spec(**overrides: Any) -> Any:
@@ -808,7 +834,7 @@ async def test_abort_control_leaves_child_alive_and_shutdown_joins_it(
 
 @pytest.mark.asyncio
 async def test_shutdown_joins_grandchildren_and_background_bash_jobs(
-    scratch: Any, wire: Wire
+    scratch: Any, wire: Wire, shutdown_accounting: ShutdownAccounting
 ) -> None:
     wire.script(
         "parent",
@@ -837,12 +863,16 @@ async def test_shutdown_joins_grandchildren_and_background_bash_jobs(
         session.subscribe_requests(observed.append)
         await session.prompt(f"{_PARENT_MARKER}: hold the tree")
         await asyncio.sleep(0.4)  # let the children register their sleeping jobs
+        shutdown_accounting.begin_shutdown()
         receipt = await session.shutdown_owned_work("test-teardown", timeout_s=30)
         assert receipt.complete is True, receipt
         assert receipt.pending_job_ids == ()
         assert not [job for job in session.jobs.list() if job.status == "running"]
-        # No request reaches the wire after the tree settled.
-        assert len(wire.requests) == len(observed) + 0, "every row is a real request"
+        # Final rows account for logical requests, including failover's exact
+        # pre-wire shutdown refusal. Preserve transport/success matching and
+        # reject every unwitnessed failure rather than allowing ProviderError
+        # by name or assuming transport-entry count equals logical-final count.
+        shutdown_accounting.validate(observed, len(wire.requests))
 
 
 # ---------------------------------------------------------------------------
