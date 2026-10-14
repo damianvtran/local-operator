@@ -659,6 +659,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``code_requests``: the derived index under the store root and the scan cache "
         "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
     ),
+    # Files inventory uses the same out-of-session derived-store convention: moving a
+    # session carries its journal, never a device-local cache of that journal's file facts.
+    # Rebuild on the receiving device so cached absolute paths/stats are not transported.
+    "local_operator/session_files/ledger.py": (
+        1,
+        "``CACHE_DIRNAME`` (``session_files``): regenerable scan cache under "
+        "``<config>/cache/session_files/``, never an entry inside a session directory",
+    ),
     "local_operator/code_requests/cache.py": (
         1,
         "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
