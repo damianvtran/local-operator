@@ -11184,34 +11184,62 @@ class Session:
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]
         existing_word = picks[0].strip().lower() if len(picks) == 1 else ""
-        if existing_word:
-            from local_operator.asks import store as _asks_store
-            from local_operator.harness.approval import bridge_decide_grant_committed
+        from local_operator.asks import store as _asks_store
+        from local_operator.harness.approval import (
+            bridge_decide_grant_committed,
+            bridge_decide_grant_seen,
+        )
 
-            if (
-                str(record.get("status") or "")
-                in (_asks_store.STATUS_ANSWERED, _asks_store.STATUS_LATE)
-                and not bridge_decide_grant_committed(
-                    session_id=_session_id,
-                    ask_id=ask_id,
-                    question_id=str(question_id),
-                    word=existing_word,
-                )
-            ):
-                # §1.4: the recorded answer was never accompanied by an
-                # admitted decision — supersede it through the SANCTIONED
-                # revision window while the response row is still undelivered
-                # (once delivered the ordinary refusal stands, and the
-                # dispatcher's grant check has already kept the unproven
-                # answer from POSTing). S-R3-1: the test is whether the EXISTING
-                # answer was proven (a CONSUMED grant for its word), never
-                # whether such a grant exists — the operator's own minted grant
-                # would otherwise make a forged same-word line look proven and
-                # silently drop the operator's decision.
-                if not queue.revision_refusal(ask_id):
-                    revised = queue.revise(ask_id, {question_slot: [decision.word]}, by="operator")
-                    if revised.get("ok"):
-                        return {"ok": True, "revised": True, "word": decision.word}
+        status = str(record.get("status") or "")
+        # F5-1 (§1.4/M2): the fold is a same-uid record, so a DECLINED or
+        # DISMISSED carriage is not proof that a human declined anything — and it
+        # carries no answers, so the word-based arm below never matched it: the
+        # genuine, admitted decision fell through to the ordinary door and was
+        # refused ("you already declined this"), withdrawing the grant of an
+        # admitted decision on the way out. A forged line locked the human out.
+        # Such a carriage is therefore ADMITTED as a first answer (below), and
+        # the guard here is what keeps that from being a bypass: the decision
+        # must be the one this environment admitted — the grant is minted only
+        # by the authority seam, for the exact word.
+        forged_decline = (
+            status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED)
+            and queue._is_bridge_ask_record(record)
+        )
+        if forged_decline and not bridge_decide_grant_seen(
+            session_id=_session_id,
+            ask_id=ask_id,
+            question_id=str(question_id),
+            word=decision.word,
+        ):
+            return _refuse("that decision does not match what this session admitted for this ask.")
+        unproven_answer = (
+            bool(existing_word)
+            and status in (_asks_store.STATUS_ANSWERED, _asks_store.STATUS_LATE)
+            and not bridge_decide_grant_committed(
+                session_id=_session_id,
+                ask_id=ask_id,
+                question_id=str(question_id),
+                word=existing_word,
+            )
+        )
+        if unproven_answer:
+            # §1.4: the recorded answer was never accompanied by an admitted
+            # decision — supersede it through the SANCTIONED revision window
+            # while the response row is still undelivered (once delivered the
+            # ordinary refusal stands, and the dispatcher's grant check has
+            # already kept the unproven answer from POSTing). S-R3-1: the test is
+            # whether the EXISTING answer was proven (a CONSUMED grant for its
+            # word), never whether such a grant exists — the operator's own
+            # minted grant would otherwise make a forged same-word line look
+            # proven and silently drop the operator's decision.
+            if not queue.revision_refusal(ask_id):
+                revised = queue.revise(ask_id, {question_slot: [decision.word]}, by="operator")
+                if revised.get("ok"):
+                    return {"ok": True, "revised": True, "word": decision.word}
+        # A declined/dismissed BRIDGE carriage lands HERE (F5-1), through the
+        # ordinary first-answer door: the queue admits it for exactly this case
+        # and the fold's own ordering puts a genuine ``answered`` event above a
+        # recorded decline, so the human's admitted decision posts exactly once.
         outcome = queue.respond(ask_id, {question_slot: [decision.word]}, by="operator")
         if not outcome.get("ok"):
             return _refuse(str(outcome.get("error") or "the decision was refused."))
