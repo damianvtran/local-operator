@@ -561,9 +561,8 @@ async def test_length_pairs_but_does_not_execute():
                 tool_call_delta(0, id="c1", name="echo", args="{}"),
                 StreamEndEvent(stop_reason="length"),
             ],
-            # The placeholder result goes back to the model; it answers and
-            # stops cleanly.
-            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            # The placeholder result goes back to the model; it stops cleanly.
+            [StreamEndEvent(stop_reason="stop")],
         ]
     )
     context = LoopContext(tools=[echo_tool(executed)])
@@ -644,7 +643,7 @@ async def test_length_arms_are_distinguished():
                 tool_call_delta(2, id="c_cut", name="echo", args='{"text": "'),
                 StreamEndEvent(stop_reason="length"),
             ],
-            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
         ]
     )
     context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
@@ -764,9 +763,8 @@ async def test_length_with_prose_and_a_call_takes_the_answer_arm():
                 tool_call_delta(0, id="c1", name="echo", args="{}"),
                 StreamEndEvent(stop_reason="length"),
             ],
-            # The placeholder result goes back to the model; it answers and
-            # stops cleanly.
-            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            # The placeholder result goes back to the model; it stops cleanly.
+            [StreamEndEvent(stop_reason="stop")],
         ]
     )
     context = LoopContext(tools=[echo_tool(executed)])
@@ -2087,11 +2085,6 @@ class TestTheContextHintIsStampedPerRequestByTheLoop:
             events: list[StreamEvent] = []
             if more:
                 events.append(tool_call_delta(0, id="c", name="echo", args="{}"))
-            else:
-                # A REAL completion: the terminal turn answers in prose. A bare
-                # stop would be the wordless-stop recovery's target and buy a
-                # fourth request this class does not pin.
-                events.append(StreamTextDelta(delta="done"))
             if context is not None:
                 events.append(StreamUsageEvent(usage=Usage(input_tokens=1, context_tokens=context)))
             events.append(StreamEndEvent(stop_reason="toolUse" if more else "stop"))
@@ -2175,10 +2168,7 @@ class TestNoTurnLeavesTheLoopWithoutAGenerationBound:
                     tool_call_delta(0, id="c", name="echo", args="{}"),
                     StreamEndEvent(stop_reason="toolUse"),
                 ],
-                # A real completion (prose then stop): a bare stop would be
-                # re-asked once by the wordless-stop recovery, adding a third
-                # request this class does not pin.
-                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+                [StreamEndEvent(stop_reason="stop")],
             ]
         )
 
@@ -6738,7 +6728,8 @@ def _wordless_stop_turn() -> list[StreamEvent]:
 
 @pytest.mark.asyncio
 async def test_a_wordless_stop_gets_one_re_ask_and_the_turn_continues():
-    """The blank terminal turn must not end the run by default: the loop knows
+    """When the session bit says silence is a failure, the blank terminal turn
+    must not end the run: the loop knows
     the one fact the model cannot see -- its message arrived empty -- and
     re-asks ONCE, after which the turn continues normally. The empty assistant
     row must never reach the wire: it is illegal on the Anthropic wire, and it
@@ -6756,7 +6747,9 @@ async def test_a_wordless_stop_gets_one_re_ask_and_the_turn_continues():
     )
     context = LoopContext(tools=[echo_tool(executed)])
     events = []
-    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
         events.append(event)
 
     # The run continued: the model's next action executed, and the run ended
@@ -6808,7 +6801,9 @@ async def test_wordless_stop_recovery_is_bounded():
     )
     context = LoopContext(tools=[])
     events = []
-    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
         events.append(event)
 
     end = events[-1]
@@ -6836,7 +6831,11 @@ async def test_a_requested_stop_skips_the_wordless_re_ask():
     async for event in AgentLoop().run(
         [Message.user("go")],
         context,
-        make_config(stream, graceful_cancel_requested=lambda: len(stream.requests) >= 1),
+        make_config(
+            stream,
+            recover_wordless_stop=True,
+            graceful_cancel_requested=lambda: len(stream.requests) >= 1,
+        ),
         None,
     ):
         events.append(event)
@@ -6860,6 +6859,31 @@ async def test_an_ordinary_answer_gets_no_wordless_re_ask():
     stream = ScriptedStream(
         [
             [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not any(
+        isinstance(event, NoticeEvent) and "arrived empty" in event.text for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_without_the_session_bit_keeps_the_old_ending():
+    """Silence is a LEGITIMATE ending for internal arrivals -- delivery,
+    catch-up, a non-notify wake -- so with the session bit unset (the default)
+    the bare stop ends the turn exactly as before and spends no extra provider
+    call. This is the shape the session delivery/wake/latch cells pin."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
             [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
         ]
     )

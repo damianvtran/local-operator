@@ -2652,11 +2652,23 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                         )
-                    elif stop_reason == "stop" and not (assistant.text or "").strip():
+                    elif (
+                        config.recover_wordless_stop
+                        and stop_reason == "stop"
+                        and not (assistant.text or "").strip()
+                    ):
                         # A WORDLESS STOP: a clean ``stop`` arrived with no
                         # text and no tool calls, and no arm above claimed it
                         # (not a ``length`` cut-off, not the nameless-call
-                        # family's ``toolUse``). There is nothing to act on and nothing will
+                        # family's ``toolUse``). Recovered ONLY on runs whose
+                        # host declares silence a failure here
+                        # (``config.recover_wordless_stop`` -- the session's
+                        # quiet-end rule inverted): a run whose words someone
+                        # is waiting on must not end in silence, while every
+                        # internal arrival -- delivery, catch-up, a non-notify
+                        # wake -- may end quietly and keeps the old ending,
+                        # paying no extra provider call. Where the bit is set,
+                        # there is nothing to act on and nothing will
                         # be said, so without this arm the turn ends here and
                         # every surface reads a deliberate stop -- measured
                         # 2026-10-14 on the OSWorld arm 325633a (episode
