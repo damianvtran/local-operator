@@ -4055,6 +4055,32 @@ async def _drain_for_signal(
     stop.set()
 
 
+def _resume_consumed_ids(directory: Path) -> set[str]:
+    """Inbox/job ids a predecessor already delivered, from the checkpoint record.
+
+    The successor reads this ONCE at boot (before it listens) so a row the
+    predecessor already delivered is not delivered a second time. Unreadable,
+    absent, deferred or non-resumable ⇒ empty: the rows are delivered normally,
+    because unknown is not permission to suppress a delivery.
+    """
+    try:
+        from local_operator.service_handoff import resumable
+        from local_operator.session.transcript import (
+            CHECKPOINT_CUSTOM_TYPE,
+            read_latest_custom,
+        )
+
+        record = read_latest_custom(directory, CHECKPOINT_CUSTOM_TYPE)
+    except Exception:  # noqa: BLE001 — unreadable is not permission to filter
+        return set()
+    if not resumable(record):
+        return set()
+    consumed = record.get("inbox_consumed_ids") if record else None
+    if not isinstance(consumed, list):
+        return set()
+    return {item for item in consumed if isinstance(item, str) and item}
+
+
 async def _drain_inbox_into(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
@@ -4146,6 +4172,19 @@ async def _drain_inbox_into(handle: object) -> int:
     # deferral writes back ONE row per wake (carrying its fire count), which is
     # also what keeps a later drain's merge from double-counting.
     lines = coalesce_wake_rows(lines)
+    # SUCCESSOR RESUME (ready-successor handoff). A checkpointed move may have
+    # already delivered some spooled rows on the predecessor; the record's
+    # ``inbox_consumed_ids`` is the durable "delivered once" set. Dropping those
+    # rows here is what makes delivery exactly-once across the swap rather than
+    # at-least-once. Unreadable/absent/deferred ⇒ no filtering (the rows are
+    # delivered normally), matching the rule that unknown is not permission to
+    # change behaviour. Read BEFORE the deferral split so the deferral writes
+    # back only what it will not deliver.
+    consumed = _resume_consumed_ids(directory)
+    if consumed:
+        lines = [
+            line for line in lines if (getattr(line, "message_id", "") or "") not in consumed
+        ]
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
