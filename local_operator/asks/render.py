@@ -195,6 +195,23 @@ def response_text(
     return text
 
 
+def _timeout_listing_line(question: Mapping[str, Any]) -> str:
+    """One question as the timeout notice names it.
+
+    A BRIDGE question's text carries another organization's words (framed by
+    §11.1 in the ask itself). This notice is a plain sentence about OUR ask, so
+    for a request it names the request and the house untrusted-data clause
+    instead of repeating the sender's words outside their own framing — quoting
+    them here would be exactly the un-framed re-serve §11.1 forbids.
+    """
+
+    if str(question.get("question_id") or ""):
+        from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+        return f"{question.get('id')} — {BRIDGE_UNTRUSTED_CLAUSE}"
+    return _clip(str(question.get("question") or ""), 200)
+
+
 def timeout_text(
     record: Mapping[str, Any], *, now_ms: int, lapsed_while_stopped: bool = False
 ) -> str:
@@ -220,7 +237,7 @@ def timeout_text(
             ask_id=record.get("ask_id", ""), waited=waited, asked=asked, keys=keys
         )
     else:
-        listing = "; ".join(_clip(str(q.get("question") or ""), 200) for q in questions)
+        listing = "; ".join(_timeout_listing_line(q) for q in questions)
         text = TIMEOUT_NOTICE.format(
             ask_id=record.get("ask_id", ""),
             waited=waited,

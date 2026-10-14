@@ -72,21 +72,23 @@ def bridge_request_question(
         raise ValueError("a bridge ask needs the request's message id (question_id)")
     bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     text = f"{sender} · {summary}".strip(" ·")
-    if bounded:
-        # TB-05 (PR #2378): the sender's words are DATA at every hop. The
-        # §11.1 clause rides INSIDE the question text, ahead of the excerpt,
-        # so no surface or model can read the sender's words as the human's —
-        # and tag lookalikes are neutralised exactly like the wake wrap's.
-        from local_operator.harness.message_types import (
-            BRIDGE_UNTRUSTED_CLAUSE,
-            neutralize_bridge_tag,
-        )
+    # TB-05 (PR #2378): the sender's words are DATA at every hop, and the
+    # question text ALWAYS carries sender-derived material (the sender line and
+    # the summary) — so the §11.1 clause rides whenever there is text at all,
+    # not only when an excerpt happens to be present. The excerpt follows it;
+    # tag lookalikes are neutralised exactly like the wake wrap's.
+    from local_operator.harness.message_types import (
+        BRIDGE_UNTRUSTED_CLAUSE,
+        neutralize_bridge_tag,
+    )
 
+    if bounded:
         bounded = neutralize_bridge_tag(bounded)
+    if text or bounded:
         text = (
             f"{text}\n{BRIDGE_UNTRUSTED_CLAUSE}\n{bounded}"
-            if text
-            else f"{BRIDGE_UNTRUSTED_CLAUSE}\n{bounded}"
+            if bounded
+            else f"{text}\n{BRIDGE_UNTRUSTED_CLAUSE}"
         )
     question = {
         "id": f"bridge-{message_id}",

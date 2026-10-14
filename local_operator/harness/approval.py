@@ -950,6 +950,54 @@ def bridge_decide_grant_seen(
     return entry is not None and str(entry.get("word")) == str(word).strip().lower()
 
 
+def bridge_decide_grant_committed(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> bool:
+    """Whether a CONSUMED grant exists for exactly this word (S-R3-1).
+
+    THE PROVENANCE TEST for an already-recorded answer: an answer that came
+    through the verified door was CONSUMED by the dispatcher at the point of
+    effect, and the consumed entry is retained for the TTL. A MINTED-but-
+    unconsumed grant is the operator's own live decision whose fold row has not
+    been written yet — reading that as "the recorded answer was proven" is what
+    let a forged SAME-WORD line suppress the operator's decision and leave the
+    grant unspent (S-R3-1). Distinct from
+    :func:`bridge_decide_grant_seen`, which answers "was this decision ever
+    admitted" and is the wrong question here.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    entry = _BRIDGE_DECIDE_GRANTS.get((str(session_id), str(ask_id), str(question_id)))
+    if entry is None:
+        return False
+    return bool(entry.get("consumed")) and str(entry.get("word")) == str(word).strip().lower()
+
+
+def withdraw_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str) -> None:
+    """Drop a minted-but-unconsumed grant when the door REFUSES the frame.
+
+    S-R3-3: mint-on-admission happens before the door can validate the ask, the
+    question and the word, so a refusal must not leave a live grant behind —
+    otherwise the same TARGET could be spent later (by a stale retry or another
+    route) without a fresh, admitted human decision. The key is the target, not
+    the attempted word: an admitted frame whose word the door refused proves
+    nothing about the target, and the grant on it must not outlive the refusal.
+    A CONSUMED entry is left in place — it is the provenance record the
+    supersede test reads.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    key = (str(session_id), str(ask_id), str(question_id))
+    entry = _BRIDGE_DECIDE_GRANTS.get(key)
+    if entry is None or entry.get("consumed"):
+        return
+    _BRIDGE_DECIDE_GRANTS.pop(key, None)
+
+
 def reset_bridge_decide_grants_for_tests() -> None:
     """Clear the process-wide table. Tests only — production never calls it."""
     _BRIDGE_DECIDE_GRANTS.clear()

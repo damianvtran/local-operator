@@ -221,8 +221,13 @@ def _seed_note_envelope(tmp_path) -> None:
         conn.close()
 
 
-def _stamp(store: Store, *, advance_phase: bool = True) -> dict:
-    """The REAL write path (+ the confirmed-handoff phase), for the seeds."""
+def _stamp(store: Store, *, advance_phase: bool = True, sender_account_id: str = "acc_1") -> dict:
+    """The REAL write path (+ the confirmed-handoff phase), for the seeds.
+
+    ``sender_account_id`` is the REMOTE sender's account — distinct from the
+    local owner's ``account_id`` — so a case can prove the displayed identity
+    comes from the sender and never from the owner (TB-11).
+    """
 
     envelope = store.write_screened_request_delivery(
         _owner(),
@@ -238,7 +243,7 @@ def _stamp(store: Store, *, advance_phase: bool = True) -> dict:
             "request_state": "pending",
             "request_expires_at": "",
             "request_ref": "",
-            "sender_account_id": "acc_1",
+            "sender_account_id": sender_account_id,
             "sender_endpoint_id": "ep_1",
             "recipient_account_id": "acc_2",
             "recipient_endpoint_id": "ep_2",

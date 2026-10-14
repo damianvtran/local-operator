@@ -2412,7 +2412,18 @@ class Store:
         try:
             with self._connect() as conn:
                 self._init(conn)
-                if delivery_ref:
+                if delivery_ref and message_id:
+                    # S-R3-4 (PR #2378): BOTH locators are binding when the
+                    # caller holds both — a reference is borrowable, and a read
+                    # that matched on the ref alone could hand back a different
+                    # delivery's row (its scope, its sender identity) to a
+                    # caller echoing a reference it merely saw.
+                    row = conn.execute(
+                        "SELECT * FROM screened_request_deliveries "
+                        "WHERE owner_key = ? AND delivery_ref = ? AND message_id = ?",
+                        (key, str(delivery_ref), str(message_id)),
+                    ).fetchone()
+                elif delivery_ref:
                     row = conn.execute(
                         "SELECT * FROM screened_request_deliveries "
                         "WHERE owner_key = ? AND delivery_ref = ?",
