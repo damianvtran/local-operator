@@ -314,8 +314,9 @@ async def test_a_raising_beat_does_not_end_the_serving_planes_reporter(
     monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", BEAT_INTERVAL_S)
     logs = tmp_path / "logs"
     assert stall_watchdog.arm(seconds=600.0, directory=logs, busy=lambda: True) is True
+    runtime: RuntimeServer | None = None
     try:
-        await _boot(tmp_path)
+        runtime = await _boot(tmp_path)
         assert await _wait_for(
             lambda: len(stamps) >= 3, BEAT_DEADLINE_S
         ), "the serving plane's tick died with its first stamp, so nothing re-reports"
@@ -326,7 +327,16 @@ async def test_a_raising_beat_does_not_end_the_serving_planes_reporter(
             f"plane: {deaths}"
         )
     finally:
-        stall_watchdog.disarm()
+        try:
+            if runtime is not None:
+                # Disarming is not teardown: the thread-hosted serving ticker
+                # would survive this cell and stamp a later test's global arm.
+                # Await the existing off-loop close so the session loop remains
+                # available while the runtime disposes its serving handle.
+                await runtime.aclose_remote()
+                assert runtime._closed.is_set(), "the serving ticker was not stopped"
+        finally:
+            stall_watchdog.disarm()
 
 
 async def _wait_for(predicate: Any, timeout: float) -> bool:
