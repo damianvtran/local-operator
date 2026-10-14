@@ -452,6 +452,71 @@ def resumable(checkpoint: "dict[str, Any] | None") -> bool:
     return bool(checkpoint) and checkpoint.get("phase") == "resume"
 
 
+@dataclass(frozen=True)
+class ResumePlan:
+    """What a successor may do with a checkpoint, derived — never guessed.
+
+    ``deferred`` is a refusal to claim continuation, not a partial success: it
+    is set whenever the record cannot be read or says so, and in that case
+    ``replay_effect`` is empty and ``skip_call_ids`` is empty, so the caller
+    cannot resume work on the strength of an unreadable record.
+    """
+
+    deferred: bool
+    reason: str
+    skip_call_ids: frozenset[str]
+    replay_effect: dict[str, Any]
+    inbox_consumed_ids: frozenset[str]
+
+
+def resume_plan(checkpoint: "dict[str, Any] | None") -> ResumePlan:
+    """Decide the exactly-once resume: skip committed calls, replay the one
+    effect that did NOT commit, deliver each inbox/job id once.
+
+    The rules, in one place so both the runtime and its tests read them:
+
+    * Unreadable/``None`` or phase ``deferred`` ⇒ deferred, nothing replayed.
+    * A completed effect (by ``call_id``) is SKIPPED — never re-run.
+    * ``pending_effect`` is replayed ONLY because it never durably committed;
+      an effect with no stable ``call_id`` cannot be proven uncommitted, so it
+      is deferred rather than re-run (the declared at-least-once limit).
+    * Inbox ids are a set, so a duplicate drain is a no-op.
+    """
+
+    if not resumable(checkpoint):
+        return ResumePlan(
+            True, "checkpoint is unreadable or deferred", frozenset(), {}, frozenset()
+        )
+    assert checkpoint is not None  # resumable() guaranteed it
+    skip = frozenset(
+        effect["call_id"]
+        for effect in checkpoint.get("completed_effects", [])
+        if isinstance(effect, dict) and isinstance(effect.get("call_id"), str) and effect["call_id"]
+    )
+    pending = checkpoint.get("pending_effect") or {}
+    replay: dict[str, Any] = {}
+    if isinstance(pending, dict) and pending:
+        call_id = pending.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            # No stable id: we cannot prove it did not commit, so we must not
+            # re-run it. A non-idempotent side effect is the operator's to
+            # reconcile; a silent re-run is the harm this guards against.
+            return ResumePlan(
+                True,
+                "pending effect has no stable call_id; not replayable exactly-once",
+                skip,
+                {},
+                frozenset(),
+            )
+        replay = dict(pending)
+    inbox = frozenset(
+        item
+        for item in checkpoint.get("inbox_consumed_ids", [])
+        if isinstance(item, str) and item
+    )
+    return ResumePlan(False, "", skip, replay, inbox)
+
+
 __all__ = [
     "HANDOFF_CONTRACT",
     "HANDOFF_STATES",
@@ -470,5 +535,7 @@ __all__ = [
     "checkpoint_record",
     "effect_already_committed",
     "resumable",
+    "ResumePlan",
+    "resume_plan",
     "_acceptor_factory",
 ]
