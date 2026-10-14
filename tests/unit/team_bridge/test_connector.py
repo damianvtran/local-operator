@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import plistlib
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -224,7 +226,15 @@ def test_resync_walk_completes_only_after_terminal_page(tmp_path, monkeypatch) -
 
 
 def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
-    """Replace the heavy seams with controlled fakes; return the recorder."""
+    """Replace the heavy seams with controlled fakes; return the recorder.
+
+    The settings seam is patched ENABLED here (the spine's config gate); the
+    dedicated off-arm below re-patches it to prove ZERO new traffic. The ack
+    fake returns a CONFIRMED AckOutcome — the S-12 gate reads the outcome, so
+    a bare ``None`` (the old shape) would now correctly HOLD.
+    """
+
+    from types import SimpleNamespace
 
     body = body or "hello from the org"
     record: dict[str, Any] = {"acks": [], "delivered": [], "screened": 0}
@@ -241,15 +251,28 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
         return ScreenResult(disposition="hold", hold_code="screening_hold")
 
     async def fake_message(owner, message_id, *, config_dir, access, client=None):
-        from types import SimpleNamespace
-
         return SimpleNamespace(message_id=message_id)
 
     async def fake_ack(owner, message_id, target, receipt, *, config_dir, access):
         record["acks"].append(target)
+        # The REAL frozen intent: the confirmed outcome must resolve to THIS
+        # row by id (S-12), so the default fake records the real one — the
+        # binding arms below deliberately break the tuple instead.
+        from local_operator.team_bridge.store import Store as _AckStore
 
-    async def fake_deliver(owner, payload, *, session_id, config_dir):
-        record["delivered"].append({"session": session_id, "payload": payload})
+        intent_id = _AckStore(config_dir).record_ack_intent(
+            owner, message_id, target, receipt, "connector-test"
+        )
+        # S-12 FULL TUPLE: the ledger row must read CONFIRMED, so the nominal
+        # fake completes the real write path (record → mark) instead of
+        # returning a confirmed outcome over a pending row.
+        _AckStore(config_dir).mark_ack_result(owner, intent_id, state="confirmed", error_code=None)
+        return SimpleNamespace(state="confirmed", intent_id=intent_id)
+
+    async def fake_deliver(owner, payload, *, session_id, config_dir, bridge_meta=None):
+        record["delivered"].append(
+            {"session": session_id, "payload": payload, "bridge_meta": bridge_meta}
+        )
         return "delivered"
 
     monkeypatch.setattr(pull_mod, "message", fake_message)
@@ -257,6 +280,13 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     monkeypatch.setattr(wake_mod, "screen_item", fake_screen)
     monkeypatch.setattr(wake_mod, "ack_read", fake_ack)
     monkeypatch.setattr(wake_mod, "deliver_wake", fake_deliver)
+    # S-8a: the fence reads the config from DISK now — the fixture writes the
+    # real file shape (read_config_values reads ``values`` of config.yml) with
+    # the feature enabled, instead of patching an in-memory object that no
+    # longer exists on the path.
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+    )
     return record, body
 
 
@@ -276,6 +306,282 @@ def test_spine_delivers_from_screened_bytes_and_releases_claim(tmp_path, monkeyp
     assert "Org Member" in payload and "Acme" in payload
     # Claim released: a fresh claim with a NEW token succeeds immediately.
     store.claim(owner, "bmsg_1", "sess_x", "tok2", expiry=time.time() + 60)
+
+
+def test_spine_off_settings_start_zero_new_traffic(tmp_path, monkeypatch) -> None:
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    # The operator's config says off: fence #0 holds BEFORE the designation
+    # read, the claim, the authenticated fetch or the screening. S-8a: the
+    # fence reads the switch from DISK on every boundary (a cached in-memory
+    # settings object is deliberately ignored), so the off arm must flip the
+    # real file, not patch a seam the fence no longer consults.
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": False}}}), encoding="utf-8"
+    )
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold" and out["code"] == "bridge_off"
+    assert record["screened"] == 0
+    assert record["delivered"] == []
+    assert record["acks"] == []
+
+
+def test_spine_ack_pending_holds_without_delivery(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+
+    async def pending_ack(owner_, message_id, target, receipt, *, config_dir, access):
+        record["acks"].append(target)
+        # S-12: an ORDINARY return is not a confirmed read — the transport
+        # RETURNS pending; the spine must HOLD, never fabricate the ack.
+        return SimpleNamespace(state="pending", intent_id="intent-bmsg_1")
+
+    monkeypatch.setattr(wake_mod, "ack_read", pending_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold"
+    assert out["code"] == "ack_not_confirmed:pending"
+    assert record["delivered"] == []
+
+
+def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeypatch) -> None:
+    """S-12: confirmed state alone is not enough — the frozen tuple must match.
+
+    Each arm gives the spine a CONFIRMED outcome whose intent id resolves to a
+    DIFFERENT frozen tuple (or a foreign owner's row): all must HOLD with zero
+    delivery — never a fabricated ack.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.team_bridge.store import Store as _AckStore
+
+    def _arm(case: Path, *, record_kwargs: dict, record_owner=None):
+        case.mkdir()
+        store, owner = _enroll(case)
+        record, body = _wire_spine(monkeypatch, case)
+        receipt = _receipt(body)
+        other_owner = record_owner or owner
+        if other_owner is not owner:
+            store.commit_enrollment(
+                other_owner, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="sess_cos"
+            )
+        intent_id = _AckStore(case).record_ack_intent(
+            other_owner,
+            record_kwargs.get("message_id", "bmsg_1"),
+            record_kwargs.get("target", "read"),
+            record_kwargs.get("receipt", receipt),
+            "connector-test",
+        )
+
+        async def bound_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+            record["acks"].append(target)
+            return SimpleNamespace(state="confirmed", intent_id=intent_id)
+
+        monkeypatch.setattr(wake_mod, "ack_read", bound_ack)
+        out = asyncio.run(
+            wake_mod.handle_message_available(
+                owner, "bmsg_1", config_dir=case, auth_store=None, access=None
+            )
+        )
+        assert out["action"] == "hold", out
+        assert out["code"] == "ack_binding_mismatch", out
+        assert record["delivered"] == []
+
+    # Wrong message: a real read intent for ANOTHER message id.
+    _arm(tmp_path / "wrong_msg", record_kwargs={"message_id": "bmsg_other"})
+    # Wrong target: a real BLOCKED intent (reject receipt) answering our read.
+    _arm(
+        tmp_path / "wrong_target",
+        record_kwargs={"target": "blocked", "receipt": _receipt("hello from the org", verdict="reject")},
+    )
+    # Wrong BODY HASH: a read intent for different screened bytes.
+    _arm(tmp_path / "wrong_body", record_kwargs={"receipt": _receipt("a different body")})
+    # Foreign owner: the row exists only in ANOTHER owner's namespace; the run's
+    # lookup is keyed by ITS OWN owner, so it misses -> hold.
+    case = tmp_path / "foreign_owner"
+    case.mkdir()
+    store, owner = _enroll(case)
+    record, body = _wire_spine(monkeypatch, case)
+    foreign = OwnerSnapshot(
+        canonical_base_url="https://hub.example",
+        account_id="acc_1",
+        tenant_id="tnt_1",
+        endpoint_id="ep_other",
+        credential_id=9,
+        enrollment_generation=3,
+    )
+    store.commit_enrollment(
+        foreign, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="sess_cos"
+    )
+    foreign_id = _AckStore(case).record_ack_intent(
+        foreign, "bmsg_1", "read", _receipt(body), "connector-test"
+    )
+    # ``active_owner`` treats two committed enrollments as AMBIGUOUS authority
+    # (None → the producer fence answers owner_changed before the binding check
+    # is ever reached). The foreign row must only exist as ANOTHER namespace's
+    # ledger entry, so retire its enrollment after the intent is recorded; the
+    # intent row stays keyed by the foreign owner key.
+    import sqlite3
+
+    with sqlite3.connect(store._path) as raw:
+        raw.execute(
+            "UPDATE enrollments SET state = 'superseded' WHERE endpoint_id = ?",
+            (foreign.endpoint_id,),
+        )
+
+    async def foreign_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+        record["acks"].append(target)
+        return SimpleNamespace(state="confirmed", intent_id=foreign_id)
+
+    monkeypatch.setattr(wake_mod, "ack_read", foreign_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=case, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold" and out["code"] == "ack_binding_mismatch"
+    assert record["delivered"] == []
+
+
+def test_spine_ack_binding_accepts_the_real_frozen_intent(tmp_path, monkeypatch) -> None:
+    """Positive control: the SAME path delivers when the tuple matches."""
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "delivered"
+    assert record["delivered"][0]["session"] == "sess_cos"
+
+
+def test_spine_ack_full_tuple_mismatch_arms_hold(tmp_path, monkeypatch) -> None:
+    """S-12 FULL TUPLE: a CONFIRMED row must equal THIS run's receipt.
+
+    The ledger row is recorded with a DIFFERENT model (same message/body) and
+    then confirmed; the spine screens the normal receipt and must HOLD before
+    any phase advance or delivery — a wrong-model confirmation is not this
+    screening result's ack.
+    """
+
+    from dataclasses import replace
+
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    altered = replace(_receipt(body), model="model-b").validated()
+
+    async def wrong_tuple_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+        record["acks"].append(target)
+        from local_operator.team_bridge.store import Store as _AckStore
+
+        intent_id = _AckStore(config_dir).record_ack_intent(
+            owner_, message_id, target, altered, "connector-test-wrong"
+        )
+        _AckStore(config_dir).mark_ack_result(
+            owner_, intent_id, state="confirmed", error_code=None
+        )
+        return SimpleNamespace(state="confirmed", intent_id=intent_id)
+
+    monkeypatch.setattr(wake_mod, "ack_read", wrong_tuple_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold"
+    assert out["code"] == "ack_tuple_mismatch", out
+    assert record["delivered"] == []
+
+
+def test_spine_ack_pending_ledger_with_confirmed_outcome_holds(tmp_path, monkeypatch) -> None:
+    """A transport claiming CONFIRMED over a ledger row still PENDING must HOLD."""
+
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+
+    async def lying_ack(owner_, message_id, target, receipt_, *, config_dir, access):
+        record["acks"].append(target)
+        from local_operator.team_bridge.store import Store as _AckStore
+
+        intent_id = _AckStore(config_dir).record_ack_intent(
+            owner_, message_id, target, receipt_, "connector-test"
+        )
+        # Deliberately NOT marked confirmed: the outcome's claim is a lie the
+        # frozen LEDGER state must catch.
+        return SimpleNamespace(state="confirmed", intent_id=intent_id)
+
+    monkeypatch.setattr(wake_mod, "ack_read", lying_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold"
+    assert out["code"] == "ack_tuple_mismatch", out
+    assert record["delivered"] == []
+
+
+def test_spine_phase_persistence_refusal_holds_without_delivery(tmp_path, monkeypatch) -> None:
+    """S-12: a handoff phase that cannot be persisted must NOT deliver.
+
+    The request path is driven to the phase write (a fake stamped envelope +
+    a confirmed bound ack), where ``mark_delivery_phase`` REFUSES: the spine
+    must HOLD with zero delivery — never log-and-continue.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.team_bridge.store import Store as _SpineStore, StoreRefused as _Refused
+
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+
+    async def request_message(owner_, message_id, *, config_dir, access, client=None):
+        return SimpleNamespace(
+            message_id=message_id,
+            message_type="request",
+            request_state="pending",
+            thread_id="bth_1",
+            request_expires_at="",
+            request_ref="req-1",
+            sender_account_id="acc_sender",
+            sender_endpoint_id="ep_sender",
+            recipient_account_id="acc_1",
+            recipient_endpoint_id="ep_1",
+            tenant_id="tnt_1",
+        )
+
+    monkeypatch.setattr(pull_mod, "message", request_message)
+
+    def fake_write(self, owner_, *, delivery_ref, message_id, designated_session, **kwargs):
+        return {
+            "delivery_ref": delivery_ref,
+            "display_digest": "dd44" * 16,
+            "phase": "prepared",
+        }
+
+    def refuse_phase(self, owner_, delivery_ref, phase):
+        raise _Refused("phase_conflict", "the phase write refuses")
+
+    monkeypatch.setattr(_SpineStore, "write_screened_request_delivery", fake_write)
+    monkeypatch.setattr(_SpineStore, "mark_delivery_phase", refuse_phase)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+        )
+    )
+    assert out["action"] == "hold"
+    assert str(out["code"]).startswith("phase_refused")
+    assert record["delivered"] == []
 
 
 def test_spine_hold_and_bounce_never_wake(tmp_path, monkeypatch) -> None:

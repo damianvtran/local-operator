@@ -32,10 +32,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from local_operator.team_bridge.connector.wake import (
-    handle_message_available,
-    parse_event_ref,
-)
+from local_operator.team_bridge.connector.wake import handle_message_available
+from local_operator.team_bridge.events import plan_feed_refs
 
 #: Bounded exponential backoff between loop iterations after a FAILURE (a
 #: refused read, a transport error). A 204 timeout is NOT a failure — it
@@ -192,20 +190,16 @@ async def run_iteration(
             "retries": retries,
         }
     refs = _pull.drain_feed_refs(owner, config_dir=config_dir, upto_seq=batch["cursor"])
+    # H5e: the routing rule is stated ONCE (team_bridge.events) so the CoS
+    # refresh consumer cannot drift from this loop: deliveries wake; the
+    # state_changed/request_* refs are refresh hints and NEVER a wake kind.
+    plan = plan_feed_refs(refs)
     handled: list[dict[str, Any]] = []
-    for ref in refs:
-        parsed = parse_event_ref(ref)
-        if parsed is None:
-            continue
-        event_type, kind, value = parsed
-        if event_type != "message_available" or kind != "message_id":
-            # state_changed/request_* refs are the CoS session's own reads'
-            # business; the connector only WAKES on new deliveries.
-            continue
+    for message_id in plan.deliveries:
         handled.append(
             await handle_message_available(
                 owner,
-                value,
+                message_id,
                 config_dir=config_dir,
                 auth_store=auth_store,
                 access=access,

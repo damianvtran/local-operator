@@ -1437,6 +1437,27 @@ def receives_custom_type(target: Any) -> bool:
     return "custom_type" in parameters
 
 
+def receives_bridge_meta(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes ``bridge_meta``.
+
+    The ``receives_custom_type`` discipline, one field over (H5 F3): the
+    dispatch asks the HANDLE, and both hosts ask the SESSION OBJECT their
+    handle wraps, before handing the keyword on — so a reduced double or an
+    older build never sees a keyword its literal signature would refuse.
+    VAR_KEYWORD answers NO for the same reason; no method at all also
+    answers NO.
+    """
+
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "bridge_meta" in parameters
+
+
 def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """The ``(detail, extra)`` an op's answer contributes to its ack frame.
 
@@ -7536,6 +7557,23 @@ class RuntimeServer:
                     )
                 if receives_custom_type(h):
                     fields["custom_type"] = custom_type
+            # BRIDGE LOCATOR (H5 F3): the internal bounded ``bridge_meta`` is
+            # validated against the closed key set BEFORE anything forwards
+            # it — an unknown/oversized/non-scalar block is a typed refusal,
+            # never a coercion — and a frame without the key stays
+            # byte-identical, exactly like ``custom_type`` above.
+            bridge_meta = frame.get("bridge_meta")
+            if bridge_meta is not None:
+                from local_operator.harness.message_types import validate_bridge_meta
+
+                try:
+                    bridge_meta = validate_bridge_meta(bridge_meta)
+                except ValueError as failure:
+                    raise ValueError(
+                        f"peer_message carries an invalid bridge_meta: {failure}"
+                    ) from failure
+                if receives_bridge_meta(h):
+                    fields["bridge_meta"] = bridge_meta
             return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The

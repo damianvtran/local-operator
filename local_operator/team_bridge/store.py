@@ -56,7 +56,7 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
 #: of these is DAMAGED and refuses: re-running DDL is NOT repair — it
@@ -340,7 +340,161 @@ CREATE TABLE IF NOT EXISTS screening_breaker (
     updated_at REAL NOT NULL
 );
 """
-_SCHEMA = _CORE_SCHEMA + _SCREENING_SCHEMA
+_PRODUCER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS screened_request_deliveries (
+    delivery_ref TEXT PRIMARY KEY,
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    native_generation INTEGER NOT NULL,
+    scope_version TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    endpoint_id TEXT NOT NULL,
+    credential_id INTEGER NOT NULL,
+    designated_session_id TEXT NOT NULL,
+    consent_version TEXT NOT NULL,
+    consent_ref TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_kind TEXT NOT NULL,
+    request_state TEXT NOT NULL,
+    request_expires_at TEXT NOT NULL,
+    request_ref TEXT NOT NULL,
+    sender_account_id TEXT NOT NULL,
+    sender_endpoint_id TEXT NOT NULL,
+    recipient_account_id TEXT NOT NULL,
+    recipient_endpoint_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    template_sha256 TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    categories_digest TEXT NOT NULL,
+    envelope_digest TEXT NOT NULL,
+    admission_revision TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL,
+    creator_generation INTEGER NOT NULL,
+    claim_hash TEXT NOT NULL,
+    claim_session_id TEXT NOT NULL,
+    claim_generation INTEGER NOT NULL,
+    claim_expires_at REAL NOT NULL,
+    display_digest TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (owner_key, message_id)
+);
+"""
+
+#: Column floors for the producer envelope: an unreleased-era store without
+#: the table (or a row missing a binding column) is DAMAGE, never a quiet
+#: backfill — the receiver would otherwise mint scope from current fields.
+_PRODUCER_COLUMNS = frozenset(
+    {
+        "delivery_ref",
+        "owner_key",
+        "message_id",
+        "native_generation",
+        "scope_version",
+        "base_url",
+        "account_id",
+        "tenant_id",
+        "endpoint_id",
+        "credential_id",
+        "designated_session_id",
+        "consent_version",
+        "consent_ref",
+        "thread_id",
+        "message_kind",
+        "request_state",
+        "request_expires_at",
+        "request_ref",
+        "sender_account_id",
+        "sender_endpoint_id",
+        "recipient_account_id",
+        "recipient_endpoint_id",
+        "body_sha256",
+        "template_sha256",
+        "prompt_version",
+        "model",
+        "verdict",
+        "categories_digest",
+        "envelope_digest",
+        "admission_revision",
+        "policy_epoch",
+        "creator_generation",
+        "claim_hash",
+        "claim_session_id",
+        "claim_generation",
+        "claim_expires_at",
+        "display_digest",
+        "fingerprint",
+        "phase",
+        "created_at",
+    }
+)
+
+#: The handoff phase lattice: written ``prepared`` before the server ack,
+#: advanced ONLY on confirmed facts (a confirmed read ack, then a completed
+#: local handoff) — an uncertain ack PARKS in ``prepared``/``handoff_started``
+#: rather than ever claiming a delivery that was not observed.
+_DELIVERY_PHASE_ORDER = ("prepared", "handoff_started", "delivered")
+_DELIVERY_PHASES = frozenset({*_DELIVERY_PHASE_ORDER, "fenced"})
+
+#: Per-STATEMENT producer DDL for MIGRATION paths: ``executescript`` issues an
+#: implicit COMMIT before running, which would split a migration transaction
+#: (DDL committed separately from the version stamp). Migrations execute these
+#: statements individually inside the SAME transaction as the stamp, so a kill
+#: mid-migration rolls back to the old version and re-migrates on next open.
+_PRODUCER_DDL_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS screened_request_deliveries ("
+    "delivery_ref TEXT PRIMARY KEY, owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+    "native_generation INTEGER NOT NULL, scope_version TEXT NOT NULL, base_url TEXT NOT NULL, "
+    "account_id TEXT NOT NULL, tenant_id TEXT NOT NULL, endpoint_id TEXT NOT NULL, "
+    "credential_id INTEGER NOT NULL, designated_session_id TEXT NOT NULL, "
+    "consent_version TEXT NOT NULL, consent_ref TEXT NOT NULL, thread_id TEXT NOT NULL, "
+    "message_kind TEXT NOT NULL, request_state TEXT NOT NULL, request_expires_at TEXT NOT NULL, "
+    "request_ref TEXT NOT NULL, sender_account_id TEXT NOT NULL, sender_endpoint_id TEXT NOT NULL, "
+    "recipient_account_id TEXT NOT NULL, recipient_endpoint_id TEXT NOT NULL, "
+    "body_sha256 TEXT NOT NULL, template_sha256 TEXT NOT NULL, prompt_version TEXT NOT NULL, "
+    "model TEXT NOT NULL, verdict TEXT NOT NULL, categories_digest TEXT NOT NULL, "
+    "envelope_digest TEXT NOT NULL, admission_revision TEXT NOT NULL, policy_epoch INTEGER NOT NULL, "
+    "creator_generation INTEGER NOT NULL, claim_hash TEXT NOT NULL, claim_session_id TEXT NOT NULL, "
+    "claim_generation INTEGER NOT NULL, claim_expires_at REAL NOT NULL, display_digest TEXT NOT NULL, "
+    "fingerprint TEXT NOT NULL, phase TEXT NOT NULL, created_at REAL NOT NULL, "
+    "UNIQUE (owner_key, message_id))",
+)
+
+
+def _ensure_producer_table(conn: sqlite3.Connection) -> None:
+    """Add the producer table on a MIGRATION without repairing partial ones.
+
+    Absent ⇒ created empty (no legacy backfill — old stores stay
+    non-authorizing); PRESENT ⇒ its full column floor is validated first:
+    a partial/half-table is damage and refuses rather than being "fixed".
+    """
+
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "screened_request_deliveries" in existing:
+        columns = {
+            r[1] for r in conn.execute("PRAGMA table_info(screened_request_deliveries)")
+        }
+        if not _PRODUCER_COLUMNS <= columns:
+            raise StoreRefused(
+                "schema_damaged",
+                f"screened_request_deliveries lacks {sorted(_PRODUCER_COLUMNS - columns)}",
+            )
+        return
+    for statement in _PRODUCER_DDL_STATEMENTS:
+        conn.execute(statement)
+
+
+_SCHEMA = _CORE_SCHEMA + _SCREENING_SCHEMA + _PRODUCER_SCHEMA
 
 
 def _fingerprint_revision(fingerprint: str) -> str:
@@ -780,6 +934,8 @@ class Store:
                 raise StoreRefused("schema_damaged", f"v2 store missing {sorted(missing)}")
             try:
                 conn.executescript(_SCREENING_SCHEMA)
+                for _statement in _PRODUCER_DDL_STATEMENTS:
+                    conn.execute(_statement)
                 conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
@@ -805,6 +961,7 @@ class Store:
                     "owner_key TEXT PRIMARY KEY, last_sender TEXT, "
                     "lease_holder TEXT, lease_expires REAL)"
                 )
+                _ensure_producer_table(conn)
                 conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
@@ -830,9 +987,54 @@ class Store:
             ):
                 raise StoreRefused("schema_damaged", "screening_schedule lacks required columns")
             try:
+                _ensure_producer_table(conn)
                 conn.executescript(_FLOORS_SCHEMA)
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
+            conn.execute(
+                "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+            return
+
+        if version == "5":
+            # S-11: the additive upgrade's validation, DDL and stamp must ride
+            # ONE explicit transaction. ``with conn`` is a commit boundary,
+            # NOT a begun transaction — without this BEGIN, per-statement DDL
+            # can commit ahead of the stamp and a crash can leave a partial
+            # v5-with-producer-table file. BEGIN IMMEDIATE here, BEFORE the
+            # first validation read, closes that crash window; a mid-failure
+            # rollback leaves the old schema, rows and version intact.
+            if not conn.in_transaction:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.Error as error:
+                    raise StoreRefused("state_unreadable", str(error)) from error
+            # KNOWN V5 (producer-era baseline): the ORIGINAL v5 floor is
+            # validated FIRST (a v5 store never required the producer table),
+            # then the additive migration adds it EMPTY (or validates an
+            # already-present WIP table's full columns — never a silent
+            # repair) and the stamp advances in the SAME transaction. Every
+            # old enrollment/claim/ACK/quota/proof/text-floor row survives.
+            missing = (_V3_TABLES | _V4_ADDED) - pre_existing
+            if missing:
+                raise StoreRefused("schema_damaged", f"stamped-v5 store missing {sorted(missing)}")
+            for table, required in _V3_COLUMNS.items():
+                columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if not required <= columns:
+                    raise StoreRefused(
+                        "schema_damaged", f"{table} lacks {sorted(required - columns)}"
+                    )
+            schedule_columns = {r[1] for r in conn.execute("PRAGMA table_info(screening_schedule)")}
+            if (
+                not {"owner_key", "last_sender", "lease_holder", "lease_expires"}
+                <= schedule_columns
+            ):
+                raise StoreRefused("schema_damaged", "screening_schedule lacks required columns")
+            floor_columns = {r[1] for r in conn.execute("PRAGMA table_info(text_floors)")}
+            if not {"owner_key", "hub", "kind", "version", "sha256", "updated_at"} <= floor_columns:
+                raise StoreRefused("schema_damaged", "text_floors lacks required columns")
+            _ensure_producer_table(conn)
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -844,7 +1046,9 @@ class Store:
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
             if missing:
-                raise StoreRefused("schema_damaged", f"stamped-v3 store missing {sorted(missing)}")
+                raise StoreRefused(
+                    "schema_damaged", f"stamped-{version} store missing {sorted(missing)}"
+                )
             for table, required in _V3_COLUMNS.items():
                 columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
                 if not required <= columns:
@@ -861,6 +1065,19 @@ class Store:
             floor_columns = {r[1] for r in conn.execute("PRAGMA table_info(text_floors)")}
             if not {"owner_key", "hub", "kind", "version", "sha256", "updated_at"} <= floor_columns:
                 raise StoreRefused("schema_damaged", "text_floors lacks required columns")
+            if "screened_request_deliveries" not in pre_existing:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"stamped-{version} store missing screened_request_deliveries",
+                )
+            producer_columns = {
+                r[1] for r in conn.execute("PRAGMA table_info(screened_request_deliveries)")
+            }
+            if not _PRODUCER_COLUMNS <= producer_columns:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"screened_request_deliveries lacks {sorted(_PRODUCER_COLUMNS - producer_columns)}",
+                )
             return
 
         raise StoreRefused(
@@ -1901,6 +2118,429 @@ class Store:
             # An unreadable cache row is a MISS (fresh screening may re-bill
             # under normal accounting); it can never silently certify.
             return None
+
+    def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """THE trusted record for one screened message, by message id (H5 F3).
+
+        The receive-side hook's authority is THIS machine's receipt — written
+        by the TRUSTED screened-producer epoch before the wake ever left — not
+        anything the wake text or a carriage hint claims. The caller compares
+        the receipt's body hash and creator generation against the locator and
+        the live owner; a copied/screened boolean on the wire cannot mint one.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                    "categories, envelope_digest, admission_revision, policy_epoch, "
+                    "creator_generation, created_at "
+                    "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), str(message_id)),
+                ).fetchone()
+                if row is None:
+                    return None
+                return {
+                    "verdict": row["verdict"],
+                    "model": row["model"],
+                    "policy_epoch": row["policy_epoch"],
+                    "creator_generation": row["creator_generation"],
+                    "prompt_version": row["prompt_version"],
+                    "template_sha256": row["template_sha256"],
+                    "body_sha256": row["body_sha256"],
+                    "categories": json.loads(row["categories"]),
+                    "envelope_digest": row["envelope_digest"],
+                    "admission_revision": row["admission_revision"],
+                    "created_at": row["created_at"],
+                }
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
+
+    def write_screened_request_delivery(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        delivery_ref: str,
+        message_id: str,
+        designated_session: str,
+        display_digest: str,
+        body_sha256: str,
+        request: Mapping[str, Any],
+        claim_token: str = "",
+    ) -> dict[str, Any]:
+        """Persist the IMMUTABLE original-binding envelope BEFORE handoff (F3/S8).
+
+        Written by the TRUSTED connector from its authenticated, pinned owner
+        snapshot + acquired claim + validated server request, in ONE
+        ``BEGIN IMMEDIATE`` transaction with the enrollment/consent/policy/
+        receipt/claim reads it validates against: the envelope can never
+        describe a state that was not TRUE at write time. Write-once AND
+        idempotent — a second write for the same (owner, message) returns the
+        existing row rather than minting a second envelope; the row carries
+        refs/digests and non-secret identities ONLY (no bearer claim token,
+        no body text). ``request`` fields come from the authenticated
+        MessageRef projection; ``display_digest`` is the canonical digest of
+        the bounded display context assembled from the same authenticated item.
+        """
+
+        import hashlib
+
+        key = _owner_key(owner)
+        now = time.time()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            existing = conn.execute(
+                "SELECT * FROM screened_request_deliveries "
+                "WHERE owner_key = ? AND message_id = ?",
+                (key, str(message_id)),
+            ).fetchone()
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                raise StoreRefused("owner_changed", "the committed owner generation moved")
+            enrollment = conn.execute(
+                "SELECT consent_version, consent_ref, designated_session, state FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (key, owner.enrollment_generation),
+            ).fetchone()
+            if enrollment is None:
+                raise StoreRefused("no_enrollment", "no committed enrollment at this generation")
+            if str(enrollment["state"] or "") != "committed":
+                raise StoreRefused("owner_changed", f"enrollment state {enrollment['state']!r}")
+            consent_version = str(enrollment["consent_version"] or "")
+            consent_ref = str(enrollment["consent_ref"] or "")
+            if not consent_version or not consent_ref:
+                raise StoreRefused("consent_revoked", "no committed consent receipt")
+            if str(enrollment["designated_session"] or "") != str(designated_session):
+                raise StoreRefused("owner_changed", "designation moved since the connector read it")
+            claim = conn.execute(
+                "SELECT session_id, token, generation, expires_at, state FROM claims "
+                "WHERE owner_key = ? AND message_id = ?",
+                (key, str(message_id)),
+            ).fetchone()
+            if claim is None or str(claim["state"]) != "held":
+                raise StoreRefused("no_claim", "no live local claim for this message")
+            if not claim_token or str(claim["token"]) != claim_token:
+                # The PASSED token is the initiating connector's acquisition,
+                # private to this call (never stored/logged): a successor's
+                # claim, or a retry that no longer holds what it acquired, is
+                # not this handoff's identity — refuse rather than adopt.
+                raise StoreRefused(
+                    "claim_not_mine", "the passed claim token is not the current held claim"
+                )
+            if str(claim["session_id"]) != str(designated_session):
+                raise StoreRefused("claim_not_mine", "the held claim names another session")
+            if int(claim["generation"]) != owner.enrollment_generation:
+                raise StoreRefused("owner_changed", "claim generation is not the live one")
+            if float(claim["expires_at"]) <= now:
+                raise StoreRefused("expired_lease", "claim expired before the envelope write")
+            receipt = conn.execute(
+                "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                "categories, envelope_digest, admission_revision, policy_epoch, creator_generation "
+                "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                (key, str(message_id)),
+            ).fetchone()
+            if receipt is None:
+                raise StoreRefused("no_receipt", "no screening receipt for this message")
+            policy = conn.execute(
+                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
+                "WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            if policy is None:
+                raise StoreRefused("no_policy", "no published screening policy")
+            if (
+                policy["template_sha256"] != receipt["template_sha256"]
+                or policy["default_model"] != receipt["model"]
+                or policy["revision"] != receipt["admission_revision"]
+                or int(policy["epoch"]) != int(receipt["policy_epoch"])
+                or int(receipt["creator_generation"]) != owner.enrollment_generation
+            ):
+                raise StoreRefused(
+                    "stale_proof", "screening proof is not current under the live policy"
+                )
+            if str(receipt["verdict"]) != "allow":
+                raise StoreRefused("not_allow", "only an allowing verdict can be stamped")
+            if str(receipt["body_sha256"]) != str(body_sha256):
+                raise StoreRefused("body_mismatch", "envelope body hash is not the screened one")
+            message_kind = str(request.get("message_kind") or "")
+            request_state = str(request.get("request_state") or "")
+            if message_kind != "request":
+                # Ordinary screened notes deliver WITHOUT a request envelope:
+                # there is no approval for them to authorize, and stamping one
+                # would let a forged locator later mint an ask from it.
+                raise StoreRefused("not_request", "only request messages are stamped")
+            if request_state != "pending":
+                raise StoreRefused("not_pending", f"request state {request_state!r} is not pending")
+            if existing is not None:
+                # EXISTING-ENVELOPE REPLAY: the very same authority checks just
+                # ran on the CURRENT row — retrieving an old reference is not
+                # by itself permission to hand off again.
+                return dict(existing)
+            categories_digest = hashlib.sha256(
+                json.dumps(
+                    json.loads(receipt["categories"]), separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest()
+            claim_hash = hashlib.sha256(str(claim["token"]).encode("utf-8")).hexdigest()
+            identity = [
+                str(delivery_ref),
+                key,
+                str(message_id),
+                int(owner.enrollment_generation),
+                "v1",
+                str(owner.canonical_base_url),
+                str(owner.account_id),
+                str(owner.tenant_id),
+                str(owner.endpoint_id),
+                int(owner.credential_id),
+                str(designated_session),
+                consent_version,
+                consent_ref,
+                str(request.get("thread_id") or ""),
+                message_kind,
+                request_state,
+                str(request.get("request_expires_at") or ""),
+                str(request.get("request_ref") or ""),
+                str(request.get("sender_account_id") or ""),
+                str(request.get("sender_endpoint_id") or ""),
+                str(request.get("recipient_account_id") or ""),
+                str(request.get("recipient_endpoint_id") or ""),
+                str(body_sha256),
+                str(receipt["template_sha256"]),
+                str(receipt["prompt_version"]),
+                str(receipt["model"]),
+                str(receipt["verdict"]),
+                categories_digest,
+                str(receipt["envelope_digest"]),
+                str(receipt["admission_revision"]),
+                int(receipt["policy_epoch"]),
+                int(receipt["creator_generation"]),
+                claim_hash,
+                str(claim["session_id"]),
+                int(claim["generation"]),
+                float(claim["expires_at"]),
+                str(display_digest),
+            ]
+            fingerprint = hashlib.sha256(
+                json.dumps(identity, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            conn.execute(
+                "INSERT INTO screened_request_deliveries (delivery_ref, owner_key, message_id, "
+                "native_generation, scope_version, base_url, account_id, tenant_id, endpoint_id, "
+                "credential_id, designated_session_id, consent_version, consent_ref, thread_id, "
+                "message_kind, request_state, request_expires_at, request_ref, sender_account_id, "
+                "sender_endpoint_id, recipient_account_id, recipient_endpoint_id, body_sha256, "
+                "template_sha256, prompt_version, model, verdict, categories_digest, envelope_digest, "
+                "admission_revision, policy_epoch, creator_generation, claim_hash, claim_session_id, "
+                "claim_generation, claim_expires_at, display_digest, fingerprint, phase, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(delivery_ref),
+                    key,
+                    str(message_id),
+                    int(owner.enrollment_generation),
+                    "v1",
+                    str(owner.canonical_base_url),
+                    str(owner.account_id),
+                    str(owner.tenant_id),
+                    str(owner.endpoint_id),
+                    int(owner.credential_id),
+                    str(designated_session),
+                    consent_version,
+                    consent_ref,
+                    str(request.get("thread_id") or ""),
+                    message_kind,
+                    request_state,
+                    str(request.get("request_expires_at") or ""),
+                    str(request.get("request_ref") or ""),
+                    str(request.get("sender_account_id") or ""),
+                    str(request.get("sender_endpoint_id") or ""),
+                    str(request.get("recipient_account_id") or ""),
+                    str(request.get("recipient_endpoint_id") or ""),
+                    str(body_sha256),
+                    str(receipt["template_sha256"]),
+                    str(receipt["prompt_version"]),
+                    str(receipt["model"]),
+                    str(receipt["verdict"]),
+                    categories_digest,
+                    str(receipt["envelope_digest"]),
+                    str(receipt["admission_revision"]),
+                    int(receipt["policy_epoch"]),
+                    int(receipt["creator_generation"]),
+                    claim_hash,
+                    str(claim["session_id"]),
+                    int(claim["generation"]),
+                    float(claim["expires_at"]),
+                    str(display_digest),
+                    fingerprint,
+                    "prepared",
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM screened_request_deliveries WHERE delivery_ref = ?",
+                (str(delivery_ref),),
+            ).fetchone()
+            return dict(row) if row is not None else {}
+
+    def screened_request_delivery(
+        self, owner: OwnerSnapshot, *, delivery_ref: str = "", message_id: str = ""
+    ) -> dict[str, Any] | None:
+        """Exact by-reference (or by-message) read of the ORIGINAL envelope.
+
+        READ-ONLY and exact: the receiver hook must never scan-and-guess, and
+        a miss is a real absence (``None``) — the caller holds/unrecoverables,
+        it never backfills scope from current fields.
+        """
+
+        key = _owner_key(owner)
+        if not delivery_ref and not message_id:
+            return None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                if delivery_ref:
+                    row = conn.execute(
+                        "SELECT * FROM screened_request_deliveries "
+                        "WHERE owner_key = ? AND delivery_ref = ?",
+                        (key, str(delivery_ref)),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM screened_request_deliveries "
+                        "WHERE owner_key = ? AND message_id = ?",
+                        (key, str(message_id)),
+                    ).fetchone()
+                return dict(row) if row is not None else None
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
+
+    def mark_delivery_phase(self, owner: OwnerSnapshot, delivery_ref: str, phase: str) -> None:
+        """Monotonic handoff phase (see ``_DELIVERY_PHASE_ORDER``).
+
+        A confirmed server read advances ``prepared → handoff_started``; a
+        completed local handoff advances to ``delivered``; an uncertain ack
+        simply does not advance (the row PARKS where it is — it never claims
+        an observation that was not confirmed). ``fenced`` is terminal.
+        """
+
+        if phase not in _DELIVERY_PHASES:
+            raise StoreRefused("bad_phase", f"unknown handoff phase {phase!r}")
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            row = conn.execute(
+                "SELECT phase FROM screened_request_deliveries "
+                "WHERE owner_key = ? AND delivery_ref = ?",
+                (key, str(delivery_ref)),
+            ).fetchone()
+            if row is None:
+                raise StoreRefused("no_envelope", "no stamped envelope for this reference")
+            current = str(row["phase"])
+            if current == "fenced" or phase == current:
+                return
+            if phase != "fenced" and (
+                current not in _DELIVERY_PHASE_ORDER
+                or _DELIVERY_PHASE_ORDER.index(phase) != _DELIVERY_PHASE_ORDER.index(current) + 1
+            ):
+                raise StoreRefused("phase_conflict", f"cannot advance {current!r} → {phase!r}")
+            conn.execute(
+                "UPDATE screened_request_deliveries SET phase = ? "
+                "WHERE owner_key = ? AND delivery_ref = ?",
+                (phase, key, str(delivery_ref)),
+            )
+
+    def verify_original_envelope_current(
+        self, owner: OwnerSnapshot, envelope: Mapping[str, Any]
+    ) -> tuple[str, str]:
+        """Re-validate a STORED original binding against CURRENT local authority (S-8).
+
+        Read-only. Returns ``("", "")`` when the envelope still matches the
+        live owner generation, the committed consent identity, the native
+        designation, the full published-policy/receipt proof and the reference
+        claim identity. The ORIGINAL lease may have been released since (a
+        valid historical handoff identity); a DIFFERENT live claim under the
+        same message is a successor's — refused as ``claim_successor``. This
+        runs on the RECEIVER before any ask, and its producer-side twin is the
+        store transaction's own checks at stamp time: retrieving an old
+        reference is never by itself permission.
+        """
+
+        import hashlib
+
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            if str(envelope.get("owner_key") or "") != key:
+                return ("owner_changed", "envelope names another owner namespace")
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return ("owner_changed", "the committed owner generation moved")
+            if int(envelope.get("native_generation", -1)) != owner.enrollment_generation:
+                return ("generation_drift", "envelope generation is not the live one")
+            enrollment = conn.execute(
+                "SELECT consent_version, consent_ref, designated_session, state FROM enrollments "
+                "WHERE owner_key = ? AND enrollment_generation = ?",
+                (key, owner.enrollment_generation),
+            ).fetchone()
+            if enrollment is None or str(enrollment["state"] or "") != "committed":
+                return ("consent_revoked", "no committed enrollment at this generation")
+            if str(enrollment["consent_version"] or "") != str(
+                envelope.get("consent_version") or ""
+            ) or str(enrollment["consent_ref"] or "") != str(envelope.get("consent_ref") or ""):
+                return ("consent_drift", "the committed consent receipt changed")
+            if str(enrollment["designated_session"] or "") != str(
+                envelope.get("designated_session_id") or ""
+            ):
+                return ("designation_drift", "the native designation moved")
+            receipt = conn.execute(
+                "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
+                "envelope_digest, admission_revision, policy_epoch, creator_generation "
+                "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                (key, str(envelope.get("message_id") or "")),
+            ).fetchone()
+            if receipt is None or str(receipt["verdict"]) != "allow":
+                return ("proof_missing", "no allowing receipt for this message")
+            if (
+                str(receipt["body_sha256"]) != str(envelope.get("body_sha256") or "")
+                or str(receipt["template_sha256"]) != str(envelope.get("template_sha256") or "")
+                or str(receipt["prompt_version"]) != str(envelope.get("prompt_version") or "")
+                or str(receipt["model"]) != str(envelope.get("model") or "")
+                or str(receipt["envelope_digest"]) != str(envelope.get("envelope_digest") or "")
+                or str(receipt["admission_revision"])
+                != str(envelope.get("admission_revision") or "")
+                or int(receipt["policy_epoch"]) != int(envelope.get("policy_epoch", -1))
+                or int(receipt["creator_generation"])
+                != int(envelope.get("creator_generation", -2))
+            ):
+                return ("proof_drift", "the stored screening proof changed")
+            policy = conn.execute(
+                "SELECT template_sha256, default_model, revision, epoch FROM screening_policy "
+                "WHERE owner_key = ?",
+                (key,),
+            ).fetchone()
+            if policy is None or (
+                policy["template_sha256"] != receipt["template_sha256"]
+                or policy["default_model"] != receipt["model"]
+                or policy["revision"] != receipt["admission_revision"]
+                or int(policy["epoch"]) != int(receipt["policy_epoch"])
+            ):
+                return ("policy_drift", "the published policy advanced past the stored proof")
+            claim = conn.execute(
+                "SELECT token, session_id, generation FROM claims "
+                "WHERE owner_key = ? AND message_id = ?",
+                (key, str(envelope.get("message_id") or "")),
+            ).fetchone()
+            if claim is not None:
+                claim_hash = hashlib.sha256(str(claim["token"]).encode("utf-8")).hexdigest()
+                if (
+                    claim_hash != str(envelope.get("claim_hash") or "")
+                    or str(claim["session_id"]) != str(envelope.get("claim_session_id") or "")
+                    or int(claim["generation"]) != int(envelope.get("claim_generation", -1))
+                ):
+                    return ("claim_successor", "a different claim holds this message now")
+            return ("", "")
 
     def bind_attempt_fingerprint(
         self,

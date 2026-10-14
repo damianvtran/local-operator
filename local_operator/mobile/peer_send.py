@@ -1658,6 +1658,7 @@ async def deliver_peer_message_outcome(
     sender: "dict[str, Any]",
     cwd: str = "",
     custom_type: str | None = None,
+    bridge_meta: dict[str, Any] | None = None,
 ) -> DeliveryOutcome:
     """Deliver one message and return the HONEST state of that delivery.
 
@@ -1689,6 +1690,7 @@ async def deliver_peer_message_outcome(
             wake=wake,
             sender=sender,
             custom_type=custom_type,
+            bridge_meta=bridge_meta,
         )
 
     # Cold target: the ONLY signal of engagement is the session's own durable
@@ -1729,6 +1731,7 @@ async def deliver_peer_message_outcome(
         sender=sender,
         cwd=cwd,
         custom_type=custom_type,
+        bridge_meta=bridge_meta,
     )
 
 
@@ -1742,6 +1745,7 @@ async def _live_outcome(
     wake: bool,
     sender: "dict[str, Any]",
     custom_type: str | None = None,
+    bridge_meta: dict[str, Any] | None = None,
 ) -> DeliveryOutcome:
     """Dial a live peer, retrying the idempotent op inside one hard budget.
 
@@ -1785,6 +1789,7 @@ async def _live_outcome(
                         # when it exists (the ``message_id`` discipline one
                         # field over): other callers keep byte-identical frames.
                         custom_type=custom_type,
+                        bridge_meta=bridge_meta,
                         deadline_s=PEER_SEND_DEADLINE_S,
                     )
                 except ControlDialFailed:
@@ -1878,6 +1883,7 @@ async def _engaged_outcome(
     sender: "dict[str, Any]",
     cwd: str,
     custom_type: str | None = None,
+    bridge_meta: dict[str, Any] | None = None,
 ) -> DeliveryOutcome:
     """Start a runtime for a cold target and deliver over its socket.
 
@@ -1901,6 +1907,7 @@ async def _engaged_outcome(
                 sender=dict(sender),
                 command_id=message_id,
                 custom_type=custom_type or "",
+                bridge_meta=dict(bridge_meta) if bridge_meta else {},
             ),
             config_dir=config_dir(),
         )

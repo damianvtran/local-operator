@@ -100,6 +100,7 @@ from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
 from local_operator.session.runtime.server import (
+    receives_bridge_meta,
     receives_custom_type,
     receives_message_id,
 )
@@ -2506,6 +2507,7 @@ class ServingSessionHandle(SessionHandle):
         harness_injected: bool = False,
         message_id: str = "",
         custom_type: str = "",
+        bridge_meta: dict[str, Any] | None = None,
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2599,6 +2601,11 @@ class ServingSessionHandle(SessionHandle):
                     # generic peer card would re-open exactly the §13.4 gap this
                     # carriage closes. Empty on the owner-prompt paths.
                     custom_type=custom_type,
+                    # The internal bridge locator, carried across the handover
+                    # for the same reason ``custom_type`` is: the successor
+                    # cannot re-derive it (H5 F3). Omitted (empty) on the
+                    # owner-prompt paths, whose rows stay byte-identical.
+                    bridge_meta=bridge_meta or {},
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -4573,6 +4580,7 @@ class ServingSessionHandle(SessionHandle):
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
         custom_type: str | None = None,
+        bridge_meta: dict[str, Any] | None = None,
     ) -> AckDetail:
         # This handle owns an in-process Session on the registrant's own loop,
         # so the coroutine can be awaited directly (unlike the TUI handle, which
@@ -4595,6 +4603,20 @@ class ServingSessionHandle(SessionHandle):
                     "receive_peer_message carries an unknown custom_type; "
                     "refusing to stamp a provenance kind the session cannot verify"
                 )
+        # The BRIDGE LOCATOR (H5 F3) re-validates HERE too, for the same trust
+        # reason as ``custom_type``: a frame from a sender this build does not
+        # control can carry anything, and this handle is not the last hop.
+        # Unknown/oversized/non-scalar blocks are refused (typed), never
+        # forwarded toward a wake.
+        if bridge_meta is not None:
+            from local_operator.harness.message_types import validate_bridge_meta
+
+            try:
+                bridge_meta = validate_bridge_meta(bridge_meta)
+            except ValueError as failure:
+                raise ValueError(
+                    f"receive_peer_message carries an invalid bridge_meta: {failure}"
+                ) from failure
         # A retiring runtime must not START a turn it will abort one await
         # later. The QUIET record-only delivery (``mailbox``, no wake) is
         # deliberately still admitted: it opens no turn, and refusing it would
@@ -4620,6 +4642,7 @@ class ServingSessionHandle(SessionHandle):
                     sender=sender or {},
                     message_id=message_id or "",
                     custom_type=custom_type or "",
+                    bridge_meta=bridge_meta or {},
                 )
                 # The row is DURABLE the moment this returns (it raises instead
                 # when it cannot be written), so the sender may report it as
@@ -4652,6 +4675,10 @@ class ServingSessionHandle(SessionHandle):
         # is forwarded — a frame without one keeps the pre-carriage call shape.
         if custom_type and receives_custom_type(self._session):
             peer_kwargs["custom_type"] = custom_type
+        # The same handle-vs-session split again (H5 F3): only a value that
+        # exists is forwarded, and only to a session whose signature takes it.
+        if bridge_meta and receives_bridge_meta(self._session):
+            peer_kwargs["bridge_meta"] = bridge_meta
         result = await self._session.receive_peer_message(text, **peer_kwargs)
         self._fold.note_peer_message(text, sender=sender or {})
         self._notify()

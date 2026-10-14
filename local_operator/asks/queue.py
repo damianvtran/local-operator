@@ -47,8 +47,11 @@ becoming unconditional.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -263,6 +266,168 @@ class AskQueue:
                 "ok": False,
                 "error": "the ask could not be recorded on this session's ask log.",
             }
+        self._arm_deadline_wake(record)
+        self._refresh(now)
+        receipt = render.receipt_text(record, self._reach())
+        details = {
+            "ask_id": ask_id,
+            "status": "queued",
+            "question_ids": [q["id"] for q in shapes],
+            "timeout_s": timeout_s,
+            "expires_at": record["expires_at"],
+            "urgent": record["urgent"],
+            "secret": any(q["secret"] for q in shapes),
+            "reach": self._reach(),
+        }
+        self.arm()
+        return {"ok": True, "text": receipt, "details": details}
+
+    def enqueue_idempotent(
+        self,
+        *,
+        issuance_key: str,
+        fingerprint: str,
+        questions: Sequence[Mapping[str, Any]],
+        timeout: Any = None,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
+        """KEYED-IDEMPOTENT bridge enqueue (S-10), under ONE interprocess lock.
+
+        The harness-only companion to :meth:`enqueue`: the durable ask id is
+        DERIVED from the preallocated issuance identity (never caller/model/
+        UI-chosen), and the exact-key lookup + fingerprint validation + append
+        run inside ONE ``_NonBlockingLock`` section on the ask log — the same
+        lock discipline as every other writer — so two writers cannot both
+        observe "absent" and mint duplicate asks. Same key + same fingerprint
+        returns the SAME ask id (even after the ask was consumed); a mismatched
+        fingerprint or multiple exact rows REFUSE. The generic heuristic
+        duplicate-text refusal does not apply here: the KEY is the identity,
+        and a retry legitimately carries the same wording.
+
+        ``timeout`` follows :func:`policy.parse_timeout_param`: ``None`` (the
+        default) means the policy default window, and anything out of range —
+        an empty string included — is a validation error naming the bounds,
+        exactly as for :meth:`enqueue`. It is never silently defaulted here,
+        so a caller cannot ship an unintended window by passing ``""``.
+        """
+
+        if not issuance_key or not fingerprint:
+            return {"ok": False, "error": "an issuance key and fingerprint are required."}
+        ask_id = "ask-bridge-" + hashlib.sha1(
+            ("bridge-idem:" + issuance_key).encode("utf-8")
+        ).hexdigest()[:16]
+        timeout_s, bounds_error = policy.parse_timeout_param(timeout)
+        if bounds_error is not None:
+            return {"ok": False, "error": bounds_error}
+        now = self._now()
+        # The lock fd must be opened on the log itself, so the per-session
+        # directory has to exist first — the same discipline as
+        # ``store.append_event`` for every other writer. A first-ever ask for a
+        # session (the bridge's usual shape) otherwise died on FileNotFoundError.
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                store.asks_log_path(self.session_dir),
+                os.O_CREAT | os.O_WRONLY | os.O_APPEND,
+                0o600,
+            )
+        except OSError:
+            logger.warning("could not open the ask log in %s", self.session_dir, exc_info=True)
+            return {"ok": False, "error": "the ask log could not be opened; not enqueuing."}
+        try:
+            with store._NonBlockingLock(fd):
+                try:
+                    rows = self.records()
+                except Exception:  # noqa: BLE001 — unreadable is its own answer
+                    return {
+                        "ok": False,
+                        "error": "the ask log could not be read; not enqueuing.",
+                    }
+                exact = [r for r in rows if str(r.get("ask_id") or "") == ask_id]
+                if len(exact) > 1:
+                    return {
+                        "ok": False,
+                        "error": "multiple asks already carry this issuance key; not enqueuing.",
+                    }
+                if exact:
+                    if _bridge_fingerprint_from_row(exact[0]) != fingerprint:
+                        return {
+                            "ok": False,
+                            "error": (
+                                "this issuance key already carries a different request; "
+                                "not enqueuing."
+                            ),
+                        }
+                    row = exact[0]
+                    # SAME key + SAME fingerprint: the SAME ask, even when it
+                    # has since been answered/consumed — a crash retry or a
+                    # live+cold duplicate must never mint a second one.
+                    return {
+                        "ok": True,
+                        "text": "",
+                        "details": {
+                            "ask_id": ask_id,
+                            "status": "existing",
+                            "question_ids": [
+                                str(q.get("id") or "")
+                                for q in (row.get("questions") or [])
+                                if isinstance(q, Mapping)
+                            ],
+                            "timeout_s": row.get("timeout_s"),
+                            "expires_at": row.get("expires_at"),
+                            "urgent": bool(row.get("urgent")),
+                            "secret": any(
+                                bool(q.get("secret"))
+                                for q in (row.get("questions") or [])
+                                if isinstance(q, Mapping)
+                            ),
+                            "reach": self._reach(),
+                        },
+                    }
+                open_rows = [r for r in rows if r["status"] == store.STATUS_OPEN]
+                if len(open_rows) >= policy.OPEN_ASK_CAP:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"this session already has {len(open_rows)} open asks (the cap "
+                            f"is {policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
+                        ),
+                    }
+                shapes = [_question_shape(q) for q in questions]
+                # THE MINT MUST AGREE WITH ITS OWN FINGERPRINT. Every later
+                # lookup compares a caller's fingerprint against the digest
+                # RECOMPUTED from the stored question's bridge block (the log
+                # keeps no separate fingerprint column), so the first writer's
+                # claim is only ever checked if it is checked HERE. Without
+                # this, a writer holding a conflicting fingerprint that landed
+                # first minted the ask under the stored block's digest, and the
+                # honest writer behind it then matched that digest and was
+                # answered "existing" — two writers, both ok, for one key.
+                if _bridge_fingerprint_from_row({"questions": shapes}) != fingerprint:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "the fingerprint does not match the request's original scope; "
+                            "not enqueuing."
+                        ),
+                    }
+                record = {
+                    "ask_id": ask_id,
+                    "created_at": now,
+                    "expires_at": now + timeout_s * 1000,
+                    "timeout_s": timeout_s,
+                    "urgent": policy.is_urgent(timeout_s),
+                    "tool_call_id": str(tool_call_id or ""),
+                    "questions": shapes,
+                }
+                event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
+                os.write(
+                    fd,
+                    json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    + b"\n",
+                )
+        finally:
+            os.close(fd)
         self._arm_deadline_wake(record)
         self._refresh(now)
         receipt = render.receipt_text(record, self._reach())
@@ -1768,6 +1933,27 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:
+    """The canonical scope fingerprint, recomputed from a FOLDED ask row.
+
+    The bridge scope block IS the stored original block (with the issuance
+    identity fields embedded), so the same canonical JSON hash the session
+    computes server-side is recomputable from the log ALONE — no side table,
+    no correlation-only ledger (S-10).
+    """
+
+    for question in row.get("questions") or []:
+        if isinstance(question, Mapping):
+            bridge = question.get("bridge")
+            if isinstance(bridge, Mapping):
+                return hashlib.sha256(
+                    json.dumps(dict(bridge), separators=(",", ":"), sort_keys=True).encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+    return ""
+
+
 def _question_shape(question: Any) -> dict[str, Any]:
     """One question as the plain dict the stdlib-only log stores.
 
@@ -1780,7 +1966,7 @@ def _question_shape(question: Any) -> dict[str, Any]:
     options: list[dict[str, Any]] = []
     for option in raw.get("options") or ():
         options.append(_as_mapping(option))
-    return {
+    shape = {
         "id": str(raw.get("id") or ""),
         "question": str(raw.get("question") or ""),
         "options": options,
@@ -1788,7 +1974,23 @@ def _question_shape(question: Any) -> dict[str, Any]:
         "recommended": raw.get("recommended"),
         "secret": bool(raw.get("secret")),
         "persist": bool(raw.get("persist")),
+        # H5a: BRIDGE REQUESTS are human-required by contract (§10.3, #125) —
+        # a bridge ask must ALWAYS land in the human queue, so the mark rides
+        # the projection: the gate short-circuits on it (``Session._gate_ask``)
+        # and the ask's ``question_id`` is the bridge message id the decide
+        # receipt (`ask_ref`) binds to. Both default empty/false for every
+        # existing ask, so their logs and folds are byte-compatible.
+        "human_required": bool(raw.get("human_required")),
+        "question_id": str(raw.get("question_id") or ""),
     }
+    bridge = raw.get("bridge")
+    if isinstance(bridge, Mapping):
+        # H5b/S-3: the ORIGINAL bridge scope block travels WHOLE (it is the
+        # provenance a later recovery re-validates), and the key is added ONLY
+        # when present — an ask without it keeps the exact pre-scope shape, so
+        # existing logs fold and serialize byte-identically.
+        shape["bridge"] = dict(bridge)
+    return shape
 
 
 __all__ = ["AskQueue"]
