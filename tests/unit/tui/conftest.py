@@ -13,6 +13,7 @@ This file also reclaims the temporary directories this suite allocates; see
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -47,6 +48,11 @@ from local_operator.tui.widgets.transcript import TranscriptView
 #: survived the stack (every layer delegates), but the growth was unbounded
 #: within a session.
 _STDLIB_MKDTEMP = tempfile.mkdtemp
+
+#: Backstop for :func:`await_session_boot`: how long a boot worker may run before
+#: the wait calls it wedged. Generous on purpose -- it only ever fires on a
+#: genuine hang, and a hang should fail the test, not the job's 25-minute ceiling.
+BOOT_DEADLOCK_GUARD_S = 30.0
 
 #: The real stylesheet, so styled tests exercise the shipped rules rather
 #: than a convenient approximation of them.
@@ -115,6 +121,72 @@ def _prepay_session_import_warmup() -> None:
     # Never raises by contract — an optional extra that is not installed is the
     # factory's problem to report, not a collection error for the whole suite.
     warm_session_imports()
+
+
+async def await_session_boot(app: App[None]) -> None:
+    """Block until the app's boot worker has adopted its session.
+
+    WHY THIS EXISTS. ``on_mount`` hands ``_boot_session`` to
+    ``run_worker(group="session")`` so first paint never waits on the factory,
+    and that worker's first hop is ``_warm_session_imports`` -- a THREAD. A test
+    that does ``await pilot.pause()`` once or twice and then reads the band, the
+    roster or the transcript is therefore betting that the thread (plus the
+    ``first_run_pending`` hops before it) finishes inside a fixed COUNT of loop
+    turns. ``pilot.pause()`` yields to the message pump; it does not wait for a
+    thread. On an idle laptop the thread wins by orders of magnitude, so the bet
+    looks safe; on a loaded 4-vCPU runner it loses and the test reads an
+    unadopted app (``'' == 'auto'``, ``set() == {'manager', 'sibling'}``).
+    Reproduced deterministically by making ``warm_session_imports`` sleep 0.4 s:
+    57 tests across seven files failed before the call was added.
+
+    Waits on the worker, not on a clock, and asserts the premise instead of
+    assuming it (the worker is dropped from the manager once it finishes, so an
+    empty list is legitimate only if the session is already adopted -- see
+    ``test_subagent_stats._booted``, which this generalises). The deadline is a
+    backstop for a wedged factory, not the assertion.
+    """
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await asyncio.wait_for(app.workers.wait_for_complete(workers), BOOT_DEADLOCK_GUARD_S)
+        return
+    assert getattr(app, "_session", None) is not None, (
+        "no session worker is pending and no session was adopted -- the boot "
+        "worker never ran, so waiting here would have waited on nothing"
+    )
+
+
+#: Opt-in chaos knob for :func:`_slow_boot_warmup`: seconds the boot's import
+#: warm-up thread is made to take. Unset (the default) changes nothing.
+SLOW_BOOT_WARM_ENV = "LOP_TEST_SLOW_BOOT_WARM_S"
+
+
+@pytest.fixture(autouse=True)
+def _slow_boot_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the boot's warm-up thread slow, on demand, to find tests that bet on it.
+
+    WHY. ``_prepay_session_import_warmup`` makes the warm-up a no-op in a green
+    run, so a test that reads app state after a fixed count of ``pilot.pause()``
+    turns instead of waiting on the boot worker passes everywhere except a
+    loaded CI runner, where the thread hop takes longer than the turn budget.
+    That is not reproducible on a quiet machine by running the test again.
+    Setting ``LOP_TEST_SLOW_BOOT_WARM_S=0.4`` turns the loaded runner into a
+    deterministic one: the warm-up sleeps that long in its thread, and every test
+    that does not wait on the worker (``await_session_boot``) reads an unadopted
+    app and fails the same way every time.
+
+    Not on by default: it makes every boot slower, which a normal run has no use
+    for. A test that asserts on the warm-up itself installs its own fake after
+    this fixture and is unaffected.
+    """
+    raw = os.environ.get(SLOW_BOOT_WARM_ENV, "").strip()
+    if not raw:
+        return
+    delay = float(raw)
+    import time
+
+    monkeypatch.setattr(
+        "local_operator.session_factory.warm_session_imports", lambda: time.sleep(delay)
+    )
 
 
 @pytest.fixture(autouse=True)
