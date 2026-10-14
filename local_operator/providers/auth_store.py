@@ -84,6 +84,7 @@ from local_operator.providers.registry import (
 )
 
 if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
+    from local_operator.providers.usage import QuotaHealth
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -3061,12 +3062,20 @@ class AuthStore:
     def _cached_remaining_fraction(
         self, row: StoredCredential, provider: str, model_id: str, now_ms: int
     ) -> float | None:
-        """Remaining shared quota (0..1) for ``row`` from the cache, or ``None``.
+        """Numeric view retained for callers; paid balances have no fraction."""
+        health = self._cached_quota_health(row, provider, model_id, now_ms)
+        return health.remaining_fraction if health is not None else None
+
+    def _cached_quota_health(
+        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
+    ) -> "QuotaHealth | None":
+        """Cached quota verdict, preserving definite usability without a fraction.
 
         ``None`` is UNKNOWN, not zero: no report, an unparseable one, one
         older than :data:`USAGE_PICK_MAX_REPORT_AGE_MS`, or a report whose
-        windows carry no measurable fraction. The caller treats unknown as
-        neutral so a cold cache cannot demote an account.
+        windows carry neither a measurable fraction nor definite payable
+        capacity. The caller keeps unknown neutral without treating a healthy
+        absolute wallet as unknown or fabricating its remaining percentage.
 
         TWO sources feed this, and the newer report wins. The per-account
         preflight row is keyed exactly as the message-boundary preflight
@@ -3148,9 +3157,7 @@ class AuthStore:
             ):
                 return None
         health = usage_health(report, model_id, now_ms=now_ms)
-        if health.state == "unknown" or health.remaining_fraction is None:
-            return None
-        return health.remaining_fraction
+        return health if health.state != "unknown" else None
 
     def _usage_ranked_order(
         self,
@@ -3174,7 +3181,7 @@ class AuthStore:
         to an account, and steers that binding toward headroom.
 
         HOW. Every row's remaining shared fraction is read from the cache
-        (:meth:`_cached_remaining_fraction`, no network). The rows within
+        (:meth:`_cached_quota_health`, no network). The rows within
         ``tolerance`` of the best-known remaining fraction form a bucket of
         "equally good" accounts; unknown rows join the bucket as neutral
         members, since no evidence is not evidence against. The bucket is
@@ -3206,13 +3213,17 @@ class AuthStore:
             return fallback
         try:
             now_ms = self._now_ms()
+            health = {r.id: self._cached_quota_health(r, provider, model_id, now_ms) for r in rows}
             remaining = {
-                r.id: self._cached_remaining_fraction(r, provider, model_id, now_ms) for r in rows
+                cid: h.remaining_fraction if h is not None else None for cid, h in health.items()
             }
+            usable = any(
+                h is not None and h.state in ("healthy", "reserve") for h in health.values()
+            )
             known = [v for v in remaining.values() if v is not None]
-            if not known:
+            if not known and not usable:
                 return fallback
-            best = max(known)
+            best = max(known, default=0.0)
             floor = best - self._usage_pick_tolerance
             bucket: list[StoredCredential] = []
             rest: list[StoredCredential] = []
@@ -3224,7 +3235,16 @@ class AuthStore:
                 # missing report is most often a cold cache or a window that
                 # just reset -- and penalising an account for the absence of
                 # data is how a fresh login gets starved by its own silence.
-                (bucket if value is None or value >= floor else rest).append(r)
+                # Absolute paid headroom is definite usability, not a synthetic
+                # fraction. Keep unknown neutral, but a known spent row cannot
+                # tie with a definitely usable wallet even if all fractions=0.
+                verdict = health[r.id]
+                depleted = verdict is not None and verdict.state == "depleted"
+                (
+                    bucket
+                    if (not (usable and depleted) and (value is None or value >= floor))
+                    else rest
+                ).append(r)
             # Stable sort: rows with equal remaining keep the store's row
             # order, which is the order the hash fallback also assumes.
             rest.sort(key=lambda r: -(remaining[r.id] or 0.0))

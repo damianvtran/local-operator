@@ -5697,3 +5697,108 @@ async def test_usage_preflight_keeps_openai_with_plan_or_credits(
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_paid_shared_bypass_blocks_only_exhausted_spark(tmp_path) -> None:
+    from local_operator.providers.failover import _recover_quota_blocked
+    from local_operator.providers.usage import (
+        UsageAmount,
+        UsageLimit,
+        UsageReport,
+        usage_health,
+    )
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential("openai", _oauth("synthetic-openai", "synthetic-account"))
+    stream = create_stream_fn(
+        store, {"retry": {"usageAwareFallback": True}}, session_id="synthetic-spark"
+    )
+    report = UsageReport(
+        provider="openai",
+        limits=[
+            UsageLimit("plan", "Plan", UsageAmount(used_fraction=1), shared=True),
+            UsageLimit("spark", "Spark", UsageAmount(used_fraction=1), tier="spark"),
+            UsageLimit(
+                "paid", "Paid", UsageAmount(remaining=10), paid_fallback=True, available=True
+            ),
+        ],
+    )
+    try:
+        health = usage_health(report, "gpt-spark")
+        assert health.state == "depleted" and health.scope == "model"
+        assert health.binding_families == ("spark",) and health.binding_labels == ("Spark",)
+        with patch("local_operator.providers.usage.fetch_usage", return_value=report):
+            await stream.preflight_usage(ModelSpec(provider="openai", model_id="gpt-spark"))
+        assert store.is_blocked_for_model(row.id, "openai", "gpt-spark")
+        assert not store.is_blocked_for_model(row.id, "openai", "gpt-codex")
+        report.limits[1].amount.used_fraction = 0.25
+        with patch("local_operator.providers.usage.fetch_usage", return_value=report):
+            assert await _recover_quota_blocked(store, "openai", "gpt-spark") is not None
+        assert not store.is_blocked_for_model(row.id, "openai", "gpt-spark")
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan,paid", [(1, 0.25), (0.25, 1)])
+async def test_legacy_paid_cache_preflight_keeps_serviceable_account(tmp_path, plan, paid) -> None:
+    from local_operator.providers.usage_cache import (
+        UsageCacheStore,
+        account_preflight_key,
+        report_from_dict,
+    )
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential("anthropic", _oauth("synthetic", "legacy-account"))
+    stream = create_stream_fn(
+        store, {"retry": {"usageAwareFallback": True}}, session_id="synthetic-legacy"
+    )
+    cache = UsageCacheStore(tmp_path / "usage.db")
+    stream._usage_cache = cache
+    report = report_from_dict(
+        {
+            "provider": "anthropic",
+            "fetched_at": store._now_ms(),
+            "limits": [
+                {
+                    "id": "anthropic:7d",
+                    "label": "Plan",
+                    "amount": {"used_fraction": plan},
+                    "shared": True,
+                },
+                {
+                    "id": "anthropic:extra",
+                    "label": "Extra",
+                    "amount": {"used_fraction": paid, "unit": "usd"},
+                },
+            ],
+        }
+    )
+    assert report is not None
+    cache.set(
+        account_preflight_key("anthropic", row.data.get("email") or row.data["account_id"]),
+        "anthropic",
+        [report],
+        expires_at_ms=store._now_ms() + 60000,
+    )
+    # Routing reads cached reports only under peer lease contention, never
+    # merely because TTL is fresh. Exercise that real cache-serving branch.
+    peer = UsageCacheStore(tmp_path / "usage.db")
+    assert peer.try_lease(
+        account_preflight_key("anthropic", row.data.get("email") or row.data["account_id"])
+    )
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=AssertionError("peer cached report must not duplicate probe"),
+        ):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus"))
+        assert not store.is_blocked_for_model(row.id, "anthropic", "claude-opus")
+        assert stream._route_state.active is None
+    finally:
+        await stream.close()
+        cache.close()
+        peer.close()
+        store.close()

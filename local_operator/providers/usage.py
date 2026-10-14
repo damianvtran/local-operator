@@ -456,6 +456,11 @@ def usage_health(
         if not paid.supersedes_tiers and tiers:
             cap = _usage_windows_health(tiers, reserve_percent=reserve_percent, now_ms=now_ms)
             if cap.state == "depleted":
+                # Shared exhaustion is already bypassed by this paid path. The
+                # remaining restriction is the family cap, so an account-wide
+                # block would incorrectly hide these credits from other models.
+                if best.state == "depleted":
+                    best = cap
                 continue
         else:
             cap = QuotaHealth("healthy")

@@ -5331,6 +5331,17 @@ class SessionStreamFn:
                     )
                     await self._route_state.clear_settled("primary model still has quota")
                     return
+                # The last account's family depletion is still a definite
+                # verdict even when no fallback exists. Persist only its binding
+                # families; an account-wide block would hide payable shared
+                # credits from otherwise runnable models on this same login.
+                self._write_quota_block(
+                    self._auth_store,
+                    access.credential_id,
+                    storage,
+                    health,
+                    max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+                )
                 fallback = await self._first_available_fallback(
                     model,
                     reserve_percent=retry.usage_reserve_percent,
