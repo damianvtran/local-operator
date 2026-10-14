@@ -3986,23 +3986,27 @@ def replay_entries(
             _apply_prune(message, notice)
         kept.append(message)
     if compaction_index is not None:
-        # Reapply the epoch's capture-elision frontier to the KEPT window.
-        # The live pass elided superseded captures from the projection it
-        # sent and recorded the count on the compaction payload; source rows
-        # and attachment blobs stayed untouched, so replay re-derives the
-        # same partition from the same messages and consumes the same prefix
-        # -- resumed and live contexts match byte for byte. A record without
-        # a frontier (every pre-elision record) changes nothing here, and a
-        # malformed one degrades to no elision rather than a guess.
-        from local_operator.compaction.marker import capture_elision_frontier
+        # Reapply the epoch's capture-elision record to the KEPT window. The
+        # live pass elided superseded captures from the projection it sent
+        # and recorded their stable addresses (producer scope, stream,
+        # revision) on the compaction payload; source rows and attachment
+        # blobs stayed untouched, so replay elides EXACTLY those blocks.
+        # Deliberately NOT a count re-derived here: a later turn can
+        # retro-supersede a capture the pass protected, so re-deriving a
+        # first-N over the resumed segment would drop a block the live
+        # session kept and resurrect one it elided (reviewer round 1, C1).
+        # A record without identities (every pre-elision record) changes
+        # nothing here, and a malformed one degrades to no elision rather
+        # than a guess.
+        from local_operator.compaction.marker import capture_elision_identities
 
-        frontier = capture_elision_frontier(compaction.payload)
-        if frontier:
+        identities = capture_elision_identities(compaction.payload)
+        if identities:
             from local_operator.compaction.pruning import apply_capture_elisions
 
-            projected, _applied = apply_capture_elisions(
+            projected, _elided = apply_capture_elisions(
                 [message for message in kept if isinstance(message, Message)],
-                limit=frontier,
+                identities=identities,
             )
             projected_iter = iter(projected)
             kept = [

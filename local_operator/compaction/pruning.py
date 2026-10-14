@@ -659,7 +659,7 @@ def _elide_capture_prefix(
     *,
     fit_budget: int | None = None,
     limit: int | None = None,
-) -> tuple[list[Message], int]:
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
     """Apply a deterministic prefix of ``candidates``; ONE elision algorithm.
 
     Shared by the byte-band rung (:func:`reclaim_captures_to_wire_budget`)
@@ -668,7 +668,7 @@ def _elide_capture_prefix(
 
     - ``fit_budget``: stop as soon as the estimate is at or below it.
     - ``limit``: apply exactly this many eligible elisions (deterministic
-      skips do not count toward it), for replaying a persisted frontier.
+      skips do not count toward it).
     - Neither: apply every eligible elision.
 
     ``candidates`` must come from :func:`partition_captures` over the SAME
@@ -676,12 +676,19 @@ def _elide_capture_prefix(
     identity, and the never-empty guard skips rather than ever producing an
     empty content list. Sources are never mutated: only elided messages are
     rebuilt as copies.
+
+    Returns ``(messages, elided_candidates)`` -- the candidates ACTUALLY
+    elided, in elision order, so a caller can persist their stable addresses
+    and a replay can elide exactly those blocks instead of re-deriving a
+    candidate prefix: a later turn can retro-supersede a capture the pass
+    protected, which reorders the candidate list a count-replay would walk
+    (reviewer round 1, C1).
     """
     working = list(messages)
     contents: dict[int, list[Content]] = {}
-    elided = 0
+    elided: list[CaptureElision] = []
     for candidate in candidates:
-        if limit is not None and elided >= limit:
+        if limit is not None and len(elided) >= limit:
             break
         message_index = candidate.message_index
         content = contents.get(message_index)
@@ -702,34 +709,69 @@ def _elide_capture_prefix(
         working[message_index] = messages[message_index].model_copy(
             update={"content": list(content)}
         )
-        elided += 1
+        elided.append(candidate)
         if fit_budget is not None and estimate_wire_bytes(working) <= fit_budget:
             break
-    return working, elided
+    return working, tuple(elided)
 
 
-def apply_capture_elisions(messages: Sequence[Message], *, limit: int) -> tuple[list[Message], int]:
-    """Reapply a persisted elision frontier to ``messages`` (replay side).
+def apply_capture_elisions(
+    messages: Sequence[Message], *, identities: Sequence[tuple[str, str, str]]
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
+    """Reapply a RECORDED elision set to ``messages`` (replay side).
 
-    The compaction record persists HOW MANY eligible superseded captures an
-    epoch elided; replay re-derives the partition from the same source and
-    applies the same number -- same candidates, same never-empty skips,
-    same identity resolution -- so the projected history a resumed session
-    replays is the one the live session sent, without storing image copies
-    or a second registry. ``limit`` beyond the eligible count applies all of
-    them; ``limit <= 0`` returns the input list untouched.
+    The compaction record persists WHICH captures an epoch elided -- their
+    stable harness-stamped addresses ``(producer_scope, stream_id,
+    revision_id)``, one entry per elided block -- and replay elides exactly
+    those blocks. Deliberately NOT a count re-derived at replay time: a later
+    turn can retro-supersede a capture the pass protected, so the candidate
+    order over the whole segment is not the order the pass saw, and a
+    first-N walk would drop a block the live session kept and resurrect one
+    it elided (reviewer round 1, C1).
+
+    Matching is occurrence-bounded: the nth matching block in canonical
+    arrival order is elided only if the record carries at least n copies of
+    that identity, so a producer that repeated a claim cannot over-elide on
+    replay. Same never-empty skip and copy/identity semantics as the live
+    rung, through the ONE :func:`_elide_capture_prefix` core.
+
+    ``identities`` empty returns the input list untouched.
     """
-    if limit <= 0:
-        return list(messages), 0
-    candidates = partition_captures(messages).reclaimable
-    if not candidates:
-        return list(messages), 0
-    return _elide_capture_prefix(messages, candidates, limit=limit)
+    counts: dict[tuple[str, str, str], int] = {}
+    for identity in identities:
+        counts[identity] = counts.get(identity, 0) + 1
+    if not counts:
+        return list(messages), ()
+    used: dict[tuple[str, str, str], int] = {}
+    targets: list[CaptureElision] = []
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            if frame is None:
+                continue
+            identity = (frame.producer_scope, frame.stream_id, frame.revision_id)
+            if used.get(identity, 0) >= counts.get(identity, 0):
+                continue
+            used[identity] = used.get(identity, 0) + 1
+            targets.append(
+                CaptureElision(
+                    message_index=message_index,
+                    content_index=content_index,
+                    stream_id=frame.stream_id,
+                    revision_id=frame.revision_id,
+                    producer_scope=frame.producer_scope,
+                )
+            )
+    if not targets:
+        return list(messages), ()
+    return _elide_capture_prefix(messages, targets)
 
 
 def reclaim_captures_to_wire_budget(
     messages: Sequence[Message], *, budget: int
-) -> tuple[list[Message], int]:
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
     """Elide SUPERSEDED captures, oldest first, until the request fits ``budget``.
 
     The FIRST recovery rung for image byte pressure, and deliberately the
@@ -749,8 +791,9 @@ def reclaim_captures_to_wire_budget(
       input list is returned, so every session under budget behaves
       byte-identically to one without this function.
     - Oldest first, deterministic: elisions follow the partition's
-      canonical-arrival order, so a replay of the same source consumes the
-      same prefix -- the property the replay watermark depends on.
+      canonical-arrival order, so the same source consumed by the same
+      budget produces the same elided set -- which the caller persists as
+      stable ADDRESSES so replay re-applies exactly it.
     - A block is never elided if it is its message's ONLY remaining block:
       an empty content list breaks wire and transcript invariants, and the
       skip is itself deterministic (the next-oldest eligible elision is
@@ -759,20 +802,21 @@ def reclaim_captures_to_wire_budget(
       eligible relief" rather than a fabricated success.
 
     Elision REMOVES the block from the projected copy; the source message
-    objects stay untouched, which is what lets a later replay rebuild the
-    exact same projection from the source plus the persisted frontier.
+    objects stay untouched.
 
-    Returns ``(messages, elided)``; ``elided`` is 0 and the input list is
-    returned when nothing was over budget or nothing eligible could run.
+    Returns ``(messages, elided_captures)`` -- the candidates actually
+    elided, in elision order (their addresses are what a record persists);
+    the tuple is empty and the input list is returned when nothing was over
+    budget or nothing eligible could run.
     """
     if budget <= 0:
-        return list(messages), 0
+        return list(messages), ()
     if estimate_wire_bytes(messages) <= budget:
-        return list(messages), 0
+        return list(messages), ()
 
     candidates = partition_captures(messages).reclaimable
     if not candidates:
-        return list(messages), 0
+        return list(messages), ()
     return _elide_capture_prefix(messages, candidates, fit_budget=budget)
 
 

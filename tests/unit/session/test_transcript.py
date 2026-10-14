@@ -1069,7 +1069,15 @@ async def test_resume_reapplies_the_capture_elision_frontier(transcript):
         )
     )
     await transcript.append_compaction(
-        "SUMMARY", first.id, 100, preserve_data={"capture_elisions": {"applied": 1}}
+        "SUMMARY",
+        first.id,
+        100,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "1"]],
+            }
+        },
     )
 
     history = transcript.build_llm_history()
@@ -1114,13 +1122,22 @@ async def test_resume_without_or_with_malformed_frontier_changes_nothing(transcr
     )
     malformed = transcript.build_llm_history()
 
+    await transcript.append_compaction(
+        "SUMMARY3",
+        first.id,
+        100,
+        preserve_data={"capture_elisions": {"applied": 1, "identities": "nope"}},
+    )
+    malformed_ids = transcript.build_llm_history()
+
     assert len(_capture_images(plain)) == 2
     assert len(_capture_images(malformed)) == 2
+    assert len(_capture_images(malformed_ids)) == 2
 
 
 @pytest.mark.asyncio
-async def test_resume_frontier_beyond_eligible_elides_only_eligible(transcript):
-    """A frontier larger than the eligible set cannot touch protected captures."""
+async def test_resume_ignores_a_record_that_names_no_present_block(transcript):
+    """An address that matches nothing in the segment elides nothing."""
     first = await transcript.append_message(
         Message.user(
             "only",
@@ -1134,13 +1151,21 @@ async def test_resume_frontier_beyond_eligible_elides_only_eligible(transcript):
         )
     )
     await transcript.append_compaction(
-        "S", first.id, 10, preserve_data={"capture_elisions": {"applied": 9}}
+        "S",
+        first.id,
+        10,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "9"]],
+            }
+        },
     )
 
     history = transcript.build_llm_history()
 
     images = _capture_images(history)
-    assert len(images) == 1  # the single capture is its stream's latest
+    assert len(images) == 1
     assert images[0].captured_frame is not None
     assert images[0].captured_frame.revision_id == "1"
 

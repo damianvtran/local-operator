@@ -14,6 +14,7 @@ from __future__ import annotations
 from local_operator.compaction.marker import (
     build_compaction_marker,
     capture_elision_frontier,
+    capture_elision_identities,
     render_compaction_marker,
     split_leading_marker,
     with_capture_elision_frontier,
@@ -57,13 +58,19 @@ def test_a_context_full_marker_folds_its_summary() -> None:
 
 
 def test_capture_elision_frontier_round_trips_through_a_marker() -> None:
-    """The frontier persists on the marker, beside any strategy payload."""
-    preserve = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, 3)
+    """The record persists on the marker, beside any strategy payload."""
+    identities = (
+        ("mcp:sess:cam", "screen", "1"),
+        ("mcp:sess:cam", "camera", "5"),
+        ("mcp:sess:cam", "screen", "2"),
+    )
+    preserve = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, identities)
     assert preserve is not None
     marker = build_compaction_marker("A SUMMARY", preserve)
 
     assert marker.details["preserve_data"]["snapcompact"] == {"text": "x"}
     assert capture_elision_frontier(marker.details) == 3
+    assert capture_elision_identities(marker.details) == identities
 
 
 def test_capture_elision_frontier_is_omitted_when_unset_or_zero() -> None:
@@ -73,16 +80,16 @@ def test_capture_elision_frontier_is_omitted_when_unset_or_zero() -> None:
     assert capture_elision_frontier(bare.details) is None
 
     # A zero-elision pass commits NOTHING rather than spelling a zero.
-    assert with_capture_elision_frontier(None, 0) is None
-    kept = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, 0)
+    assert with_capture_elision_frontier(None, ()) is None
+    kept = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, ())
     assert kept == {"snapcompact": {"text": "x"}}
     assert "capture_elisions" not in kept
-    zero = build_compaction_marker("A SUMMARY", with_capture_elision_frontier(None, 0))
+    zero = build_compaction_marker("A SUMMARY", with_capture_elision_frontier(None, ()))
     assert "preserve_data" not in zero.details
 
 
 def test_capture_elision_frontier_malformed_values_degrade_to_none() -> None:
-    """Unknown or malformed frontiers must elide NOTHING on replay."""
+    """Unknown or malformed counts must read as no record."""
     for frontier in ("3", -1, True, 2.5, {}, None):
         details = {"preserve_data": {"capture_elisions": frontier}}
         assert capture_elision_frontier(details) is None
@@ -90,11 +97,46 @@ def test_capture_elision_frontier_malformed_values_degrade_to_none() -> None:
     assert capture_elision_frontier(None) is None
 
 
+def test_capture_elision_identities_degrade_to_empty() -> None:
+    """A record without usable addresses elides NOTHING on replay."""
+    assert capture_elision_identities(None) == ()
+    assert capture_elision_identities({"preserve_data": "nope"}) == ()
+    assert capture_elision_identities({"preserve_data": {"capture_elisions": {"applied": 3}}}) == ()
+    assert (
+        capture_elision_identities({"preserve_data": {"capture_elisions": {"identities": "nope"}}})
+        == ()
+    )
+    record = {
+        "preserve_data": {
+            "capture_elisions": {
+                "applied": 3,
+                "identities": [
+                    ["mcp:s:c", "screen", "1"],
+                    ["short"],
+                    [1, 2, 3],
+                    ("mcp:s:c", "screen", "2"),
+                ],
+            }
+        }
+    }
+    assert capture_elision_identities(record) == (
+        ("mcp:s:c", "screen", "1"),
+        ("mcp:s:c", "screen", "2"),
+    )
+
+
 def test_with_capture_elision_frontier_copies_its_input() -> None:
     original = {"snapcompact": {"text": "x"}}
-    merged = with_capture_elision_frontier(original, 4)
+    identities = (("mcp:s:c", "screen", "1"),) * 4
+    merged = with_capture_elision_frontier(original, identities)
 
-    assert merged == {"snapcompact": {"text": "x"}, "capture_elisions": {"applied": 4}}
+    assert merged == {
+        "snapcompact": {"text": "x"},
+        "capture_elisions": {
+            "applied": 4,
+            "identities": [["mcp:s:c", "screen", "1"]] * 4,
+        },
+    }
     assert original == {"snapcompact": {"text": "x"}}
 
 

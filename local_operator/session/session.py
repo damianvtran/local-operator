@@ -19659,17 +19659,17 @@ class Session:
                 preserved_turns_shed = capped.injections_dropped
             # Capture elision, LIVE half: reclaim SUPERSEDED captures from the
             # kept window until the recorded recovery band is met, and record
-            # the count on this pass's payload so replay re-applies EXACTLY
-            # this frontier (``build_llm_history`` consumes it via
-            # ``apply_capture_elisions``; both sides then send the same
-            # projection). Only captures carrying harness provenance are
-            # eligible: user uploads, unknown images and every stream's LATEST
-            # frame can never be elided, and the rung runs ONLY here, at a
-            # real pass -- no per-turn churn -- and the source rows stay
-            # untouched because this is a projection, not an edit. The band is
-            # measured on the kept rows; the gate's own fresh render remains
-            # the authority on the whole request.
-            applied_captures = 0
+            # the elided blocks' stable addresses on this pass's payload so
+            # replay re-elides EXACTLY them (``build_llm_history`` consumes
+            # the identities; both sides then send the same projection).
+            # Only captures carrying harness provenance are eligible: user
+            # uploads, unknown images and every stream's LATEST frame can
+            # never be elided, and the rung runs ONLY here, at a real pass --
+            # no per-turn churn -- and the source rows stay untouched because
+            # this is a projection, not an edit. The band is measured on the
+            # kept rows; the gate's own fresh render remains the authority on
+            # the whole request.
+            elided_captures: tuple[Any, ...] = ()
             elision_budget = self._capture_elision_budget(compaction_api, plan)
             if elision_budget is not None:
                 from local_operator.compaction.pruning import (
@@ -19678,17 +19678,23 @@ class Session:
 
                 elision_rows = [message for message in kept if isinstance(message, Message)]
                 if elision_rows:
-                    projected_rows, applied_captures = reclaim_captures_to_wire_budget(
+                    projected_rows, elided_captures = reclaim_captures_to_wire_budget(
                         elision_rows, budget=elision_budget
                     )
-                    if applied_captures:
+                    if elided_captures:
                         projected_iter = iter(projected_rows)
                         kept = [
                             next(projected_iter) if isinstance(message, Message) else message
                             for message in kept
                         ]
-            if applied_captures:
-                preserve_data = with_capture_elision_frontier(preserve_data, applied_captures)
+            if elided_captures:
+                preserve_data = with_capture_elision_frontier(
+                    preserve_data,
+                    tuple(
+                        (capture.producer_scope, capture.stream_id, capture.revision_id)
+                        for capture in elided_captures
+                    ),
+                )
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,

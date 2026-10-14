@@ -34,6 +34,7 @@ __all__ = [
     "COMPACTION_MARKER_TYPE",
     "build_compaction_marker",
     "capture_elision_frontier",
+    "capture_elision_identities",
     "marker_details",
     "marker_exists",
     "render_compaction_marker",
@@ -73,14 +74,17 @@ def build_compaction_marker(
     return CustomMessage(custom_type=COMPACTION_MARKER_TYPE, attribution="system", details=details)
 
 
-#: ``preserve_data`` key for the CAPTURE-ELISION FRONTIER an epoch commits:
-#: ``{"applied": <int>}`` -- how many superseded-capture blocks the pass
-#: elided under the byte band. ADDITIVE and optional: a record without the
-#: key (every record written before this existed) replays with NO capture
-#: elisions, which is exactly the old behaviour, and a writer with nothing to
-#: record omits the key rather than spelling a zero. The count is the same
-#: number :func:`local_operator.compaction.pruning.apply_capture_elisions`
-#: takes as its limit, so replay needs no second interpretation.
+#: ``preserve_data`` key for the CAPTURE-ELISION record an epoch commits:
+#: ``{"applied": <int>, "identities": [[scope, stream, revision], ...]}`` --
+#: which superseded-capture blocks the pass elided under the byte band (one
+#: entry per elided block, in elision order) plus the count for diagnostics.
+#: ADDITIVE and optional: a record without the key (every record written
+#: before this existed) replays with NO capture elisions, which is exactly
+#: the old behaviour, and a writer with nothing to record omits the key
+#: rather than spelling a zero. REPLAY USES THE IDENTITIES, never a count
+#: re-derived from the resumed segment: a later turn can retro-supersede a
+#: capture the pass protected, so the pass-time candidate order cannot be
+#: rebuilt from the resumed whole (reviewer round 1, C1).
 CAPTURE_ELISION_FRONTIER_KEY = "capture_elisions"
 
 
@@ -108,10 +112,50 @@ def capture_elision_frontier(details: Mapping[str, Any] | None) -> int | None:
     return applied
 
 
+def capture_elision_identities(
+    details: Mapping[str, Any] | None,
+) -> tuple[tuple[str, str, str], ...]:
+    """The stable addresses of the captures a marker's epoch elided.
+
+    Each entry is ``(producer_scope, stream_id, revision_id)``, one per
+    elided block in elision order. ``()`` covers both "this record predates
+    the identities key" and "the value is malformed" -- replay then applies
+    NOTHING, the conservative reading: an unknown record must never elide
+    anything, and a bare count is not safely re-derivable (reviewer round 1,
+    C1). Non-string or wrongly-shaped entries are skipped individually, so
+    one bad entry cannot discard the rest of a valid record.
+    """
+    if not isinstance(details, Mapping):
+        return ()
+    preserve = details.get("preserve_data")
+    if not isinstance(preserve, Mapping):
+        return ()
+    record = preserve.get(CAPTURE_ELISION_FRONTIER_KEY)
+    if not isinstance(record, Mapping):
+        return ()
+    identities = record.get("identities")
+    if not isinstance(identities, (list, tuple)):
+        return ()
+    out: list[tuple[str, str, str]] = []
+    for entry in identities:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        scope, stream, revision = entry
+        if isinstance(scope, str) and isinstance(stream, str) and isinstance(revision, str):
+            out.append((scope, stream, revision))
+    return tuple(out)
+
+
 def with_capture_elision_frontier(
-    preserve_data: Mapping[str, Any] | None, applied: int
+    preserve_data: Mapping[str, Any] | None, identities: Sequence[tuple[str, str, str]]
 ) -> dict[str, Any] | None:
-    """``preserve_data`` with the capture-elision frontier merged in.
+    """``preserve_data`` with the capture-elision record merged in.
+
+    ``identities`` are the stable harness-stamped addresses of the blocks the
+    pass ELIDED, one entry per elided block in elision order; the persisted
+    form stores them beside their count (``applied``), because replay must
+    re-elide exactly the recorded blocks rather than re-derive a candidate
+    prefix over the resumed segment (see the key comment above).
 
     A pass that elided nothing commits NOTHING new: the key is omitted rather
     than written as zero, so a text-only or legacy pass's marker payload
@@ -119,10 +163,13 @@ def with_capture_elision_frontier(
     copied, never mutated -- the caller's payload may be shared with a
     strategy archive.
     """
-    if applied <= 0:
+    if not identities:
         return dict(preserve_data) if preserve_data is not None else None
     merged: dict[str, Any] = dict(preserve_data) if preserve_data else {}
-    merged[CAPTURE_ELISION_FRONTIER_KEY] = {"applied": applied}
+    merged[CAPTURE_ELISION_FRONTIER_KEY] = {
+        "applied": len(identities),
+        "identities": [list(identity) for identity in identities],
+    }
     return merged
 
 

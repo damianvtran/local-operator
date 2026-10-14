@@ -17,7 +17,10 @@ import base64
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
-from local_operator.compaction.marker import capture_elision_frontier
+from local_operator.compaction.marker import (
+    capture_elision_frontier,
+    capture_elision_identities,
+)
 from local_operator.harness.types import (
     CapturedFrame,
     ImageContent,
@@ -89,6 +92,25 @@ def _plain() -> ImageContent:
     return ImageContent(data=_DOC_DATA, mime_type="image/png")
 
 
+def _stream_capture(*, stream: str, revision: str) -> ImageContent:
+    """A capture on a named stream with revision-DISTINCT bytes (see above)."""
+    return ImageContent(
+        data=base64.b64encode(f"{stream}-{revision}!".encode() * 9_000).decode(),
+        mime_type="image/png",
+        captured_frame=CapturedFrame(
+            stream_id=stream, revision_id=revision, producer_scope="mcp:sess:cam"
+        ),
+    )
+
+
+def _pairs(messages) -> list[tuple[str, str]]:
+    return sorted(
+        (image.captured_frame.stream_id, image.captured_frame.revision_id)
+        for image in _images(messages)
+        if image.captured_frame
+    )
+
+
 def _images(messages) -> list[ImageContent]:
     return [
         block
@@ -146,12 +168,54 @@ async def test_an_epoch_elides_the_superseded_capture_and_resume_matches(tmp_pat
     record = session._transcript.latest_entry("compaction")
     assert record is not None
     assert capture_elision_frontier(record.payload) == 1
+    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "screen", "1"),)
 
     directory = session._transcript.directory
     await session.dispose()
     replayed = Transcript(directory).build_llm_history()
     assert _marked(replayed) == ["2"], "resume must re-apply exactly the recorded frontier"
     assert _has_doc(replayed)
+
+
+@pytest.mark.asyncio
+async def test_resume_re_elides_the_recorded_capture_after_a_retro_supersede(tmp_path):
+    """The reviewer's C1 case, end to end: a later turn supersedes a capture
+    the pass protected.
+
+    Pass time: B's first capture was B's LATEST (protected, kept); A's first
+    was superseded by A's second (the only eligible elision). A later turn
+    adds B's second capture, retro-superseding the block the pass protected --
+    which now PRECEDES A's first in canonical arrival order, so a
+    count-re-derived replay would elide the wrong block. Resume must re-elide
+    exactly the recorded address (A/1) and keep B/1.
+    """
+    session = make_session(tmp_path, ScriptedStream(["reply"] * 12))
+    await session.prompt("start " + "detail " * 300)
+    await session.prompt("b one", images=[_stream_capture(stream="b", revision="1")])
+    await session.prompt("a one", images=[_stream_capture(stream="a", revision="1")])
+    await session.prompt("a two", images=[_stream_capture(stream="a", revision="2")])
+    session._compaction_settings = CompactionSettings(
+        keep_recent_tokens=KEEP_RECENT, wire_bytes_trigger=4_000
+    )
+    outcome = await session.compact_now()
+    assert outcome.ran is True
+    session._compaction_settings = CompactionSettings(keep_recent_tokens=KEEP_RECENT)
+
+    record = session._transcript.latest_entry("compaction")
+    assert record is not None
+    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "a", "1"),)
+    assert _pairs(session._context.messages) == [("a", "2"), ("b", "1")]
+
+    await session.prompt("b two", images=[_stream_capture(stream="b", revision="2")])
+
+    directory = session._transcript.directory
+    await session.dispose()
+    replayed = Transcript(directory).build_llm_history()
+    assert _pairs(replayed) == [
+        ("a", "2"),
+        ("b", "1"),
+        ("b", "2"),
+    ], "resume must re-elide exactly the recorded address and keep the retro-superseded block"
 
 
 @pytest.mark.asyncio

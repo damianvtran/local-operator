@@ -719,9 +719,10 @@ def test_reclaim_elides_superseded_captures_until_under_budget():
     assert after_one < full, "the capture payload must dominate the estimate"
     budget = (after_one + full) // 2
 
-    out, count = reclaim_captures_to_wire_budget(messages, budget=budget)
+    out, elided = reclaim_captures_to_wire_budget(messages, budget=budget)
 
-    assert count == 1
+    assert len(elided) == 1
+    assert (elided[0].stream_id, elided[0].revision_id) == ("screen", "1")
     assert estimate_wire_bytes(out) <= budget
     assert [type(block).__name__ for block in out[0].content] == ["TextContent"]
     assert out[1] is messages[1], "untouched messages keep sharing their objects"
@@ -737,9 +738,9 @@ def test_reclaim_below_budget_is_byte_identical_and_free():
     ]
     full = estimate_wire_bytes(messages)
 
-    out, count = reclaim_captures_to_wire_budget(messages, budget=full + 1)
+    out, elided = reclaim_captures_to_wire_budget(messages, budget=full + 1)
 
-    assert count == 0
+    assert elided == ()
     assert out[0] is messages[0] and out[1] is messages[1]
 
 
@@ -750,9 +751,9 @@ def test_reclaim_refuses_when_only_protected_images_remain():
         Message.user("doc", images=[ImageContent(data="aGVsbG8=" * 30000, mime_type="image/png")]),
     ]
 
-    out, count = reclaim_captures_to_wire_budget(messages, budget=1)
+    out, elided = reclaim_captures_to_wire_budget(messages, budget=1)
 
-    assert count == 0
+    assert elided == ()
     assert estimate_wire_bytes(out) == estimate_wire_bytes(messages)
     assert out[0] is messages[0] and out[1] is messages[1]
 
@@ -771,9 +772,9 @@ def test_reclaim_never_empties_a_message():
     )
     messages = [only, latest]
 
-    out, count = reclaim_captures_to_wire_budget(messages, budget=1)
+    out, elided = reclaim_captures_to_wire_budget(messages, budget=1)
 
-    assert count == 0
+    assert elided == ()
     assert len(out[0].content) == 1
     assert out[0] is only
 
@@ -786,32 +787,37 @@ def test_reclaim_is_deterministic_and_pure():
     ]
     before = [message.model_dump() for message in messages]
 
-    first, count = reclaim_captures_to_wire_budget(messages, budget=1)
-    second, count_again = reclaim_captures_to_wire_budget(messages, budget=1)
+    first, first_elided = reclaim_captures_to_wire_budget(messages, budget=1)
+    second, second_elided = reclaim_captures_to_wire_budget(messages, budget=1)
 
-    assert count == count_again == 2  # the two superseded captures; latest stays
+    assert len(first_elided) == len(second_elided) == 2  # superseded pair; latest stays
+    assert [capture.revision_id for capture in first_elided] == ["1", "2"]
     assert first == second
     assert [message.model_dump() for message in messages] == before
 
 
 def test_apply_capture_elisions_reproduces_the_byte_rung_projection():
-    """The persisted frontier replays to the live projection: same source, same plan."""
+    """The recorded addresses replay to the live projection: same source, same plan."""
     messages = [
         Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
         Message.user("mid", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
         Message.user("now", images=[_big_capture(stream="screen", revision="3", scope="mcp:s:a")]),
     ]
-    rung, elided_count = reclaim_captures_to_wire_budget(messages, budget=1)
-    assert elided_count == 2
+    rung, elided = reclaim_captures_to_wire_budget(messages, budget=1)
+    assert [capture.revision_id for capture in elided] == ["1", "2"]
+    identities = tuple(
+        (capture.producer_scope, capture.stream_id, capture.revision_id) for capture in elided
+    )
 
-    replayed, applied = apply_capture_elisions(messages, limit=elided_count)
+    replayed, applied_back = apply_capture_elisions(messages, identities=identities)
 
-    assert applied == elided_count
     assert replayed == rung
+    assert [capture.revision_id for capture in applied_back] == ["1", "2"]
 
 
-def test_apply_capture_elisions_skips_do_not_consume_the_limit():
-    """A skipped candidate (never-empty guard) is not an applied elision."""
+def test_apply_capture_elisions_never_empties_a_message() -> None:
+    """A recorded address whose block is its message's ONLY block is skipped,
+    not turned into an empty content list (the same guard the live rung has)."""
     only = Message(role="user")
     only.content = [_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
     latest = Message.user(
@@ -819,14 +825,14 @@ def test_apply_capture_elisions_skips_do_not_consume_the_limit():
     )
     messages = [only, latest]
 
-    out, applied = apply_capture_elisions(messages, limit=5)
+    out, elided = apply_capture_elisions(messages, identities=[("mcp:s:a", "screen", "1")])
 
-    assert applied == 0
+    assert elided == ()
     assert len(out[0].content) == 1
     assert out[0] is only
 
 
-def test_apply_capture_elisions_limit_zero_or_beyond_and_purity():
+def test_apply_capture_elisions_empty_or_unmatched_and_purity() -> None:
     messages = [
         Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
         Message.user("mid", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
@@ -834,14 +840,81 @@ def test_apply_capture_elisions_limit_zero_or_beyond_and_purity():
     ]
     before = [message.model_dump() for message in messages]
 
-    zero, applied_zero = apply_capture_elisions(messages, limit=0)
-    assert applied_zero == 0
-    assert zero[0] is messages[0]
+    untouched, elided_none = apply_capture_elisions(messages, identities=())
+    assert elided_none == ()
+    assert untouched[0] is messages[0]
 
-    beyond, applied_beyond = apply_capture_elisions(messages, limit=99)
-    assert applied_beyond == 2  # every eligible capture; the latest stays
-    assert beyond[2] is messages[2]
+    unmatched, elided_unmatched = apply_capture_elisions(
+        messages, identities=[("mcp:s:a", "screen", "99")]
+    )
+    assert elided_unmatched == ()
+    assert unmatched[2] is messages[2]
 
-    again, applied_again = apply_capture_elisions(messages, limit=2)
-    assert (again, applied_again) == (beyond, 2)
+    again, elided_again = apply_capture_elisions(
+        messages,
+        identities=[("mcp:s:a", "screen", "1"), ("mcp:s:a", "screen", "2")],
+    )
+    assert [capture.revision_id for capture in elided_again] == ["1", "2"]
+    assert again[2] is messages[2]
     assert [message.model_dump() for message in messages] == before
+
+
+def test_apply_capture_elisions_bounds_duplicate_identities_by_occurrence() -> None:
+    """A repeated claim elides only as many occurrences as the record carries."""
+    messages = [
+        Message.user("a", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("b", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("c", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+    ]
+    identity = ("mcp:s:a", "screen", "1")
+    block_count = lambda source: sum(  # noqa: E731 -- assertion shorthand, local to the test
+        1 for message in source for block in message.content if isinstance(block, ImageContent)
+    )
+
+    one, elided_one = apply_capture_elisions(messages, identities=[identity])
+    assert len(elided_one) == 1
+    assert block_count(one) == 2, "one duplicate occurrence must remain"
+
+    both, elided_both = apply_capture_elisions(messages, identities=[identity, identity])
+    assert len(elided_both) == 2
+    assert block_count(both) == 1
+
+
+def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> None:
+    """The reviewer's case: a later turn retro-supersedes a capture the pass
+    protected. A count re-derived over the resumed segment would pick a
+    different first-N -- the retro-superseded block PRECEDES the elided one
+    in canonical arrival order -- so the recorded addresses must win."""
+    b1 = Message.user("b1", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:b")])
+    a1 = Message.user("a1", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")])
+    a2 = Message.user("a2", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")])
+    at_pass = [b1, a1, a2]
+
+    _, elided = reclaim_captures_to_wire_budget(at_pass, budget=1)
+    assert [(capture.producer_scope, capture.revision_id) for capture in elided] == [
+        ("mcp:s:a", "1")
+    ]
+    identities = tuple(
+        (capture.producer_scope, capture.stream_id, capture.revision_id) for capture in elided
+    )
+
+    # A later turn supersedes B1 -- the block the pass protected.
+    b2 = Message.user("b2", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:b")])
+    resumed_segment = [b1, a1, a2, b2]
+    assert (
+        partition_captures(resumed_segment).reclaimable[0].producer_scope == "mcp:s:b"
+    ), "the fixture must make the retro-superseded block the first fresh candidate"
+
+    replayed, applied_back = apply_capture_elisions(resumed_segment, identities=identities)
+
+    assert [(capture.producer_scope, capture.revision_id) for capture in applied_back] == [
+        ("mcp:s:a", "1")
+    ]
+    kept_blocks = [
+        (block.captured_frame.producer_scope, block.captured_frame.revision_id)
+        for message in replayed
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+    assert kept_blocks == [("mcp:s:b", "1"), ("mcp:s:a", "2"), ("mcp:s:b", "2")]
