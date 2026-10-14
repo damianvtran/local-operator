@@ -210,8 +210,8 @@ def is_harness_chrome(text: str) -> bool:
     would suppress a chrome prompt that the other painted as the user's own
     words the moment a persisted prompt gained a trailing newline.
 
-    Two legs, one decision. Exact membership covers the three prompts that are
-    single fixed strings; a producer-side recogniser covers each family the
+    Two legs, one decision. Exact membership covers the prompts that are
+    single fixed strings (the five listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -712,7 +712,7 @@ def is_harness_notice_row(row: Any) -> bool:
     person who pastes a harness notice verbatim loses their display row: the text
     is hidden on every human surface. It is NOT lost anywhere else — the row is
     still in the journal, and still in the model's context; only the renderer drops
-    it, exactly as :func:`is_harness_chrome` does for the three loop/continuation
+    it, exactly as :func:`is_harness_chrome` does for the loop/continuation
     prompts, which a person can equally paste verbatim. Those two are the verified
     retention surfaces, and they are named alone because a claim about anywhere
     else would be one nobody measured. That precedent is the reason this is
