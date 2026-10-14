@@ -325,6 +325,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # "this daemon is going away" and two tasks that must observe it.
     reload_task: asyncio.Task[None] | None = None
     reload_stop: asyncio.Event | None = None
+    # The reload watch itself: ``install`` answers None on every boot that cannot
+    # be armed, and it is read BELOW this block (the heartbeat that publishes the
+    # rolling contract) as well as inside it. Declaring it here keeps the
+    # outside-block read bound on a boot that published no record at all.
+    reload_watch: serve_reload.ReloadWatch | None = None
     if announced is not None:
         # THE NAMESPACE'S OWN REAPER, ON THE ONE MOMENT A NEW WRITER JOINS IT.
         # ``run/serve`` had no production reaper at all until this call, and
@@ -382,6 +387,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # signal handlers all answer None, and all three would be lying if
             # this read `listener_fd is not None` instead.
             reloadable=reload_watch is not None,
+            rolling_reload_contract=serve_reload.rolling_contract(app),
             access_token=surface_keys.access_token,
             boot_generation=surface_keys.generation,
         )
@@ -483,6 +489,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - auto-update is optional; the daemon is not
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
+
+    # The record was created before the autonomous hub producer. Publish safety
+    # only AFTER every real hook exists; absent/failed hub startup stays unknown.
+    if serve_publisher is not None and reload_watch is not None:
+        try:
+            serve_publisher.heartbeat(rolling_reload_contract=serve_reload.rolling_contract(app))
+        except Exception:  # noqa: BLE001 — failed publication never authorizes reload
+            logger.warning("rolling reload capability could not be published", exc_info=True)
 
     yield
     try:
@@ -890,6 +904,11 @@ app.include_router(desktop_approvals.router)
 # `/code-requests` child of a session, and the two-segment `/refresh` path is declared
 # after its own parent here, so the literal suffix cannot be swallowed.
 app.include_router(desktop_code_requests.router)
+
+# Install the loop-local work fence before lifespan publishes its reload
+# capability. It drains real request bodies, not just endpoint construction;
+# established replayable desktop feeds retain their independent runtime owners.
+app.add_middleware(serve_reload.ReloadAdmissionMiddleware, owner=app)
 
 # Add CORS middleware
 app.add_middleware(

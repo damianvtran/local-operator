@@ -324,10 +324,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "channel, never a file in a session",
     ),
     "local_operator/install_transaction.py": (
-        2,
-        "``install.lock`` and ``.install-attempt.json`` belong to the node-local "
-        "INSTALLROOT/generation authority, not a session directory. Kernel locks "
-        "and PID/birth-bound build attempts must never travel with a session move.",
+        3,
+        "``install.lock``, ``.install-attempt.json`` and ``.update-operations`` "
+        "belong to the node-local INSTALLROOT/generation authority, not a session "
+        "directory. Kernel locks and PID/birth-bound build attempts must never "
+        "travel with a session move, and ``OPERATION_DIR`` holds the durable "
+        "update-operation records for this INSTALLROOT — machine-local recovery "
+        "state bound to one install, exactly as untransportable as the lock and "
+        "the attempt file beside it.",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
