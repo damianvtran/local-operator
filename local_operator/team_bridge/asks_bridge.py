@@ -75,21 +75,23 @@ def bridge_request_question(
         neutralize_bridge_tag,
     )
 
-    # S3-6: EVERY sender-derived line is flattened to ONE line and tag-
+    # S3-6/M1: EVERY sender-derived line is flattened to ONE line and tag-
     # neutralised — a newline or a wrapper-tag lookalike inside the sender's
     # name/summary must not open a line of its own outside the framing. The
     # §11.1 clause comes FIRST, ahead of those words, so the frame is read
     # before the untrusted content it frames.
+    #
+    # ``text`` is assigned UNCONDITIONALLY: the sender, the summary and the
+    # excerpt may ALL be absent (the excerpt is designed to degrade to ""), and
+    # an assignment guarded by "did any of them say something" left the name
+    # unbound on exactly that path (round-4 M1). The clause always leads.
     sender_line = neutralize_bridge_tag(" ".join(str(sender or "").split()))
     summary_line = neutralize_bridge_tag(" ".join(str(summary or "").split()))
     plain = f"{sender_line} · {summary_line}".strip(" ·")
     bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     if bounded:
         bounded = neutralize_bridge_tag(bounded)
-    if plain or bounded:
-        text = "\n".join(
-            line for line in (BRIDGE_UNTRUSTED_CLAUSE, plain, bounded) if line
-        )
+    text = "\n".join(line for line in (BRIDGE_UNTRUSTED_CLAUSE, plain, bounded) if line)
     question = {
         "id": f"bridge-{message_id}",
         "question": text,

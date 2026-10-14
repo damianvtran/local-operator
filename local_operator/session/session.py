@@ -11124,6 +11124,18 @@ class Session:
             )
             return {"ok": False, "error": copy}
 
+        def _refuse_with_code(code: str, copy: str) -> dict[str, Any]:
+            """``_refuse`` that also names WHY, typed, for the surface (S3-5).
+
+            The copy alone cannot be keyed off: a surface needs a stable code to
+            decide whether to offer "answer again" (an expiry) or to leave the
+            card alone (a genuine refusal).
+            """
+
+            answer = _refuse(copy)
+            answer["code"] = str(code)
+            return answer
+
         if runtime is None:
             return _refuse("agent messages are not active in this session.")
         queue = self.ask_queue()
@@ -11141,6 +11153,27 @@ class Session:
                 break
         if question is None:
             return _refuse("that request's question is not on this ask.")
+        from local_operator.harness.approval import (
+            bridge_decide_grant_drops_for,
+            bridge_decide_grant_seen,
+        )
+
+        if not bridge_decide_grant_seen(
+            session_id=_session_id,
+            ask_id=str(ask_id),
+            question_id=str(question_id),
+            word=str(word),
+        ) and bridge_decide_grant_drops_for(
+            session_id=_session_id, ask_id=str(ask_id), question_id=str(question_id)
+        ):
+            # S3-5: THIS target's admitted decision expired unspent (the TTL
+            # dropped it, and the drop ring names it). Typed and visible, with
+            # the one action that helps: answer again. The generic refusal below
+            # would read like a bug to someone who did tap the card.
+            return _refuse_with_code(
+                "decision_expired",
+                "that answer expired before it could be sent — please answer again",
+            )
         from local_operator.team_bridge.decide import NotAHumanDecision, human_decision
 
         try:

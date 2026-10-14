@@ -459,15 +459,16 @@ def neutralize_bridge_tag(text: str) -> str:
     question text.
 
     The match is DELIBERATELY LOOSE (S3-7): the separator between the name
-    parts may be a hyphen, an underscore or whitespace, and the slash may be
-    spaced (``< / team-bridge-message>``). A variant the reader would still
+    parts may be a hyphen, an underscore, a dot, a NON-BREAKING or unicode
+    hyphen (U+2010/U+2011) or whitespace, and the slash may be spaced
+    (``< / team-bridge-message>``). A variant the reader would still
     recognise as the tag must not survive this hop just because it is spelled
     differently from the one the wrap emits.
     """
     import re
 
     return re.sub(
-        r"<\s*/?\s*team[\s\-_]*bridge[\s\-_]*message",
+        r"<\s*/?\s*team[\s\-\u2010\u2011_.]*bridge[\s\-\u2010\u2011_.]*message",
         lambda match: match.group(0).replace("<", "&lt;"),
         text,
         flags=re.IGNORECASE,

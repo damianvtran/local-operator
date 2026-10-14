@@ -208,6 +208,12 @@ def _patch_consumed(
     def _reader(directory: str, wanted: str):
         if details is None:
             return None
+        payload_details = dict(details)
+        # What the PRODUCTION row builder stamps for a verdict-backed bridge
+        # answer (``AskQueue._response_message``), and what the recovery door
+        # requires before it will consider the row at all (R3-5). A row shape
+        # the product cannot write is not a test of the product.
+        payload_details.setdefault("bridge_provenance", "authority_grant")
         return SimpleNamespace(
             id=entry_id or wanted,
             type="message",
@@ -215,7 +221,7 @@ def _patch_consumed(
                 "kind": "custom",
                 "custom_type": custom_type,
                 "attribution": attribution,
-                "details": dict(details),
+                "details": payload_details,
             },
         )
 
@@ -403,3 +409,26 @@ async def test_recovery_forged_row_type_lineage_and_selector_refuse(
         )
     assert exc4.value.code == "no_durable_answer"
     assert intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1") == "none"
+
+
+async def test_a_row_without_the_marker_is_not_considered(tmp_path, monkeypatch) -> None:
+    """R3-5: the marker is a CORRELATION marker, and the door asks for it first.
+
+    It says "the harness rendered this row under a confirmed admitted verdict";
+    it is not unforgeable (the transcript is same-uid writable) and the AUTHORITY
+    remains the consumed grant, the original scope block and the live fence. Its
+    job is to keep the door from even considering a row some other writer
+    appended, so its absence is a typed refusal rather than a fall-through.
+    """
+
+    _patch_consumed(monkeypatch, {"ask_id": "a-1", "bridge_provenance": ""})
+    intents = DecideIntents(tmp_path)
+    with pytest.raises(DecideIntentsRefused) as exc:
+        await recover_from_durable_answer(
+            _runtime(tmp_path).client,
+            intents,
+            _runtime(tmp_path),
+            ask_id="a-1",
+            question_id="bmsg_1",
+        )
+    assert exc.value.code == "no_durable_answer"
