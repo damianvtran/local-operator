@@ -1068,6 +1068,16 @@ _FRONTEND_LOCAL_SLASHES = {
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on AttachedSession.
     "btw",
+    # The same argument `/btw` and `/settings` make: the hub-links PANEL is an
+    # overlay THIS terminal draws and holds focus on, and the policy it writes
+    # is a fact about THIS machine's config root (``config.yml``'s
+    # ``hub.links``, the store this terminal's own service reads). Routed to a
+    # runtime's dispatcher there is no panel to open and the write would land on
+    # the runtime's config, so the command is not advertised
+    # `authoritative_session` and the phone's sheet does not offer it (the
+    # surface it needs is a terminal overlay). This is also what keeps it out
+    # of ``session/runtime/serving.py::_slash_result``.
+    "hub",
     # The kill switch is the one session command that must act from THIS
     # process even on a follower: bare /stop ends the session the viewer is
     # looking at (the attached runtime via the direct stop op, not a routed

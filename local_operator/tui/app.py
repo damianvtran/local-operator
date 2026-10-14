@@ -46456,19 +46456,6 @@ class OperatorApp(App[None]):
 
         self.run_worker(run(), thread=False, group="hub-links", exclusive=True)
 
-    def _hub_link_eligibility_reason(self, link_id: str) -> str:
-        """The service-computed ineligibility reason for a link, or ""."""
-
-        try:
-            snapshot = self._hub_links_snapshot_sync()
-        except Exception:  # noqa: BLE001 - a notice must not raise
-            return ""
-        row = next(
-            (link for link in snapshot.get("links", []) if link.get("link_id") == link_id),
-            None,
-        )
-        return str((row or {}).get("eligibility", {}).get("reason") or "")
-
     # -- the /btw aside ------------------------------------------------------
     #
     # The contract, because everything below is downstream of it: an aside

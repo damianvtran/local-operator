@@ -43,13 +43,17 @@ HUB = "https://api.radienthq.com/v1"
 
 #: The rig writes EVIDENCE; it must land in the session scratchpad, never the
 #: repo. A pytest run under a bare ``env -i`` has no scratchpad var, and the
-#: first version then wrote ``./hub-links-capture`` into the worktree. Refuse
-#: rather than guess.
+#: first version then wrote ``./hub-links-capture`` into the worktree. The rig
+#: is a SESSION tool, so without the var it SKIPS at collection (CI sets no
+#: scratchpad, and an error here fails the shard for a rig it never needed);
+#: with the var it runs unchanged -- run it through scripts/run_bounded.py
+#: within the session, which supplies it.
 if "LOCAL_OPERATOR_SCRATCHPAD" not in os.environ:  # pragma: no cover - env guard
-    raise RuntimeError(
+    pytest.skip(
         "the hub-links capture rig needs $LOCAL_OPERATOR_SCRATCHPAD (evidence "
         "must not be written into the repo); run it through scripts/run_bounded.py "
-        "within the session, which supplies it"
+        "within the session, which supplies it",
+        allow_module_level=True,
     )
 
 
