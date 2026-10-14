@@ -11,18 +11,37 @@ committed switch never touches the operator's real config.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
 
 from local_operator.config import ConfigManager
+from local_operator.i18n import text as i18n_text
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+
+@pytest.fixture(autouse=True)
+def _restore_locale() -> Iterator[None]:
+    """The active locale is PROCESS state a committed switch moves; put it back.
+
+    ``test_a_shipped_wave_locale_switches_and_persists`` leaves the process in
+    ``fr``, and every later test in the same worker then resolves French copy:
+    CI shard ``test (3.12, 1)`` failed twice on
+    ``test_marker_chip.py::test_the_receipt_row_is_inked_as_chrome_not_as_the_user_s_prose``
+    reading ``1 image jointe`` (PR #2377, reproduced locally on main ``8492cebb5``
+    by running this file before that test). The sibling ``test_language_live.py``
+    restores the same way; this file never patches the catalogue root, so a plain
+    move back to ``en`` is enough.
+    """
+    yield
+    i18n_text.set_active_locale("en")
 
 
 @pytest.fixture()
