@@ -645,14 +645,17 @@ async def test_team_detail_exposes_definition_revision_and_stale_write_is_409(ap
     assert ok.status_code == 200, ok.text
 
     # The same token is now STALE (description changed) -> 409, row untouched.
-    before = TeamRegistry(root).get_team_by_name("audit").description
+    audit = TeamRegistry(root).get_team_by_name("audit")
+    assert audit is not None
+    before = audit.description
     stale = await client.patch(
         "/v1/desktop/teams/audit",
         json=mutation(description="Overwrite", expected_definition_revision=token),
     )
     assert stale.status_code == 409, stale.text
     assert stale.json()["detail"]["code"] == "local-concurrent-edit"
-    assert TeamRegistry(root).get_team_by_name("audit").description == before
+    after = TeamRegistry(root).get_team_by_name("audit")
+    assert after is not None and after.description == before
 
 
 async def test_profile_detail_exposes_definition_revision_and_stale_write_is_409(api):

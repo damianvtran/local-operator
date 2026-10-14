@@ -1,5 +1,7 @@
 """OperationBudget invariants: monotonic clock, reserve, stage caps, modes."""
 
+from typing import Any, cast
+
 import pytest
 
 from local_operator.hub_sync.budget import (
@@ -47,7 +49,8 @@ def test_invalid_budget_refused() -> None:
         OperationBudget(
             deadline_monotonic=2.0,
             started_monotonic=1.0,
-            mode="nope",
+            # Deliberately invalid literal: the refusal is the assertion here.
+            mode=cast(Any, "nope"),
             operation_id="o",
             attempt_generation=1,
         )

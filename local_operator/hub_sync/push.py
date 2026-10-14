@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
+from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync.merge import MergeOptions
 from local_operator.hub_sync.outbound import ProjectionResult, project_outbound, refuses
 from local_operator.hub_sync.outbox import Outbox
@@ -51,6 +52,7 @@ class PushTransport(Protocol):
         self, *, kind: str, payload: Mapping[str, Any], budget: OperationBudget
     ) -> Mapping[str, Any]:
         """Return ``{"content_revision": str, "operation_id": str, ...}`` or raise."""
+        ...
 
     async def commit(
         self,
@@ -62,6 +64,7 @@ class PushTransport(Protocol):
         budget: OperationBudget,
     ) -> Mapping[str, Any]:
         """Conditional write; raises :class:`RemoteRevisionChanged` on HTTP 412."""
+        ...
 
 
 class RemoteRevisionChanged(RuntimeError):
@@ -122,7 +125,7 @@ class PushOutcome:
     reason: str = ""
 
 
-def _canonical_equal(kind: str, a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+def _canonical_equal(kind: Kind, a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
     from local_operator.hub_sync.outbound import canonical_fields
     from local_operator.hub_sync.provenance import fingerprint_snapshot
 
@@ -133,7 +136,7 @@ def _canonical_equal(kind: str, a: Mapping[str, Any], b: Mapping[str, Any]) -> b
 
 async def push_item(
     *,
-    kind: str,
+    kind: Kind,
     local_id: str,
     captured_local: Mapping[str, Any] | None,
     accepted: Mapping[str, Any] | None,
@@ -237,7 +240,7 @@ def reconcilable(record: Any) -> bool:
 
 
 def receipt_for(
-    kind: str, accepted: Mapping[str, Any], current_local: Mapping[str, Any]
+    kind: Kind, accepted: Mapping[str, Any], current_local: Mapping[str, Any]
 ) -> OutboundReceipt:
     """Build the replacement outbound pair ``(captured local, accepted remote)``.
 

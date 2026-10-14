@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
 from local_operator.config import ConfigManager
+from local_operator.hub_sync.identity import Visibility
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_config_manager,
@@ -230,6 +231,11 @@ async def apply(
             raise _refusal(422, "an org source resolution needs tenant_id")
         if body.visibility == "public" and body.tenant_id:
             raise _refusal(422, "a public source resolution must not name an organization")
+        # Bind the guarded values ONCE, before the closure: pyright does not
+        # carry the guard's narrowing into a nested function body, and these
+        # are exactly the values the runtime checks above vouched for.
+        requested_source: str = body.hub_source
+        requested_visibility: Visibility = body.visibility
 
         def resolve_work(ctx: Any) -> dict[str, Any]:
             from local_operator.hub_sync.identity import LinkError as _IdentityError
@@ -242,7 +248,7 @@ async def apply(
             # base -- never an arbitrary URL gaining credential egress.
             approved = (configured_radient_base_url(ctx.config_manager),)
             try:
-                source = approve_source(body.hub_source, approved)
+                source = approve_source(requested_source, approved)
             except _IdentityError as error:
                 raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
             if ctx.credential == "none":
@@ -253,17 +259,22 @@ async def apply(
                     kind=body.kind,
                     name=body.name,
                     hub_source=source,
-                    visibility=body.visibility,
+                    visibility=requested_visibility,
                     tenant_id=body.tenant_id,
                 )
             except _IdentityError as error:
                 raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
+            # resolve_source MATERIALIZES the identity on the record it returns;
+            # the Optional on the record type covers adopt/legacy records, not
+            # this arm.
+            identity = record.identity
+            assert identity is not None
             return {
-                "link": record.identity.to_json(),
+                "link": identity.to_json(),
                 "resolved": {
-                    "source": record.identity.hub_source,
-                    "visibility": record.identity.visibility,
-                    "tenant_id": record.identity.tenant_id,
+                    "source": identity.hub_source,
+                    "visibility": identity.visibility,
+                    "tenant_id": identity.tenant_id,
                     # The ACTUAL baseline provenance literal this arm writes. The
                     # resolve arm always records "adopt-unknown" (a source/scope
                     #  confirmed but no content common-ancestor vouched for); the

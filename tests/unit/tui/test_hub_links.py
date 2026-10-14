@@ -250,7 +250,12 @@ def test_every_hinted_key_has_a_live_action() -> None:
     from local_operator.tui.widgets import hub_links_panel as panel_mod
 
     _t = tr("tui.hub_links")
-    bound = {str(binding[0]) for binding in panel_mod.HubLinksPanel.BINDINGS}
+    bound = {
+        # The panel's own entries are (key, action, description) tuples; Textual
+        # also accepts ``Binding`` objects, whose key is the attribute.
+        str(entry[0]) if isinstance(entry, tuple) else str(entry.key)
+        for entry in panel_mod.HubLinksPanel.BINDINGS
+    }
     # The ordinary hint row teaches these ACTIONS; the confirm key is taught by
     # the armed prompt's own block.
     taught = {

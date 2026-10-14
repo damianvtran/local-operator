@@ -9,21 +9,29 @@ import httpx
 import pytest
 
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
-from local_operator.hub_sync.outbox import AsyncDispatcher, Outbox
+from local_operator.hub_sync.outbox import AsyncDispatcher, Outbox, OutboxRecord
+
+
+def _stored(out: Outbox, operation_id: str) -> OutboxRecord:
+    """The stored record, ASSERTED present: every call here enqueued one first."""
+
+    record = out.read(operation_id)
+    assert record is not None
+    return record
 
 
 def test_intent_is_durable_then_settled_and_a_stale_generation_is_fenced(tmp_path: Path) -> None:
     out = Outbox(tmp_path)
     out.enqueue(operation_id="op1", kind="agent", local_id="a1", direction="push", generation=1)
-    assert out.read("op1").state == "pending"
+    assert _stored(out, "op1").state == "pending"
 
     # A late worker from generation 1 must NOT settle after generation 2 starts.
     new_gen = out.bump_generation("op1")
     assert new_gen == 2
     assert out.settle("op1", generation=1, result={"ok": True}) is False  # fenced out
-    assert out.read("op1").state == "pending"
+    assert _stored(out, "op1").state == "pending"
     assert out.settle("op1", generation=2, result={"ok": True}) is True
-    assert out.read("op1").state == "done"
+    assert _stored(out, "op1").state == "done"
 
 
 def test_a_crafted_operation_id_cannot_escape_the_outbox_dir(tmp_path: Path) -> None:

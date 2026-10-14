@@ -31,7 +31,7 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.identity import LinkIdentity
+from local_operator.hub_sync.identity import Kind, LinkIdentity, Visibility
 from local_operator.tui.app import OperatorApp
 from scripts.visual_capture import save_capture
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -76,10 +76,10 @@ def _snap_link(name: str) -> dict[str, Any]:
 def _seed_link(
     root: Path,
     *,
-    kind: str = "agent",
+    kind: Kind = "agent",
     local_id: str,
     name: str,
-    visibility: str,
+    visibility: Visibility,
     tenant: str | None,
     subscribe: bool,
     auto_push: bool,
@@ -119,7 +119,7 @@ def _seed_link(
         hub["tenant_names"] = {tenant: tenant.title()}
     ConfigManager(root).set_config_value("hub", hub)
 
-    def fold(doc: dict) -> None:
+    def fold(doc: dict[str, Any]) -> None:
         item = doc.setdefault("items", {}).setdefault(
             f"{kind}:{local_id}", st.blank_item(kind, local_id, name, f"h-{local_id}", tenant)
         )

@@ -17,7 +17,30 @@ BASE = "## Rules\nBe brief.\n\n## Tools\nUse tools carefully."
 
 def test_agent_adapter_snapshot_matches_its_canonical_fields(tmp_path: Path) -> None:
     registry = AgentRegistry(tmp_path)
-    row = registry.create_agent(AgentEditFields(name="coder", description="d"))
+    # The FULL field set, like the sibling direct constructions
+    # (tests/unit/test_session_factory.py): a partial spelling trips pyright's
+    # synthesized pydantic init for every ``= Field(None, ...)`` field.
+    row = registry.create_agent(
+        AgentEditFields(
+            name="coder",
+            security_prompt="",
+            hosting="test",
+            model="test",
+            description="d",
+            last_message="",
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+            tags=[],
+            categories=[],
+        )
+    )
     registry.set_agent_system_prompt(row.id, BASE)
     adapter = adapter_for("agent")
     snapshot = adapter.snapshot(tmp_path, registry.get_agent(row.id))

@@ -21,6 +21,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.css.query import NoMatches
 
 from local_operator.harness.types import ImageContent
@@ -2849,6 +2850,10 @@ def test_no_two_app_bindings_share_a_key() -> None:
     seen: dict[str, str] = {}
     clashes: list[str] = []
     for binding in OperatorApp.BINDINGS:
+        # Textual's BINDINGS union also admits tuple spellings; the app's own
+        # list is materialised as ``Binding`` objects, asserted so a regression
+        # that reintroduces a bare tuple fails HERE rather than silently skipping.
+        assert isinstance(binding, Binding)
         key = str(binding.key)
         action = str(binding.action)
         if key in seen and seen[key] != action:

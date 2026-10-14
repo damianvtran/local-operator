@@ -601,6 +601,7 @@ def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
     stamped = _pull_agent(agents, hub, root)
     # Drop the identity so the row is a LEGACY unknown-origin link (hub id only).
     record = prov.read_baseline(root, "agent", stamped.id)
+    assert record is not None
     prov.write_baseline(root, dataclasses.replace(record, identity=None, scope_known=True))
 
     resolved = svc.resolve_source(
@@ -614,9 +615,9 @@ def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
     assert resolved.identity is not None
     assert resolved.identity.visibility == "public"
     assert resolved.scope_known is True
-    assert (
-        prov.read_baseline(root, "agent", stamped.id).identity.link_id == resolved.identity.link_id
-    )
+    stored = prov.read_baseline(root, "agent", stamped.id)
+    assert stored is not None and stored.identity is not None
+    assert stored.identity.link_id == resolved.identity.link_id
 
     # A DIFFERENT known scope (org) at the same source is refused, old bytes kept.
     before = (root / "hub" / "baselines" / f"agent-{stamped.id}.json").read_bytes()

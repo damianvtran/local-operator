@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from local_operator.hub_sync.identity import LinkError, LinkIdentity
+from local_operator.hub_sync.identity import Kind, LinkError, LinkIdentity, Visibility
 from local_operator.hub_sync.provenance import fingerprint_fields
 
 
@@ -39,10 +39,11 @@ class Snapshot:
 class KindAdapter(Protocol):
     """What the engine may ask of ONE artifact kind. No network, no locks here."""
 
-    kind: str
+    kind: Kind
 
     def local_id(self, row: Any) -> str:
         """The IMMUTABLE local id (stable across rename), not a display name."""
+        ...
 
     def display_name(self, row: Any) -> str: ...
 
@@ -53,9 +54,11 @@ class KindAdapter(Protocol):
 
     def snapshot(self, config_dir: Path, row: Any) -> Snapshot:
         """Read the canonical authored fields now; the engine diffs these."""
+        ...
 
     def canonical_fields(self, raw: Mapping[str, Any]) -> Mapping[str, Any]:
         """Normalize a remote document to the same field shape ``snapshot`` uses."""
+        ...
 
     def validate(self, fields: Mapping[str, Any]) -> None:
         """Refuse a merged/remote document that cannot be this kind. Named error."""
@@ -65,17 +68,41 @@ class KindAdapter(Protocol):
         local_id: str,
         name: str,
         hub_source: str,
-        visibility: str,
+        visibility: Visibility,
+        tenant_id: str | None,
+        hub_id: str,
+    ) -> LinkIdentity:
+        """Build this adapter's immutable link identity (see ``_SharedIdentity``)."""
+        ...
+
+
+class _SharedIdentity:
+    """The one ``identity()`` implementation the three concrete adapters share.
+
+    A protocol's default body is not INHERITED by its implementers -- pyright
+    requires the member on each class for conformance -- and the construction is
+    kind-independent (``self.kind`` is the only kind-specific input), so it
+    lives once here rather than three times beside the classes.
+    """
+
+    kind: Kind
+
+    def identity(
+        self,
+        local_id: str,
+        name: str,
+        hub_source: str,
+        visibility: Visibility,
         tenant_id: str | None,
         hub_id: str,
     ) -> LinkIdentity:
         return LinkIdentity(self.kind, local_id, hub_source, visibility, tenant_id, hub_id)
 
 
-class AgentAdapter:
+class AgentAdapter(_SharedIdentity):
     """Agent/profile rows: identity is the registry row id; fields are two texts."""
 
-    kind = "agent"
+    kind: Kind = "agent"
 
     def local_id(self, row: Any) -> str:
         return str(row.id)
@@ -121,10 +148,10 @@ class AgentAdapter:
             raise LinkError("merge-refused", "agent instructions must be text")
 
 
-class TeamAdapter:
+class TeamAdapter(_SharedIdentity):
     """Team rows: identity is the registry row id; the remote id lives in the baseline."""
 
-    kind = "team"
+    kind: Kind = "team"
 
     def local_id(self, row: Any) -> str:
         return str(row.id)
@@ -172,10 +199,10 @@ class TeamAdapter:
             raise LinkError("merge-refused", "team manager must be a name")
 
 
-class SkillAdapter:
+class SkillAdapter(_SharedIdentity):
     """Managed skills: identity is the persisted opaque id; fields are the strict manifest."""
 
-    kind = "skill"
+    kind: Kind = "skill"
 
     def local_id(self, row: Any) -> str:
         raise LinkError("origin-conflict", "a skill's local id is its persisted manifest id")

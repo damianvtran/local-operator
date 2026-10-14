@@ -358,7 +358,7 @@ def spawn_outbox_worker(
     coro_factory: Callable[[], Any],
     *,
     loop: asyncio.AbstractEventLoop | None = None,
-) -> asyncio.Task:
+) -> asyncio.Task[Any]:
     """Run a dispatch coroutine on the loop; kept here so callers don't each re-derive it."""
 
     loop = loop or asyncio.get_event_loop()

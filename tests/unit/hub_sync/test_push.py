@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from local_operator.hub_sync.budget import OperationBudget
 from local_operator.hub_sync.merge import MergeOptions
-from local_operator.hub_sync.outbox import Outbox
+from local_operator.hub_sync.outbox import Outbox, OutboxRecord
 from local_operator.hub_sync.push import (
     PushOutcome,
     RemoteRevisionChanged,
@@ -70,7 +70,15 @@ def test_a_local_edit_is_previewed_then_committed(tmp_path: Path) -> None:
     outcome, out, server = asyncio.run(_run(tmp_path))
     assert outcome.state == "pushed" and outcome.revision == "r2"
     assert server.committed and "NEW" in server.committed[0]["instructions"]
-    assert out.read("op1").state == "done"
+    assert _stored(out, "op1").state == "done"
+
+
+def _stored(out: Outbox, operation_id: str) -> OutboxRecord:
+    """The stored record, ASSERTED present: every call here enqueued one first."""
+
+    record = out.read(operation_id)
+    assert record is not None
+    return record
 
 
 def test_identical_remote_settles_a_no_op_without_paying(tmp_path: Path) -> None:
@@ -103,7 +111,7 @@ def test_a_cas_conflict_refuses_to_resubmit(tmp_path: Path) -> None:
     outcome, out, server = asyncio.run(_run(tmp_path, conflict=True))
     assert outcome.state == "conflict" and outcome.reason == "remote-revision-changed"
     assert server.committed == []  # the stale body was NOT resubmitted
-    assert out.read("op1").state == "failed"
+    assert _stored(out, "op1").state == "failed"
 
 
 def test_an_aborted_dispatch_is_pending_reconciliation_not_failed(tmp_path: Path) -> None:
@@ -111,7 +119,7 @@ def test_an_aborted_dispatch_is_pending_reconciliation_not_failed(tmp_path: Path
 
     outcome, out, _ = asyncio.run(_run(tmp_path, hang=True))
     assert outcome.state == "pending-reconciliation"
-    assert out.read("op1").state == "pending-reconciliation"  # replayable, not failed
+    assert _stored(out, "op1").state == "pending-reconciliation"  # replayable, not failed
 
 
 def test_no_outbound_receipt_refuses_without_publishing(tmp_path: Path) -> None:
@@ -144,7 +152,7 @@ def test_a_stale_generation_cannot_settle_after_a_new_attempt(tmp_path: Path) ->
     out.bump_generation("op1")  # a new attempt starts
     # The late worker from generation 1 is fenced out of settlement.
     assert out.settle("op1", generation=1, result={"revision": "r9"}) is False
-    assert out.read("op1").state == "pending"
+    assert _stored(out, "op1").state == "pending"
 
 
 def test_receipt_for_pairs_the_sent_local_with_the_accepted_remote() -> None:

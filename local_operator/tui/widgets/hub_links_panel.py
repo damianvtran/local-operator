@@ -73,7 +73,7 @@ def _entry_lines(entry: Text) -> int:
 def _entry_lines_text(entry: Text) -> list[Text]:
     """The physical lines of one body entry."""
 
-    return entry.split("\n") or [Text("")]
+    return list(entry.split("\n")) or [Text("")]
 
 
 class HubLinksPanel(Static):
@@ -361,7 +361,12 @@ class HubLinksPanel(Static):
                 event.stop()
                 return
             self._engaged = True  # the burst settled; this keystroke is intent
-        elif not printable and key in {binding[0] for binding in self.BINDINGS}:
+        elif not printable and key in {
+            # The panel's own entries are (key, action, description) tuples;
+            # Textual also accepts ``Binding`` objects, whose key is the attribute.
+            entry[0] if isinstance(entry, tuple) else entry.key
+            for entry in self.BINDINGS
+        }:
             # D30: engage only on a key the panel BINDS (its BINDINGS is the one
             # source of truth). `enter`, ctrl chords and F-keys are not panel
             # commands, so they must not count as intent — otherwise a burst like
@@ -709,7 +714,7 @@ class HubLinksPanel(Static):
                 notice_style = Style(color=theme_mod.semantic_color(ink))
             except Exception:  # noqa: BLE001 - a card must not fail to paint
                 notice_style = "dim"
-            for chunk in Text(self._notice).wrap(self, width) or [Text("")]:
+            for chunk in Text(self._notice).wrap(self.app.console, width) or [Text("")]:
                 chunk.stylize(notice_style)
                 lines.append(chunk)
             lines.append(Text(""))
@@ -797,7 +802,7 @@ class HubLinksPanel(Static):
         # real painted line, so the caller's height sum stays honest.
         out: list[Text] = []
         for para in paras:
-            for chunk in para.wrap(self, width) or [Text("")]:
+            for chunk in para.wrap(self.app.console, width) or [Text("")]:
                 out.append(chunk)
         return out
 

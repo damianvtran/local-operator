@@ -45,7 +45,12 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.identity import PUBLICATION_CONTRACT, LinkIdentity
+from local_operator.hub_sync.identity import (
+    PUBLICATION_CONTRACT,
+    Kind,
+    LinkIdentity,
+    Visibility,
+)
 from local_operator.hub_sync.merge import (
     FieldInput,
     MergeOptions,
@@ -251,10 +256,10 @@ def _adopt_if_equal(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
 def resolve_source(
     ctx: HubSyncContext,
     *,
-    kind: str,
+    kind: Kind,
     name: str,
     hub_source: str,
-    visibility: str,
+    visibility: Visibility,
     tenant_id: str | None,
 ) -> prov.BaselineRecord:
     """Confirm SOURCE+SCOPE for an unknown-origin (legacy) linked item.

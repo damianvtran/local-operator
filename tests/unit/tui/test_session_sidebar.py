@@ -5547,12 +5547,20 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
     app bindings (including the remappable keymap defaults and the footer-led
     keys), never a hand-maintained list.
     """
+    from textual.binding import Binding
+
     from local_operator.keymap import KEY_ACTIONS
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
     from local_operator.tui.widgets.session_sidebar import SessionSidebar
 
-    app_keys: set[str] = {str(binding.key) for binding in OperatorApp.BINDINGS}
+    app_keys: set[str] = set()
+    for binding in OperatorApp.BINDINGS:
+        # Textual's BINDINGS union also admits tuple spellings; the app's own
+        # list is materialised as ``Binding`` objects, asserted so a regression
+        # that reintroduces a bare tuple fails HERE rather than skipping a key.
+        assert isinstance(binding, Binding)
+        app_keys.add(str(binding.key))
     # The remappable defaults are materialised as bindings, but assert them
     # explicitly too so a refactor that stops materialising one still fails here.
     keymap_defaults = {action.default for action in KEY_ACTIONS if action.scope == "app"}

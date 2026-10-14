@@ -18,8 +18,9 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.identity import LinkIdentity
+from local_operator.hub_sync.identity import Kind, LinkIdentity, Visibility
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 HUB = "https://api.radienthq.com/v1"
@@ -28,10 +29,10 @@ HUB = "https://api.radienthq.com/v1"
 def _seed_link(
     root: Path,
     *,
-    kind: str = "agent",
+    kind: Kind = "agent",
     local_id: str = "a1",
     name: str = "coder",
-    visibility: str = "public",
+    visibility: Visibility = "public",
     tenant: str | None = None,
     subscribe: bool = True,
     auto_push: bool = False,
@@ -66,7 +67,7 @@ def _seed_link(
         hub["tenant_names"] = {tenant: tenant.title()}
     ConfigManager(root).set_config_value("hub", hub)
 
-    def fold(doc: dict) -> None:
+    def fold(doc: dict[str, Any]) -> None:
         item = doc.setdefault("items", {}).setdefault(
             f"{kind}:{local_id}",
             st.blank_item(kind, local_id, name, f"h-{local_id}", tenant),
@@ -93,6 +94,14 @@ async def _open_panel(app: OperatorApp, pilot: Any) -> None:
     # are treated as intent rather than typed-ahead.
     await pilot.press("down")
     await pilot.pause()
+
+
+def _mounted_panel(app: OperatorApp) -> HubLinksPanel:
+    """The mounted overlay panel, ASSERTED present: every use opens it first."""
+
+    panel = app._hub_links_panel()
+    assert panel is not None
+    return panel
 
 
 @pytest.mark.asyncio
@@ -151,7 +160,7 @@ async def test_public_single_a_arms_but_does_not_write(
         await pilot.press("a")
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         assert panel._consent_link_id == identity.link_id, "the prompt must be armed"
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
 
@@ -254,7 +263,7 @@ async def test_esc_cancels_the_prompt_not_the_overlay(
         await pilot.pause()
         await pilot.press("escape")  # cancel the PROMPT
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         assert panel.is_open, "esc must cancel the prompt, not close the overlay"
         assert panel._consent_link_id is None, "esc must disarm"
         # A following `a` only re-arms.
@@ -279,7 +288,7 @@ async def test_ineligible_refusal_is_named_on_the_card(
         await pilot.press("a")
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         # The refusal is on the CARD (D19), humanized (D19), not a raw code.
         assert panel._notice, "a refusal must be shown on the card"
         assert "unsupported precondition" in panel._notice.lower(), panel._notice
@@ -298,7 +307,7 @@ async def test_stale_policy_revision_is_a_named_cas_refusal_on_the_card(
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         await _open_panel(app, pilot)
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         # Simulate a concurrent edit: the panel's revision is now stale.
         panel._rows = [
             dataclasses.replace(row, policy_revision="stale-revision") for row in panel._rows
@@ -398,7 +407,7 @@ async def test_selected_row_is_painted_at_every_boundary(
         app.action_hub_links()
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel._selected = count - 1
         panel._repaint()
         await pilot.pause()
@@ -423,7 +432,7 @@ async def test_selected_row_is_painted_with_wrapped_rows(
         app.action_hub_links()
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel._selected = 19
         panel._repaint()
         await pilot.pause()
@@ -455,7 +464,7 @@ async def test_consent_block_is_fully_painted_at_small_screens(
     async with app.run_test(size=(40, 24)) as pilot:
         await pilot.pause()
         await _open_panel(app, pilot)
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel._selected = 0
         await pilot.press("a")  # arm the consent
         await pilot.pause()
@@ -490,7 +499,7 @@ async def test_consent_block_is_fully_painted_with_many_links(
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         await _open_panel(app, pilot)
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel._selected = 0
         await pilot.press("a")
         await pilot.pause()
@@ -505,7 +514,7 @@ async def test_consent_block_is_fully_painted_with_many_links(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("visibility,tenant", [("org", "acme"), ("public", None)])
 async def test_zero_spacing_burst_with_punctuation_never_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visibility: str, tenant: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visibility: Visibility, tenant: str | None
 ) -> None:
     """D23: a ZERO-SPACING burst containing space/comma/period never writes.
 
@@ -532,7 +541,7 @@ async def test_zero_spacing_burst_with_punctuation_never_writes(
         app.action_hub_links()
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         # A zero-spacing burst: call the handler with no pilot.pause between.
         # Textual names space/comma/period, so the event carries the NAMED key
         # with its real printable CHARACTER — exactly what a terminal produces.
@@ -571,7 +580,7 @@ async def test_highlighted_row_is_the_write_target_for_every_index(
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         await _open_panel(app, pilot)
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         expected = ["auditor", "coder", "crew", "deploy"]  # agent, agent, team, skill
         for index in range(4):
             panel._selected = index
@@ -622,7 +631,7 @@ async def test_tab_never_strands_the_overlay(
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         await _open_panel(app, pilot)
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         await pilot.press(key)
         await pilot.pause()
         assert panel.is_open, "tab must not close the overlay"
@@ -653,7 +662,7 @@ async def test_non_printable_burst_key_does_not_engage(
         app.action_hub_links()
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         # Zero-spacing burst: `h`, enter, `a` — enter is NOT a panel binding.
         for ev in (events.Key("h", "h"), events.Key("enter", None), events.Key("a", "a")):
             panel.on_key(ev)
@@ -685,7 +694,7 @@ async def test_card_clears_the_dock_for_screens_of_at_least_24_rows_and_60_cols(
             app.action_hub_links()
             await pilot.pause()
             await pilot.pause()
-            panel = app._hub_links_panel()
+            panel = _mounted_panel(app)
             panel._selected = 7
             panel._repaint()
             await pilot.pause()
@@ -711,7 +720,7 @@ async def test_mid_section_window_keeps_its_section_title(
         app.action_hub_links()
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel._selected = 15
         panel._repaint()
         await pilot.pause()
@@ -759,7 +768,7 @@ async def test_selection_follows_the_link_across_a_reorder(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel.display = True
         panel.show_links(_snap(_link(name="alpha", link_id="A"), _link(name="crew", link_id="C")))
         panel._selected = 1  # crew
@@ -790,7 +799,7 @@ async def test_selection_clamps_and_highlights_a_real_row_when_removed(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel.display = True
         panel.show_links(
             _snap(
@@ -818,7 +827,7 @@ async def test_removing_the_armed_link_disarms_the_consent(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel.display = True
         panel.show_links(
             _snap(
@@ -859,7 +868,7 @@ async def test_window_never_ends_on_an_orphan_section_header(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        panel = app._hub_links_panel()
+        panel = _mounted_panel(app)
         panel.display = True
         links = [
             _link(kind="agent", local_id=f"a{i}", name=f"agent-{i}", link_id=f"A{i}")

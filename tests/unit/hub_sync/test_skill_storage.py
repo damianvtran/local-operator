@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -80,7 +81,8 @@ def test_malformed_journal_fingerprint_cannot_supply_an_absence_basis() -> None:
             local_id=identity.local_id,
             link=identity.to_json(),
             direction="pull",
-            before_fingerprint=False,
+            # Deliberately malformed input: the refusal is the assertion here.
+            before_fingerprint=cast(Any, False),
             after_fingerprint=None,
             payload={},
         )
@@ -94,14 +96,16 @@ def test_managed_commit_is_complete_inert_and_protocol_readable(tmp_path: Path) 
     )
     assert transaction.phase == "complete"
     assert storage.snapshot(identity.local_id).document == document
-    assert read_baseline(storage.config_dir, "skill", identity.local_id).identity == identity
+    stored = read_baseline(storage.config_dir, "skill", identity.local_id)
+    assert stored is not None and stored.identity == identity
     script = storage.path(document.name) / "scripts/inert.py"
     assert script.read_text() == "raise RuntimeError('never run')\n"
     assert script.stat().st_mode & 0o111 == 0
     resources, _ = discover_skills([storage.root], config_dir=storage.config_dir)
     resource = next(row for row in resources if row.name == document.name)
     assert resource.managed_config_dir == storage.config_dir
-    assert "# Body" in resolve_skill_url("skill://example-skill", {resource.name: resource})
+    resolved = resolve_skill_url("skill://example-skill", {resource.name: resource})
+    assert resolved is not None and "# Body" in resolved
 
 
 def test_crash_gap_restores_only_verified_original_backup(tmp_path: Path) -> None:
@@ -154,7 +158,8 @@ def test_crash_gap_preserves_external_backup_edit_instead_of_promoting_it(tmp_pa
     storage.recover()
     assert not destination.exists()
     assert body.read_bytes() == actual
-    assert storage.journal.read(pending.operation_id).phase == "blocked"
+    journal = storage.journal.read(pending.operation_id)
+    assert journal is not None and journal.phase == "blocked"
 
 
 def test_fingerprint_cannot_recover_external_symlinked_profile(tmp_path: Path) -> None:

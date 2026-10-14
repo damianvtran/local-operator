@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync.merge import (
     FieldInput,
     MergeOptions,
@@ -88,7 +89,7 @@ def _one_field(
 
 
 def project_outbound(
-    kind: str,
+    kind: Kind,
     *,
     captured_local: Mapping[str, Any],
     accepted: Mapping[str, Any],
@@ -138,7 +139,7 @@ def project_outbound(
     )
 
 
-def canonical_fields(kind: str, fields: Mapping[str, Any]) -> Mapping[str, Any]:
+def canonical_fields(kind: Kind, fields: Mapping[str, Any]) -> Mapping[str, Any]:
     """Normalize a document to the engine's canonical form, per field kind.
 
     The merge core normalizes text (LF, trimmed, single blank line) and rosters; a
@@ -162,7 +163,7 @@ def canonical_fields(kind: str, fields: Mapping[str, Any]) -> Mapping[str, Any]:
     return out
 
 
-def derived_no_op(kind: str, projected: Mapping[str, Any], remote: Mapping[str, Any]) -> bool:
+def derived_no_op(kind: Kind, projected: Mapping[str, Any], remote: Mapping[str, Any]) -> bool:
     """Canonical equality for the settle-no-op decision, reusable by callers."""
 
     return fingerprint_snapshot(kind, projected) == fingerprint_snapshot(kind, remote)

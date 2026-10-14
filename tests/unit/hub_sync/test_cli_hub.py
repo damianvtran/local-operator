@@ -285,6 +285,7 @@ def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) 
         visibility="public",
         tenant_id=None,
     )
+    assert record.identity is not None
     link_id = record.identity.link_id
 
     rc = cli.hub_link_set_command(

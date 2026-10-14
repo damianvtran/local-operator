@@ -265,7 +265,7 @@ def test_prompt_too_long_is_scheduled_not_retired_and_gated_by_fingerprint() -> 
     """A too-long request retries on a schedule, but only when its input changed."""
     from local_operator.hub_sync import store as st
 
-    item: dict = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
+    item: dict[str, Any] = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
     st.record_failure(item, "prompt-too-long", "section too long", now=FIXED)
     assert item["auto_retry"] is True  # NOT a human-only dead end
     assert item["next_retry_at"] is not None  # a cheap scheduled retry
@@ -283,7 +283,7 @@ def test_prompt_too_long_is_scheduled_not_retired_and_gated_by_fingerprint() -> 
 def test_merge_refused_still_retires() -> None:
     from local_operator.hub_sync import store as st
 
-    item: dict = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
+    item: dict[str, Any] = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
     st.record_failure(item, "merge-refused", "conflict", now=FIXED)
     assert item["auto_retry"] is False
 

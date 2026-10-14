@@ -291,7 +291,7 @@ async def test_push_phase_skips_links_without_an_outbound_receipt(rig, monkeypat
     from local_operator.hub_sync.identity import LinkIdentity, LinkPolicy
 
     ident = LinkIdentity("agent", "a1", "https://hub.test/v1", "public", None, "h1")
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
 
     async def fake_push_item(**kw):
         calls.append(kw)

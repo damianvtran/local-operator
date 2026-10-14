@@ -110,8 +110,10 @@ class ManagedSkillStorage:
         return content
 
     def _locations(self, transaction: LocalTransaction) -> tuple[Path, Path, Path]:
-        alias = transaction.payload.get("local_alias")
-        validate_name(alias)
+        # validate_name AUTHENTICATES the payload value (Any -> a checked
+        # kebab-case name) and returns it; binding the return carries that
+        # runtime verification into the type at this one payload boundary.
+        alias = validate_name(transaction.payload.get("local_alias"))
         destination = self.path(alias)
         staged = self.config_dir / "hub" / "staging" / transaction.operation_id / "content"
         backups = self.config_dir / "hub" / "backups"
