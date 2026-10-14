@@ -39,6 +39,10 @@ from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import store as bridge_store
 from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.asks_bridge import enqueue_bridge_request_ask
+# Bound at IMPORT time, before the autouse ``_boundaries`` fixture swaps the
+# module attribute for the receive-side fake: a function-local import would
+# resolve to the FAKE and 'restoring' it would restore the fake.
+from local_operator.team_bridge.store import Store as _RealStore
 from local_operator.team_bridge.connector.wake import EXCERPT_MAX_CHARS, build_bridge_meta
 from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
 
@@ -305,12 +309,19 @@ def test_the_real_queue_enqueue_is_found_by_the_message_lookup(tmp_path) -> None
     )
 
 
-def test_the_receipt_trust_matrix(tmp_path) -> None:
+def test_the_receipt_trust_matrix(tmp_path, monkeypatch) -> None:
     # The receipt trust check is not a standalone Session method: the hook's
     # one validator (``_authorize_bridge_envelope``) delegates it to
     # ``Store.verify_original_envelope_current``, which re-reads the REAL
     # screening receipt against the stamped envelope. This drives that real
     # path: allow passes; every other receipt shape refuses with a typed code.
+    # !!! ORDER MATTERS !!! This file's autouse boundary fixture fakes
+    # ``bridge_store.Store`` for the HOOK's sake, and the seeder module below
+    # does ``from local_operator.team_bridge.store import Store`` AT ITS IMPORT
+    # — so if this is the first import of that module in the session, a lazy
+    # import here binds the FAKE and the case cannot build a real store at all.
+    # The real class therefore goes back BEFORE the import, not after it.
+    monkeypatch.setattr(bridge_store, "Store", _RealStore)
     from tests.unit.team_bridge.test_h5_envelope_negatives import (
         DREF,
         MESSAGE_ID,
@@ -318,6 +329,13 @@ def test_the_receipt_trust_matrix(tmp_path) -> None:
         _seed_store,
         _stamp,
     )
+
+    # The seeder binds ``Store`` at ITS import, so this assert is the contract
+    # the restore above exists for: a fake here means the case would silently
+    # exercise a different store than the one the product reads.
+    import tests.unit.team_bridge.test_h5_envelope_negatives as _neg
+
+    assert _neg.Store is _RealStore, "the seeder must hold the REAL store class"
 
     store = _seed_store(tmp_path)
     _stamp(store)

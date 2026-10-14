@@ -70,25 +70,25 @@ def bridge_request_question(
     """
     if not str(message_id or "").strip():
         raise ValueError("a bridge ask needs the request's message id (question_id)")
-    bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
-    text = f"{sender} · {summary}".strip(" ·")
-    # TB-05 (PR #2378): the sender's words are DATA at every hop, and the
-    # question text ALWAYS carries sender-derived material (the sender line and
-    # the summary) — so the §11.1 clause rides whenever there is text at all,
-    # not only when an excerpt happens to be present. The excerpt follows it;
-    # tag lookalikes are neutralised exactly like the wake wrap's.
     from local_operator.harness.message_types import (
         BRIDGE_UNTRUSTED_CLAUSE,
         neutralize_bridge_tag,
     )
 
+    # S3-6: EVERY sender-derived line is flattened to ONE line and tag-
+    # neutralised — a newline or a wrapper-tag lookalike inside the sender's
+    # name/summary must not open a line of its own outside the framing. The
+    # §11.1 clause comes FIRST, ahead of those words, so the frame is read
+    # before the untrusted content it frames.
+    sender_line = neutralize_bridge_tag(" ".join(str(sender or "").split()))
+    summary_line = neutralize_bridge_tag(" ".join(str(summary or "").split()))
+    plain = f"{sender_line} · {summary_line}".strip(" ·")
+    bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     if bounded:
         bounded = neutralize_bridge_tag(bounded)
-    if text or bounded:
-        text = (
-            f"{text}\n{BRIDGE_UNTRUSTED_CLAUSE}\n{bounded}"
-            if bounded
-            else f"{text}\n{BRIDGE_UNTRUSTED_CLAUSE}"
+    if plain or bounded:
+        text = "\n".join(
+            line for line in (BRIDGE_UNTRUSTED_CLAUSE, plain, bounded) if line
         )
     question = {
         "id": f"bridge-{message_id}",

@@ -1248,9 +1248,20 @@ class AskQueue:
                     )
                 )
             if response_missing:
-                responses.append(
-                    (int(record.get("created_at") or 0), self._response_message(record))
-                )
+                if self._bridge_answer_is_proven(record):
+                    responses.append(
+                        (int(record.get("created_at") or 0), self._response_message(record))
+                    )
+                else:
+                    # S3-1: the record holds an answer NOTHING admitted — the
+                    # model must never read it as the user's pick, and the row
+                    # is the delivery marker, so withholding it also keeps the
+                    # revision window open for the verified door to supersede.
+                    logger.warning(
+                        "bridge ask %s carries an UNPROVEN answer — its response row is "
+                        "withheld until the verified door decides it",
+                        record.get("ask_id"),
+                    )
         messages: list[CustomMessage] = []
         # Timeouts first: within a batch they are the older event, and a notice
         # that predates the answer it sits beside reads in the order it happened.
@@ -1273,6 +1284,57 @@ class AskQueue:
     # SESSION (the four delivery paths call ``Session._append_injected_message``
     # around it). These four methods are that append's queue-side contract, and
     # nothing else in this module touches ``_committing`` or ``_handed``:
+
+    def _bridge_question(self, record: Mapping[str, Any]) -> tuple[str, str] | None:
+        """The bridge (question_id, word) a record's answer decided, or ``None``.
+
+        A bridge question is the one carrying a server ``question_id`` (the wire
+        message id) — the predicate the session's own door uses — and the word
+        is its single pick, lowercased. Ordinary asks answer ``None`` here.
+        """
+
+        answers = record.get("answers") or {}
+        for question in record.get("questions") or ():
+            if not isinstance(question, Mapping):
+                continue
+            candidate = str(question.get("question_id") or "")
+            if not candidate:
+                continue
+            picks = [
+                str(value)
+                for value in ((answers.get(str(question.get("id") or "")) or ()))
+            ]
+            if len(picks) != 1:
+                return None
+            return candidate, picks[0].strip().lower()
+        return None
+
+    def _bridge_answer_is_proven(self, record: Mapping[str, Any]) -> bool:
+        """Whether a BRIDGE record's recorded answer may reach the model.
+
+        The fold is a RECORD, not a proof (§1.4, S3-1): a forged line can claim
+        any surface and any word, so a bridge ask's response row is built ONLY
+        when the answer is backed by a decision THIS runtime's authority seam
+        admitted for this session — the one-shot grant, live (the human's
+        gesture, dispatched around the append) or already consumed by the
+        dispatcher. An unproven answer is withheld rather than rendered as the
+        user's: the human still decides through the verified door, which
+        supersedes the forged record while the window is open. Ordinary asks
+        are unaffected — this answers ``True`` for them.
+        """
+
+        bridge = self._bridge_question(record)
+        if bridge is None:
+            return True
+        question_id, word = bridge
+        from local_operator.harness.approval import bridge_decide_grant_seen
+
+        return bridge_decide_grant_seen(
+            session_id=str(self._session_id or ""),
+            ask_id=str(record.get("ask_id") or ""),
+            question_id=question_id,
+            word=word,
+        )
 
     def begin_row_commit(self, row_id: str) -> None:
         """Mark an ask row's durable append as IN FLIGHT (the commit guard).
@@ -1438,6 +1500,7 @@ class AskQueue:
             images_missing=images_missing,
         )
         extra: dict[str, Any] = {}
+        bridge_question = self._bridge_question(record)
         if images:
             # THE IMAGES RIDE AS A TOP-LEVEL ``content`` EXTRA, not inside
             # ``details`` -- measured, not assumed (design §1.3, spikes A and B):
@@ -1481,6 +1544,17 @@ class AskQueue:
                 "secret_lost": lost,
                 "tool_call_id": str(record.get("tool_call_id") or ""),
                 "text": text,
+                # S3-1/R3-5: this row is built ONLY for a provenance-verified
+                # bridge answer, so it ATTEST that the harness admitted the
+                # decision. The ask-log fold cannot set it — the row is built
+                # here — which is what lets the restart-surviving recovery door
+                # tell a verified answer from a forged fold line after the
+                # in-memory grant table is gone.
+                **(
+                    {"bridge_provenance": "authority_grant"}
+                    if bridge_question is not None
+                    else {}
+                ),
                 # REFS for the cards (TUI, desktop, phone): thumbnails come from
                 # the digest route, never from bytes on the row. Absent for a
                 # text-only answer so the row is unchanged for every existing ask.
