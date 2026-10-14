@@ -121,3 +121,24 @@ def test_unknown_handoff_state_is_not_a_completion(tmp_path) -> None:
     operation = tx.start_operation(tmp_path, baseline="A", target="B", route="latest")
     with pytest.raises(tx.InstallTransactionError):
         tx.advance_handoff(tmp_path, operation.identifier, "complete")
+
+
+def test_unit_inventory_classifies_every_owned_central_unit() -> None:
+    """The §3 table is the inventory the wiring reads; drift is a defect."""
+    names = {entry.name for entry in handoff.UNITS}
+    assert names == {
+        "serve", "mobile", "relay", "browser",
+        "hub-scheduler", "wake-monitor", "tunnel", "usage",
+    }
+    assert {entry.name for entry in handoff.transferable_units()} == {
+        "serve", "mobile", "relay", "browser",
+    }
+    assert {entry.name for entry in handoff.fenced_units()} == {
+        "hub-scheduler", "wake-monitor",
+    }
+    # tunnel has no transferable state and MUST be reported pending, not moved.
+    assert [entry.name for entry in handoff.pending_units()] == ["tunnel"]
+    assert handoff.unit("tunnel").counts_as_moved is False
+    assert handoff.unit("usage").kind == "service"
+    with pytest.raises(KeyError):
+        handoff.unit("nonexistent")

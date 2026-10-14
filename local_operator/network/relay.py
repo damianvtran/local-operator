@@ -4349,6 +4349,13 @@ class RelayServer:
         self._control_key = wire.b64u(os.urandom(32))
         self._control_port = 0
         self._stop = threading.Event()
+        # ADMISSION FENCE (ready-successor handoff, relay). While a handoff is in
+        # progress this relay stops admitting NEW peers but keeps every existing
+        # link and in-flight exchange running, so nothing is lost or replayed. It
+        # is a threading.Event because the accept loop is a plain thread, and it
+        # defaults SET (open) so ordinary operation is unchanged.
+        self._admission = threading.Event()
+        self._admission.set()
         self._threads: list[threading.Thread] = []
         self._reply_waiters: dict[tuple[str, Any], "_ReplyWaiter"] = {}
         #: The last COMPLETED membership pass, by network id — what a `status` read
@@ -4376,6 +4383,12 @@ class RelayServer:
         #: plain: a release without an acquire is a bug this turns into a loud
         #: ValueError rather than a cap that silently grows.
         self._handshake_slots = threading.BoundedSemaphore(max(1, self.settings.max_handshakes))
+        # ACTIVE handshakes, counted at the real acquire/release bracket so a
+        # reload blocker can name "a handshake is mid-flight" honestly. A free
+        # semaphore slot is NOT that fact (the bound can be idle with a peer
+        # mid-handshake), so the count is kept, not inferred.
+        self._handshakes_active = 0
+        self._handshakes_lock = threading.Lock()
         #: When the pre-auth bound last reported itself (``_note_handshake_cap``).
         #: Written and read by the accept loop alone, which is one thread, so it needs
         #: no lock here. The audit call it guards does lock — ``AuditLog`` is flushed
@@ -4524,6 +4537,33 @@ class RelayServer:
         self._run_start_hooks()
         self._sweep_approvals_once()
         self._warm_open_frame_strip()
+
+    def begin_reload(self) -> None:
+        """Close NEW peer admission without touching existing links or work.
+
+        The ready-successor handoff contract shared with the scheduler and hub
+        runner: a daemon being replaced stops admitting new peers while its
+        accepted links and in-flight exchanges keep running, so nothing is lost
+        or double-dispatched across the swap.
+        """
+        self._admission.clear()
+
+    def end_reload(self) -> None:
+        """A refused handoff reopens the SAME relay without cancelling work."""
+        self._admission.set()
+
+    def reload_blocker(self) -> str | None:
+        """One outstanding handshake blocks the transfer; accepted links do not.
+
+        Existing links are expected to outlive the swap (they are not owned work),
+        so they are not a blocker. A handshake mid-flight IS owned work whose
+        thread would be stranded by a successor that never inherited it. The
+        count is read from the real acquire/release bracket, so it names the fact
+        rather than inferring it from a semaphore's remaining permits.
+        """
+        with self._handshakes_lock:
+            active = self._handshakes_active
+        return f"{active} relay handshake(s) in flight" if active else None
 
     def _warm_open_frame_strip(self) -> None:
         """Pay the strip's one-time import bill BEFORE the first open needs it.
@@ -5239,6 +5279,12 @@ class RelayServer:
                 continue
             if self._close_if_stopped(sock):
                 return
+            if not self._admission.is_set():
+                # A committed handoff has closed new admission: this arrival is
+                # refused with no protocol, exactly as a post-stop arrival is.
+                # Existing links are untouched — this is admission, not shutdown.
+                _close_quietly(sock)
+                continue
             if len(self.links) >= self.settings.max_links:
                 sock.close()
                 continue
@@ -5254,13 +5300,25 @@ class RelayServer:
                 self._note_handshake_cap(addr)
                 sock.close()
                 continue
-            thread = threading.Thread(
-                target=self._handshake_inbound,
-                args=(sock, addr),
-                name="mesh-handshake",
-                daemon=True,
-            )
-            thread.start()
+            with self._handshakes_lock:
+                self._handshakes_active += 1
+            try:
+                thread = threading.Thread(
+                    target=self._handshake_inbound,
+                    args=(sock, addr),
+                    name="mesh-handshake",
+                    daemon=True,
+                )
+                thread.start()
+            except BaseException:
+                # A thread that never started must not leave its slot or its
+                # active-handshake count held: either would stall a handoff that
+                # waits on reload_blocker() becoming empty.
+                with self._handshakes_lock:
+                    self._handshakes_active -= 1
+                self._handshake_slots.release()
+                _close_quietly(sock)
+                raise
 
     def _note_handshake_cap(self, addr: Any) -> None:
         """Name a pre-auth cap drop in the LOCAL audit record, once per window.
@@ -5316,6 +5374,8 @@ class RelayServer:
         try:
             self._run_inbound_handshake(sock, addr)
         finally:
+            with self._handshakes_lock:
+                self._handshakes_active -= 1
             self._handshake_slots.release()
 
     def _run_inbound_handshake(self, sock: socket.socket, addr: Any) -> None:

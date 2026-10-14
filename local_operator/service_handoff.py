@@ -28,7 +28,8 @@ import asyncio
 import os
 import socket
 import struct
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -227,13 +228,126 @@ def _scheduler_occurrence_exclusions(record: "dict[str, Any] | None") -> "list[s
     return [item for item in inherited if isinstance(item, str)]
 
 
+# ---------------------------------------------------------------------------
+# Per-unit inventory: how each owned central unit survives a swap.
+#
+# The handoff is not one mechanism applied N times: a unit that owns a bound
+# listener transfers that listener, a unit that owns only timers/peers is fenced
+# and re-homed, and a unit with no transferable state is reported pending.
+# Keeping this as DATA the wiring reads (rather than prose) is how the
+# classification cannot drift from the code that acts on it.
+# ---------------------------------------------------------------------------
+
+TransferKind = Literal["listener", "fenced", "service", "pending"]
+
+
+@dataclass(frozen=True)
+class Unit:
+    """One owned central unit and the way a handoff must treat it."""
+
+    name: str
+    kind: TransferKind
+    anchor: str
+    note: str
+
+    @property
+    def transfers_listener(self) -> bool:
+        return self.kind == "listener"
+
+    @property
+    def counts_as_moved(self) -> bool:
+        """``pending`` is not moved; everything else is an owned transfer."""
+
+        return self.kind != "pending"
+
+
+#: The authoritative inventory; anchors name the source location the wiring
+#: must attach to, so the claim can be audited against the tree.
+UNITS: tuple[Unit, ...] = (
+    Unit(
+        "serve",
+        "listener",
+        "cli.serve_command / server/reload.py",
+        "owns the API listener; wired through ListenerOwner",
+    ),
+    Unit(
+        "mobile",
+        "listener",
+        "mobile/service.py amain",
+        "own uvicorn listener on loopback; scan_loop fenced on admission",
+    ),
+    Unit(
+        "relay",
+        "listener",
+        "network/relay.py RelayServer.bind/_accept_loop",
+        "own peer listener; new admission fenced, existing links untouched",
+    ),
+    Unit(
+        "browser",
+        "listener",
+        "browser_bridge/daemon.py _serve_main",
+        "own uvicorn server; in-flight RPCs fenced before commit",
+    ),
+    Unit(
+        "hub-scheduler",
+        "fenced",
+        "hub_sync/runner.py / scheduler_service.py",
+        "fence already exists; occurrence inheritance needs a durable marker",
+    ),
+    Unit(
+        "wake-monitor",
+        "fenced",
+        "wakes/supervisor.py / monitors/scheduler.py",
+        "freeze kick/pump on admission; hand off via supervisor respawn",
+    ),
+    Unit(
+        "tunnel",
+        "pending",
+        "tunnels/install.py",
+        "no transferable state: relaunch is a fresh start, reported pending",
+    ),
+    Unit(
+        "usage",
+        "service",
+        "providers/controller.py",
+        "lives inside the serving API; covered by the API listener handoff",
+    ),
+)
+
+
+def transferable_units() -> tuple[Unit, ...]:
+    return tuple(entry for entry in UNITS if entry.transfers_listener)
+
+
+def fenced_units() -> tuple[Unit, ...]:
+    return tuple(entry for entry in UNITS if entry.kind == "fenced")
+
+
+def pending_units() -> tuple[Unit, ...]:
+    return tuple(entry for entry in UNITS if entry.kind == "pending")
+
+
+def unit(name: str) -> Unit:
+    for entry in UNITS:
+        if entry.name == name:
+            return entry
+    raise KeyError(f"unknown central unit: {name}")
+
+
 __all__ = [
     "HANDOFF_CONTRACT",
     "HANDOFF_STATES",
     "HandoffError",
     "ListenerOwner",
     "ListenerUnsupported",
+    "TransferKind",
+    "UNITS",
+    "Unit",
+    "fenced_units",
+    "pending_units",
     "receive_listener",
+    "transferable_units",
+    "unit",
     "_acceptor_factory",
     "_scheduler_occurrence_exclusions",
 ]
