@@ -22075,18 +22075,20 @@ class Session:
         spool, so a second retire cannot overwrite the pre-drain hook with the
         spool itself.
         """
-        # ``getattr`` like ``_wake_rearms`` below: the cell harnesses bind these
-        # methods one at a time, so a host can reach here without the hook the
-        # real session owns in ``__init__`` — and ``None`` is the honest thing
-        # to save for it.
+        # ``getattr`` like the send-resume hooks below: the cell harnesses bind
+        # these methods one at a time, so a host can reach here without the hook
+        # the real session owns in ``__init__`` — and ``None`` is the honest
+        # thing to save for it.
         previous = getattr(self, "_wake_deliver_hook", None)
         if previous != self._spool_wake_to_inbox:
             self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
-        #: One-shot schedules this drain swallowed, written to the index by
-        #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
-        #: ``__init__`` because a session that never drains never has any, and
-        #: the hook that fills it is installed on this same line.
-        self._wake_rearms: list[WakeSchedule] = []
+        # NO per-session re-arm queue any more. The one-shot a retiring fire
+        # owes the successor is RESERVED in the scheduler that owns the handle
+        # (``WakeScheduler.hold_pending``), so a create in this still-serving
+        # runtime cannot allocate the same id and be silently discarded when the
+        # queue was written (the replacement loss this change fixes). The
+        # reservation is what keeps the id occupied; there is no second
+        # authoritative list beside the scheduler's own owned view.
         self._wake_deliver_hook = self._spool_wake_to_inbox
 
     def resume_wakes_from_inbox(self) -> bool:
@@ -22212,15 +22214,22 @@ class Session:
         they know. ``fired_count`` is left alone — the delivery the successor
         makes IS this occurrence, and the count moves when it lands.
 
-        False when there is nowhere to queue it, so the caller spools the text
+        The reservation is made by the SCHEDULER (:meth:`WakeScheduler.hold_
+        pending`), which owns the handle: a held id stays in the scheduler's
+        owned view (``schedules``) so every creator's allocation/cap/cancel sees
+        it occupied, while staying out of the runnable rows the timer arms over.
+        That is the whole fix — there is no per-session queue to keep in step.
+
+        False when there is nowhere to reserve it, so the caller spools the text
         instead: the one outcome this path must not produce is an occurrence
         that exists neither as a schedule nor as a spooled reminder.
         """
-        queued = getattr(self, "_wake_rearms", None)
-        if queued is None:
+        scheduler = getattr(self, "_wake", None)
+        hold = getattr(scheduler, "hold_pending", None)
+        if not callable(hold):
             return False
         try:
-            queued.append(
+            held = hold(
                 due.schedule.model_copy(
                     update={
                         "next_due_at": int(time.time() * 1000),
@@ -22228,12 +22237,15 @@ class Session:
                         "until_at": None,
                         "limit": None,
                     }
-                )
+                ),
+                reason="drain",
             )
         except Exception:  # noqa: BLE001 — the caller falls back to the spool
             logger.warning(
                 "wake %s could not be re-armed for the successor", due.schedule.id, exc_info=True
             )
+            return False
+        if not held:
             return False
         logger.info(
             "session runtime: wake %s re-armed for the successor (its fire retired the schedule)",
@@ -22264,22 +22276,31 @@ class Session:
         Never raises: a runtime that has already stopped admitting work must not
         be held by a failed handover, and the failure is loud because it means a
         wake the user is waiting on is now only in the log.
+
+        The atomic strict write is the SCHEDULER's (:meth:`WakeScheduler.handover_
+        pending`): it holds the existing write lock, persists the complete owned
+        view through this session's writer, and releases the holds ONLY once that
+        write landed — a failed append retains ownership and reports zero so a
+        retry is possible and a create in the meantime still sees the ids taken.
+        This method adds the session-level best-effort exit logging around it.
         """
-        pending = list(getattr(self, "_wake_rearms", []) or [])
-        if not pending:
+        scheduler = getattr(self, "_wake", None)
+        hand_over = getattr(scheduler, "handover_pending", None)
+        if not callable(hand_over):
             return 0
-        self._wake_rearms = []
-        superseded = {schedule.id for schedule in pending}
-        live = [schedule for schedule in self._wake.schedules if schedule.id not in superseded]
+        # ``getattr`` erases the method's type, so the ``cast`` restores the one
+        # thing the call site needs to type-check: that the probed capability is
+        # awaitable. It changes nothing at runtime — the same probe, the same
+        # best-effort ``except`` below (this path must never hold the exit).
+        hand_over = cast("Callable[[], Awaitable[int]]", hand_over)
         try:
-            await self._persist_wake_schedules([*live, *pending])
+            handed = int(await hand_over())
         except Exception:  # noqa: BLE001 — the exit must not wait on a handover
-            logger.warning(
-                "could not hand %d draining wake(s) to a successor", len(pending), exc_info=True
-            )
+            logger.warning("could not hand draining wake(s) to a successor", exc_info=True)
             return 0
-        logger.info("session runtime: handed %d draining wake(s) to the successor", len(pending))
-        return len(pending)
+        if handed:
+            logger.info("session runtime: handed %d draining wake(s) to the successor", handed)
+        return handed
 
     def _prepare_missed_wake_catchup(self) -> None:
         """Snapshot the overdue schedules load() just adopted and compose the
@@ -22564,25 +22585,17 @@ class Session:
         that failed to install costs nothing that was not already lost (the
         live session still fires its own wakes).
 
-        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` queues the
-        one-shot that replaces a schedule its fire retired, and the caller that
-        queues it IS the scheduler's deliver hook — so the persist the pump
-        runs immediately after that delivery is this method, and merging the
-        queue here is what makes the occurrence durable in the same breath as
-        the fire (review round 2, MINOR 1). Queuing it for the exit left it in
-        memory for as long as the drain's wait, which is deliberately unbounded
-        — the work it is waiting for is this change's own premise — so a socket
-        ``stop``, a SIGTERM, a dispose or a crash in that window lost the
-        occurrence with no schedule left to retry it (the pump had already
-        persisted the retire). The exit write stays as the retry: an id already
-        in the queue is dropped from the list being written, so merging is
-        idempotent, and until the queue is cleared nothing that comes through
-        here can drop it.
+        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` reserves the
+        one-shot that replaces a schedule its fire retired in the scheduler's
+        owned view (``WakeScheduler.hold_pending``), and the caller that reserves
+        it IS the scheduler's deliver hook — so the persist the pump runs
+        immediately after that delivery is this method, and the owned view it is
+        handed already contains the held row: the occurrence is durable in the
+        same breath as the fire (review round 2, MINOR 1). The exit handover
+        (``WakeScheduler.handover_pending``) stays as the retry, and it is now the
+        scheduler that owns both the reservation and its release, so there is no
+        per-session queue to merge here and no id supersession to apply.
         """
-        pending = list(getattr(self, "_wake_rearms", []) or [])
-        if pending:
-            superseded = {schedule.id for schedule in pending}
-            schedules = [*[s for s in schedules if s.id not in superseded], *pending]
         # AIDA'S ENGINE WRITES HERE, and nowhere else while this session is
         # live: the reconcile applies the pause/disable hold, ensures the
         # single cadence row (this is how a fired one-shot is re-armed for

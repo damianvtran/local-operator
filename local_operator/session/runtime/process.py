@@ -3616,12 +3616,12 @@ async def _abandon_move(
     :func:`_drain_for` with it, so the departure is still retried on every tick and
     still happens at the first idle instant — but the LATCH IS NOT TAKEN AGAIN, and
     that matters more than it looks: a second ``begin_drain`` re-runs
-    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list and
-    so discards the one-shot wakes this drain has already swallowed. A reminder that
-    fired before the bound would then never fire at all, which is a silent loss of
-    the operator's work in exchange for a re-announcement nobody needs — the drain
-    is already latched as a commitment (the record still says it is leaving for the
-    build on disk when its turn ends, which is still true).
+    ``Session.retire_wakes_to_inbox``, whose per-session re-arm queue used to be
+    started fresh and so discarded the one-shot wakes this drain had already
+    swallowed. That queue is gone — the reservation now lives in the scheduler's
+    owned view (``WakeScheduler.hold_pending``), which a second retire does not
+    clear — but the latch is still not taken twice: the commitment is already
+    recorded, and re-announcing it helps nobody.
 
     THAT RETRY IS ALSO WHAT MAKES THE DWELL ARM SAFE TO FIRE EARLY, which is the
     half a reader of the dwell bound needs: on the STALENESS arm the work has stopped
