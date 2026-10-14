@@ -1000,6 +1000,18 @@ class ProviderController:
         if not cache.read_only_available():
             if cache._db_path.exists():
                 return ReadOnlyUsageSnapshot(unavailable=True)
+            # Muse's durable source is auth metadata, not the derived usage
+            # cache. It remains reportable before that cache has ever existed.
+            if provider is None or self._storage_id(provider) == "meta-muse":
+                try:
+                    reports = self._muse_usage_reports()
+                except Exception:  # noqa: BLE001 — unreadable metadata is unavailable
+                    return ReadOnlyUsageSnapshot(unavailable=True)
+                return ReadOnlyUsageSnapshot(
+                    reports=[self._without_identity(report) for report in reports],
+                    may_be_stale=bool(getattr(store, "read_only_sidecar_present", lambda: False)()),
+                    cached_at=max((report.fetched_at for report in reports), default=0),
+                )
             return ReadOnlyUsageSnapshot()
 
         may_be_stale = cache.read_only_sidecar_present() or bool(
@@ -1013,6 +1025,12 @@ class ProviderController:
         )
         out: list[UsageReport] = []
         for storage in providers:
+            if storage == "meta-muse":
+                try:
+                    out.extend(self._muse_usage_reports())
+                except Exception:  # noqa: BLE001 — unreadable metadata is unavailable
+                    return ReadOnlyUsageSnapshot(unavailable=True)
+                continue
             key = provider_cache_key(storage, self._persisted_account_fingerprint(store, storage))
             readable, loaded = cache.read_reports_read_only(key, include_expired=True)
             if not readable:
@@ -1446,6 +1464,9 @@ class ProviderController:
         )
         reports: list[UsageReport] = []
         for target in targets:
+            if target == "meta-muse":
+                reports.extend(self._muse_usage_reports())
+                continue
             key = self._usage_cache_key(target)
             try:
                 cached = cache.get(key, include_expired=True)
@@ -2033,6 +2054,25 @@ class ProviderController:
         jitter = USAGE_UNAVAILABLE_RETRY_MS * (random.random() * 0.5 - 0.25)
         return int(USAGE_UNAVAILABLE_RETRY_MS + jitter)
 
+    def _muse_usage_reports(self) -> list[UsageReport]:
+        """Project current account metadata, without decrypting or querying Muse.
+
+        A derived quota cache can outlive the passive receipt or conceal a newer
+        SSE receipt. Read the small sanitized auth metadata on every open/refresh
+        so old 0/0 login-cache entries never flash as current capacity.
+        """
+        from local_operator.providers.auth_store import credential_identity
+        from local_operator.providers.usage import meta_muse_usage_report
+
+        reports = []
+        for row in self.auth_store.list_credentials("meta-muse"):
+            if row.credential_type != "oauth" or row.disabled_cause:
+                continue
+            report = meta_muse_usage_report(row.data)
+            report.identity = credential_identity(row)
+            reports.append(report)
+        return reports
+
     async def _fetch_provider_cached(
         self,
         client: httpx.AsyncClient,
@@ -2048,6 +2088,8 @@ class ProviderController:
         stale value while that one refreshes. That lease is the coordination;
         no in-process future map is needed on top of it.
         """
+        if provider == "meta-muse":
+            return self._muse_usage_reports()
         cache = self._usage_cache_store()
         key = ""
         if cache is not None:

@@ -32,7 +32,7 @@ offset and the focus.
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from rich.cells import cell_len
@@ -776,9 +776,27 @@ def build_usage_body(  # noqa: ANN001
     from local_operator.providers.usage import (
         META_MUSE_ALLOWANCE_NOTE,
         META_MUSE_NO_OBSERVATION_NOTE,
+        META_MUSE_OBSERVATION_TTL_MS,
+        META_MUSE_PASSIVE_NOTE,
+        META_MUSE_STALE_NOTE,
         META_MUSE_USAGE_NOTES,
     )
 
+    # A panel can remain open past the passive receipt's lifetime. Re-evaluate
+    # on paint too, so its clock never ages a verified 0% into apparently-current
+    # free capacity. Replace locally; do not mutate shared cached report objects.
+    visible_reports = []
+    for report in reports:
+        if report.provider == "meta-muse" and report.limits:
+            if report.notes != META_MUSE_PASSIVE_NOTE:
+                report = replace(report, limits=[], notes=META_MUSE_ALLOWANCE_NOTE)
+            elif now_ms - report.fetched_at > META_MUSE_OBSERVATION_TTL_MS or any(
+                limit.resets_at_ms is not None and limit.resets_at_ms <= now_ms
+                for limit in report.limits
+            ):
+                report = replace(report, limits=[], notes=META_MUSE_STALE_NOTE)
+        visible_reports.append(report)
+    reports = visible_reports
     columns = _measure_columns(reports, width, now_ms)
 
     dim = Style(color=theme_mod.semantic_color("dim"))
@@ -814,7 +832,11 @@ def build_usage_body(  # noqa: ANN001
                 if account_note.startswith("last known "):
                     age = f" ({account_note.removeprefix('last known ')})"
                     account_note = ""
-                muse_note = f"Sign-in snapshot{age}; r won't update Muse"
+                muse_note = f"Usage unknown; sign-in snapshot{age}"
+            elif muse_note == META_MUSE_STALE_NOTE:
+                muse_note = "Usage unknown; stale response snapshot"
+            elif muse_note == META_MUSE_PASSIVE_NOTE:
+                muse_note = "Response snapshot; r won't query Muse"
             elif muse_note == META_MUSE_NO_OBSERVATION_NOTE:
                 muse_note = "No sign-in allowance observed"
         if account_note:
