@@ -111,6 +111,7 @@ model never having to search.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
@@ -251,16 +252,40 @@ def _reachable(boundary: ToolConfinement, path: Path) -> bool:
     try:
         resolved = Path(path).expanduser().resolve()
     except (OSError, ValueError, RuntimeError):
-        # RuntimeError is load-bearing on Python 3.12: ``Path.resolve`` raises
-        # it for a symlink LOOP, not OSError, and a loop is precisely the case
-        # the boundary must read as outside. This is a judgement about
-        # reachability, not error suppression: the contract above says an
-        # unresolvable path counts as outside, mirroring
-        # ``ToolConfinement.path_denial(resolvable=False)`` -- and it must be
-        # true on the version the project supports, or the docstring would
-        # promise more than the code keeps.
+        # RuntimeError is the Python 3.12 spelling of "symlink loop":
+        # ``Path.resolve`` raises it there instead of OSError. A loop is
+        # precisely the case the boundary must read as outside. This is a
+        # judgement about reachability, not error suppression: the contract
+        # above says an unresolvable path counts as outside, mirroring
+        # ``ToolConfinement.path_denial(resolvable=False)``.
+        return False
+    # Python 3.13 stopped raising: a non-strict ``resolve`` now hands a loop
+    # back UNRESOLVED (the loop link itself, or the loop link plus the rest of
+    # the path). That value sits inside the world, so without this check the
+    # same loop that 3.12 denies is advertised as readable -- and the project
+    # supports both (``requires-python = ">=3.12"``, CI runs 3.13 on ``main``).
+    # ``strict=True`` would also deny a not-yet-existing path, which is
+    # reachable, so detect the signature instead: a fully resolved path has no
+    # symlink among its existing components.
+    if _stops_at_symlink(resolved):
         return False
     return boundary.contains(resolved)
+
+
+def _stops_at_symlink(resolved: Path) -> bool:
+    """Whether ``resolved`` still names a symlink at its deepest existing part.
+
+    ``Path.resolve`` replaces every symlink it can follow, so a symlink that
+    survives in its result is one it gave up on (a loop on Python 3.13+, which
+    returns it unresolved instead of raising). Components that do not exist yet
+    are skipped: a missing leaf is ordinary, a surviving link is not.
+    """
+    probe = resolved
+    while not os.path.lexists(probe):
+        if probe.parent == probe:
+            return False
+        probe = probe.parent
+    return probe.is_symlink()
 
 
 def _hinted_copy(message: Message, note: str) -> Message:

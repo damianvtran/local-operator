@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -605,7 +606,17 @@ class _PresenceCacheClock:
     def __init__(self, root: Path, native: Any) -> None:
         self.root = root
         self.native_code = native.__code__
-        self.now = time.monotonic()
+        # A WHOLE number of seconds, never the raw ``time.monotonic()``. The
+        # matrix measures a cache entry's age as ``now - ((now + TTL) - TTL)``,
+        # which is exactly 0 only if every addition is exact. With a fractional
+        # uptime the round trip loses a ulp and the age comes back as -1.4e-14
+        # (reproduced at uptime 252.56993219293187), failing ``0 <= age`` on a
+        # healthy cache. An integer base plus the TTL, +1 and TTL/16 steps used below
+        # are all dyadic, so the arithmetic stays exact at any magnitude.
+        # ``ceil`` (not ``int``) keeps the base at or above the real clock, so
+        # a cache entry stamped by the real clock before this patch still
+        # expires after the first logical advance.
+        self.now = float(math.ceil(time.monotonic()))
 
     def monotonic(self) -> float:
         frame = sys._getframe(1)
