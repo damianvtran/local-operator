@@ -7028,22 +7028,29 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     standalone bounds, so that composition is unchanged by this stage.
     """
 
-    if _is_generation_install():
-        # Immutable success is not permission to bounce supervisors that may own
-        # wake/monitor/browser/mobile/mesh work. Only the API's positively proved
-        # local-work contract is moved by services_stage below; other units stay
-        # running/pending until their own continuity contract is available.
-        names = ("browser bridge", "tunnel", "wakes supervisor", "network relay", "mobile")
-        return [
-            DaemonRefresh(
-                "supervised daemons",
-                warnings=(
-                    "supervised services remain pending; no verified rolling handoff "
-                    "capability (none restarted)",
-                ),
-                statuses=tuple(DaemonStatus(name, "pending") for name in names),
-            )
-        ]
+    # IMMUTABLE-ONLY SUCCESS IS STILL SUCCESS (2026-10-14, central-path wiring).
+    # A generation install USED to short-circuit here, returning every supervised
+    # unit `pending`. The caution rested on a fear a bounce disturbs owned
+    # wake/monitor/browser/mobile/mesh work; the fact that retires it is that
+    # session runtimes are their OWN child processes (spawned with
+    # ``start_new_session=True`` and SIGHUP ignored), so bouncing a SUPERVISOR does
+    # not terminate them — they keep serving from their immutable roots (see
+    # ``supervisors._systemd_unit``'s ``KillMode=process`` note and
+    # ``process._install_sighup_ignore``). The per-unit repairs below already ran on
+    # the mutable path; the only thing that stopped them on a generation install
+    # was that branch, so the two paths now share this ONE body. Continuity per
+    # unit: browser bridge — in-flight requests drop and the client reconnects;
+    # tunnel — the link blips and re-attaches; wakes supervisor — wake MOMENTS are
+    # persisted, so a restart defers them (they fire after it returns); network
+    # relay — accepted links are not blockers by design (they drop and re-dial).
+    #
+    # The relay's reload fence is NOT applied here, reported rather than faked:
+    # ``RelayServer.begin_reload/reload_blocker`` are methods of the RUNNING relay
+    # object, and the restart runs in this repair CHILD, a different process with no
+    # signal or control op reaching that admission gate. An IPC fence is out of
+    # this slice; the relay restart is unchanged from the mutable path
+    # (at-least-once for a handshake in flight, recovered by re-dial), and the fence
+    # stays available to any IN-PROCESS caller.
     deadline = time.monotonic() + _STAGE_DEADLINE_S
     results: dict[str, DaemonRefresh] = {}
 
