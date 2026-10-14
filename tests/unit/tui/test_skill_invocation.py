@@ -27,6 +27,7 @@ from local_operator.tui.widgets.command_picker import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import TranscriptView
+from tests.unit.tui.conftest import await_session_boot
 
 from .test_app_pilot import FakeSession, _factory, _transcript_text
 
@@ -135,6 +136,7 @@ async def test_invocation_sends_body_and_request(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(app, pilot, "$research fix the login bug")
         await _await_prompt(pilot, session)
@@ -157,6 +159,7 @@ async def test_skill_created_after_app_start_is_invocable(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         # Populate the cache first: the interesting case is invalidation, not
         # a cold read that would have walked the filesystem anyway.
@@ -182,6 +185,7 @@ async def test_transcript_shows_what_was_typed_not_the_body(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(app, pilot, "$research fix the login bug")
         await _await_prompt(pilot, session)
@@ -205,6 +209,7 @@ async def test_bare_invocation_sends_the_skill_alone(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(app, pilot, "$research")
         await pilot.pause()
@@ -222,6 +227,7 @@ async def test_hidden_skill_is_invocable_by_name(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(app, pilot, "$secret-audit check the repo")
         await _await_prompt(pilot, session)
@@ -238,6 +244,7 @@ async def test_non_invocations_are_sent_verbatim(skill_root, text) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         await _submit(app, pilot, text)
         await _await_prompt(pilot, session)
@@ -249,6 +256,7 @@ async def test_picker_opens_on_the_sigil_and_lists_skills(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -272,6 +280,7 @@ async def test_picker_closes_once_the_request_starts(skill_root) -> None:
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -288,6 +297,7 @@ async def test_enter_on_a_skill_row_completes_without_submitting(skill_root) -> 
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()
@@ -321,6 +331,7 @@ class TestHandBackPathsReturnTheTypedLine:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = app.query_one(Editor)
             # Mid-turn, so the submit takes the STEER branch.
@@ -345,6 +356,7 @@ class TestHandBackPathsReturnTheTypedLine:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             app._compacting = True
             await _submit(app, pilot, "$research fix the login bug")
@@ -362,6 +374,7 @@ class TestHandBackPathsReturnTheTypedLine:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = app.query_one(Editor)
             app._compacting = True
@@ -379,6 +392,7 @@ class TestHandBackPathsReturnTheTypedLine:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             app._compacting = True
             await _submit(app, pilot, "just a normal message")
@@ -392,6 +406,7 @@ class TestHandBackPathsReturnTheTypedLine:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = app.query_one(Editor)
             session.streaming = True
@@ -428,6 +443,7 @@ class TestReviewRegressions:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             # A skill whose BODY cites an image, which is what shifts the order.
             app._skills_by_name = None
@@ -481,6 +497,7 @@ class TestReviewRegressions:
         session._history = [SimpleNamespace(role="user", text=payload, content=[])]
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             app._project_settled_rows(list(session._history))
             await pilot.pause()
@@ -502,6 +519,7 @@ class TestReviewRegressions:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             await _submit(app, pilot, "$stub do the thing")
             await _await_prompt(pilot, session)
@@ -516,6 +534,7 @@ class TestReviewRegressions:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = app.query_one(Editor)
             editor.focus()
@@ -561,6 +580,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "fix the flaky login test $res")
             assert editor.picker.is_open(), "inline `$` offered no list"
@@ -573,6 +593,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "fix the flaky login test\n$res")
             assert editor.picker.is_open()
@@ -585,6 +606,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, text)
             assert not editor.picker.is_open()
@@ -602,6 +624,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "costs $5")
             assert not editor.picker.is_open()
@@ -623,6 +646,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             for buffer in ("/model $res", "/team $res"):
                 editor = await self._draft(app, pilot, buffer)
@@ -640,6 +664,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "fix the flaky login test $res")
             assert editor.picker.is_open()
@@ -660,6 +685,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             await self._draft(app, pilot, "fix the flaky login test $res")
             await pilot.press("enter")
@@ -683,6 +709,7 @@ class TestInlineInvocation:
         app = OperatorApp(lambda: _factory(session))
         text = "we should use $research for this"
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             await _submit(app, pilot, text)
             await _await_prompt(pilot, session)
@@ -694,6 +721,7 @@ class TestInlineInvocation:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "$resea")
             await pilot.press("enter")
@@ -754,6 +782,7 @@ class TestInlineShellVariablesAreNotInvocations:
         app = OperatorApp(lambda: _factory(session))
         text = "echo $DEBUG"
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, text)
             assert not editor.picker.is_open(), "an inline `$VAR` opened a skill list"
@@ -776,6 +805,7 @@ class TestInlineShellVariablesAreNotInvocations:
         app = OperatorApp(lambda: _factory(session))
         text = "the price is $"
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, text)
             assert not editor.picker.is_open(), "a bare inline `$` opened the catalogue"
@@ -796,6 +826,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "fix this $")
             assert not editor.picker.is_open()
@@ -816,6 +847,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "$")
             assert editor.picker.is_open(), "a leading `$` stopped browsing the catalogue"
@@ -837,6 +869,7 @@ class TestInlineShellVariablesAreNotInvocations:
         app = OperatorApp(lambda: _factory(session))
         text = "translate to $LANG"
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, text)
             assert not editor.picker.is_open()
@@ -869,6 +902,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, text)
             assert not editor.picker.is_open()
@@ -879,6 +913,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "fix this $re")
             assert editor.picker.is_open()
@@ -895,6 +930,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "$rsrch")
             assert editor.picker.is_open(), "the leading position lost fuzzy matching"
@@ -913,6 +949,7 @@ class TestInlineShellVariablesAreNotInvocations:
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
             await pilot.pause()
             editor = await self._draft(app, pilot, "$Research")
             assert editor.picker.is_open(), "the leading position lost case-insensitivity"

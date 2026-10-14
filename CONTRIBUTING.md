@@ -185,6 +185,31 @@ We use pytest for testing with async support:
 - Aim for 80%+ test coverage for new features
 - Mark async tests with `@pytest.mark.asyncio`
 
+### Flake rules
+
+- Wait for the fact an assertion reads, not a fixed sleep or a count of unrelated
+  loop turns. TUI tests that require an adopted session can use
+  `await_session_boot(app)` from `tests.unit.tui.conftest`; tests deliberately
+  holding boot open must not use that helper. `pilot.pause()` drains UI messages,
+  not the factory's thread. Network copy storage and the owner's acknowledgement
+  are separate writes: wait on the acknowledgement before asserting its ledger.
+- Use per-test temporary directories and OS-assigned ports. Isolate HOME/config,
+  strip inherited session/terminal variables, and restore locale, TZ, environment,
+  cwd and module-global state after mutation. See `AGENTS.md` for the required
+  isolation prefix and bounded process-group cleanup.
+- Inject a clock for expiry tests; use exact arithmetic for logical clocks and
+  avoid real-wall-clock performance assertions when a structural invariant exists.
+  A timeout is a deadlock backstop, never evidence that work has completed.
+- Reproduce before changing a wait. For a deterministic boot scheduling probe,
+  run **one targeted test**, serially, with `LOP_TEST_SLOW_BOOT_WARM_S=0.4` in its
+  isolated environment. This delays only the existing warm-up thread; it does not
+  disable the production boot path. Do not apply it to the whole suite by default.
+- Repeat touched node IDs serially in fresh isolated environments, within
+  `scripts/run_bounded.py` limits. No repeat/random-order plugin is required by
+  this repository. A rerun that passes is evidence to investigate, not permission
+  to hide the failure with retries, skips or xfails. Record the failing run URL,
+  signature, actual before/after rates and any cases still unresolved.
+
 ## Contribution Workflow
 
 Please follow the following steps to contribute:

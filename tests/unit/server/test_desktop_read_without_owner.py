@@ -893,16 +893,20 @@ async def test_a_busy_owner_is_painted_cold_at_once_and_goes_live_behind_it(
         await owner.start()
         _publish_live(tmp_path, owner, session_id=harness.session_id)
 
-        started = time.monotonic()
         async with harness.pool.session(harness.session_id, read=True) as bridge:
-            elapsed = time.monotonic() - started
             subscription = bridge.subscribe(frontend_replace=True)
             stream = bridge.events(subscription, epoch=None, after_seq=0)
             try:
                 frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
                 while frame["type"] != "snapshot":
                     frame = await asyncio.wait_for(stream.__anext__(), timeout=DEADLOCK_GUARD_S)
-                assert elapsed < 0.3, f"the first frame waited {elapsed:.2f}s"
+                # The first frame must arrive WHILE the silent owner's attach is
+                # still pending, not after its full budget. Task state is the
+                # discriminating fact; elapsed time also measures runner starvation
+                # (CI: 0.62 s against the old flat 0.3 s ceiling). If the read waits
+                # for the attach budget, this task is done before it can answer.
+                assert bridge.read_attach_task is not None
+                assert not bridge.read_attach_task.done(), "the first frame waited for attach"
                 assert frame["payload"]["cold"] is True
                 assert frame["payload"]["cold_reason"] in {"owner-silent", "no-runtime"}
                 assert frame["payload"]["attaching"] is True
