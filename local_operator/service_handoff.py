@@ -35,6 +35,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
 
 HANDOFF_CONTRACT = "ready-successor-v1"
+#: Busy-turn checkpoint vocabulary. Mirrors ``transcript.CHECKPOINT_PHASES``; kept
+#: here so this module stays a leaf (the transcript module is heavier and imports
+#: on the hot path), with a unit test pinning the two spellings together.
+CHECKPOINT_PHASES = ("resume", "deferred")
 #: Record states. ``ready`` is B announcing under the transaction; ``commit`` is
 #: A's irreversible step; ``ack`` is B confirming it holds the listener; anything
 #: else (abort/unknown) leaves BOTH roots and BOTH processes alive for recovery.
@@ -368,6 +372,86 @@ def unit(name: str) -> Unit:
     raise KeyError(f"unknown central unit: {name}")
 
 
+def checkpoint_record(
+    *,
+    session_id: str,
+    turn_id: str,
+    committed_message_ids: "list[str]",
+    boot_build: str = "",
+    target_build: str = "",
+    provider: str = "",
+    model: str = "",
+    completed_effects: "list[dict[str, Any]] | None" = None,
+    pending_effect: "dict[str, Any] | None" = None,
+    inbox_consumed_ids: "list[str] | None" = None,
+    subagent_refs: "list[str] | None" = None,
+    pty_refs: "list[str] | None" = None,
+    job_refs: "list[str] | None" = None,
+    phase: str = "resume",
+) -> dict[str, Any]:
+    """Build the durable checkpoint payload written with a committed pair.
+
+    The record travels on the SAME atomic transcript write as the batch it
+    describes, so there is never a committed batch without a checkpoint nor a
+    checkpoint whose batch is not yet durable. ``completed_message_ids`` is the
+    assistant+tool-result batch that just fsynced; ``completed_effects`` is the
+    ``call_id``-keyed set the successor may skip; ``pending_effect`` is the one
+    tool that had not committed and is the ONLY thing a replay may re-run.
+
+    ``phase`` is ``resume`` when the turn can be carried forward and
+    ``deferred`` when it cannot (provider stream, PTY, native child,
+    non-idempotent effect): a deferred record is a refusal to fake continuation,
+    not a partial success.
+    """
+
+    if phase not in CHECKPOINT_PHASES:
+        raise HandoffError("checkpoint phase has no contract")
+    return {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "provider": provider,
+        "model": model,
+        "boot_build": boot_build,
+        "target_build": target_build,
+        "committed_message_ids": list(committed_message_ids),
+        "completed_effects": list(completed_effects or []),
+        "pending_effect": pending_effect or {},
+        "inbox_consumed_ids": list(inbox_consumed_ids or []),
+        "subagent_refs": list(subagent_refs or []),
+        "pty_refs": list(pty_refs or []),
+        "job_refs": list(job_refs or []),
+        "phase": phase,
+    }
+
+
+def effect_already_committed(checkpoint: "dict[str, Any]", call_id: str) -> bool:
+    """Has this tool call already durably committed on the predecessor?
+
+    The exactly-once test for a replayed effect: a completed effect is never
+    re-run, so the successor skips it. A call WITHOUT a stable ``call_id`` cannot
+    be answered here and must be treated as not-committed by the caller (an
+    at-least-once result), which is the declared limit rather than a guess.
+    """
+
+    if not call_id:
+        return False
+    for effect in checkpoint.get("completed_effects", []):
+        if isinstance(effect, dict) and effect.get("call_id") == call_id:
+            return True
+    return False
+
+
+def resumable(checkpoint: "dict[str, Any] | None") -> bool:
+    """Whether a successor may carry this turn forward at all.
+
+    Unreadable/missing (``None``) is NOT resumable, and neither is an explicit
+    ``deferred`` phase: unknown is not permission to continue, matching the
+    repo's rule that an unreadable probe must not decide the action.
+    """
+
+    return bool(checkpoint) and checkpoint.get("phase") == "resume"
+
+
 __all__ = [
     "HANDOFF_CONTRACT",
     "HANDOFF_STATES",
@@ -383,5 +467,8 @@ __all__ = [
     "suppressed_occurrences",
     "transferable_units",
     "unit",
+    "checkpoint_record",
+    "effect_already_committed",
+    "resumable",
     "_acceptor_factory",
 ]
