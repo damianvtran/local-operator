@@ -288,9 +288,59 @@ def test_symlink_escape_and_unresolvables_count_as_outside(tmp_path):
     alien.mkdir()
     (alien / "x.bin").write_bytes(b"x")
     (world / "esc").symlink_to(alien)
+    (world / "loop").symlink_to(world / "loop")
     boundary = ToolConfinement.at(world)
 
     assert _reachable(boundary, world / "plain.bin")
+    # A symlink LOOP makes ``Path.resolve`` raise RuntimeError on Python 3.12;
+    # the contract is "unresolvable counts as outside", so it must read False.
+    assert not _reachable(boundary, world / "loop")
     assert not _reachable(boundary, world / "esc" / "x.bin")
     assert not _reachable(boundary, alien / "x.bin")
     assert not _reachable(boundary, Path("bad\x00name"))
+
+
+def test_mixed_reachability_marks_only_the_unreachable_rows(tmp_path, monkeypatch):
+    """One message, two images, one side of the boundary each: the reachable
+    file keeps its full row, the file symlinked out of the world is reduced,
+    and the opening stops promising reads it cannot keep -- pinned at one
+    opening and two rows."""
+    from local_operator.session import attachments as attachments_mod
+
+    world = tmp_path / "world"
+    store_root = world / "attachments"
+    store_root.mkdir(parents=True)
+    monkeypatch.setattr(attachments_mod, "attachments_dir", lambda: store_root)
+    store = AttachmentStore()
+    assert store.put(PNG_B64, "image/png") is not None
+
+    payload_b = PNG_BYTES + b"b"
+    b64_b = base64.b64encode(payload_b).decode("ascii")
+    assert store.put(b64_b, "image/png") is not None
+    ref_b = store.locate(b64_b, "image/png")
+    assert ref_b is not None
+    alien = tmp_path / "alien.bin"
+    alien.write_bytes(payload_b)
+    stored_b = store.path_for(ref_b.digest)
+    Path(stored_b).unlink()
+    Path(stored_b).symlink_to(alien)
+
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="mixed"),
+            ImageContent(data=PNG_B64, mime_type="image/png"),
+            ImageContent(data=b64_b, mime_type="image/png"),
+        ],
+    )
+
+    (hinted,) = with_attachment_hints([message], world_root=str(world))
+
+    note = hinted.content[-1]
+    assert isinstance(note, TextContent)
+    assert note.text.startswith("[image attachments —")
+    assert note.text.count("\n- ") == 2
+    assert note.text.count("; no workspace file)") == 1
+    assert str(store.path_for(PNG_DIGEST)) in note.text
+    assert str(stored_b) not in note.text
+    assert str(alien) not in note.text

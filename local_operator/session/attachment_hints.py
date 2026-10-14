@@ -250,7 +250,15 @@ def _reachable(boundary: ToolConfinement, path: Path) -> bool:
     """
     try:
         resolved = Path(path).expanduser().resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError is load-bearing on Python 3.12: ``Path.resolve`` raises
+        # it for a symlink LOOP, not OSError, and a loop is precisely the case
+        # the boundary must read as outside. This is a judgement about
+        # reachability, not error suppression: the contract above says an
+        # unresolvable path counts as outside, mirroring
+        # ``ToolConfinement.path_denial(resolvable=False)`` -- and it must be
+        # true on the version the project supports, or the docstring would
+        # promise more than the code keeps.
         return False
     return boundary.contains(resolved)
 
