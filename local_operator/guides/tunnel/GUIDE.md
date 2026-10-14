@@ -16,23 +16,26 @@ it does not expose the machine by itself.
    With several Radient logins, select the intended owner's bracketed ID and
    use the same `--credential-id` on billing, create and connect. Do not read
    auth.db or print credentials.
-2. Run `lop tunnel billing --credential-id <id> --json`. Require a fresh valid
-   account and strictly positive balance (`account_valid` and `positive_balance`).
-   `/usage` shows Radient credits but its cache cannot authorize setup. For
-   zero/negative/unavailable credit, direct the user to the console to top up
-   or repair their login, then repeat the fresh check. Starter credit counts;
-   a purchase is not needed if the balance is already positive.
-3. Show the actual monthly price in `billing.monthly_price_usd`. The current
-   allocation is USD 0/month, subject to that live quote. Positive account
-   credit is not a separate tunnel fee. `setup_ready` is true when positive
-   credit and billing eligibility both hold. Only activate
-   billing at the exact amount the user has accepted; do not invent a fixed
-   price or silently accept a changed quote. Supply that amount with
-   `lop tunnel create --credential-id <id> --accept-monthly-price <amount>`.
-   If already eligible, `lop tunnel create --credential-id <id>` suffices.
-4. Install cloudflared 2025.4.0 or newer using the platform's supported
-   package manager if it is missing. Run `lop tunnel install`, then verify
-   `lop tunnel status` before giving the user the printed URL.
+2. Run `lop tunnel setup --credential-id <id> --json` to observe a derived
+   plan. No action argument (or `plan`) is read-only, even with price flags.
+   It reads the selected account and billing fresh; cached usage is insufficient.
+   Positive starter credit counts, and setup never purchases credit.
+3. Follow its local prerequisite blockers before any cloud mutation. Install
+   cloudflared >=2025.4.0 using the supported package manager (normal tool
+   approval; macOS `brew install cloudflared`). A supported user supervisor is
+   required. The runner does not silently install software or change listener
+   binds. A deliberately stopped setup stays stopped, and a dead/different
+   owning credential cannot silently repoint an existing configuration.
+4. Run `lop tunnel setup apply --credential-id <id>` only when instructed.
+   If activation is required, obtain acceptance of the exact fresh monthly USD
+   price and add `--accept-monthly-price <amount>`. Already eligible means no
+   new price-consent step. TUI equivalents: `/mobile status --credential-id <id>`
+   and `/mobile enable [amount] --credential-id <id>`; all use the same runner.
+   Partial failures retain completed receipts; retry reuses the saved create
+   key and original payload. Healthy existing setup is a no-op. Give the URL
+   only when `verified:true`: running connector, answering gateway, healthy
+   mobile with a closed gate and a fresh active route. The URL is taken from
+   that route, never guessed. This does not prove phone-side sign-in/access.
 5. The phone signs in through Radient. Do not ask the user to copy a relay
    password into chat: the local gateway authenticates the relay internally.
 

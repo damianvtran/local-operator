@@ -48707,26 +48707,38 @@ class OperatorApp(App[None]):
     def _cmd_mobile(self, arg: str, notice: NoticeFn) -> None:
         """A convenience over the same CLI lifecycle, never an implicit login side effect.
 
-        /mobile enable <quoted-monthly-price> makes the billing acceptance
-        explicit. All network and service work runs outside the TUI loop;
-        only the sanitized final receipt returns to the conversation surface.
+        Status observes the shared plan without service side effects. Enable
+        needs a price only for activation, bound to the fresh owning quote.
+        Network/service work runs outside the TUI loop; sanitized progress and
+        accumulated receipts return even when a later step fails.
         """
-        pieces = arg.split()
-        action = pieces[0] if pieces else "status"
-        if action not in {"status", "enable", "start", "stop", "billing"} or len(pieces) > 2:
-            notice("Use /mobile status, billing, enable <monthly price>, start, or stop.")
+        from local_operator.i18n.keys import mobile_setup as ms
+        from local_operator.i18n.text import tr
+        from local_operator.tunnels.setup import parse_mobile
+
+        mobile_text = tr("mobile.setup")
+
+        try:
+            action, accepted, selected = parse_mobile(arg)
+        except ValueError:
+            notice(mobile_text(ms.usage()))
             return
         if getattr(self, "_tunnel_action_busy", False):
-            notice("Mobile setup is already running.")
+            notice(mobile_text(ms.busy()))
             return
         self._tunnel_action_busy = True
+        notice(mobile_text(ms.checking()))
 
         async def run() -> None:
             from local_operator.tunnels.cli import mobile_action
 
             try:
                 result = await asyncio.to_thread(
-                    mobile_action, action, pieces[1] if len(pieces) > 1 else None
+                    mobile_action,
+                    action,
+                    accepted,
+                    selected=selected,
+                    progress=lambda message: self.call_from_thread(self._system_notice, message),
                 )
             except Exception:  # noqa: BLE001 — no provider bodies or secrets in a notice
                 result = "Mobile setup failed. Check lop tunnel status and /login radient."
