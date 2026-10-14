@@ -64,7 +64,7 @@ class OutboxRecord:
     local_id: str
     direction: str  # "push" | "pull"
     generation: int
-    state: str  # "pending" | "done" | "failed"
+    state: str  # "pending" | "pending-reconciliation" | "done" | "failed"
     created_at: str
     updated_at: str
     result: Mapping[str, Any] | None = None
@@ -236,6 +236,37 @@ class Outbox:
                 error_class=error_class,
             )
             self._atomic_write(settled)
+        return True
+
+    def mark_pending_reconciliation(self, operation_id: str, generation: int) -> bool:
+        """Mark an UNCERTAIN outcome (aborted dispatch) for replay, fenced by generation.
+
+        A timeout does not prove the server did or did not accept the write, so it
+        is not settled as failed. The record stays replayable with the SAME
+        operation id/pin/body; state ``pending-reconciliation`` distinguishes it
+        from a fresh ``pending`` so a replay is never treated as a new create.
+        """
+        with self._locked() as held:
+            if not held:
+                return False
+            record = self.read(operation_id)
+            if record is None or record.generation != generation:
+                return False
+            if record.state not in ("pending", "pending-reconciliation"):
+                return False
+            nxt = OutboxRecord(
+                operation_id=record.operation_id,
+                kind=record.kind,
+                local_id=record.local_id,
+                direction=record.direction,
+                generation=record.generation,
+                state="pending-reconciliation",
+                created_at=record.created_at,
+                updated_at=now_iso(),
+                result=record.result,
+                error_class=record.error_class,
+            )
+            self._atomic_write(nxt)
         return True
 
     def bump_generation(self, operation_id: str) -> int:
