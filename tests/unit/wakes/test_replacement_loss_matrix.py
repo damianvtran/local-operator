@@ -32,13 +32,13 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.types import ToolContext
 from local_operator.harness.wake import (
     LOAD_GRACE_MS,
     MAX_WAKE_SCHEDULES,
     WakeSchedule,
     WakeScheduler,
 )
-from local_operator.harness.types import ToolContext
 from local_operator.session import session as session_module
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tools import builtin
