@@ -47,6 +47,7 @@ MAX_DIMENSION = 1_000_000
 MAX_COORDINATE = 1_000_000
 MAX_SCROLL_DELTA = 100_000
 MAX_WAIT_MS = 60_000
+MAX_DRAG_MS = 5_000
 
 Identifier = Annotated[
     str,
@@ -408,6 +409,28 @@ class DoubleClickAction(_FrameAction):
     button: Literal["left"] = "left"
 
 
+class DragAction(_FrameAction):
+    """One atomic press-drag-release between two points of the shown frame.
+
+    Deliberately atomic: a cross-request held-button lifecycle would let a
+    stale or refused follow-up strand a live mouse-down, and no adapter
+    implements one. Both endpoints bind to the SAME frame, so validation
+    refuses either endpoint before any adapter executes.
+    """
+
+    kind: Literal["drag"] = "drag"
+    start_x: Coordinate
+    start_y: Coordinate
+    end_x: Coordinate
+    end_y: Coordinate
+    button: MouseButton = "left"
+    # Bounded in both directions: below the floor a drag is a slower click for
+    # no benefit, and the ceiling keeps one atomic statement a small fraction
+    # of the adapter's guest execution deadline (the same relationship the
+    # adapter's typing bound derives from that deadline).
+    duration_ms: int = Field(default=500, ge=100, le=MAX_DRAG_MS)
+
+
 class TypeAction(_Action):
     kind: Literal["type"] = "type"
     text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH, pattern=r"\S")
@@ -532,6 +555,7 @@ class AskUserAction(_Action):
 ComputerAction: TypeAlias = Annotated[
     ClickAction
     | DoubleClickAction
+    | DragAction
     | TypeAction
     | KeyAction
     | PasteTextAction
@@ -596,16 +620,26 @@ class ActionBatch(ProtocolModel):
             )
         frames = {frame.frame_id: frame for frame in observation.frames}
         for action in self.actions:
-            if isinstance(action, (ClickAction, DoubleClickAction, ScrollAction)):
+            if isinstance(action, (ClickAction, DoubleClickAction, ScrollAction, DragAction)):
                 frame = frames.get(action.frame_id)
                 if frame is None:
                     raise ValueError(f"action references unknown frame_id {action.frame_id!r}")
                 visible = frame.geometry.model_visible
-                if action.x >= visible.width or action.y >= visible.height:
-                    raise ValueError(
-                        f"action coordinate {action.x},{action.y} is outside model-visible frame "
-                        f"{visible.width}x{visible.height}"
-                    )
+                # A drag binds BOTH endpoints to the same frame and checks
+                # them against the same model-visible geometry: admitting a
+                # drag whose start or end would land outside the screen the
+                # model actually saw is exactly the class this check closes.
+                points = (
+                    ((action.start_x, action.start_y), (action.end_x, action.end_y))
+                    if isinstance(action, DragAction)
+                    else ((action.x, action.y),)
+                )
+                for x, y in points:
+                    if x >= visible.width or y >= visible.height:
+                        raise ValueError(
+                            f"action coordinate {x},{y} is outside model-visible frame "
+                            f"{visible.width}x{visible.height}"
+                        )
 
 
 ProtocolEnvelope: TypeAlias = Annotated[

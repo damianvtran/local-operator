@@ -329,6 +329,7 @@ class OSWorldV2Adapter:
                 paste_text=actions.ACTION_SURFACE.paste_text,
                 type_text_mode=actions.ACTION_SURFACE.type_text_mode,
                 max_type_chars=actions.ACTION_SURFACE.max_type_chars,
+                drag=actions.ACTION_SURFACE.drag,
             ),
         )
         # Per-episode state. None until the corresponding method runs.

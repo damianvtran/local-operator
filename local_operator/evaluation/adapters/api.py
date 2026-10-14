@@ -298,6 +298,17 @@ class AdapterCapabilities(ProtocolModel):
     # ``prepare``/``reset`` allocate, which is why the schema version was
     # not bumped; do not treat the digest as a protocol-compat substitute.
     max_type_chars: int | None = Field(default=None, ge=1)
+    #: Whether the worker carries the atomic drag translator (the guest helper
+    #: in ``computer_input`` plus the adapter's compile branch). The default
+    #: lets a NEW parent accept an OLD worker that predates the field — it
+    #: simply advertises no drag, which is the behaviour it already had.
+    #: Serialization OMITS this key while it is false (``_omit_disabled_drag``),
+    #: so a worker without the capability keeps its exact old hello bytes and an
+    #: old parent's ``extra="forbid"`` handshake cannot see them; a worker that
+    #: advertises ``true`` rides the wire and is refused by an old parent at
+    #: hello, fail-closed before prepare/reset allocate — the same documented
+    #: direction as ``max_type_chars``, not a downgrade compatibility claim.
+    drag: bool = False
 
     def action_surface(self) -> "ActionSurface":
         return ActionSurface(
@@ -305,7 +316,25 @@ class AdapterCapabilities(ProtocolModel):
             type_text_mode=self.type_text_mode,
             ask_user=self.ask_user,
             max_type_chars=self.max_type_chars,
+            drag=self.drag,
         )
+
+    @model_serializer(mode="wrap")
+    def _omit_disabled_drag(self, handler: Any, info: Any) -> Any:
+        """Omit ``drag`` from the wire while it is false.
+
+        Mirror of ``AdapterSelector._omit_absent_core_source``: only THIS
+        key's false is dropped, so a worker that does not carry the drag
+        translator emits hello bytes byte-identical to the ones it emitted
+        before the field existed. A worker that advertises ``true`` still
+        rides the wire, and an old parent refuses it at hello (the documented
+        fail-closed direction).
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("drag") is False:
+            data.pop("drag", None)
+        return data
 
     @field_validator("routes", mode="before")
     @classmethod

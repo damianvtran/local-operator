@@ -997,8 +997,8 @@ def test_the_structured_classifier_reads_pydantic_types_and_never_values() -> No
             "extra-action-key",
         ),
         (
-            {"actions": [{"kind": "drag", "x": 1}]},
-            {"actions": [{"kind": "drag", "x": "is limited to"}]},
+            {"actions": [{"kind": "definitely_not_a_kind", "x": 1}]},
+            {"actions": [{"kind": "definitely_not_a_kind", "x": "is limited to"}]},
             "unknown-action-kind",
         ),
         (

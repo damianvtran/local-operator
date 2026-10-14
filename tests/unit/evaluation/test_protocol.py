@@ -25,6 +25,7 @@ from local_operator.evaluation.protocol import (
     AskUserAction,
     ClickAction,
     DoubleClickAction,
+    DragAction,
     FinishAction,
     FrameGeometry,
     FrameRef,
@@ -716,6 +717,69 @@ def test_batch_size_status_mouse_and_numeric_bounds_are_closed() -> None:
         WaitAction(
             observation_id="observation-7",
             duration_ms=float("nan"),  # type: ignore[arg-type]
+        )
+
+
+def test_atomic_drag_binds_both_endpoints_and_stays_within_bounds() -> None:
+    observation = _observation()
+    drag = DragAction(
+        observation_id="observation-7",
+        frame_id="frame-1",
+        start_x=10,
+        start_y=20,
+        end_x=30,
+        end_y=40,
+    )
+    _batch(drag).validate_for(observation)
+    assert drag.kind == "drag"
+    assert drag.duration_ms == 500
+    assert drag.button == "left"
+    # A drag is atomic and both endpoints bind to the SAME frame: either
+    # endpoint outside the model-visible geometry refuses the batch before any
+    # adapter executes. `frame-1` is 1280x720, so x=1280 and y=720 are both
+    # one past the last valid coordinate.
+    for start_x, end_y in ((1280, 40), (10, 720)):
+        with pytest.raises(ValueError, match="outside model-visible"):
+            _batch(
+                DragAction(
+                    observation_id="observation-7",
+                    frame_id="frame-1",
+                    start_x=start_x,
+                    start_y=20,
+                    end_x=30,
+                    end_y=end_y,
+                )
+            ).validate_for(observation)
+    with pytest.raises(ValueError, match="unknown frame_id"):
+        _batch(
+            DragAction(
+                observation_id="observation-7",
+                frame_id="old-frame",
+                start_x=1,
+                start_y=1,
+                end_x=2,
+                end_y=2,
+            )
+        ).validate_for(observation)
+    for duration_ms in (99, 5001):
+        with pytest.raises(ValidationError):
+            DragAction(
+                observation_id="observation-7",
+                frame_id="frame-1",
+                start_x=1,
+                start_y=1,
+                end_x=2,
+                end_y=2,
+                duration_ms=duration_ms,
+            )
+    with pytest.raises(ValidationError):
+        DragAction(
+            observation_id="observation-7",
+            frame_id="frame-1",
+            start_x=-1,
+            start_y=1,
+            end_x=2,
+            end_y=2,
         )
 
 
