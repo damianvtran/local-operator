@@ -710,17 +710,13 @@ async def skills(
         # process's cwd, so a sessionless read would silently discover whatever
         # tree the server happened to be started in. This request's folder — home
         # when it named none — is the only correct start (skills/api.py).
-        roots = default_skill_roots(
-            pathlib.Path(folder), config_dir=request.app.state.config_manager.config_dir
-        )
+        roots = default_skill_roots(pathlib.Path(folder))
         return reply({"data": await _read_skills(roots, name)})
 
     async with errors(request), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
-        roots = default_skill_roots(
-            pathlib.Path(cwd), config_dir=request.app.state.config_manager.config_dir
-        )
+        roots = default_skill_roots(pathlib.Path(cwd))
         return reply({"data": await _read_skills(roots, name)})
 
 
