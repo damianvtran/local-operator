@@ -10,10 +10,13 @@ from __future__ import annotations
 from . import (
     cli_exec_help,
     relay_login,
+    relay_shell,
     tui_analytics,
+    tui_hub_links,
     tui_status,
     tui_transcript,
     tui_welcome,
+    wire_aida_cadence,
     wire_errors,
     wire_errors_agents,
     wire_errors_auth,
@@ -26,16 +29,20 @@ from . import (
     wire_incidents,
     wire_notices,
     wire_settings,
+    wire_settings_hub_defaults,
     wire_slash,
 )
 
 __all__ = [
     "cli_exec_help",
     "relay_login",
+    "relay_shell",
     "tui_analytics",
+    "tui_hub_links",
     "tui_status",
     "tui_transcript",
     "tui_welcome",
+    "wire_aida_cadence",
     "wire_errors",
     "wire_errors_agents",
     "wire_errors_auth",
@@ -48,5 +55,6 @@ __all__ = [
     "wire_incidents",
     "wire_notices",
     "wire_settings",
+    "wire_settings_hub_defaults",
     "wire_slash",
 ]

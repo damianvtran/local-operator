@@ -124,7 +124,7 @@ import json
 import logging
 import os
 import time
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -179,7 +179,7 @@ CROSS_SESSION_TOOL_NAME = "send"
 #: 5: all-row journal ordinals and their equality domain. Earlier caches only
 #: cover the search/rail subsets; they cannot prove a visible custom row's
 #: position. Rebuilding on version mismatch is preferable to fabricating it.
-TRANSCRIPT_INDEX_VERSION = 5
+TRANSCRIPT_INDEX_VERSION = 7
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -545,6 +545,245 @@ class ScanState:
 
 
 @dataclass
+class SourceProjectionViews:
+    """Body-free inverse views, rebuilt ONCE with this same index, never per read."""
+
+    by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    duplicates: set[str] = field(default_factory=set)
+    prunes: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    owners: dict[str, list[str]] = field(default_factory=dict)
+    results: dict[str, list[str]] = field(default_factory=dict)
+    compactions: list[dict[str, Any]] = field(default_factory=list)
+    compaction_seqs: list[int] = field(default_factory=list)
+    prune_seqs: dict[str, list[int]] = field(default_factory=dict)
+    preserved_sets: dict[int, frozenset[str]] = field(default_factory=dict)
+    opaque_causal_seqs: list[int] = field(default_factory=list)
+    global_unknown_seqs: list[int] = field(default_factory=list)
+    unknown_identity_seqs: list[int] = field(default_factory=list)
+    origins_complete: bool = False
+
+    @classmethod
+    def build(cls, facts: list[dict[str, Any]]) -> "SourceProjectionViews":
+        out = cls()
+        for fact in facts:
+            id_, seq = fact["id"], fact["seq"]
+            if id_ in out.by_id:
+                out.duplicates.add(id_)
+            out.by_id[id_] = fact
+            if not id_:
+                out.unknown_identity_seqs.append(seq)
+            flags = fact.get("flags", [])
+            if "global_unknown" in flags:
+                out.global_unknown_seqs.append(seq)
+            if "opaque_causal" in flags:
+                out.opaque_causal_seqs.append(seq)
+            for call in fact.get("call_ids", []):
+                out.owners.setdefault(call, []).append(id_)
+            if fact.get("result_call_id"):
+                out.results.setdefault(fact["result_call_id"], []).append(id_)
+            if fact["source_class"] == "prune" and fact.get("prune_target"):
+                target = fact["prune_target"]
+                out.prunes.setdefault(target, []).append(fact)
+                out.prune_seqs.setdefault(target, []).append(seq)
+            if fact["source_class"] == "compaction":
+                out.compactions.append(fact)
+                out.compaction_seqs.append(seq)
+                out.preserved_sets[seq] = frozenset(fact.get("preserved_candidate_ids", []))
+        return out
+
+
+def source_projection_fact(entry: Any, seq: int) -> dict[str, Any]:
+    """Extract IDs/flags before rail classification drops semantic information.
+
+    This receives the scanner's ALREADY parsed JSON. No reparse, arguments,
+    prose, prune notices or preserved bodies are retained. Incomplete semantic
+    shape fails closed; opaque tool bodies have causal rather than global scope.
+    """
+    from local_operator.harness.rows import (
+        is_ask_gate_divert_row,
+        is_hidden_tool_name,
+        is_hidden_wake_delivery,
+        is_settle_only_ask,
+    )
+
+    fact: dict[str, Any] = {
+        "id": "",
+        "seq": seq,
+        "source_class": "invalid",
+        "flags": ["global_unknown"],
+    }
+    if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+        return fact
+    fact["id"] = entry["id"]
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return fact
+    etype = entry.get("type")
+    fact["flags"] = []
+    if etype == "custom":
+        fact["source_class"] = "bookkeeping"
+    elif etype == "prune":
+        fact["source_class"] = "prune"
+        target = payload.get("target")
+        if isinstance(target, str) and 1 <= len(target) <= 128:
+            fact["prune_target"] = target
+        else:
+            fact["flags"] = ["global_unknown"]
+    elif etype == "compaction":
+        fact["source_class"] = "compaction"
+        kept = payload.get("first_kept_entry_id")
+        if kept is not None and (not isinstance(kept, str) or not 1 <= len(kept) <= 128):
+            fact["flags"].append("incomplete")
+        else:
+            fact["first_kept_entry_id"] = kept
+        preserved = payload.get("preserved_user_turns", [])
+        if (
+            not isinstance(preserved, list)
+            or len(preserved) > 512
+            or any(
+                not isinstance(turn, dict)
+                or not isinstance(turn.get("id"), str)
+                or not 1 <= len(turn["id"]) <= 128
+                for turn in preserved
+            )
+        ):
+            fact["flags"].append("incomplete")
+        else:
+            fact["preserved_candidate_ids"] = [turn["id"] for turn in preserved]
+    elif etype == "message":
+        kind = payload.get("kind", "message")
+        if kind not in ("message", "custom"):
+            fact["flags"] = ["global_unknown"]
+            return fact
+        fact["source_class"] = "custom_message" if kind == "custom" else "plain_message"
+        if kind == "custom":
+            if payload.get("custom_type"):
+                fact["flags"].append("injection")
+            else:
+                fact["flags"].append("incomplete")
+        else:
+            role = payload.get("role")
+            if role not in ("user", "assistant", "tool"):
+                fact["flags"].append("incomplete")
+            calls = payload.get("tool_calls", [])
+            if (
+                not isinstance(calls, list)
+                or len(calls) > 512
+                or any(
+                    not isinstance(call, dict)
+                    or not isinstance(call.get("id"), str)
+                    or not 1 <= len(call["id"]) <= 128
+                    for call in calls
+                )
+            ):
+                fact["flags"].append("opaque_causal")
+            elif calls and role != "assistant":
+                fact["flags"].append("opaque_causal")
+            elif calls:
+                fact["call_ids"] = [call["id"] for call in calls]
+                if any(is_settle_only_ask(call.get("name"), queued_engine=True) for call in calls):
+                    fact["flags"].append("ask")
+                if any(is_hidden_tool_name(call.get("name")) for call in calls):
+                    fact["flags"].append("hidden")
+            if role == "tool":
+                call = payload.get("tool_call_id")
+                if isinstance(call, str) and 1 <= len(call) <= 128:
+                    fact["result_call_id"] = call
+                else:
+                    fact["flags"].append("opaque_causal")
+                if is_settle_only_ask(payload.get("tool_name"), queued_engine=True):
+                    fact["flags"].append("ask")
+        if (
+            _row_is_invisible(entry)
+            or is_ask_gate_divert_row(entry)
+            or is_hidden_wake_delivery(payload)
+        ):
+            fact["flags"].append("hidden")
+    else:
+        fact["flags"] = ["global_unknown"]
+    fact["flags"] = sorted(set(fact["flags"]))
+    return fact
+
+
+def valid_source_projection_facts(facts: Any, scan: ScanState, rows: dict[str, Any]) -> bool:
+    """Cache structure/origins are validated, not silently repaired/truncated."""
+    # ScanState.rows counts the most recent reader's segment, NOT total rows
+    # after suffix re-derivation. Contiguous fact ordinals plus last-ID origins
+    # validate the complete table without mistaking a valid append for corruption.
+    if not isinstance(facts, list) or not 0 <= scan.window_rows <= len(facts):
+        return False
+    allowed = {
+        "id",
+        "seq",
+        "source_class",
+        "flags",
+        "call_ids",
+        "result_call_id",
+        "prune_target",
+        "first_kept_entry_id",
+        "preserved_candidate_ids",
+    }
+    enums = {
+        "plain_message",
+        "custom_message",
+        "prune",
+        "compaction",
+        "bookkeeping",
+        "opaque",
+        "invalid",
+    }
+    flag_enums = {"injection", "hidden", "ask", "incomplete", "opaque_causal", "global_unknown"}
+    last = {}
+    for seq, fact in enumerate(facts):
+        if (
+            not isinstance(fact, dict)
+            or set(fact) - allowed
+            or type(fact.get("seq")) is not int
+            or fact["seq"] != seq
+        ):
+            return False
+        if (
+            not isinstance(fact.get("id"), str)
+            or not isinstance(fact.get("source_class"), str)
+            or fact["source_class"] not in enums
+        ):
+            return False
+        flags = fact.get("flags")
+        if not isinstance(flags, list) or any(
+            not isinstance(flag, str) or flag not in flag_enums for flag in flags
+        ):
+            return False
+        for key in ("call_ids", "preserved_candidate_ids"):
+            values = fact.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not 1 <= len(value) <= 128 for value in values
+            ):
+                return False
+            if len(values) > 512:
+                return False
+        for key in ("result_call_id", "prune_target", "first_kept_entry_id"):
+            value = fact.get(key)
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
+                return False
+        cls, flags = fact["source_class"], set(flags)
+        if cls == "invalid" and "global_unknown" not in flags:
+            return False
+        if cls == "opaque" and flags not in ({"opaque_causal"}, {"global_unknown"}):
+            return False
+        if cls == "prune" and not fact.get("prune_target") and "global_unknown" not in flags:
+            return False
+        if (
+            cls == "compaction"
+            and "incomplete" not in flags
+            and ("first_kept_entry_id" not in fact or "preserved_candidate_ids" not in fact)
+        ):
+            return False
+        if fact["id"]:
+            last[fact["id"]] = seq
+    return last == rows
+
+
+@dataclass
 class TranscriptIndex:
     """The parsed cache: checkpoints, message docs, and the scan's own facts."""
 
@@ -565,7 +804,18 @@ class TranscriptIndex:
     #: ALL complete rows by entry id, not just search/rail rows. Derived during
     #: the scan already paid for those views; page readers do indexed lookups.
     journal_rows: dict[str, int] = field(default_factory=dict)
+    # PROTOTYPE: offsets come from the same scanner/witness as ordinals. They
+    # retain no payload and do not certify settled replay projection semantics.
+    journal_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
+    source_projection_facts: list[dict[str, Any]] = field(default_factory=list)
+    source_views: SourceProjectionViews = field(init=False, repr=False)
     version: int = TRANSCRIPT_INDEX_VERSION
+
+    def __post_init__(self) -> None:
+        self.source_views = SourceProjectionViews.build(self.source_projection_facts)
+        self.source_views.origins_complete = {
+            id_: fact["seq"] for id_, fact in self.source_views.by_id.items() if id_
+        } == self.journal_rows
 
 
 def journal_coordinates_for_page(
@@ -641,6 +891,35 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     messages = raw.get("messages")
     if not isinstance(checkpoints, list) or not isinstance(messages, list):
         return None
+    raw_ranges = raw.get("journal_ranges")
+    raw_rows = raw.get("journal_rows")
+    if (
+        not isinstance(raw_ranges, dict)
+        or not isinstance(raw_rows, dict)
+        or raw_ranges.keys() != raw_rows.keys()
+    ):
+        return None
+    if any(
+        not isinstance(id_, str) or type(seq) is not int or seq < 0 for id_, seq in raw_rows.items()
+    ):
+        return None
+    # The isinstance narrows for the TYPE CHECKER the same shape the validator
+    # already refuses at runtime (it answers False for a non-list): one
+    # condition, so the facts map reaching the constructor is provably the
+    # list the validator just accepted.
+    facts = raw.get("source_projection_facts")
+    if not isinstance(facts, list) or not valid_source_projection_facts(facts, scan, raw_rows):
+        return None
+    size = sig.get("size")
+    if type(size) is not int or any(
+        not isinstance(id_, str)
+        or not isinstance(span, (list, tuple))
+        or len(span) != 2
+        or any(type(n) is not int for n in span)
+        or not 0 <= span[0] < span[1] <= size
+        for id_, span in raw_ranges.items()
+    ):
+        return None
     parsed_checkpoints = [c for c in (Checkpoint.from_payload(c) for c in checkpoints) if c]
     parsed_messages = [m for m in (MessageDoc.from_payload(m) for m in messages) if m]
     raw_runs = raw.get("runs")
@@ -660,6 +939,8 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         journal_generation=(
             raw["journal_generation"] if isinstance(raw.get("journal_generation"), str) else ""
         ),
+        source_projection_facts=facts,
+        journal_ranges={id_: tuple(span) for id_, span in raw_ranges.items()},
         journal_rows=(
             {
                 str(key): value
@@ -701,6 +982,8 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
         "journal_rows": index.journal_rows,
+        "journal_ranges": index.journal_ranges,
+        "source_projection_facts": index.source_projection_facts,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -844,6 +1127,7 @@ class _Row:
     #: inside it can be read, so a run containing one is only ever ``complete:
     #: False`` (see :class:`RunRecord`).
     body_dropped: bool = False
+    source_fact: dict[str, Any] | None = None
     #: True when this row PAINTS as a completed turn — the desktop's terminal
     #: vocabulary (``boundaryKindOf``/``isTerminalMarker``): a
     #: ``completion_attention`` marker the renderer turns into a ``complete``
@@ -1106,13 +1390,31 @@ def _classify(
             # and the note at its call site (UI review round 2, M2).
             tool_name=dropped_tool_name if kind == "tool" else "",
             body_dropped=True,
+            source_fact={
+                "id": id_,
+                "seq": ordinal,
+                "source_class": "opaque",
+                "flags": ["opaque_causal" if kind == "tool" else "global_unknown"],
+            },
         )
+    fact = source_projection_fact(None, ordinal)
+
+    def make_row(**kwargs: Any) -> _Row:
+        captured = {**fact, "id": kwargs.get("id", "")}
+        return _Row(**kwargs, source_fact=captured)
+
     try:
         entry = json.loads(line)
     except ValueError:
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
     if not isinstance(entry, dict):
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
+    fact = source_projection_fact(entry, ordinal)
+    id_ = entry.get("id") if isinstance(entry.get("id"), str) else id_
     if _row_is_invisible(entry):
         # F5: A ROW THE CLIENT NEVER RECEIVES IS NOT WORK. The page is filtered
         # through ``harness.rows.visible_transcript_rows`` before it is served —
@@ -1121,7 +1423,7 @@ def _classify(
         # the reader cannot see, and the client's own fold would contradict it
         # (reproduced: a run of one visible call and one hidden row reported
         # ``action_count=2``, worked 3.5 s, against the fold's 1 and 3.0 s).
-        return _Row(
+        return make_row(
             ordinal=ordinal,
             offset=line_start,
             end=line_end,
@@ -1141,7 +1443,7 @@ def _classify(
         # Classified before the payload branches: a compaction is a transcript
         # RECORD (the marker a reader pins) and never a message, whatever the
         # payload holds.
-        return _Row(
+        return make_row(
             ordinal=ordinal,
             offset=line_start,
             end=line_end,
@@ -1155,7 +1457,7 @@ def _classify(
     if etype == "message":
         if payload.get("kind") == "custom" and payload.get("custom_type"):
             inject_type = str(payload.get("custom_type"))
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1175,7 +1477,7 @@ def _classify(
             if role == "user" and _is_harness_user_row(id_, payload, text):
                 # Harness chrome, skipped whole: no user checkpoint (the rail
                 # would caption it "Your message"), no find doc, no turn content.
-                return _Row(
+                return make_row(
                     ordinal=ordinal,
                     offset=line_start,
                     end=line_end,
@@ -1183,7 +1485,7 @@ def _classify(
                     ts=ts,
                     kind="other",
                 )
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1193,7 +1495,7 @@ def _classify(
                 text=text,
             )
         if role == "tool":
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1206,7 +1508,9 @@ def _classify(
                 tool_name=str(payload.get("tool_name") or ""),
                 **_tool_fault_fields(payload),
             )
-        return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+        return make_row(
+            ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other"
+        )
     if etype == "custom":
         custom_type = payload.get("custom_type")
         if custom_type == _ATTENTION_STARTED:
@@ -1214,7 +1518,7 @@ def _classify(
             token = ""
             if isinstance(details, dict):
                 token = str(details.get("token", ""))
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1243,7 +1547,7 @@ def _classify(
                 # boundary.
                 anchored = isinstance(details.get("anchor"), str)
                 anchor = str(details.get("anchor") or "") if anchored else ""
-            return _Row(
+            return make_row(
                 ordinal=ordinal,
                 offset=line_start,
                 end=line_end,
@@ -1256,7 +1560,7 @@ def _classify(
                 eligible=eligible,
                 terminal=anchored and marker_kind in _TERMINAL_MARKER_KINDS,
             )
-    return _Row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
+    return make_row(ordinal=ordinal, offset=line_start, end=line_end, id=id_, ts=ts, kind="other")
 
 
 class _RowReader:
@@ -2053,9 +2357,13 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
     reader = _RowReader(path, 0, 0)
     state = _Derivation()
     journal_rows: dict[str, int] = {}
+    journal_ranges: dict[str, tuple[int, int]] = {}
+    source_facts = []
     for row in reader:
+        source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
+            journal_ranges[row.id] = (row.offset, row.end)
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(prior_checkpoints=[], prior_messages=[], turn_base=0)
@@ -2077,6 +2385,8 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
         },
         journal_generation=uuid4().hex,
         journal_rows=journal_rows,
+        journal_ranges=journal_ranges,
+        source_projection_facts=source_facts,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2119,9 +2429,15 @@ def _scan_incremental(
     # before the reader's ordinal resume point; derive suffix ids in this same
     # verified view so stale suffix mappings cannot survive a re-derivation.
     journal_rows = {id_: seq for id_, seq in previous.journal_rows.items() if seq < window_rows}
+    journal_ranges = {
+        id_: span for id_, span in previous.journal_ranges.items() if id_ in journal_rows
+    }
+    source_facts = [fact for fact in previous.source_projection_facts if fact["seq"] < window_rows]
     for row in reader:
+        source_facts.append(row.source_fact or source_projection_fact(None, row.ordinal))
         if row.id:
             journal_rows[row.id] = row.ordinal
+            journal_ranges[row.id] = (row.offset, row.end)
         state.consume(row)
     _assert_same_file(reader)
     checkpoints, messages, runs = state.emit(
@@ -2148,6 +2464,8 @@ def _scan_incremental(
         },
         journal_generation=previous.journal_generation,
         journal_rows=journal_rows,
+        journal_ranges=journal_ranges,
+        source_projection_facts=source_facts,
         naming=naming,
         runs=runs,
         scan=ScanState(
@@ -2326,6 +2644,172 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     if entry is not None:
         _RESIDENT.move_to_end(_key(config_dir, session_id))
     return entry
+
+
+def _journal_order_doc(
+    index: TranscriptIndex, entry_id: str, seq: int, role: str
+) -> MessageDoc | None:
+    """Exact existing doc at a raw ordinal; no body/history scan or role guess."""
+    if type(seq) is not int or seq < 0 or index.journal_rows.get(entry_id) != seq:
+        return None
+    at = bisect_left(index.messages, seq, key=lambda doc: doc.seq)
+    if at == len(index.messages):
+        return None
+    doc = index.messages[at]
+    return (
+        doc
+        if doc.id == entry_id and doc.seq == seq and doc.role == role and not doc.injected
+        else None
+    )
+
+
+def journal_order_opener(index: TranscriptIndex, entry_id: str, seq: int) -> tuple[str, int] | None:
+    """The genuine run opener of an exact source assistant, not a viewer guess.
+
+    Sparse ready corrections previously stated an assistant's coordinate while
+    its optimistic opening user still had none. The desktop then correctly put
+    the known assistant before the unknown suffix. Close that metadata dependency
+    with the user's REAL coordinate; do not invent its slot, re-rank the known
+    reply, or infer a parent from a last-user/admission/frame/generation scan.
+
+    MessageDoc.seq, RunRecord.first_seq/last_seq and journal_rows all derive from
+    the SAME _Row.ordinal, which counts every complete journal line (including
+    invisible/prune/tool rows). These are not display/turn ordinals. Exact role,
+    raw ID, membership and opener-first equality are each necessary: run_key can
+    name a tool/marker, a steer does not become a new opener, and head-cut/injected
+    inputs have no genuine opening user to contribute. The existing source
+    signature/freshness gate belongs to the caller; this helper never grants it.
+
+    Both sequences are scan ordered. Keyed bisects read only a bounded number of
+    existing records, with no whole-history walk, new cache, body or journal read.
+    Missing proof (including an old cache without docs/runs) contributes nothing.
+    """
+    if not index.journal_generation or type(seq) is not int or seq < 0:
+        return None
+    if _journal_order_doc(index, entry_id, seq, "assistant") is None:
+        return None
+    run_at = bisect_right(index.runs, seq, key=lambda run: run.first_seq) - 1
+    if run_at < 0:
+        return None
+    run = index.runs[run_at]
+    if not (run.first_seq <= seq <= run.last_seq) or not run.opening_user_id:
+        return None
+    opener_id = run.opening_user_id
+    opener_seq = index.journal_rows.get(opener_id)
+    if not isinstance(opener_id, str) or not 1 <= len(opener_id) <= 128:
+        return None  # the existing source-metadata raw-ID wire bound, not truncation
+    if type(opener_seq) is not int or opener_seq != run.first_seq or not (0 <= opener_seq < seq):
+        return None
+    if _journal_order_doc(index, opener_id, opener_seq, "user") is None:
+        return None
+    return opener_id, opener_seq
+
+
+def journal_order_correction_batches(
+    index: TranscriptIndex, rows: list[dict[str, Any]]
+) -> Iterator[list[dict[str, Any]]]:
+    """Pack existing ready metadata into <=128-row dependency-closed events.
+
+    Call only after every descriptor's original page signature matches this fresh
+    index, as DesktopSessionBridge's correction already requires. A newly known
+    assistant travels with its exact run-opening user's coordinate in the SAME
+    event: flushing 127 rows before a pair is intentional. Re-include the opener
+    in each new event rather than globally deduplicating it, since a viewer may
+    join/replay from a later receipt. No user body/new record is published here.
+    """
+    # Also send already-supplied genuine user facts first. A requested steer U2
+    # is not the run opener, but splitting its true coordinate behind A2 at a
+    # frame boundary would repeat the race. This partitions only bounded INPUT
+    # descriptors by exact source proof; it never selects a last user from history.
+    # Ordering user rows ahead of the others is deliberate: the viewer orders by
+    # the stored journal_seq, not by arrival, so this only matters for the ONE
+    # event boundary a flush can fall on — and the opener is re-prepended into
+    # each later event, so a split pair is still emitted user-first there too.
+    users: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
+    for row in rows:
+        entry_id = row.get("id")
+        seq = row.get("journal_seq")
+        # The `type(seq) is int` guard is required for type narrowing only: the
+        # underlying lookup already rejects non-int ordinals, so it adds no
+        # authority — it just lets the callers below type-check.
+        is_user = (
+            isinstance(entry_id, str)
+            and type(seq) is int
+            and _journal_order_doc(index, entry_id, seq, "user") is not None
+        )
+        (users if is_user else others).append(row)
+    chunk: list[dict[str, Any]] = []
+    in_chunk: set[str] = set()
+    for row in users + others:
+        entry_id = row.get("id")
+        seq = row.get("journal_seq")
+        opener = (
+            journal_order_opener(index, entry_id, seq)
+            if isinstance(entry_id, str) and type(seq) is int
+            else None
+        )
+        dependency = (
+            {"id": opener[0], "type": "message", "role": "user", "journal_seq": opener[1]}
+            if opener is not None
+            else None
+        )
+        unit = (
+            [dependency] if dependency is not None and dependency["id"] not in in_chunk else []
+        ) + [row]
+        if len(chunk) + len(unit) > 128:
+            yield chunk
+            chunk = []
+            in_chunk.clear()
+            # A dependency present in the old chunk is not proof in this event.
+            unit = ([dependency] if dependency is not None else []) + [row]
+        chunk.extend(unit)
+        in_chunk.update(item["id"] for item in unit)
+    if chunk:
+        yield chunk
+
+
+def apply_journal_order(
+    root: Path,
+    session_id: str,
+    answer: dict[str, Any],
+    source: tuple[int, int, float] | None,
+    ids: list[str],
+) -> bool:
+    """Join owner coordinates only when page and resident index share a witness.
+
+    Both desktop-local and peer-stored reads must use this equality check:
+    current disk state alone cannot attest rows read before a concurrent rewrite.
+    False leaves the page untouched; each transport owns its readiness policy.
+    """
+    index = fresh_resident(root, session_id)
+    if index is None or not index.journal_generation or source is None:
+        return False
+    if source != (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime")):
+        return False
+    if any(row["id"] not in index.journal_rows for row in answer["entries"]):
+        return False
+    answer["entries"] = [
+        {**row, "journal_seq": index.journal_rows[row["id"]]} for row in answer["entries"]
+    ]
+    answer["journal_order_state"] = "ready"
+    answer["journal_generation"] = index.journal_generation
+    answer["journal_ordinals"] = {
+        id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
+    }
+    # The synchronous ready page has the same sparse-A race as the asynchronous
+    # correction. Carry actual opener coordinates as bounded source sidecars,
+    # never user bodies: at most one extra ID per bounded page/request identity.
+    # Missing-ID reporting still describes ONLY the IDs the caller requested.
+    for id_ in dict.fromkeys([row["id"] for row in answer["entries"]] + ids):
+        seq = index.journal_rows.get(id_)
+        if seq is None:
+            continue
+        opener = journal_order_opener(index, id_, seq)
+        if opener is not None:
+            answer["journal_ordinals"][opener[0]] = opener[1]
+    answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
+    return True
 
 
 def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:

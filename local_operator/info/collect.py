@@ -165,6 +165,11 @@ def collect_install(errors: list[tuple[str, str]]) -> InstallInfo:
         (None, None),
         errors,
     )
+    # The behind CLAIM derives only from a readiness-proved cache entry
+    # (update.cached_ready_version): latest_known above is the diagnostic
+    # "last answer known" and may name a version whose files never landed,
+    # so is_behind on IT would re-advertise the publishing race on /info.
+    ready_latest = _safe("install.ready_latest", update.cached_ready_version, None, errors)
     import_path = _safe("install.import_path", _resolved_import_path, "", errors)
     return InstallInfo(
         version=version,
@@ -178,7 +183,7 @@ def collect_install(errors: list[tuple[str, str]]) -> InstallInfo:
         build_age_s=_safe("install.build_age", update.build_marker_age_s, None, errors),
         latest_known=latest,
         latest_age_s=latest_age,
-        behind=update.is_behind(version, latest),
+        behind=update.is_behind(version, ready_latest),
         python_version=platform.python_version(),
         python_implementation=platform.python_implementation(),
         # ~15 ms, measured. CPython memoizes ``platform.uname()`` but NOT

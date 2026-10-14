@@ -29,7 +29,7 @@ import pytest
 from local_operator.buildwatch import UpdateLock
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.types import ImageContent
-from local_operator.harness.wake import WakeSchedule
+from local_operator.harness.wake import WakeSchedule, WakeScheduler
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime.inbox import (
@@ -581,7 +581,14 @@ def test_a_user_stop_during_the_drain_is_still_the_users_own(tmp_path: Path) -> 
 
 
 class WakeHost:
-    """``Session``'s wake-handover methods over a stub transcript and scheduler."""
+    """``Session``'s wake-handover methods over a stub transcript and a real scheduler.
+
+    The reservation moved INTO the scheduler (``WakeScheduler.hold_pending`` /
+    ``handover_pending``), so this host now carries a real one instead of a
+    ``_wake_rearms`` list: the handover is strict (it keeps ownership on a failed
+    append) and idempotent, and those are exactly the behaviours the cells here
+    pin — a stub could not be trusted to reproduce them.
+    """
 
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
     resume_wakes_from_inbox = Session.resume_wakes_from_inbox
@@ -589,15 +596,19 @@ class WakeHost:
     _queue_wake_rearm = Session._queue_wake_rearm
     hand_wakes_to_successor = Session.hand_wakes_to_successor
 
-    #: Declared for the type checker, which cannot see an attribute a borrowed
-    #: method assigns on the instance (``retire_wakes_to_inbox`` sets it).
-    _wake_rearms: list[Any]
-
     def __init__(self, directory: Path | None, *, live: tuple[Any, ...] = ()) -> None:
         self._transcript = SimpleNamespace(directory=directory)
         self._wake_deliver_hook: Any = None
-        self._wake = SimpleNamespace(schedules=live)
         self.persisted: list[list[Any]] = []
+        #: The REAL scheduler, so ``hold_pending`` / ``handover_pending`` /
+        #: ``release_pending`` behave as they do in the product rather than as a
+        #: hand-written stand-in would.
+        self._wake = WakeScheduler(
+            now=lambda: 1,
+            deliver=lambda due: None,  # type: ignore[arg-type,return-value]
+            persist=self._persist_wake_schedules,
+        )
+        self._wake._schedules = list(live)
 
     def _missed_delivery_note(self, _due: Any) -> None:
         return None
@@ -656,11 +667,16 @@ async def test_a_retiring_schedule_is_re_armed_instead_of_spooled(tmp_path: Path
     await host._spool_wake_to_inbox(_final_due())
 
     assert peek_inbox(tmp_path) == [], "the re-arm carries it; a note would double it"
-    assert len(host._wake_rearms) == 1
-    rearmed = host._wake_rearms[0]
+    held = host._wake.held_schedules
+    assert len(held) == 1
+    rearmed = held[0]
     assert (rearmed.id, rearmed.message) == ("w1", "check the deploy"), "same handle, cancellable"
     assert rearmed.every_ms is None and rearmed.limit is None and rearmed.until_at is None
     assert rearmed.next_due_at > 0, "due now, so the supervisor engages on its next pass"
+    # And the held handle is still in the OWNED view, which is what keeps a
+    # create in this runtime from allocating it again (the replacement loss).
+    assert [row.id for row in host._wake.schedules] == ["w1"]
+    assert host._wake.pending_ids() == frozenset({"w1"})
 
 
 @pytest.mark.asyncio
@@ -678,7 +694,7 @@ async def test_a_wake_that_cannot_be_re_armed_is_still_spooled(tmp_path: Path) -
 
     rows = peek_inbox(tmp_path)
     assert len(rows) == 1 and rows[0].wake is True
-    assert host._wake_rearms == [], "nothing to hand over, and nothing claimed"
+    assert host._wake.held_schedules == (), "nothing to hand over, and nothing claimed"
 
 
 @pytest.mark.asyncio
@@ -758,7 +774,6 @@ class PersistHost:
     _queue_wake_rearm = Session._queue_wake_rearm
 
     def __init__(self) -> None:
-        self._wake_rearms: list[Any] = []
         self._wake_fired_since_persist = True  # the delivery that just happened
         self._session_id = "s1"
         self._cwd = "/tmp"
@@ -766,6 +781,14 @@ class PersistHost:
         self.indexed: list[list[Any]] = []
         self.supervisors = 0
         self._transcript = SimpleNamespace(append_custom=self._record_append)
+        #: The reservation now lives in the scheduler, so the fire that reserves
+        #: it needs a REAL one to hold the row — the persist these cells pin is
+        #: handed the scheduler's owned view, exactly as the pump hands it.
+        self._wake = WakeScheduler(
+            now=lambda: 1,
+            deliver=lambda due: None,  # type: ignore[arg-type,return-value]
+            persist=self._persist_wake_schedules,
+        )
 
     async def _record_append(self, _kind: str, payload: dict[str, Any]) -> None:
         self.appended.append(payload["schedules"])
@@ -795,17 +818,17 @@ async def test_a_final_fires_re_arm_is_durable_without_the_exit() -> None:
     host = PersistHost()
     host.retire_wakes_to_inbox()
     await host._spool_wake_to_inbox(_final_due())
-    assert host._wake_rearms, "the fire queued a re-arm"
+    assert host._wake.held_schedules, "the fire reserved a re-arm"
 
     # The pump's own persist, right after that delivery: the list it hands over
-    # is the post-retire one, WITHOUT the re-arm in it.
-    await host._persist_wake_schedules([])
+    # is the scheduler's OWNED view, which already carries the held row.
+    await host._persist_wake_schedules(list(host._wake.schedules))
 
     assert len(host.appended) == 1
     # The transcript payload is the DUMPED form — that is what becomes durable.
-    written = host.appended[0]
-    assert [row["id"] for row in written] == ["w1"], "the re-arm rode the fire's persist"
-    assert written[0]["every_ms"] is None and written[0]["limit"] is None, "and as the one-shot"
+    written = {row["id"]: row for row in host.appended[0]}
+    assert list(written) == ["w1"], "the re-arm rode the fire's persist"
+    assert written["w1"]["every_ms"] is None and written["w1"]["limit"] is None, "as the one-shot"
     assert [schedule.id for schedule in host.indexed[0]] == [
         "w1"
     ], "the index too, so the supervisor can engage"
@@ -813,37 +836,46 @@ async def test_a_final_fires_re_arm_is_durable_without_the_exit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_durable_re_arm_supersedes_a_live_copy_of_the_same_id(tmp_path: Path) -> None:
-    """One row per id on disk: the re-armed one-shot replaces the live schedule."""
+async def test_the_held_re_arm_supersedes_a_live_copy_of_the_same_id(tmp_path: Path) -> None:
+    """One row per id on disk: the held one-shot replaces the live schedule.
+
+    A full-list write can carry a pre-fire copy of the same id (a caller that
+    prepared its list before the fire landed). Supersession is the SCHEDULER's
+    job now, through ``update`` — the full-list writer every caller ends in — so
+    that is the path this drives: the reservation must win, or the write would
+    reset the owed occurrence back to the schedule that already fired (the
+    interleaving the design calls out by name).
+    """
     host = PersistHost()
     host.retire_wakes_to_inbox()
     await host._spool_wake_to_inbox(_final_due())
     live = WakeSchedule(id="w1", message="check the deploy", next_due_at=9, every_ms=3_600_000)
     other = WakeSchedule(id="w2", message="hourly", next_due_at=9, every_ms=3_600_000)
 
-    await host._persist_wake_schedules([live, other])
+    await host._wake.update([live, other])
 
-    written = host.appended[0]
-    assert [row["id"] for row in written] == ["w2", "w1"]
-    assert written[1]["every_ms"] is None, "the surviving w1 is the re-arm, not the live copy"
+    written = {row["id"]: row for row in host.appended[0]}
+    assert sorted(written) == ["w1", "w2"], "one row per id"
+    assert written["w1"]["every_ms"] is None, "the held one-shot survived the stale copy"
+    assert host._wake.pending_ids() == frozenset({"w1"}), "and stayed held"
 
 
 @pytest.mark.asyncio
-async def test_the_handover_writes_live_and_re_armed_wakes_once(tmp_path: Path) -> None:
-    """The successor is engaged by the INDEX, so the re-arm has to reach it
-    through the one writer of schedule state — with the same id appearing once,
-    the live copy of a re-armed schedule dropped in favour of the one-shot."""
+async def test_the_handover_writes_live_and_held_wakes_once(tmp_path: Path) -> None:
+    """The successor is engaged by the INDEX, so the held one-shot has to reach
+    it through the one writer of schedule state — with the same id appearing
+    once. The reservation releases only AFTER that write lands."""
     live = WakeSchedule(id="w2", message="hourly", next_due_at=2, every_ms=3_600_000)
-    superseded = WakeSchedule(id="w1", message="check the deploy", next_due_at=1)
-    host = WakeHost(tmp_path, live=(live, superseded))
+    host = WakeHost(tmp_path, live=(live,))
     host.retire_wakes_to_inbox()
     await host._spool_wake_to_inbox(_final_due())
 
     assert await host.hand_wakes_to_successor() == 1
     assert len(host.persisted) == 1, "one write, transcript-then-index"
-    written = host.persisted[0]
-    assert [schedule.id for schedule in written] == ["w2", "w1"], "one row per id, re-arm last"
-    assert written[1].every_ms is None, "and the surviving w1 is the one-shot"
+    written = {schedule.id: schedule for schedule in host.persisted[0]}
+    assert sorted(written) == ["w1", "w2"], "one row per id"
+    assert written["w1"].every_ms is None, "and w1 is the held one-shot"
+    assert host._wake.held_schedules == (), "ownership passed with the write"
     assert await host.hand_wakes_to_successor() == 0, "handed over exactly once"
 
 
@@ -1500,8 +1532,6 @@ class CancelHost:
     _queue_wake_rearm = Session._queue_wake_rearm
     _purge_removed_wakes = Session._purge_removed_wakes
     _drop_queued_wake_deliveries = Session._drop_queued_wake_deliveries
-
-    _wake_rearms: list[Any]
 
     def __init__(self, directory: Path) -> None:
         self._transcript = SimpleNamespace(directory=directory)

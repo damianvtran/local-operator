@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -201,9 +202,47 @@ def report_from_dict(data: Any) -> UsageReport | None:
                 # while the live fetch still carries it — the annotation would
                 # appear on a cold `/usage` and vanish on every warm one.
                 detail=str(limit.get("detail") or ""),
+                # Old cache rows lack the additive fields: default to no paid
+                # evidence, never turn a foreign truthy string into eligibility.
+                paid_fallback=limit.get("paid_fallback") is True,
+                available=(
+                    limit.get("available") if isinstance(limit.get("available"), bool) else None
+                ),
+                supersedes_tiers=limit.get("supersedes_tiers") is True,
+                unlimited=limit.get("unlimited") is True,
             )
             for limit in data.get("limits", [])
         ]
+        # Before paid metadata existed, this exact Anthropic row was emitted
+        # ONLY by the enabled extra-usage parser. Migrate that known wire shape
+        # here, not a generic suffix heuristic in routing. Disabled/malformed
+        # rows remain non-payable alternatives, never conjunctive plan gates.
+        if data.get("provider") == "anthropic":
+            for raw, limit in zip(data.get("limits", []), limits):
+                if limit.id != "anthropic:extra" or "paid_fallback" in raw:
+                    continue
+                if (
+                    limit.amount.used_fraction is None
+                    and (limit.amount.used is not None or limit.amount.limit is not None)
+                    and limit.status != "disabled"
+                ):
+                    # Historical extra_usage scaled only the cap; spend scaled
+                    # both. The wire carries neither producer nor precision, so
+                    # even plausible values cannot prove which units were used.
+                    # Invalidate the whole report: keeping the exhausted plan
+                    # alone would still strand payable headroom. Cache miss
+                    # refreshes where possible; unavailable refresh fails open.
+                    return None
+                limit.paid_fallback = True
+                limit.supersedes_tiers = True
+                fraction = limit.amount.fraction()
+                limit.available = (
+                    limit.amount.unit == "usd"
+                    and limit.status in (None, "ok", "warning", "exhausted")
+                    and fraction is not None
+                    and math.isfinite(fraction)
+                    and 0 <= fraction <= 1
+                )
         raw_next = data.get("next_probe_at_ms")
         try:
             next_probe_at_ms = int(raw_next) if raw_next is not None else None
@@ -320,12 +359,17 @@ def account_preflight_key(storage_id: str, account_identity: str) -> str:
 class UsageCacheStore:
     """SQLite-backed shared usage cache; every method is exception-safe."""
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *, read_only: bool = False) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_cache_path()
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took.
         self._holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._conn: sqlite3.Connection | None = None
+        #: True for the paired-phone seam: every open is ``mode=ro`` over an
+        #: existing file, and construction itself touches nothing on disk. A
+        #: read-only caller must never be the reason a directory, database file
+        #: or WAL sidecar appears under the operator's config root.
+        self._read_only = read_only
 
     # -- connection ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection | None:
@@ -337,6 +381,36 @@ class UsageCacheStore:
         """
         if self._conn is not None:
             return self._conn
+        if self._read_only:
+            # Read-only open: no mkdir, no O_CREAT, no WAL PRAGMA, no schema
+            # DDL, no commit, no chmod — a phone GET must not write. An absent
+            # database is an empty cache, not a file this path creates.
+            #
+            # ``immutable=1`` is load-bearing here, not merely tidy: a plain
+            # ``mode=ro`` open still creates ``-wal``/``-shm`` sidecars beside
+            # the database (measured: ``mode=ro`` added both; ``mode=ro&immutable=1``
+            # added neither and still read every row). The sidecars are writes
+            # the no-writes promise forbids, so this path opens immutable. The
+            # tradeoff it accepts: immutable assumes the file will not change,
+            # so it SKIPS an uncheckpointed WAL — a live writer's newest commits
+            # can be invisible. For best-effort display that reads as a slightly
+            # older cached value (never a wrong one), which is the right failure
+            # direction for a phone route; correctness of routing is unaffected
+            # because this seam serves no routing decision.
+            if not self._db_path.exists():
+                return None
+            try:
+                uri = f"file:{self._db_path}?mode=ro&immutable=1"
+                conn = sqlite3.connect(uri, timeout=5.0, uri=True)
+                # sqlite3.connect in ro mode still opens lazily; force a read
+                # so a corrupt/foreign file fails HERE (=> unavailable) rather
+                # than at the first query.
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+                self._conn = conn
+                return conn
+            except Exception:  # noqa: BLE001 — read-only miss, never fatal
+                logger.debug("usage cache: read-only open failed %s", self._db_path, exc_info=True)
+                return None
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             # Create the file 0600 BEFORE sqlite opens it (same rule as
@@ -370,6 +444,96 @@ class UsageCacheStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    @property
+    def db_path(self) -> Path:
+        """The database this store opens (read by the read-only seam)."""
+        return self._db_path
+
+    # -- read-only seam reads ------------------------------------------------
+    def read_only_available(self) -> bool:
+        """True when a read-only handle opens AND the reports table has columns.
+
+        The seam needs this because :meth:`get` collapses three different
+        answers into ``None`` — key absent, table absent, payload unparseable —
+        and the phone route must tell "nothing cached" (EMPTY) from "the cache
+        could not be read" (UNAVAILABLE, which must never render as zero
+        credits). A ``usage_reports`` table missing its key columns is the second
+        case: the file opens but the SELECT would fail.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(usage_reports)").fetchall()
+            }
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        return {"key", "payload", "expires_at_ms"}.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a ``-wal``/``-shm`` sidecar with unfrozen frames exists.
+
+        The seam opens ``immutable=1`` to guarantee the no-write property, which
+        means it CANNOT see an uncheckpointed WAL. A NON-EMPTY ``-wal`` is
+        therefore the exact on-disk signal that the database it read may be
+        behind: committed inserts/updates the reader will not see, and deletes it
+        will still see. A zero-length ``-wal`` (the common idle state — measured
+        on a live writer that had checkpointed) holds no frames and is NOT
+        staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
+
+    def read_only_cached_at(self) -> int | None:
+        """Epoch ms the on-disk database was last written, or ``None``.
+
+        A freshness marker the phone can render. ``immutable`` reads the main
+        file as of its mtime, so that timestamp is the honest "as of" for the
+        payload this seam returns.
+        """
+        try:
+            return int(self._db_path.stat().st_mtime * 1000)
+        except OSError:
+            return None
+
+    def read_reports_read_only(
+        self, key: str, *, include_expired: bool = False
+    ) -> tuple[bool, list[UsageReport]]:
+        """``(readable, reports)`` for ``key`` on the read-only seam path.
+
+        Unlike :meth:`get`, a read failure is NOT folded into an empty result:
+        ``readable=False`` means the query failed or a stored payload would not
+        decode, which the seam reports as UNAVAILABLE rather than as an absence
+        of data. ``(True, [])`` is a genuinely absent key.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False, []
+        try:
+            row = conn.execute(
+                "SELECT payload, expires_at_ms FROM usage_reports WHERE key = ?", (key,)
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — table/query failure = unavailable
+            logger.debug("usage cache: read-only query failed", exc_info=True)
+            return False, []
+        if row is None:
+            return True, []
+        payload, expires_at_ms = row
+        if not include_expired and int(expires_at_ms) <= self._now_ms():
+            return True, []
+        try:
+            data = json.loads(payload)
+        except Exception:  # noqa: BLE001 — unparseable row = unavailable
+            return False, []
+        if not isinstance(data, list):
+            return False, []
+        reports = [r for r in (report_from_dict(item) for item in data) if r is not None]
+        return True, reports
 
     @staticmethod
     def _now_ms() -> int:

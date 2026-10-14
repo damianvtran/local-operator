@@ -515,18 +515,20 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
         store.close()
 
 
-def test_a_session_built_before_the_first_share_keeps_a_local_only_store(
+def _bridge_before_placement(root: Path, device: str) -> None:
+    """Model a securely admitted peer before its first provider login arrives."""
+    from local_operator.network import store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id=NETWORK, name="synthetic-bridge", self_device_id=device)
+    record.members.append(MemberRecord(device_id=OWNER, name="synthetic-owner"))
+    store.save(record, root)
+
+
+def test_a_session_built_before_the_first_share_promotes_without_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """audit caveat A, settled: a predating session never brokers, and a new one does.
-
-    THE PROBE the audit asked for (Q5 #5). ``build_auth_store`` decides plain-vs-mesh
-    at CONSTRUCTION, so the store a session receives is fixed for its life: a share
-    that arrives later reaches the device's document but not that store. The test
-    pins BOTH halves — the predating store keeps answering locally without ever
-    reaching the broker, and the same call after the share builds the mesh store —
-    which is why "start a new session" is the remedy and not an apology.
-    """
+    """A holder arriving after construction reaches the SAME session's resolver."""
     from local_operator.network.identity import mint
     from local_operator.providers.auth_store import AuthStore
 
@@ -535,8 +537,9 @@ def test_a_session_built_before_the_first_share_keeps_a_local_only_store(
     _point_config_at(monkeypatch, root)
     identity = mint(root, name="borrower")
 
+    _bridge_before_placement(root, identity.device_id)
     predating = mesh_store.build_auth_store(root)
-    assert type(predating) is AuthStore
+    assert type(predating.local) is AuthStore
 
     # The share arrives: the owner's document is merged into this device's file
     # (what a pull runs), and the device is now a holder for it.
@@ -552,13 +555,38 @@ def test_a_session_built_before_the_first_share_keeps_a_local_only_store(
     )
     assert changed == ["openai"]
 
-    # The PREDATING session's store cannot reach it — not now, not ever: it is the
-    # plain class, and nothing about this key will change that.
-    assert type(predating) is AuthStore
-    assert asyncio.run(predating.get_api_key("openai", "sess-1")) is None
+    # The existing session gains native access without replacing its store or ID.
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    native = Grant(
+        access_token="synthetic-native-bearer",
+        kind="bearer",
+        token_expires_at_ms=0,
+        grant_expires_at_ms=int((time.time() + 600) * 1000),
+        credential_ref=CredentialRef(
+            owner_device=OWNER,
+            owner_device_name="owner",
+            provider="openai",
+            kind="oauth",
+            credential_id=1,
+        ),
+        served_by=OWNER,
+        identity={"org_id": "synthetic-subscription-account"},
+    )
+
+    async def grant(_self: Any, _key: str, **_fields: Any) -> Any:
+        return native
+
+    monkeypatch.setattr(MeshCredentialClient, "grant_async", grant)
+    assert predating.local.list_credentials("openai") == []
+    access = asyncio.run(predating.get_oauth_access("openai", "sess-1"))
+    assert access is not None
+    assert access.kind == "oauth"
+    assert access.access_token == native.access_token
+    assert access.org_id == "synthetic-subscription-account"
     predating.close()
 
-    # A store built now IS mesh-aware, which is what the restart remedy buys.
+    # Fresh sessions use the same path, not a special restart-only construction.
     fresh = mesh_store.build_auth_store(root)
     try:
         assert isinstance(fresh, mesh_store.MeshAwareAuthStore)

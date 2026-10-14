@@ -55,6 +55,16 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # Exact executed-step discriminator for retaining signed intent; compared
+    # internally, never rendered as a reason or substituted for signature proof.
+    ("local_operator/network/approvals.py", "sweep", "detail"): (
+        1,
+        "internal executed-permission retention discriminator, never rendered",
+    ),
+    ("local_operator/network/credentials/consent.py", "verified_permission", "detail"): (
+        1,
+        "internal executed-receipt verification discriminator, never rendered",
+    ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),

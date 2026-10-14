@@ -98,6 +98,17 @@ def picker_rows(
             model_id=entry.model_id,
             label=entry.label,
             listing_name=entry.listing_name,
+            max_output_tokens=entry.max_output_tokens,
+            supports_tools=entry.supports_tools,
+            supports_images=entry.supports_images,
+            supports_audio_input=entry.supports_audio_input,
+            reasoning=entry.reasoning,
+            reasoning_efforts=entry.reasoning_efforts,
+            reasoning_default_effort=entry.reasoning_default_effort,
+            family=entry.family,
+            release_date=entry.release_date,
+            modalities=entry.modalities,
+            variants=entry.variants,
             context_window=(
                 entry.default_context_window
                 if entry.provider == "openai"

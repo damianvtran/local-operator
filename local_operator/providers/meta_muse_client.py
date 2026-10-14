@@ -91,6 +91,97 @@ class MetaMuseClient(OpenAICompatClient):
         if state is not None:
             state["request_id"] = self.last_request_id
 
+    def _observe_responses_error(self, response: httpx.Response) -> None:
+        """Retain schema identifiers, not the possibly credential-reflecting body.
+
+        A grammar alone would admit arbitrary secrets as error codes/field names.
+        Keep a finite protocol vocabulary and a small decode budget; unknown values
+        deliberately disappear rather than becoming durable incident evidence.
+        """
+        if len(response.content) > 16_384:
+            return
+        try:
+            payload = response.json()
+        except (ValueError, RecursionError):
+            return
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return
+        safe: dict[str, str] = {}
+        for key, allowed in {
+            "type": {
+                "invalid_request_error",
+                "authentication_error",
+                "permission_error",
+                "rate_limit_error",
+                "server_error",
+            },
+            "code": {
+                "invalid_value",
+                "invalid_parameter",
+                "unknown_parameter",
+                "missing_required_parameter",
+                "context_length_exceeded",
+                "unsupported_parameter",
+                "unsupported_value",
+                "invalid_request",
+                "invalid_api_key",
+                "model_not_found",
+            },
+        }.items():
+            value = error.get(key)
+            if isinstance(value, str) and value in allowed:
+                safe[key] = value
+        param = error.get("param")
+        # Only known Responses schema paths qualify, including bounded array
+        # offsets. Opaque IDs, tool names, payload values and prose never qualify.
+        fields = {
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "reasoning",
+            "effort",
+            "include",
+            "store",
+            "stream",
+            "max_output_tokens",
+            "temperature",
+            "top_p",
+            "type",
+            "content",
+            "role",
+            "name",
+            "parameters",
+            "strict",
+            "call_id",
+            "arguments",
+            "output",
+            "id",
+            "encrypted_content",
+            "summary",
+            "text",
+            "image_url",
+            "image",
+            "format",
+            "properties",
+            "required",
+            "additionalProperties",
+            "description",
+            "items",
+            "function",
+        }
+        if isinstance(param, str) and len(param) <= 160:
+            parts = re.fullmatch(
+                r"[A-Za-z_]+(?:\[[0-9]{1,4}\])?(?:\.[A-Za-z_]+(?:\[[0-9]{1,4}\])?)*", param
+            )
+            if parts and all(part in fields for part in re.findall(r"[A-Za-z_]+", param)):
+                safe["param"] = param
+        state = _ACTIVE_OBSERVATION.get()
+        if state is not None:
+            state["error_diagnostics"] = safe
+
     def _observe_responses_event(self, payload: dict[str, Any]) -> None:
         from local_operator.providers.meta_muse_usage import subscription_observation
 
@@ -174,13 +265,35 @@ class MetaMuseClient(OpenAICompatClient):
         except ProviderError as original:
             # Classify upstream before dropping possibly reflected token text.
             # Only our exact local attribution refusal survives as prose.
-            message = (
-                ATTRIBUTION_REFUSAL
-                if original.message == ATTRIBUTION_REFUSAL
-                else f"Unofficial Muse Code request failed "
-                f"(HTTP {original.status or 'unavailable'}). "
-                "Check your subscription or sign in again; no PAYG fallback was selected."
-            )
+            if original.message == ATTRIBUTION_REFUSAL:
+                message = ATTRIBUTION_REFUSAL
+            elif original.kind == "request":
+                state = _ACTIVE_OBSERVATION.get() or {}
+                details = state.get("error_diagnostics") or {}
+                diagnostic_note = "; ".join(f"{key}={value}" for key, value in details.items())
+                # A receipt-shaped header can still reflect private submitted
+                # input. Syntax is not origin evidence, so never publish it in
+                # the durable error message. Successful attribution is unchanged.
+                context_advice = (
+                    " Shorten the conversation context or start a new conversation."
+                    if details.get("code") == "context_length_exceeded"
+                    else ""
+                )
+                message = (
+                    "Muse rejected this request. Don't Continue unchanged; use /model "
+                    "to choose another configured model, or change the request."
+                    f"{context_advice} No automatic PAYG switch was attempted."
+                )
+                # The shared error frame already names kind/status. Put recovery
+                # first so narrow terminals do not bury the action under details.
+                if diagnostic_note:
+                    message += f" Details: {diagnostic_note}."
+            else:
+                message = (
+                    f"Unofficial Muse Code request failed "
+                    f"(HTTP {original.status or 'unavailable'}). "
+                    "Check your subscription or sign in again; no PAYG fallback was selected."
+                )
             raise ProviderError(
                 original.status,
                 message,
@@ -188,7 +301,20 @@ class MetaMuseClient(OpenAICompatClient):
                 retryable=original.retryable,
                 retry_after_ms=original.retry_after_ms,
                 request_sent=original.request_sent,
-                fail_closed=True,
+                auth_error=original.auth_error,
+                transport=original.transport,
+                transport_cause=original.__cause__ if original.transport else None,
+                # PRESERVE the raiser's own flag; never force it here. Forcing
+                # ``fail_closed`` on every wrapped error is what stopped a
+                # recoverable quota 429 from reaching the user's CONFIGURED
+                # fallback chains: the failover engine raises immediately on a
+                # fail-closed error, so the cascade never ran (evidence session
+                # 5ebdcd0d1ec8). A quota block is the primary being unable to
+                # serve, not a silent billable fallback -- descending to a
+                # target the user configured is their explicit choice. Only the
+                # billing-attribution refusal and the missing-meter refusal
+                # arrive here with the flag set.
+                fail_closed=original.fail_closed,
             ) from None
         except httpx.HTTPError:
             raise ProviderError(
@@ -197,7 +323,6 @@ class MetaMuseClient(OpenAICompatClient):
                 kind="transient",
                 retryable=True,
                 transport=True,
-                fail_closed=True,
             ) from None
         finally:
             _ACTIVE_OBSERVATION.reset(token)
@@ -213,10 +338,20 @@ class MetaMuseClient(OpenAICompatClient):
         reverse = {alias: name for name, alias in tool_aliases(request).items()}
         async for event in super().stream(request, api_key, oauth_access):
             if isinstance(event, StreamEndEvent) and event.error is not None:
-                # Error bodies can echo a submitted key. Preserve the status
-                # classification, never the provider body, and prohibit a
-                # hidden billable cross-provider fallback from this plan route.
-                raise ProviderError(None, "Muse Code stream failed.", fail_closed=True)
+                if event.stop_reason == "refusal":
+                    # A refusal is the provider's ANSWER, not provider weather:
+                    # pass it through so the loop renders it and the failover
+                    # engine can never re-ask refused content on another route.
+                    # Every other dialect yields refusal ends rather than
+                    # raising them; Muse converts them for no benefit.
+                    pass
+                else:
+                    # Error bodies can echo a submitted key. Preserve the status
+                    # classification, never the provider body. Deliberately NOT
+                    # fail-closed: an unknown mid-stream provider fault is
+                    # exactly what a configured fallback is for, and the engine
+                    # still refuses to replay once any content was forwarded.
+                    raise ProviderError(None, "Muse Code stream failed.")
             if isinstance(event, StreamToolCallDelta) and event.name:
                 event = event.model_copy(update={"name": reverse.get(event.name, event.name)})
             elif isinstance(event, StreamEndEvent) and event.provider_payload:

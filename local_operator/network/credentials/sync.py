@@ -2103,46 +2103,59 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                 f"{key!r} is marked local-only on this device, so it never crosses; "
                 "nothing was copied",
             )
-    meta = None
+    # Copy is also an owner serve. Keep the current deny check and local
+    # extraction under the same bounded consent lock; no rotating OAuth enters
+    # this path and no refresh/network I/O belongs inside this guard.
+    from local_operator.network.credentials import consent
+    from local_operator.network.types import MeshRefusal
+
     try:
-        meta = read_copy_value(broker._auth_store_instance(), key, entry, root=broker.root)
-    except Exception:  # noqa: BLE001 — an unreadable store holds nothing to copy
-        logger.debug("credentials sync: owner read for %s failed", key, exc_info=True)
-    if meta is None:
-        return broker._refuse(
-            link,
-            key,
-            key,
-            by,
-            "no_value",
-            f"this device has no copyable value for {key!r} right now; nothing was copied",
-        )
-    served = _served_generation(
-        broker.root, broker.network_id, key, meta, requested=requested, held=held
-    )
-    broker._audit(
-        "credential.copy",
-        actor=broker.self_device,
-        subject=by,
-        detail={
-            "credential_key": key,
-            "act": broker.self_device,
-            "sub": by,
-            "gen": served,
-        },
-    )
-    return {
-        "kind": "copy",
-        "key": key,
-        "gen": served,
-        "digest": str(meta.get("digest") or ""),
-        "value_state": VALUE_STATE_PRESENT,
-        "value": meta.get("value"),
-        "provenance": {
-            "owner_device": broker.self_device,
-            "owner_device_name": broker.self_device_name,
-        },
-    }
+        with consent.serving_guard(
+            str(broker.network_id), str(broker.self_device), by, key, {}, broker.root
+        ):
+            meta = None
+            try:
+                meta = read_copy_value(broker._auth_store_instance(), key, entry, root=broker.root)
+            except Exception:  # noqa: BLE001 — an unreadable store holds nothing to copy
+                logger.debug("credentials sync: owner read for %s failed", key, exc_info=True)
+            if meta is None:
+                return broker._refuse(
+                    link,
+                    key,
+                    key,
+                    by,
+                    "no_value",
+                    f"this device has no copyable value for {key!r} right now; nothing was copied",
+                )
+            served = _served_generation(
+                broker.root, broker.network_id, key, meta, requested=requested, held=held
+            )
+            broker._audit(
+                "credential.copy",
+                actor=broker.self_device,
+                subject=by,
+                detail={
+                    "credential_key": key,
+                    "act": broker.self_device,
+                    "sub": by,
+                    "gen": served,
+                },
+            )
+            return {
+                "kind": "copy",
+                "key": key,
+                "gen": served,
+                "digest": str(meta.get("digest") or ""),
+                "value_state": VALUE_STATE_PRESENT,
+                "value": meta.get("value"),
+                "provenance": {
+                    "owner_device": broker.self_device,
+                    "owner_device_name": broker.self_device_name,
+                },
+            }
+
+    except MeshRefusal as exc:
+        return broker._refuse(link, key, key, by, exc.code, str(exc))
 
 
 def _served_generation(

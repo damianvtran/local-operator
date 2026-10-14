@@ -50,7 +50,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.incidents",
         "wire.notices",
         "wire.settings",
+        "wire.settings.hub_defaults",
         "wire.slash",
+        "wire.aida_cadence",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -59,8 +61,16 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.errors.media") != {}
     assert catalogues.load_catalogue("en", "wire.errors.files") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
+    # Approved source namespace, not a prefix-wide wildcard. Mutation controls
+    # below still reject undeclared additions, removals and emptied namespaces.
+    assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
+    # The Aida cadence interval row is a small English-only addition carried in
+    # its own `wire.*` namespace so already-audited `wire.settings` locale
+    # hashes stay valid; pinned populated here for the same reason the other
+    # populated namespaces are.
+    assert catalogues.load_catalogue("en", "wire.aida_cadence") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 

@@ -65,6 +65,7 @@ from typing import (
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
     JOURNAL_ORDER_EVENT,
+    PEER_JOURNAL_SOURCE_CAPABILITY,
 )
 
 if TYPE_CHECKING:
@@ -2101,6 +2102,8 @@ class RuntimeServer:
         #: so the boot snapshot cannot drift toward the disk value it is
         #: compared against.
         self._boot_build = build
+        from local_operator.session.model_admission import native_chat_provider_ids
+
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -2207,6 +2210,15 @@ class RuntimeServer:
                     if getattr(handle, "journal_order_supported", False)
                     else []
                 )
+                # THE COMPLETE PEER-SOURCE STRING, same gate shape: advertised
+                # only by a build whose runtime serves the complete vocabulary
+                # (an attaching peer declares it only against this string, and
+                # its absence keeps every peer order request off the attach).
+                + (
+                    [PEER_JOURNAL_SOURCE_CAPABILITY]
+                    if getattr(handle, "peer_journal_source_supported", False)
+                    else []
+                )
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -2247,6 +2259,7 @@ class RuntimeServer:
             # The heartbeat republishes this same dataclass, so the stamp
             # rides every rewrite without a second code path.
             version=build.version,
+            native_provider_ids=native_chat_provider_ids(),
             source_ref=build.source_ref,
             # The tree THIS runtime imports from. Under the generation layout a
             # process belongs to exactly one generation and the record is where

@@ -74,6 +74,14 @@ export interface TranscriptEntryDetails {
 	   conversation_name / model_label / session_id / cwd, all advisory. Rides
 	   through the fold's `details` so the card can label who reached in. */
 	sender?: PeerSender;
+	/* Optional hub receipt facts. A requested agent reply is not operator
+	   attention and cannot establish an outstanding-reply state. */
+	body?: string;
+	direction?: string;
+	label?: string;
+	job_id?: string;
+	expects_reply?: boolean;
+	steer?: boolean;
 	/* Severity ink for a `notice` row, mirroring the TUI's NoticeBlock kind.
 	   A refusal, a failed turn and a failed compaction are `error`; an
 	   unattended gate timeout and a declined compaction are `warning`.

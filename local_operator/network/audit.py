@@ -177,6 +177,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # received the delegation; both are device ids, which is the RFC 8693
         # vocabulary mesh-credentials.md §1.4 names.
         "credential.grant",
+        # Exact finite recovery, never future inheritance or credential material.
+        "credential.finite_requested",
+        "credential.finite_applied",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -448,6 +451,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "refreshed",
             "latency_ms",
         }
+    ),
+    "credential.finite_requested": frozenset(
+        {"credential_key", "act", "sub", "scope", "approval_id"}
+    ),
+    "credential.finite_applied": frozenset(
+        {"credential_key", "act", "sub", "scope", "approval_id"}
     ),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),

@@ -722,6 +722,8 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help="Can peers complete offloaded work? Readiness with remedies",
     )
     ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
+    ready.add_argument("--model", default="", help="Also check this selected provider/model")
+    ready.add_argument("--session", default="", help="Session context for the selected model")
     ready.add_argument("--json", action="store_true")
 
     # `lop network update <peer>`: the single-peer half of mesh rolling updates
@@ -832,6 +834,17 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # like ``invite``/``log``; with several, ``_resolve`` asks for the name.
     cred_share.add_argument(
         "--network", default="", help="Network name or id (default: the only one)"
+    )
+    finite_action = cred_share.add_mutually_exclusive_group()
+    finite_action.add_argument(
+        "--request-approval",
+        action="store_true",
+        help="Request signed recovery of this exact finite share; does not grant",
+    )
+    finite_action.add_argument(
+        "--approval",
+        default="",
+        help="Apply signed finite-share recovery; never future inheritance",
     )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
@@ -2135,32 +2148,109 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     if verb == "share" and not scope:
         scope = "device" if github_mod.is_github_key(key) else "session"
 
-    with placement_mod.mutate(record.network_id, self_device=identity.device_id) as document:
-        entry = document.entry(key)
-        if verb == "share":
-            if entry is None:
-                # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
-                # runs where the credential is. ``declare`` refuses on behalf of another
-                # device, so a share can never move ownership by accident.
-                entry = document.declare(
-                    key,
-                    owner_device=identity.device_id,
-                    owner_device_name=identity.name,
-                    provider=provider,
-                    kind=kind,
-                    identity_label=label,
-                    by=identity.device_id,
-                )
-            entry = document.grant(key, device, scope=scope, by=identity.device_id)
-            action = "sharing"
-        else:
-            entry = document.revoke(key, device, by=identity.device_id)
-            action = "revoked"
-        entry_json = entry.to_json()
+    # Consent is authority; placement is only its mergeable projection. Revoke
+    # persists its tombstone first, and legacy share cannot clear that tombstone.
+    from local_operator.network.credentials import consent
+
+    finite_result = None
+    if verb == "share" and (
+        getattr(args, "request_approval", False) or getattr(args, "approval", "")
+    ):
+        from local_operator.network.credentials import finite_share
+
+        if getattr(args, "request_approval", False):
+            requested = finite_share.request(
+                record.network_id, identity.device_id, device, key, scope
+            )
+            return _emit(
+                args,
+                {
+                    "ok": True,
+                    "approval_id": requested["approval_id"],
+                    "state": requested["state"],
+                    "summary": finite_share.summary(requested),
+                },
+                [
+                    *finite_share.details(requested),
+                    "Request only; nothing shared.",
+                    f"Approve: lop network approvals approve {requested['approval_id']}",
+                    f"Apply: lop network credential share {key} --with {device} "
+                    f"--network {record.network_id} --scope {scope} "
+                    f"--approval {requested['approval_id']}",
+                ],
+            )
+        finite_result = finite_share.apply(
+            str(getattr(args, "approval", "")),
+            {
+                "owner_device": identity.device_id,
+                "network_id": record.network_id,
+                "recipient_device": device,
+                "key": key,
+                "scope": scope,
+            },
+        )
+    if verb == "revoke":
+        import time as _clock
+
+        reduced = consent.restrict_and_revoke(
+            record.network_id,
+            identity.device_id,
+            device,
+            {"credential_key": key},
+            "owner-revoke:" + str(_clock.time_ns()),
+        )
+        entry_json = reduced["entry"] or {}
+        action = "revoked"
+    elif finite_result is not None:
+        entry_json = finite_result
+        action = "sharing"
+    else:
+        authority = consent.ConsentDocument(record.network_id, identity.device_id)
+        with authority.locked():
+            try:
+                consent.check_borrow(record.network_id, identity.device_id, device, key, {})
+            except MeshRefusal as exc:
+                if exc.code in {"not_a_holder", "scope_unknown"}:
+                    raise MeshRefusal(
+                        "supersede_required",
+                        "This finite share was explicitly withdrawn; a bare share cannot clear it. "
+                        f"Request exact signed recovery: lop network credential share {key} "
+                        f"--with {device} --network {record.network_id} --scope {scope} "
+                        "--request-approval. No automatic future-sign-in inheritance "
+                        "enabled by this operation.",
+                    ) from exc
+                raise
+            with placement_mod.mutate(
+                record.network_id, self_device=identity.device_id
+            ) as document:
+                entry = document.entry(key)
+                if entry is None:
+                    # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
+                    # runs where the credential is. ``declare`` refuses on behalf of another
+                    # device, so a share can never move ownership by accident.
+                    entry = document.declare(
+                        key,
+                        owner_device=identity.device_id,
+                        owner_device_name=identity.name,
+                        provider=provider,
+                        kind=kind,
+                        identity_label=label,
+                        by=identity.device_id,
+                    )
+                entry = document.grant(key, device, scope=scope, by=identity.device_id)
+                action = "sharing"
+                entry_json = entry.to_json()
 
     capability = ""
     if verb == "share":
-        _change, capability = _apply_capability_change(record, device, grant=["broker_credential"])
+        if finite_result is not None:
+            # Capability already read back LOCALLY before the journal cleared:
+            # no fallible relay/native work follows committed finite completion.
+            capability = "locally (signed finite recovery)"
+        else:
+            _change, capability = _apply_capability_change(
+                record, device, grant=["broker_credential"]
+            )
     else:
         # The capability goes with the share. Leaving ``broker_credential`` on a device
         # that no longer holds anything is a grant that can only ever be refused, and
@@ -7352,7 +7442,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     from local_operator.network import readiness as readiness_mod
 
     live = _relay_call(
-        "peer_readiness", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
+        "peer_readiness",
+        peer=args.peer,
+        selector=getattr(args, "model", ""),
+        session_id=getattr(args, "session", ""),
+        timeout=_listing_timeout(),
+        allow_no_answer=True,
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
@@ -7661,6 +7756,20 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     capabilities=(readiness_mod.CAPABILITY_BUILD, *readiness_mod.PEER_SIDE_CHECKS),
                 )
             )
+            selector = str(getattr(args, "model", "") or "")
+            if selector:
+                # The local fallback cannot observe the peer's selected access.
+                # Preserve the requested context, not the viewer's login/default.
+                checks.append(
+                    readiness_mod.selected_model_row(
+                        member,
+                        {"state": "pending"},
+                        selector=selector,
+                        session_id=str(getattr(args, "session", "") or ""),
+                        peer_label=member.name or member.device_id,
+                        source=readiness_mod.SOURCE_UNKNOWN,
+                    )
+                )
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -8019,6 +8128,15 @@ _CARD_LABEL_WIDTH = len("withdrawn by")
 
 def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     """The human half of the same read, in the card's own order: what / where / who."""
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(dict(record))
+    if finite_summary is not None:
+        return [
+            *finite_share.details(dict(record)),
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            "This operation restores only the signed finite share; nothing is installed or joined.",
+        ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
     state = str(record.get("state") or "")
@@ -8252,6 +8370,13 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     from local_operator.network import approvals as approval_store
 
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(record)
+    if finite_summary is not None:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        for disclosure_line in finite_share.details(record):
+            print(disclosure_line, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8349,8 +8474,18 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         return _emit(args, payload, _approval_lines(decided))
     if verb == "withdraw":
         return _cmd_approvals_withdraw(args)
+    # Operation dispatch precedes every generic runner: a finite recovery is
+    # never an SSH/setup/join request just because it reuses the normal envelope.
     # verb == "run" — the agent's execution path.
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    if finite_share.intent(record) is not None:
+        raise MeshRefusal(
+            "finite_apply_required",
+            "This is finite-share recovery, not onboarding. Use the exact "
+            "credential share --approval command shown on its request; no setup ran.",
+        )
     state = str(record.get("state") or "")
     if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
         # A ``connecting`` record has TWO answers (drill finding, 2026-10-04):

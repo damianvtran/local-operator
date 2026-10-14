@@ -80,6 +80,7 @@ from local_operator.mcp.config import (
 from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
     build_agent_tool,
+    capture_producer_scope,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
@@ -4289,7 +4290,20 @@ class McpManager:
         # Flattening can walk megabytes of MCP content and spilling performs
         # filesystem I/O. Keep both off the event loop so one verbose server
         # cannot starve streaming, cancellation, or sibling tool progress.
-        return await asyncio.to_thread(format_mcp_result, result, tool_call_id, tool_label, context)
+        #
+        # Capture provenance's identity is composed HERE, from what the
+        # manager ACTUALLY called (configured origin pair + owning session),
+        # never from anything the server sent; a block claiming an identity
+        # of its own changes nothing downstream.
+        producer_scope = capture_producer_scope(server_name, mcp_tool_name, context.session_id)
+        return await asyncio.to_thread(
+            format_mcp_result,
+            result,
+            tool_call_id,
+            tool_label,
+            context,
+            producer_scope=producer_scope,
+        )
 
     async def _race_abort(
         self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None

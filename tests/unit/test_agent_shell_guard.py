@@ -41,6 +41,7 @@ from local_operator.agent_shell import (
     AGENT_SHELL_ENV,
     ALLOW_NESTED_SESSION_ENV,
     MAY_DELEGATE_ENV,
+    agent_shell_opened_run,
     exec_session_refusal,
     in_agent_shell,
     interactive_session_refusal,
@@ -1150,3 +1151,76 @@ def test_replace_self_leaves_an_ordinary_environment_alone(monkeypatch: pytest.M
 
     assert AGENT_SHELL_ENV not in captured["env"]
     assert captured["env"].get("PATH") == __import__("os").environ.get("PATH")
+
+
+# --- the SERVE entry point: a hosting plane, not an agent's command -----------
+
+
+def test_the_serve_strip_removes_all_three_markers_in_place() -> None:
+    """The in-place form, pinned where the marker set is defined.
+
+    ``drop_agent_shell_marker_from_environ`` is the ONE caller that owns the
+    process it is already in (``cli.serve_command``) rather than handing a child
+    a copy, so it must mutate the SAME mapping the guard reads at session-build
+    time — a returned copy the daemon forgot to apply is the leak this closes.
+
+    All THREE names, unlike ``without_agent_shell_marker``: the child-facing
+    helper keeps the QA escape (a harness's child is a session nobody is
+    watching), while a daemon that kept it would waive the refusal for the
+    operator's OWN chats and stamp them ``agent-shell`` — the exact regression.
+    Single-sourced by reuse: the two names the copy helper defines come from it.
+    """
+    from local_operator.agent_shell import drop_agent_shell_marker_from_environ
+
+    env = {
+        AGENT_SHELL_ENV: "1",
+        MAY_DELEGATE_ENV: "1",
+        ALLOW_NESTED_SESSION_ENV: "1",
+        "KEEP_THIS": "yes",
+    }
+    before = id(env)
+    drop_agent_shell_marker_from_environ(env)
+
+    assert id(env) == before, "the strip is in place, not a returned copy"
+    assert AGENT_SHELL_ENV not in env
+    assert MAY_DELEGATE_ENV not in env
+    assert ALLOW_NESTED_SESSION_ENV not in env
+    assert env["KEEP_THIS"] == "yes"
+
+
+def test_the_serve_strip_is_the_only_place_that_drops_the_escape() -> None:
+    """The asymmetry, pinned so it reads as a decision and not a typo.
+
+    The child-facing helper deliberately KEEPS ``ALLOW_NESTED_SESSION_ENV`` (its
+    docstring gives the reason), and the SERVE helper deliberately drops it. Both
+    are asserted here in one place, because a future edit that "unifies" the two
+    would otherwise silently reopen the leak.
+    """
+    from local_operator.agent_shell import (
+        drop_agent_shell_marker_from_environ,
+        without_agent_shell_marker,
+    )
+
+    marked = {AGENT_SHELL_ENV: "1", ALLOW_NESTED_SESSION_ENV: "1"}
+
+    child = without_agent_shell_marker(marked)
+    assert ALLOW_NESTED_SESSION_ENV in child, "the child-facing helper keeps the escape"
+
+    daemon = dict(marked)
+    drop_agent_shell_marker_from_environ(daemon)
+    assert ALLOW_NESTED_SESSION_ENV not in daemon, "the daemon must not inherit a harness's escape"
+
+
+def test_the_serve_strip_does_not_follow_the_exec_path(delegating: None) -> None:
+    """SERVE ONLY: the delegating exec path is untouched by the new helper.
+
+    The strip lives at ``serve_command``, never in the marker module's read
+    paths, so a ``lop exec`` from an agent's shell still reads its markers and
+    (for a delegating session) still opens — and is still stamped by the
+    factory. This pins the negative: the helper existing does not make the
+    marker invisible to the exec entry point it must keep refusing/allowing by.
+    """
+    assert in_agent_shell() is True
+    assert (
+        agent_shell_opened_run() is True
+    ), "the exec path reads the live markers; only serve_command clears them"

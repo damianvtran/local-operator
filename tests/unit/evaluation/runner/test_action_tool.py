@@ -584,7 +584,11 @@ def test_the_wire_schema_is_flat() -> None:
 MALFORMED = [
     ("empty-actions", {"actions": []}, "field-invalid"),
     ("missing-required-field", {"actions": [{"kind": "wait"}]}, "field-invalid"),
-    ("unknown-kind", {"actions": [{"kind": "drag", "x": 1}]}, "unknown-action-kind"),
+    (
+        "unknown-kind",
+        {"actions": [{"kind": "definitely_not_a_kind", "x": 1}]},
+        "unknown-action-kind",
+    ),
     (
         "extra-action-key",
         {"actions": [{"kind": "wait", "duration_ms": 5, "noun": "x"}]},
@@ -951,7 +955,7 @@ async def test_mark_terminal_ends_the_episode(tmp_path: Any) -> None:
 _PROJECTION_CASES: list[tuple[str, dict[str, Any]]] = [
     ("missing-field", {"actions": [{"kind": "click", "frame_id": "screen", "x": 1}]}),
     ("empty-batch", {"actions": []}),
-    ("unknown-kind", {"actions": [{"kind": "drag", "x": 1}]}),
+    ("unknown-kind", {"actions": [{"kind": "definitely_not_a_kind", "x": 1}]}),
     ("extra-key", {"actions": [{"kind": "wait", "duration_ms": 5, "noun": "x"}]}),
     ("unknown-key", {"actions": [{"kind": "key", "keys": ["NOSUCH"]}]}),
     ("keys-not-array", {"actions": [{"kind": "key", "keys": {"item": ["CTRL"]}}]}),

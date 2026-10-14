@@ -12,6 +12,8 @@
  "wire.settings.aida_cadence_at.help": "Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
  "wire.settings.aida_cadence_at.label": "Daily check-in time",
  "wire.settings.aida_cadence_at.placeholder": "08:30",
+ "wire.settings.aida_cadence_interval_hours.help": "0 keeps the daily local check-in time. 1–168 uses elapsed hours; 4 checks in every four hours. Changes preserve an already-owed check-in.",
+ "wire.settings.aida_cadence_interval_hours.label": "Check-in interval (hours)",
  "wire.settings.aida_cadence_max_extra_per_day.help": "How many escalation check-ins she may arm per day. 0 disables escalation.",
  "wire.settings.aida_cadence_max_extra_per_day.label": "Extra check-ins / day",
  "wire.settings.aida_cadence_min_gap_minutes.help": "Minimum spacing between her wakes; closer requests are refused.",

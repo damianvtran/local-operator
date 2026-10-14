@@ -61,6 +61,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         OwnedShutdownResult,
         RequestObserver,
     )
+    from local_operator.session.tool_readiness import ToolReadiness
 
 
 def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
@@ -677,6 +678,25 @@ class OwningSessionProtocol(SessionProtocol, Protocol):
         signature instead of widening it by cast. The request is sticky and
         honoured at every next-model safe point; the turn then ends as
         ``aborted`` with completed work intact.
+        """
+        ...
+
+    async def wait_for_tools(
+        self, required: Sequence[str], *, timeout_s: float = 30.0
+    ) -> ToolReadiness:
+        """TYPE-ONLY declaration of the concrete ``Session.wait_for_tools``.
+
+        The owning session's typed, bounded, point-in-time readiness check
+        for named tools (see :mod:`local_operator.session.tool_readiness`):
+        ``ready`` when the LIVE enforced inventory already reaches every name
+        (or does after one bounded discovery wait); ``pending`` while
+        discovery is still in flight; ``missing`` when discovery settled
+        without the name or no discovery manager exists. A timeout never
+        cancels discovery, a manager failure never reads ready, and caller
+        cancellation propagates. An attached viewer cannot wait on the remote
+        owner's discovery, so this lives on the owning extension only -- the
+        same segregation as :meth:`subscribe_requests` and
+        :meth:`shutdown_owned_work`.
         """
         ...
 
