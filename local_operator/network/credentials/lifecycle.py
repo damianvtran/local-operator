@@ -139,6 +139,7 @@ class Observation:
     account_scope_ref: str
     login_chain_revision: int
     material_generation: int
+    state: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,8 @@ class ObservationResult:
     reason: str
     login_chain_revision: int = 0
     material_generation: int = 0
+    # Accepted durable evidence, never the untrusted/replayed frame's state.
+    state: Optional[str] = None
 
 
 def derive(prev: Optional[CounterRow], key: str, scope: str, facts: NativeFacts) -> CounterRow:
@@ -260,6 +263,9 @@ class LifecycleDocument:
         self.rows: dict[tuple[str, str], CounterRow] = {}
         #: (owner, key, scope) -> (login_chain_revision, material_generation) high-water
         self.high_water: dict[tuple[str, str, str], tuple[int, int]] = {}
+        # Consent overlays can restrict at identical native counters. Their state
+        # must survive restart; counters alone cannot distinguish an older replay.
+        self.observation_states: dict[tuple[str, str, str], str] = {}
         self.needs_baseline = False
 
     def to_json(self) -> dict[str, Any]:
@@ -286,6 +292,11 @@ class LifecycleDocument:
                     "account_scope_ref": s,
                     "login_chain_revision": hw[0],
                     "material_generation": hw[1],
+                    **(
+                        {"state": self.observation_states[(o, k, s)]}
+                        if (o, k, s) in self.observation_states
+                        else {}
+                    ),
                 }
                 for (o, k, s), hw in sorted(self.high_water.items())
             ],
@@ -352,7 +363,12 @@ class LifecycleDocument:
                 "material_generation",
             }
             for item in data["observations"]:
-                if not isinstance(item, dict) or set(item) != obs_fields:
+                if not isinstance(item, dict) or set(item) not in (
+                    obs_fields,
+                    obs_fields | {"state"},
+                ):
+                    raise ValueError
+                if "state" in item and item["state"] not in _ANNOUNCE_STATES:
                     raise ValueError
                 if (
                     not _ref_ok(item["owner"])
@@ -369,6 +385,8 @@ class LifecycleDocument:
                     item["login_chain_revision"],
                     item["material_generation"],
                 )
+                if "state" in item:
+                    doc.observation_states[ident3] = item["state"]
         except (ValueError, TypeError):
             bad = cls(network_id)
             bad.needs_baseline = True
@@ -473,6 +491,7 @@ class LifecycleStore:
             and _ref_ok(obs.account_scope_ref)
             and _revision_ok(obs.login_chain_revision)
             and _revision_ok(obs.material_generation)
+            and (obs.state is None or obs.state in _ANNOUNCE_STATES)
         ):
             return ObservationResult(False, OBSERVED_INVALID)
         ident = (obs.owner, obs.key, obs.account_scope_ref)
@@ -480,8 +499,9 @@ class LifecycleStore:
             doc = self.load()
             if doc.needs_baseline:
                 return ObservationResult(False, NEEDS_AUTHORITATIVE_BASELINE)
+            previous = doc.high_water.get(ident)
             reason, hw = classify_observation(
-                doc.high_water.get(ident), (obs.login_chain_revision, obs.material_generation)
+                previous, (obs.login_chain_revision, obs.material_generation)
             )
             if reason == OBSERVED:
                 # A fresh ident grows the table; an existing one only moves forward,
@@ -493,13 +513,50 @@ class LifecycleStore:
                 ):
                     return ObservationResult(False, OBSERVED_TABLE_FULL)
                 doc.high_water[ident] = hw
+            changed = reason == OBSERVED
+            if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY):
+                old_state = doc.observation_states.get(ident)
+                newer_login = previous is None or obs.login_chain_revision > previous[0]
+                # Native rotations do not attest new authorization. At equal
+                # login-chain revision, state forms a restriction-only lattice.
+                # Legacy counter-only rows are UNKNOWN, not replay permission.
+                if (
+                    newer_login
+                    or (
+                        old_state is not None
+                        and _STATE_RESTRICTION[obs.state] > _STATE_RESTRICTION[old_state]
+                    )
+                    or (old_state is None and obs.state != STATE_AVAILABLE)
+                ):
+                    doc.observation_states[ident] = obs.state
+                    changed = changed or old_state != obs.state
+            if changed:
                 try:
                     self._save(doc)
                 except MeshRefusal as refusal:
                     if refusal.code != TABLE_FULL:
                         raise
                     return ObservationResult(False, OBSERVED_TABLE_FULL)
-            return ObservationResult(reason == OBSERVED, reason, hw[0], hw[1])
+            receipt_state = None
+            if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY, OBSERVED_STALE):
+                # EffectiveAccess is provider-level: another scope's availability
+                # cannot erase this owner's outstanding restriction on the key.
+                states = [
+                    state
+                    for (owner, key, _), state in doc.observation_states.items()
+                    if (owner, key) == (obs.owner, obs.key)
+                ]
+                if states:
+                    receipt_state = max(states, key=lambda state: _STATE_RESTRICTION[state])
+                    unknown_scope = any(
+                        ident[:2] == (obs.owner, obs.key) and ident not in doc.observation_states
+                        for ident in doc.high_water
+                    )
+                    if receipt_state == STATE_AVAILABLE and (
+                        unknown_scope or reason == OBSERVED_STALE
+                    ):
+                        receipt_state = None  # UNKNOWN/stale cannot license a downgrade
+            return ObservationResult(reason == OBSERVED, reason, hw[0], hw[1], receipt_state)
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +631,15 @@ _ANNOUNCE_STATES = WIRE_STATES - {STATE_SCOPE_UNKNOWN}
 #: safe and necessary: the owner's sticky deny does not move either counter, so a
 #: forward-only rule alone would drop the very announcement that withdraws access.
 _RESTRICTIVE_STATES = frozenset({STATE_WITHDRAWN, STATE_NON_PORTABLE, STATE_UNSUPPORTED})
+# Fixed order, not arrival time: only a newer native login-chain may lift a
+# restriction. All values are metadata evidence, never usable authentication.
+_STATE_RESTRICTION = {
+    STATE_AVAILABLE: 0,
+    STATE_ABSENT: 1,
+    STATE_UNSUPPORTED: 2,
+    STATE_NON_PORTABLE: 3,
+    STATE_WITHDRAWN: 4,
+}
 
 
 def _announce_error(code: str, key: str, message: str) -> dict[str, Any]:
@@ -704,7 +770,12 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
         try:
             result = life.observe(
                 Observation(
-                    sender, key, scope, item["login_chain_revision"], item["material_generation"]
+                    sender,
+                    key,
+                    scope,
+                    item["login_chain_revision"],
+                    item["material_generation"],
+                    item["state"],
                 )
             )
         except (MeshRefusal, OSError) as exc:
@@ -718,8 +789,8 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
         # block remains retry-later, never falsely acknowledged as durable.
         if result.reason == OBSERVED_TABLE_FULL and item["state"] in _RESTRICTIVE_STATES:
             effective.note_lifecycle_observation(root, providers[key], item["state"], owner=sender)
-        if applied or result.reason == OBSERVED_REPLAY:
-            effective.note_lifecycle_observation(root, providers[key], item["state"], owner=sender)
+        if result.state is not None:
+            effective.note_lifecycle_observation(root, providers[key], result.state, owner=sender)
         results.append(
             {
                 "credential_key": key,
@@ -741,6 +812,9 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
 #: active member, which the recipient's forward-only high-water absorbs as a replay),
 #: and the durable owner-side ack ledger is a later slice.
 _SENT_ATTR = "_mesh_credential_lifecycle_sent"
+# Disclosure survives connection replacement, but not owner-process lifetime.
+# It contains only already-acknowledged references/counters, never fresh facts.
+_DISCLOSED_ATTR = "_mesh_credential_lifecycle_disclosed"
 
 #: Acks that mean "this recipient needs nothing more for that row". ``applied`` is the
 #: normal case; ``replayed``/``stale`` say the recipient already holds this counter or a
@@ -758,6 +832,14 @@ def _sent_ledger(server: Any) -> dict[tuple[str, str, str], tuple[str, int, int]
         except Exception:  # noqa: BLE001 — a server that refuses attributes just re-sends
             pass
     return ledger
+
+
+def _disclosure_history(server: Any) -> dict[tuple[str, str, str], tuple[str, int, int]]:
+    history = getattr(server, _DISCLOSED_ATTR, None)
+    if history is None:
+        history = {}
+        setattr(server, _DISCLOSED_ATTR, history)
+    return history
 
 
 def negotiated(link: Any) -> bool:
@@ -836,8 +918,18 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
         return network_id, []
     life = LifecycleStore(network_id, root)
     ledger = _sent_ledger(server)
+    history = _disclosure_history(server)
+    owned = set(document.keys_owned_by(self_device))
+    active = {m.device_id for m in store.load(network_id, root).members if m.active}
+    # Bound history to active recipients and still-owned keys; scope count per
+    # recipient cannot exceed the owner's bounded counter table (MAX_ROWS).
+    for table in (ledger, history):
+        for ident in list(table):
+            if ident[0] not in active or ident[1] not in owned:
+                del table[ident]
+    disclosed_count = sum(ident[0] == device_id for ident in history)
     entries: list[dict[str, Any]] = []
-    for key in sorted(document.keys_owned_by(self_device)):
+    for key in sorted(owned):
         # A stale positive placement never bypasses provider denial or the fence.
         # Native identity is then needed for the final ACCOUNT gate; no scope is
         # inferred from peer strings or from the encoded lifecycle reference.
@@ -850,8 +942,9 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
             # evidence can only be made MORE restrictive, using the same counters
             # and references this recipient already saw. This also makes a deny
             # observable without accidentally publishing a fresh native snapshot.
-            for ident, sent in list(ledger.items()):
-                if ident[:2] == (device_id, key) and sent[0] != STATE_WITHDRAWN:
+            for ident, sent in list(history.items()):
+                withdrawal = (STATE_WITHDRAWN, sent[1], sent[2])
+                if ident[:2] == (device_id, key) and ledger.get(ident) != withdrawal:
                     entries.append(
                         {
                             "credential_key": key,
@@ -890,8 +983,13 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
                     )
                 row = life.record_native(key, scope, facts)
             except MeshRefusal as refusal:
-                sent = ledger.get((device_id, key, scope))
-                if refusal.code == "not_a_holder" and sent and sent[0] != STATE_WITHDRAWN:
+                ident = (device_id, key, scope)
+                sent = history.get(ident)
+                if (
+                    refusal.code == "not_a_holder"
+                    and sent
+                    and ledger.get(ident) != (STATE_WITHDRAWN, sent[1], sent[2])
+                ):
                     entries.append(
                         {
                             "credential_key": key,
@@ -902,12 +1000,16 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
                         }
                     )
                 continue
+            if (device_id, key, scope) not in history and disclosed_count >= MAX_ROWS:
+                continue  # never disclose facts we cannot retain for restrictive catch-up
             if ledger.get((device_id, key, scope)) == (
                 row.state,
                 row.login_chain_revision,
                 row.material_generation,
             ):
                 continue
+            if (device_id, key, scope) not in history:
+                disclosed_count += 1
             entries.append(
                 {
                     "credential_key": key,
@@ -1025,11 +1127,13 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
             continue
         if not (result.get("applied") is True or result.get("reason") in _SETTLED_REASONS):
             continue
-        ledger[(device_id, item["credential_key"], item["account_scope_ref"])] = (
+        ident = (device_id, item["credential_key"], item["account_scope_ref"])
+        ledger[ident] = (
             item["state"],
             item["login_chain_revision"],
             item["material_generation"],
         )
+        _disclosure_history(step_server)[ident] = ledger[ident]
         delivered += 1
         _audit_announced(step_server, network_id, self_device, device_id, item)
     return "delivered" if delivered == len(entries) else "retry_later"

@@ -657,3 +657,86 @@ def test_sender_preserves_verified_future_permission_without_finite_holder(rig):
     assert L.lifecycle_tick_step(_owner_server(rig, peer), rig.peer.device_id) == "delivered"
     assert len(peer.frames[0]["entries"]) == 1
     assert peer.frames[0]["entries"][0]["state"] == "available"
+
+
+def test_equal_counter_availability_cannot_lift_durable_withdrawal(rig):
+    _announce(rig)
+    _announce(rig, state="withdrawn")
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    replay = _announce(rig)["entries"][0]
+    assert replay == dict(
+        credential_key=P, account_scope_ref=SCOPE, applied=False, reason=L.OBSERVED_REPLAY
+    )
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    # The process receipt is disposable, the restrictive freshness evidence is not.
+    effective._receipts.clear()
+    _announce(rig)
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    # A rotation is not new authorization, even at a higher material generation.
+    _announce(rig, material=2)
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    effective._receipts.clear()
+    stale = _announce(rig)["entries"][0]
+    assert stale["reason"] == L.OBSERVED_STALE
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    final = _announce(rig, chain=2, material=3)
+    assert effective._receipts[(effective._root(rig.root), P)].state == "pending", (
+        final,
+        L.LifecycleStore(N, rig.root).load().to_json(),
+    )
+
+
+def test_other_scope_availability_cannot_lift_this_keys_restriction(rig):
+    _announce(rig, state="withdrawn")
+    entry = {
+        **_announce_frame(rig)["entries"][0],
+        "state": "available",
+        "account_scope_ref": "other-scope",
+        "login_chain_revision": 2,
+        "material_generation": 2,
+    }
+    _announce(rig, entries=[entry])
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    doc = L.LifecycleStore(N, rig.root).load()
+    assert doc.observation_states[(rig.own.device_id, P, SCOPE)] == "withdrawn"
+    assert doc.observation_states[(rig.own.device_id, P, "other-scope")] == "available"
+
+
+def test_legacy_counter_only_replay_is_unknown_not_receipt_permission(rig):
+    L.LifecycleStore(N, rig.root).observe(L.Observation(rig.own.device_id, P, SCOPE, 1, 1))
+    _announce(rig)
+    assert (effective._root(rig.root), P) not in effective._receipts
+    _announce(rig, state="withdrawn")
+    effective._receipts.clear()
+    _announce(rig)
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+
+
+def test_denied_reconnect_retains_disclosure_not_delivery_ack(rig, monkeypatch):
+    from local_operator.network.credentials import consent, placement
+
+    _seed(rig)
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server = _owner_server(rig, peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    disclosed = dict(peer.frames[0]["entries"][0])
+    consent.restrict_and_revoke(
+        N, rig.own.device_id, rig.peer.device_id, {"credential_key": P}, "late-deny", rig.root
+    )
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.grant(P, rig.peer.device_id, scope="session", by=rig.own.device_id)
+    monkeypatch.setattr(L, "_native_contexts", lambda *args: pytest.fail("denied native read"))
+    for _ in range(2):
+        replacement = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+        server._ensure_link = lambda device: replacement
+        assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+        assert replacement.frames[0]["entries"] == [{**disclosed, "state": "withdrawn"}]
+        assert L.lifecycle_tick_step(server, rig.peer.device_id) == "in_sync"
+        assert len(L._disclosure_history(server)) == 1
+        assert len(L._sent_ledger(server)) == 1
+    # Removed owner keys do not become a process-lifetime metadata archive.
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.entries[P].owner_device = rig.peer.device_id
+    L._pending_entries(server, rig.peer.device_id)
+    assert L._disclosure_history(server) == {}
+    assert L._sent_ledger(server) == {}
