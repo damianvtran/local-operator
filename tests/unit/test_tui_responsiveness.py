@@ -38,6 +38,25 @@ def tmp_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 STALL_MS = 30.0
 TICK_S = 0.005
 
+#: Noise discrimination for the loaded bar (the S2 cell). Both readings are
+#: sums over the wall window the probe's wake was delayed by, so on a loaded
+#: runner they grow with the runner's own scheduling noise, not with the
+#: code: the same legitimate turn read 413 ms of CPU when the 350 ms CPU bar
+#: flaked (#496) and 557.8 ms when the fixed 500 ms bar flaked (run
+#: 38165502284, shard test (3.12, 4), 2026-10-11); this fleet's own local
+#: runs red the wall side the same way under load (2-10 s wake gaps with no
+#: measured CPU work). The cell therefore measures the run's own wake-stretch
+#: floor first — idle pumping, none of the turn's legs — and bounds each
+#: reading at ``clamp(NOISE_K * floor, ceiling, cap)``: floor 186 ms admits
+#: the 557.8 ms CPU reading; floor under ~167 ms keeps the calibrated 500 ms
+#: and 2000 ms ceilings exactly; and the caps keep every bound below the
+#: canonical regression this cell exists to catch — the hostile stub's 5 s
+#: synchronous freeze trips every wall bound, and a CPU sum above
+#: NOISE_CPU_CAP_MS trips every CPU bound.
+NOISE_K = 3.0
+NOISE_CPU_CAP_MS = 1500.0
+NOISE_WALL_CAP_MS = 4000.0
+
 
 class StallRecorder:
     """Records loop-thread CPU bursts AND wall-clock gaps while it runs.
@@ -74,16 +93,21 @@ class StallRecorder:
     regression 90-130 ms). The loaded default is 500 ms of CPU, because the
     sites that use it drive real app work with legitimate loop CPU. The
     FULL CI dataset (every run that has flaked a lower ceiling on a green
-    tree): title-scan 206 ms and 264 ms, s1-boot 321 ms, s2 413 ms — so 413 ms
-    is the observed healthy max and 500 ms carries ~20% headroom over it.
-    That margin is thin: the same site has swung ~30% between runs, so a
-    green tree may yet exceed 500 ms; if it does, raise the ceiling again on
-    evidence rather than assuming the probe is wrong. (The historical 549 ms
-    layout-pass figure is WALL-CLOCK, from the pre-#486 probe this CPU clock
-    replaced — useful as an upper bound on the class of work, not as a CPU
-    precedent.) The wall ceiling is 2000 ms everywhere: 3× the worst
-    observed scheduler-noise gap, and still well below the multi-second
-    regressions.
+    tree): title-scan 206 ms and 264 ms, s1-boot 321 ms, s2 413 ms — and the
+    exceedance this paragraph anticipated, s2 557.8 ms (run 38165502284,
+    2026-10-11). 413 ms was the observed healthy max against the fixed
+    500 ms ceiling: ~20% headroom, and the same site swings ~30%, so a
+    green tree exceeding it was a matter of time. The S2 cell now bounds
+    its readings by the wake-stretch floor measured in the run itself
+    (NOISE_K and the caps, :meth:`assert_no_stall_loaded`'s
+    ``noise_floor_ms``) instead of raising the constants again. (The
+    historical 549 ms layout-pass figure is WALL-CLOCK, from the pre-#486
+    probe this CPU clock replaced — useful as an upper bound on the class
+    of work, not as a CPU precedent.) Every fixed site keeps the wall
+    ceiling of 2000 ms: 3× the worst observed scheduler-noise gap, and
+    still well below the multi-second regressions; the S2 cell's variant
+    scales it with the measured floor, up to the 4000 ms cap that sits
+    below the canonical 5 s freeze.
     """
 
     def __init__(self, stall_ms: float = STALL_MS) -> None:
@@ -91,6 +115,10 @@ class StallRecorder:
         self.cpu_stalls: list[float] = []
         self.wall_stalls: list[float] = []
         self._task: asyncio.Task[None] | None = None
+        #: Worst wake stretch seen inside the noise window, or None if no
+        #: window was measured; see :meth:`begin_noise_window`.
+        self.noise_floor_ms: float | None = None
+        self._noise_open = False
 
     async def _probe(self) -> None:
         last_cpu = time.thread_time()
@@ -101,6 +129,10 @@ class StallRecorder:
             now_wall = time.perf_counter()
             cpu_gap_ms = (now_cpu - last_cpu) * 1000.0
             wall_gap_ms = (now_wall - last_wall) * 1000.0
+            if self._noise_open and (
+                self.noise_floor_ms is None or wall_gap_ms > self.noise_floor_ms
+            ):
+                self.noise_floor_ms = wall_gap_ms
             if cpu_gap_ms >= self.stall_ms:
                 self.cpu_stalls.append(cpu_gap_ms)
             if wall_gap_ms >= self.stall_ms:
@@ -124,8 +156,30 @@ class StallRecorder:
             pass
         self._task = None
 
+    def begin_noise_window(self) -> None:
+        """Start measuring the run's own wake-stretch floor.
+
+        The loaded bar's CPU reading is a sum over the wall window the
+        probe's wake was delayed by, so the reading's legitimate ceiling
+        scales with the worst wake stretch the run itself shows. The S2
+        cell opens this window before its turn — idle pumping only, none
+        of the turn's legs — and closes it before the turn, so the floor
+        is what THIS machine and THIS runner are doing right now, not a
+        constant calibrated elsewhere. Constants: NOISE_K,
+        NOISE_CPU_CAP_MS, NOISE_WALL_CAP_MS.
+        """
+        self.noise_floor_ms = None
+        self._noise_open = True
+
+    def end_noise_window(self) -> None:
+        """Close the window :meth:`begin_noise_window` opened."""
+        self._noise_open = False
+
     def assert_no_stall(
-        self, cpu_ceiling_ms: float = 50.0, wall_ceiling_ms: float = 2000.0
+        self,
+        cpu_ceiling_ms: float = 50.0,
+        wall_ceiling_ms: float = 2000.0,
+        context: str = "",
     ) -> None:
         """Strict bar: 50 ms of loop-thread CPU, 2 s of wall as catastrophe.
 
@@ -134,40 +188,77 @@ class StallRecorder:
         90-130 ms. The wall ceiling is a backstop for a pure blocking sleep
         the CPU clock cannot see; it is 3× the worst scheduler-noise gap
         observed on CI (668 ms) so that noise cannot trip it.
+
+        ``context`` is appended to a failure message when non-empty; the
+        loaded bar passes its floor-to-bound arithmetic here so a failure
+        names the numbers it derived the bound from.
         """
+        suffix = f" [{context}]" if context else ""
         worst_cpu = max(self.cpu_stalls) if self.cpu_stalls else 0.0
         worst_wall = max(self.wall_stalls) if self.wall_stalls else 0.0
         assert worst_cpu < cpu_ceiling_ms, (
             f"event loop consumed {worst_cpu:.0f} ms of CPU without yielding "
             f"(ceiling {cpu_ceiling_ms:.0f} ms); "
             f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+            f"{suffix}"
         )
         assert worst_wall < wall_ceiling_ms, (
             f"event loop blocked for {worst_wall:.0f} ms of wall time "
             f"(ceiling {wall_ceiling_ms:.0f} ms); "
             f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
+            f"{suffix}"
         )
 
     def assert_no_stall_loaded(
-        self, cpu_ceiling_ms: float = 500.0, wall_ceiling_ms: float = 2000.0
+        self,
+        cpu_ceiling_ms: float = 500.0,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
     ) -> None:
         """Loaded bar: 500 ms of loop-thread CPU, same 2 s wall backstop.
 
         The sites that use this helper drive real app work with legitimate
         loop CPU, and lower ceilings flaked green trees repeatedly on CI.
         The full dataset: title-scan 206 ms and 264 ms, s1-boot 321 ms, s2
-        413 ms — 413 ms is the observed healthy max, so 500 ms carries ~20%
-        headroom. That is thin; see the class docstring for what to do if a
-        green tree exceeds it. (The historical 549 ms layout-pass figure is
-        WALL-CLOCK, from the pre-#486 probe — an upper bound on the class of
-        work, not a CPU precedent.)
+        413 ms — and the exceedance the class docstring anticipated, s2
+        557.8 ms (run 38165502284, 2026-10-11). Against fixed ceilings the
+        next slower runner wins that race again; the S2 cell instead passes
+        ``noise_floor_ms`` — the wake-stretch floor it measured via
+        :meth:`begin_noise_window` — and each ceiling becomes
+        ``clamp(NOISE_K * floor, ceiling, cap)``: floor 186 ms admits the
+        557.8 ms CPU reading, quiet runs (floor under ~167 ms) keep the
+        calibrated 500 ms and 2000 ms bars exactly, and the caps (1500 ms
+        CPU / 4000 ms wall) keep every bound below the canonical regression
+        the cell exists to catch — the hostile stub's 5 s synchronous
+        freeze trips every wall bound. Callers that measure no floor keep
+        the fixed ceilings, unchanged. (The historical 549 ms layout-pass
+        figure is WALL-CLOCK, from the pre-#486 probe — an upper bound on
+        the class of work, not a CPU precedent.)
 
-        The wall ceiling is the same catastrophic backstop as
-        :meth:`assert_no_stall`: a pure blocking sleep is invisible to the
-        CPU clock, and 2000 ms sits 3× above the worst observed scheduler
-        noise so that noise cannot trip it.
+        The wall side takes the same treatment because it flakes the same
+        way: a wall gap is a sum over the environment's own stretch (see
+        the class docstring and the constants' comment), and this fleet's
+        local runs red 2-10 s gaps under load with no measured CPU work.
+        What the relative wall bound stops catching is named: a gap
+        between the old 2000 ms constant and the bound no longer reds a run
+        whose own floor is that high — unavoidable, since a wall gap cannot
+        be told apart between code blocking the loop and the process being
+        starved off it; the 4000 ms cap keeps the canonical 5 s freeze
+        tripping every bound.
         """
-        self.assert_no_stall(cpu_ceiling_ms=cpu_ceiling_ms, wall_ceiling_ms=wall_ceiling_ms)
+        bound_cpu = cpu_ceiling_ms
+        bound_wall = wall_ceiling_ms
+        context = ""
+        if noise_floor_ms is not None:
+            bound_cpu = min(max(NOISE_K * noise_floor_ms, cpu_ceiling_ms), NOISE_CPU_CAP_MS)
+            bound_wall = min(max(NOISE_K * noise_floor_ms, wall_ceiling_ms), NOISE_WALL_CAP_MS)
+            context = (
+                f"noise floor {noise_floor_ms:.0f} ms -> CPU bound {bound_cpu:.0f} ms, "
+                f"wall bound {bound_wall:.0f} ms "
+                f"(K={NOISE_K:g}, caps {NOISE_CPU_CAP_MS:.0f}/{NOISE_WALL_CAP_MS:.0f}, "
+                f"fixed {cpu_ceiling_ms:.0f}/{wall_ceiling_ms:.0f})"
+            )
+        self.assert_no_stall(cpu_ceiling_ms=bound_cpu, wall_ceiling_ms=bound_wall, context=context)
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -1094,7 +1185,11 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     """S2: a streamed reply with tool batches, from submit to ``agent_end``,
     leaves no loop stall above the bar — the reported 'sending a message
     freezes the UI until processed'. The pricing leg is made hostile the same
-    way the unit test makes it: discovery stubbed slow, memo cold."""
+    way the unit test makes it: discovery stubbed slow, memo cold. The bar
+    scales with the run's own measured noise floor (the idle leg below; the
+    constants and the CI dataset behind them sit beside NOISE_K): on a quiet
+    machine it is the calibrated 500 ms, on a loaded runner the bound rides
+    the runner's own wake noise."""
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1122,6 +1217,15 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
         await pilot.pause()
         recorder = StallRecorder()
         await recorder.start()
+        # The run's own noise floor, measured before the turn: pump the idle
+        # app for a spell — timers, paints, the same pump the turn will use —
+        # with none of the turn's legs on it. The worst wake stretch observed
+        # here is what the turn's CPU-sum reading is allowed to ride on; the
+        # constants and the CI dataset behind them are beside NOISE_K.
+        recorder.begin_noise_window()
+        for _ in range(12):
+            await pilot.pause(0.05)
+        recorder.end_noise_window()
         # A turn with message text, a tool batch, per-call usage reports, and
         # an unpriceable model on the components — the exact surface the
         # freeze was reported on.
@@ -1164,7 +1268,7 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
         # bench/before.json vs after.json — out of the tree now, one `git show`
         # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
         # repository").
-        recorder.assert_no_stall_loaded()
+        recorder.assert_no_stall_loaded(noise_floor_ms=recorder.noise_floor_ms)
 
 
 @pytest.mark.asyncio

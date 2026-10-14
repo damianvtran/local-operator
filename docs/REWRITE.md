@@ -209,18 +209,18 @@ Skills (deliberate design choices, user-requested):
   - **Trigger threshold**: `min(threshold_percent * context_window,
     threshold_tokens)`, resolved in exactly one place
     (`compaction.thresholds.resolve_threshold_tokens`). Defaults: 80% and
-    600,000 tokens. The SMALLER of the two wins — the percentage keeps a
+    400,000 tokens. The SMALLER of the two wins — the percentage keeps a
     small-context model compacting in proportion to what it can hold (80% of
-    200k = 160k, where a 600k absolute trigger could never fire), and the
+    200k = 160k, where a 400k absolute trigger could never fire), and the
     absolute ceiling stops a very large window from letting one session grow
     to a size that is slow and expensive on every request even though it fits
-    (600k of a 1M window). An explicit `reserve_tokens` additionally caps the
+    (400k of a 1M window). An explicit `reserve_tokens` additionally caps the
     trigger at `window - reserve`, so it can only pull a pass earlier.
     Out-of-range values fall back to the default with a `logger.warning`.
   - Settings in config.yml `values.compaction.*`: enabled (true),
     strategy (auto), reserve_tokens (unset → 15% proportional floor),
     keep_recent_tokens (20000), threshold_percent (0.80; `80` is accepted and
-    means the same), threshold_tokens (600000), auto_continue (true),
+    means the same), threshold_tokens (400000), auto_continue (true),
     mid_turn_enabled (true). The former `max_threshold_tokens` ceiling is
     superseded by `threshold_tokens` (same meaning under `min`) and is read as
     it with a rename warning.
@@ -249,10 +249,18 @@ Skills (deliberate design choices, user-requested):
     discarded history serialized, whitespace-collapsed, rendered onto PNG
     bitmap frames of pixel-font text (Pillow `ImageDraw.text`, monospace
     bitmap rendering) that vision models read back. `Archive { frames, text,
-    text_head, text_tail }` stored in the CompactionEntry's `preserve_data`
-    so later compactions re-render from text rather than carrying old PNGs.
-    Tool results truncated to 2000 chars, useless pairs dropped, head/tail
-    plain-text edges with the imaged middle (foveation: 3 HQ edge frames).
+    text_head, text_tail, middle_kinds, page_digests }` stored in the
+    CompactionEntry's `preserve_data` so later compactions re-render from
+    text rather than carrying old PNGs. Tool results truncated to 2000 chars,
+    useless pairs dropped, head/tail plain-text edges with the imaged middle
+    (foveation: 3 HQ edge frames). Replay is per middle page
+    (`middle_kinds`): a page whose source text stays cheaper than its frame
+    even under the worst measured provider/local tokenizer divergence (1.9x,
+    see `compaction/tokens.py`'s slope notes) replays as that exact text
+    instead of the PNG; pages where the frame wins keep their image, and
+    `page_digests` binds each page string to the frame rendered from it, so
+    a replay can prove what it carries. Legacy archives (no kinds) replay
+    as frames throughout.
     Per-provider shapes (Anthropic ~1568-1932px wide bw, OpenAI 1568, Google
     flat-billed any size). Budgets: max 80 frames, ~5024 tokens/frame
     estimate. Requires image input support; falls back to context-full with

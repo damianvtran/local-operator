@@ -13,9 +13,12 @@ import pytest
 from local_operator.server.routes.desktop_radient import (
     _ORG_REFUSAL_MESSAGES,
     ORG_OPERATIONS,
+    RESEND_NOTHING_TO_RESEND,
+    RESEND_RATE_LIMITED,
     RadientRequest,
     _operation_params,
     _org_refusal_code,
+    _upstream_refusal_for,
     endpoint,
 )
 
@@ -100,3 +103,62 @@ def test_org_refusal_code_reads_only_frozen_codes_for_org_operations(
     operation: str, envelope: object, expected: str | None
 ) -> None:
     assert _org_refusal_code(operation, envelope) == expected
+
+
+# --- signup.resend ------------------------------------------------------------
+
+
+def _code(failure) -> str:
+    """The ``code`` of a proxy refusal (``HTTPException.detail`` is typed ``str``)."""
+    detail: dict[str, object] = failure.detail  # type: ignore[assignment]
+    return str(detail["code"])
+
+
+def test_signup_resend_maps_to_the_upstream_post_and_needs_a_request_id() -> None:
+    body = RadientRequest(
+        operation="signup.resend", request_id="12345678-1234-1234-1234-123456789abc"
+    )
+    assert endpoint(body) == ("POST", "/auth/signup/resend")
+    # A mutation that sends mail: no request id, no request.
+    with pytest.raises(ValueError):
+        RadientRequest(operation="signup.resend")
+
+
+def test_signup_resend_is_not_an_org_operation() -> None:
+    """Its refusals have their own mapping; the org reader must not claim them."""
+    assert "signup.resend" not in ORG_OPERATIONS
+
+
+@pytest.mark.parametrize(
+    "status,code", [(429, RESEND_RATE_LIMITED), (409, RESEND_NOTHING_TO_RESEND)]
+)
+@pytest.mark.asyncio
+async def test_signup_resend_refusal_codes_are_not_credential_refusals(
+    status: int, code: str
+) -> None:
+    class Response:
+        status_code = status
+
+    failure = await _upstream_refusal_for("signup.resend", Response(), "token")
+    assert failure.status_code == status
+    assert _code(failure) == code
+    assert _code(failure) != "radient_credential_refused"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.asyncio
+async def test_signup_resend_credential_refusals_keep_their_meaning(status: int) -> None:
+    class Response:
+        status_code = status
+
+    failure = await _upstream_refusal_for("signup.resend", Response(), "token")
+    assert _code(failure) == "radient_credential_refused"
+
+
+@pytest.mark.asyncio
+async def test_other_operations_keep_the_generic_429_reading() -> None:
+    class Response:
+        status_code = 429
+
+    failure = await _upstream_refusal_for("agents.list", Response(), "token")
+    assert _code(failure) == "radient_credential_refused"

@@ -14,7 +14,7 @@ from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -26,6 +26,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.media import (
     SUPPORTED_AUDIO_MIME_TYPES,
     SUPPORTED_IMAGE_MIME_TYPES,
@@ -51,6 +52,7 @@ from local_operator.server.models.desktop_sessions import (
     DraftReceipt,
     HistoryPage,
     InterruptReceipt,
+    JobCancelReceipt,
     MessageAdmission,
     MoveReceipt,
     NotificationClaim,
@@ -60,6 +62,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    SupplementReceipt,
     WarmReceipt,
     WatchReceipt,
 )
@@ -95,6 +98,7 @@ from local_operator.server.utils.store_failures import (
     sqlite_store_failure,
     store_failure,
 )
+from local_operator.session import open_trace
 from local_operator.session.attached import RuntimeUnresponsiveError
 from local_operator.session.attention import (
     SUPERSEDED_TOKEN_CODE,
@@ -117,6 +121,7 @@ from local_operator.session.frontend_state import (
     SlashResult,
     sync_wire_payload,
 )
+from local_operator.session.index_prewarm import start_session_warm
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
@@ -124,6 +129,10 @@ from local_operator.slash_commands import (
     command_argument_refusal,
     slash_command_for,
     whole_draft_command,
+)
+from local_operator.supplements.contract import (
+    STEER_TEXT_MAX_CHARS,
+    supplement_read_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -1001,27 +1010,24 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     try:
         spec = validate_model_selection(provider, model_id)
     except ModelSelectionRefused as refused:
-        raise HTTPException(422, {"code": refused.code, "message": refused.message}) from refused
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=refused.message).envelope(code=refused.code)
+        ) from refused
     effort = (model.reasoning_effort or "").strip().lower()
     if effort:
         if not spec.reasoning_efforts:
             raise HTTPException(
                 422,
-                {
-                    "code": "effort_unsupported",
-                    "message": f"{model_id} has no reasoning-effort levels",
-                },
+                _wd.effort_levels_missing(model=model_id).envelope(code="effort_unsupported"),
             )
         if effort not in spec.reasoning_efforts:
             raise HTTPException(
                 422,
-                {
-                    "code": "effort_unsupported",
-                    "message": (
-                        f"{model_id} accepts {', '.join(spec.reasoning_efforts)} "
-                        f"\u2014 not '{effort}'"
-                    ),
-                },
+                _wd.effort_not_in_levels(
+                    model=model_id,
+                    levels=", ".join(spec.reasoning_efforts),
+                    effort=effort,
+                ).envelope(code="effort_unsupported"),
             )
         spec = spec.model_copy(update={"reasoning_effort": effort})
     elif spec.reasoning_effort is not None:
@@ -1488,9 +1494,12 @@ async def _remote_lifecycle(
     code = str(result.get("code") or "session_lifecycle_refused")
     message = str(result.get("message") or "")
     if not message:
-        message = f"{device_name or device_id} refused that and said nothing further"
+        # The fallback sentence is catalogue-owned (E2a); the envelope's text is
+        # the same string it always rendered.
+        message = _wd.remote_refusal_silent(device=device_name or device_id).envelope()["text"]
     raise HTTPException(
-        404 if code == "session_not_found" else 409, {"code": code, "message": message}
+        404 if code == "session_not_found" else 409,
+        _wd.desktop_refusal(error=message).envelope(code=code),
     )
 
 
@@ -1585,7 +1594,10 @@ async def _remote_receipt(request: Request, session_id: str, token: str) -> dict
     # with the party named (``readiness.CODE_BEHIND``) — in the
     # ``authorizer._CAUSE_FOR`` shape: finer words where a local caller branches,
     # one coarse class for the machine consumer.
-    raise HTTPException(409, {"code": "session_is_remote", "cause": cause, "message": message})
+    raise HTTPException(
+        409,
+        _wd.desktop_refusal(error=message).envelope(code="session_is_remote") | {"cause": cause},
+    )
 
 
 #: The fixed phrase inside the refusal ``Authorizer.check`` gives an op this
@@ -1638,13 +1650,9 @@ async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) 
     label = device_name or device_id
     raise HTTPException(
         409,
-        {
-            "code": "session_is_remote",
-            "message": (
-                f"The {noun} for {session_id} lives on {label}, and this desktop "
-                "cannot write it there yet; nothing was changed here."
-            ),
-        },
+        _wd.session_is_remote_write(noun=noun, session_id=session_id, label=label).envelope(
+            code="session_is_remote"
+        ),
     )
 
 
@@ -1816,12 +1824,8 @@ def _runtime_busy_refusal() -> "HTTPException":
     """
     return HTTPException(
         503,
-        {
-            "code": RUNTIME_BUSY,
-            "message": RUNTIME_UNREACHABLE_MESSAGE,
-            "retryable": True,
-            "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
-        },
+        _wd.runtime_unreachable().envelope(code=RUNTIME_BUSY)
+        | {"retryable": True, "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS},
         headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
     )
 
@@ -1851,7 +1855,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # not admitting, so the client's move is to rediscover the successor
         # through the record (design §7) — a message and a code it can key on,
         # never a traceback.
-        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except OperatorAuthorityRequired as error:
         # THE REFUSAL IS THE ANSWER (agent review round 1 R1-2 = design D1 = UX
         # U4 = QA Q1). This one arrived as a bare ``RuntimeError`` and fell
@@ -1864,13 +1870,17 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         #
         # ``code`` rides along so a client can key on the category rather than
         # on the sentence, exactly as the ladder's other arms do.
-        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except SubagentChildUnavailable as error:
         # The child read route's containment refusal (design § 9.1). Not folded
         # into the generic 404 below because the code is part of the contract:
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
-        raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            404, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerSessionUnreachable as error:
         # A PEER HOLDS THIS CONVERSATION AND THIS DEVICE CANNOT REACH THAT DEVICE
         # (mesh slice DB2). 409 with the family's own code, which is the answer
@@ -1884,7 +1894,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # pick refuses with, so the two surfaces cannot describe one situation two
         # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
         # the shared composer).
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerSessionUnresolved as error:
         # A PEER WAS SILENT, SO THIS DEVICE CANNOT SAY THE CONVERSATION IS NOT
         # ITS OWN — the other half of mesh slice DB2 (design note §S2). The
@@ -1900,13 +1912,17 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         #
         # The sentence is composed in ``remote_open`` beside the unreachable
         # one, so the two refusals cannot drift apart on different surfaces.
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
         # device's content-addressed store is what the route reads. 409 rather
         # than 404 for the same reason as above: the image exists, and the reader
         # is told where it is instead of being told it does not.
-        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
         # ``sessions/`` directory could not be walked at all (descriptor
@@ -1951,18 +1967,10 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # ConnectionError arm below).
         raise HTTPException(
             503,
-            {
-                "code": error.code,
-                "message": (
-                    "Conversations could not be read right now. "
-                    "This recovers on its own; retry in a moment."
-                ),
-            },
+            _wd.conversations_unreadable().envelope(code=error.code),
         ) from None
     except KeyError:
-        raise HTTPException(
-            404, "Requested session, profile, team or subscription not found"
-        ) from None
+        raise HTTPException(404, _wd.requested_not_found().envelope()) from None
     except MoveIndeterminate as error:
         # 503 with the same NAMED-CONDITION body ``DaemonRetiring`` and
         # ``SubagentChildUnavailable`` use in this ladder (review round 2, N3),
@@ -1982,7 +1990,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # ``AttachedSession.set_working_directory`` (where the exception is still
         # live) and the settlement refusal in ``_settle_unconfirmed_move`` (with
         # all four readbacks).
-        raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except DraftAlreadyMaterialised as error:
         # THE DRAFT'S ONE REFUSAL (spec §1.4), sitting ABOVE the
         # ``(ReceiptConflict, ValueError)`` arm deliberately: that arm's
@@ -1992,7 +2002,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # retry a create that can never succeed. 422 as the spec fixes, in the
         # same named-condition body shape the arms above use, so a renderer keys
         # on the code instead of parsing prose.
-        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
+        raise HTTPException(
+            422, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+        ) from None
     except (ReceiptConflict, ValueError) as error:
         from local_operator.session.errors import (
             AsideUnanswered,
@@ -2002,6 +2014,7 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             ProfileRegistryUnavailable,
             RuntimeRetiring,
         )
+        from local_operator.session.model_admission import RuntimeUpgradeNeededError
 
         if isinstance(error, ForkRefused):
             # THE REFUSAL IS THE ANSWER, exactly as it is for the arms around it.
@@ -2052,7 +2065,8 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # keys never vary.
             raise HTTPException(
                 409,
-                {"code": error.code, "message": str(error), "reason": error.reason},
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"reason": error.reason},
             ) from None
         if isinstance(
             error,
@@ -2084,7 +2098,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # claim the ``MoveIndeterminate`` arm above states for the same
             # body shape ("The client is already built for this shape: it reads
             # ``detail.message`` when ``detail`` is an object").
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, AsideUnanswered):
             # THE REFUSAL IS THE ANSWER, exactly as it is for the three arms around
             # it: the aside ran, the provider answered, and the model would not
@@ -2101,14 +2117,18 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # carries the code a renderer keys on and the sentence that says what
             # to do (ask again). A ``ValueError`` subclass precisely so it lands in
             # THIS arm rather than the arms below.
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, SupersededCompletionToken):
             # Stale, not broken: the caller's token is real but no longer current,
             # and the remedy is to re-read the conversation's attention state and
             # acknowledge the token it names. The machine code is what lets the
             # renderer take that path quietly instead of backing off as if the
             # store had refused (the `code` field of its control error).
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         if isinstance(error, SessionDeletionRefused):
             # A DELETION THE MACHINE REFUSED, and it is a 409 rather than the
             # generic ``str(error)`` arm below for the one reason that matters to
@@ -2117,7 +2137,28 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # that control instead of retrying a call that cannot succeed. The
             # conversation exists, so 404 would be a lie about the user's own
             # work, and nothing failed, so 500 would be a lie about the machine.
-            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
+        if isinstance(error, RuntimeUpgradeNeededError):
+            # THE TYPED MODEL-SWITCH REFUSAL (agent review round 1, R1-1). The
+            # desktop's forwarded ``/model`` slash now pays the owner-record
+            # admission BEFORE it reaches the owner
+            # (``AttachedSession._require_routed_model_admission``); this arm is
+            # what carries that refusal to the renderer. Unlisted, the class
+            # landed in the catch-all below as a bare 409 whose body has no
+            # ``code`` at all (measured on the R1-1 repro), so a client could
+            # only parse prose. 409, in this block's established named-condition
+            # shape: the request is well-formed and the conversation's CURRENT
+            # runtime is what cannot honour it — the sentence itself names the
+            # remedies (a new conversation, or resuming after an idle-boundary
+            # update), and a sign-in repair is exactly what must NOT be
+            # suggested. A ``ValueError`` subclass precisely so it lands in THIS
+            # block rather than the generic arms below, exactly as
+            # ``AsideUnanswered`` is one for the same reason.
+            raise HTTPException(
+                409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            ) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error as error:
         # THREE CONDITIONS, THREE ANSWERS, and the split is the point: this arm
@@ -2161,7 +2202,9 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # the party that can see which guard fired is the only one that can say what
         # to do about it, and re-deriving words here is how two surfaces come to
         # disagree about one machine's state.
-        raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
+        raise HTTPException(
+            503, _wd.desktop_refusal(error=error.sentence).envelope(code=error.code)
+        ) from None
     except ConnectionError as error:
         if getattr(error, "owner_alive", False):
             # THE OWNER IS ALIVE AND SIMPLY DID NOT ANSWER THIS REQUEST IN TIME.
@@ -2203,14 +2246,13 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # in step for copy to keep rendering.
         raise HTTPException(
             503,
-            {
-                "code": RUNTIME_UNREACHABLE,
-                "message": detail or RUNTIME_UNREACHABLE_MESSAGE,
-            },
+            _wd.desktop_refusal(
+                error=detail or _wd.runtime_unreachable().envelope()["text"]
+            ).envelope(code=RUNTIME_UNREACHABLE),
         ) from None
     except (RuntimeError, asyncio.TimeoutError):
         raise HTTPException(
-            503, {"code": RUNTIME_UNREACHABLE, "message": RUNTIME_UNREACHABLE_MESSAGE}
+            503, _wd.runtime_unreachable().envelope(code=RUNTIME_UNREACHABLE)
         ) from None
     except OSError as error:
         # THE LAST ARM, and only for the disk. Placed here rather than beside the
@@ -2264,38 +2306,84 @@ def _requested_scope(scope_kind: str, scope_name: str) -> CatalogueScope | None:
     if kind and not name:
         raise HTTPException(
             422,
-            {
-                "code": "scope_name_required",
-                "message": "scope_name is required when scope_kind is given.",
-            },
+            _wd.scope_name_required().envelope(code="scope_name_required"),
         )
     if name and not kind:
         raise HTTPException(
             422,
-            {
-                "code": "scope_kind_required",
-                "message": "scope_kind is required when scope_name is given.",
-            },
+            _wd.scope_kind_required().envelope(code="scope_kind_required"),
         )
     if not kind:
         return None
     if kind not in SCOPE_KINDS:
         raise HTTPException(
             422,
-            {
-                "code": "scope_kind_unknown",
-                "message": f"scope_kind must be one of {', '.join(SCOPE_KINDS)}.",
-            },
+            _wd.scope_kind_unknown(kinds=", ".join(SCOPE_KINDS)).envelope(
+                code="scope_kind_unknown"
+            ),
         )
     if len(name) > SCOPE_NAME_MAX_LENGTH:
         raise HTTPException(
             422,
-            {
-                "code": "scope_name_too_long",
-                "message": f"scope_name must be at most {SCOPE_NAME_MAX_LENGTH} characters.",
-            },
+            _wd.scope_name_too_long(max_length=str(SCOPE_NAME_MAX_LENGTH)).envelope(
+                code="scope_name_too_long"
+            ),
         )
     return CatalogueScope(kind, name)
+
+
+async def _delegated_cleanup_notice(request: Request) -> dict[str, Any] | None:
+    """The one-time "delegated sessions were cleaned up" notice as a READ-ONLY peek.
+
+    A read must never consume it: this route is polled, and the app's own
+    main-process reads (the attach probe, the auth probe, the serving-state
+    reads) are among the pollers — consuming on read let them eat the notice
+    before the renderer could render it, permanently, since it is once per
+    store. It rides every listed read until the renderer acknowledges it
+    through ``POST /v1/desktop/delegated-cleanup-notice/ack``; the TUI keeps
+    its consume-on-show read. Read on a worker thread (a few-hundred-byte file,
+    but this route is polled). Never raises into the listing it rides on.
+    """
+    try:
+        from local_operator.session.delegated_retention import (
+            notice_wire,
+            peek_unannounced_delegated_notice,
+        )
+        from local_operator.session.retention import SESSIONS_DIRNAME
+
+        root = pathlib.Path(request.app.state.config_manager.config_dir)
+        payload = await asyncio.to_thread(
+            peek_unannounced_delegated_notice, root / SESSIONS_DIRNAME
+        )
+        return None if payload is None else notice_wire(payload)
+    except Exception:  # noqa: BLE001 — a notice never fails the sidebar
+        logger.debug("delegated cleanup notice unavailable", exc_info=True)
+        return None
+
+
+@router.post(
+    "/v1/desktop/delegated-cleanup-notice/ack", response_model=CRUDResponse[dict[str, Any]]
+)
+async def ack_delegated_cleanup_notice(request: Request):
+    """Acknowledge the one-time delegated-cleanup notice, so it is never served again.
+
+    The write half of the pair whose read half rides ``GET /v1/desktop/sessions``
+    (which only PEEKS: every list read — the app's own attach and auth probes
+    among them — must not consume a once-per-store notice). The renderer calls
+    this after it has shown the band. Idempotent: acknowledging twice, an
+    already-acknowledged record, or no record at all all answer
+    ``{"acknowledged": true}`` — the state the caller asked for, the sibling
+    pin/archive convention; a client that needs the store's own answer re-reads
+    the listing, where the notice is simply gone. A store this process cannot
+    write logs and the notice repeats rather than erroring.
+    """
+    from local_operator.session.delegated_retention import acknowledge_delegated_notice
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    root = pathlib.Path(request.app.state.config_manager.config_dir)
+    async with errors(request):
+        await asyncio.to_thread(acknowledge_delegated_notice, root / SESSIONS_DIRNAME)
+    return reply({"acknowledged": True})
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
@@ -2407,6 +2495,7 @@ async def list_sessions(
                 "cursor_missing": page.cursor_missing,
                 "scope": None if scope is None else {"kind": scope.kind, "name": scope.name},
                 "counts": page.counts,
+                "delegated_cleanup_notice": await _delegated_cleanup_notice(request),
             }
         )
 
@@ -2790,13 +2879,7 @@ async def create_session(body: CreateSession, request: Request):
                 if body.peer is not None:
                     raise HTTPException(
                         422,
-                        {
-                            "code": "agents_config_local_only",
-                            "message": (
-                                "A configuration run edits this device's agents and teams, "
-                                "so it cannot be started on another device."
-                            ),
-                        },
+                        _wd.agents_config_local_only().envelope(code="agents_config_local_only"),
                     )
                 # THE SERVER OWNS THE RUN'S SHAPE, so these four are refused rather
                 # than ignored. Silent tolerance would let a renderer believe it had
@@ -2818,14 +2901,9 @@ async def create_session(body: CreateSession, request: Request):
                 if supplied:
                     raise HTTPException(
                         422,
-                        {
-                            "code": "agents_config_client_fields",
-                            "message": (
-                                "A configuration run chooses its own working directory "
-                                "and model, so " + ", ".join(supplied) + " cannot be sent "
-                                "with it."
-                            ),
-                        },
+                        _wd.agents_config_client_fields(fields=", ".join(supplied)).envelope(
+                            code="agents_config_client_fields"
+                        ),
                     )
                 # SINGLE FLIGHT, per config root. The registries are global to
                 # this machine and two runs racing on one row would be
@@ -2839,14 +2917,8 @@ async def create_session(body: CreateSession, request: Request):
                 if active is not None:
                     raise HTTPException(
                         409,
-                        {
-                            "code": "agents_config_running",
-                            "message": (
-                                "A configuration run is already going. Open it to follow "
-                                "it, or stop it first."
-                            ),
-                            "session_id": active,
-                        },
+                        _wd.agents_config_running().envelope(code="agents_config_running")
+                        | {"session_id": active},
                     )
             elif body.peer:
                 if body.model is not None:
@@ -2892,7 +2964,9 @@ async def create_session(body: CreateSession, request: Request):
             code = str(result.get("code") or "peer_refused")
             raise HTTPException(
                 503 if code in _CREATE_UNCONFIRMED_CODES else 409,
-                {"code": code, "message": str(result.get("message") or "that device refused")},
+                _wd.desktop_refusal(
+                    error=str(result.get("message") or "that device refused")
+                ).envelope(code=code),
             )
         return reply(result)
 
@@ -3087,6 +3161,14 @@ async def snapshot(
     session_id: str,
     request: Request,
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3118,6 +3200,13 @@ async def snapshot(
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
     #
+    # ``open_frame=1`` IS THE OTHER ADDITIVE FLAG, and it is on this route for
+    # the same reason ``entry_ts`` is: the snapshot embeds a history page, and a
+    # renderer that paints from the paint-only page must get the same shape from
+    # the snapshot as from ``/history`` — two unit systems for one page is the
+    # defect this capability exists to avoid. See ``docs/DESKTOP_API.md``
+    # §"The open frame".
+    #
     # ``entry_ts=1`` RIDES THIS ROUTE TOO, because the snapshot embeds a history
     # page (``payload.history``) and that page is served by the same reader — so a
     # renderer that declared the vocabulary must get the SAME answer from the
@@ -3128,7 +3217,15 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.snapshot(entry_times=bool(entry_ts)))
+        return reply(
+            await bridge.snapshot(
+                entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=bool(peer_journal_source),
+                **supplement_read_options(bool(supplements)),
+            )
+        )
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3163,15 +3260,9 @@ async def _remote_open_refusal(request: Request, session_id: str) -> None:
     label = device_name or device_id
     raise HTTPException(
         409,
-        {
-            "code": "session_is_remote",
-            "message": (
-                f"{session_id} lives on {label}, and this desktop cannot open a "
-                "conversation on another device yet. Move it home with "
-                f"`lop sessions move {session_id} --to local`, or pilot it from the "
-                f"terminal with `/network sessions --peer {label} --engage {session_id}`."
-            ),
-        },
+        _wd.session_is_remote_open(session_id=session_id, label=label).envelope(
+            code="session_is_remote"
+        ),
     )
 
 
@@ -3185,10 +3276,31 @@ async def history(
     after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
+    source_read: Annotated[str | None, Query(max_length=32)] = None,
+    expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
+    supplements: int = Query(default=0, ge=0),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
     # returns one for a directory that does not exist), not a 404.
+    #
+    # ``peer_journal_source=1`` IS THE COMPLETE CONTRACT'S DECLARATION (the
+    # matching feature key is ``peer_journal_source`` in ``GET /v1/capabilities``
+    # ``features``): a renderer that sends it, together with ``journal_order``,
+    # is served the owner's own source state for a PEER session — including
+    # ``building``, which an availability wake settles — and its answers carry
+    # the per-response ACK. Without it every answer is byte-for-byte today's.
+    # ``source_read`` selects one typed purpose (``metadata``/``payload``;
+    # ``availability`` is the bridge's internal lane and is refused here like
+    # any other value on a non-peer session), and ``expected_journal_generation``
+    # is the payload purpose's REQUIRED domain fence.
     #
     # ``around_id``/``before``/``after`` are the anchored mode (design §D4): one
     # page centred on an entry id, for the renderer's far jump. The reader's own
@@ -3196,6 +3308,14 @@ async def history(
     # named with a cursor, counts with no anchor) through ``errors()``, so the
     # request fails the same way whichever door it came through; the numeric
     # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
+    #
+    # ``open_frame=1`` ASKS FOR THE PAINT-ONLY, RUN-ALIGNED PAGE of
+    # ``docs/DESKTOP_API.md`` §"The open frame" — a page counted in paintable
+    # rows, cut back to a run's opening user row under a hard cap (with an honest
+    # ``head_cut`` when the cap binds), with non-painted bytes stripped and the
+    # per-run facts a collapsed turn's bar needs. It is additive in both
+    # directions: without it every answer is byte-for-byte today's, and this
+    # route's own reading is unchanged.
     #
     # ``entry_ts=1`` IS THE SAME KIND OF ADDITIVE NEGOTIATION as
     # ``frontend_replace`` on ``events`` beside it: it says this renderer can
@@ -3217,6 +3337,16 @@ async def history(
                 after=after,
                 limit=limit,
                 entry_times=bool(entry_ts),
+                open_frame=bool(open_frame),
+                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                peer_journal_source=bool(peer_journal_source),
+                # Passed explicitly rather than unpacked: ``None`` IS "absent"
+                # for both (the bridge tests ``is not None``), and a str-valued
+                # unpack beside the bool-valued ones makes the whole kwargs
+                # block one inferred union type under pyright.
+                source_read=source_read,
+                expected_journal_generation=expected_journal_generation,
+                **supplement_read_options(bool(supplements)),
             )
         )
 
@@ -3546,6 +3676,42 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     )
 
 
+@router.get("/v1/desktop/sessions/{session_id}/supplements/{digest}/document")
+async def supplement_document(session_id: str, digest: AttachmentDigest, request: Request):
+    """The assembled HTML document of one stored supplement component, as ``{html}``.
+
+    The document (``docs/design/turn-supplements.md`` §2.6/§2.7) is assembled by
+    ``supplements.document`` from the component blob this digest names and
+    returned as JSON -- **never** a navigable ``text/html`` URL, because no host
+    may point a frame at a URL (§4.1): the frame mounts these bytes at an opaque
+    origin under the document's own meta CSP. The route is digest-only by
+    construction: there is no caller-supplied path anywhere in the request, and
+    ``digest`` reuses :data:`AttachmentDigest`, the traversal gate of the
+    attachment route beside it (a non-matching path is a 422 before any handler
+    code runs).
+
+    Response headers are the executing-document family's (file-serving RFC D5):
+    ``X-Content-Type-Options: nosniff`` and ``Cache-Control: no-store``. The
+    digest-addressing would make an ``immutable`` cache semantically safe about
+    the bytes, and it is still the wrong header: ``managed_desktop_boundary``
+    applies ``no-store`` to everything under ``/v1/desktop/`` because these are
+    bearer-gated session documents, and D5 names ``no-store`` for this family
+    explicitly. The frame's own CSP rides INSIDE the document (the tunnel strips
+    response headers; §2.7), so no policy depends on this response's headers --
+    they are belt beside it.
+
+    A digest held by another device is 409 ``attachment_on_peer`` (passed
+    through by the error ladder); a missing or unassemblable blob is an ordinary
+    404, and the frame-level fallback line is what the reader paints (§2.8).
+    """
+    async with errors(request):
+        html = await host(request).supplement_document(session_id, digest)
+    return JSONResponse(
+        {"html": html},
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"},
+    )
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/messages", response_model=CRUDResponse[MessageAdmission]
 )
@@ -3755,7 +3921,7 @@ async def command(session_id: str, body: Command, request: Request):
     """
     spec = slash_command_for("/" + body.command.removeprefix("/"))
     if spec is None or not spec.desktop_destination:
-        raise HTTPException(422, "Unknown command")
+        raise HTTPException(422, _wd.unknown_command().envelope())
     if spec.name == "credential" and body.args:
         # The ONE command whose trailing text this route REFUSES rather than
         # consumes, because the secret is entered in the masked form. Left as its
@@ -3770,9 +3936,7 @@ async def command(session_id: str, body: Command, request: Request):
         # and the registry's `ANY` is what keeps the secret out of a paid turn
         # for a client whose command surface is off and which therefore plans
         # every draft as `send`.
-        raise HTTPException(
-            422, "Enter credentials in the masked credential form, not command text"
-        )
+        raise HTTPException(422, _wd.masked_credential_form().envelope())
     if spec.name == "session" and body.args.strip() == SESSION_COPY_FLAG:
         # Beside `/credential` because it is the same kind of refusal: a sentence
         # naming where the gesture works, not a shape check. Forwarding it would
@@ -3781,7 +3945,7 @@ async def command(session_id: str, body: Command, request: Request):
         # gesture (decision D3); any other `/session` text forwards as before.
         raise HTTPException(
             422,
-            f"{SESSION_COPY_FLAG} works only in the terminal; the /session view shows the ID",
+            _wd.session_copy_terminal_only(flag=SESSION_COPY_FLAG).envelope(),
         )
     refusal = command_argument_refusal(spec, body.args)
     if refusal is not None:
@@ -3990,7 +4154,7 @@ async def answer(session_id: str, body: Answer, request: Request):
                 raise HTTPException(409, message) from None
             return reply({"detail": detail})
         if body.epoch != bridge.remote.frontend_state.epoch:
-            raise HTTPException(409, "This answer belongs to an earlier session owner")
+            raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
         try:
             detail = await bridge.remote.answer_gate(
                 body.request_id,
@@ -4010,10 +4174,11 @@ async def answer(session_id: str, body: Answer, request: Request):
             # prose, and the copy names the remedies.
             raise HTTPException(
                 422,
-                {"code": error.code, "message": str(error), "still_pending": True},
+                _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                | {"still_pending": True},
             ) from None
         except RuntimeError:
-            raise HTTPException(409, "This question or approval is no longer pending") from None
+            raise HTTPException(409, _wd.question_no_longer_pending().envelope()) from None
         return reply({"detail": detail})
 
 
@@ -4418,6 +4583,21 @@ async def warm(session_id: str, body: Warm, request: Request):
     # feature adds nothing to (spec §0.1/§1.3).
     async with errors(request), host(request).session(session_id, allow_draft=True) as bridge:
         assert bridge.remote is not None
+        # THE INDEX WARM RIDES THIS ROUTE (the per-session warm path), scheduled HERE
+        # rather than before the admission checks (review round 3, F12): above this
+        # line the call can still be refused — an unknown session (404) or a daemon
+        # that has LATCHED against new work (503, ``daemon-retiring``) — and a
+        # retiring daemon must not start a scan on its way out. Fire-and-forget by
+        # contract: ``start_session_warm`` schedules and returns, never raises, and is
+        # never awaited, so the engage below does not wait on a scan and a session
+        # whose index cannot be warmed still opens, paying the scan itself.
+        #
+        # WHAT IT IS WORTH, stated honestly: the desktop UI fires ``sessions.warm``
+        # on the FIRST KEYSTROKE while the manifest read on MOUNT already starts the
+        # same refresh (``checkpoints_view`` -> ``start_refresh``), so the index half
+        # usually JOINS a build that is already running. It is the anchor write the
+        # stacked anchor change adds here that is new work on every open.
+        start_session_warm(store_root(request), session_id)
         return reply({"state": await bridge.warm()})
 
 
@@ -4702,6 +4882,382 @@ async def interrupt(session_id: str, body: Interrupt, request: Request):
         )
 
 
+#: The job id a desktop cancel names, bounded the way the wire spells it
+#: (``desktop-contract``'s ``jobId``: 1..64 characters). Deliberately NOT
+#: patterned to the manager's 12-hex mint: ``AsyncJobManager.get`` also
+#: resolves historical attempt ALIASES, and the lookup — never a regex — is
+#: the one arbiter of whether an id names a job.
+JobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+#: What a job cancel's refusal means, as an HTTP status. One table for every
+#: refusal this route can surface, so the same mistake can never mean two
+#: different statuses depending on which side raised it.
+_JOB_STATUS_FOR_CODE = {
+    # Our own payload could not be read — a protocol bug, not user input; the
+    # same client-error class the wake/monitor ladders reserve for it.
+    "jobs_invalid": 422,
+    # The roster does not know the id: the frozen ``not_found`` class.
+    "jobs_not_found": 404,
+    # The row exists but was not running — the press asked for a stop that
+    # cannot happen (it settled first, or a retried cancel arrived late).
+    "jobs_not_cancelled": 409,
+    # No manager attached — a session SHAPE, like the wake surface's
+    # "unavailable" arm, so 409 rather than a transport 503.
+    "jobs_unavailable": 409,
+    # No live runtime to ask, or no receipt from the one asked: nothing was
+    # cancelled and the client's move is to come back (the sibling routes' 503).
+    "jobs_owner_unavailable": 503,
+}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/jobs/{job_id}/cancel",
+    response_model=CRUDResponse[JobCancelReceipt],
+)
+async def cancel_job(session_id: str, job_id: JobId, request: Request) -> Any:
+    """Cancel ONE background job on this conversation — the job rail's server half.
+
+    ``POST`` rather than the wake/monitor cancels' ``DELETE``, and the
+    difference is the resource's fate (the contract's own note): a cancelled
+    wake or monitor is GONE from its listing, while a cancelled job is a row
+    that stays and settles — the press is an action ON it, so the route is one
+    too.
+
+    WHO CANCELS. ``AsyncJobManager.cancel`` is the engine's one cancel call —
+    the same call ``jobs op='cancel'`` makes — and the manager lives in the
+    process that owns the session, so this route resolves the owner first and
+    DELEGATES through ``route_shared_slash("jobs", …)`` to
+    ``serving._jobs_slash`` inside that process (the wakes/monitors ladder's
+    shape, deliberately the same seam). Nothing here cancels anything itself,
+    and nothing here is a second mechanism: the runner's own cancellation
+    semantics — a video runner's bounded ``best_effort_cancel`` — apply
+    identically whoever asked.
+
+    THE PRESS IS AN ACKNOWLEDGEMENT, NOT AN OUTCOME (the honesty rule every
+    surface keeps): a 2xx says the manager received the cancel and signalled
+    the job; only the job's own settle paints ``cancelled``. A refusal is a
+    sentence the surface renders where it asked — the frozen ``not_found``
+    phrase for an unknown id (the engine authors it from its own wording map,
+    so no client has to substitute for it) and the engine's own "not
+    cancelled (status: …)" sentence for a row that settled first.
+
+    NO RECEIPT JOURNAL, the wake/monitor cancels' own reading: a retried
+    cancel about a job the first attempt already stopped answers an honest
+    refusal rather than a second side effect, so there is no duplicate a
+    journal would prevent — and the call site sends no request id for one to
+    claim on.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(await _cancel_job_on_owner(bridge, session_id, job_id))
+
+
+async def _cancel_job_on_owner(bridge: Any, session_id: str, job_id: str) -> dict[str, Any]:
+    """Ask the session's runtime to cancel one job, inside its own process.
+
+    The route never holds a manager: job state lives in the runtime's
+    ``AsyncJobManager``, and with no live owner there is nothing to reach (job
+    state does not persist outside a runtime the way wake/monitor state does,
+    so unlike those surfaces there is no cold path here — only an honest
+    refusal). A RECOVERING facade is not folded into "no owner": it is dialled
+    like a live one, and a dial that cannot be served is the ladder's 503
+    (``runtime_unreachable``) — the interrupt route's own distinction, one
+    rung over.
+    """
+    if not bridge.remote.owner_reachable and not bridge.remote.recovering:
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation has no live runtime, so the job cannot be cancelled.",
+            session_id=session_id,
+        )
+    payload = json.dumps({"op": "cancel", "job_id": job_id})
+    outcome = await bridge.remote.route_shared_slash("jobs", payload)
+    if not isinstance(outcome, Mapping):
+        # NOT a job refusal the runtime decided: the bridge answered nothing
+        # at all (no ack shape from the owner). Nothing was cancelled, and the
+        # client's move is to come back — the wake/monitor twins' 503 sentence
+        # for the same state.
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime answered nothing for this job.",
+            session_id=session_id,
+        )
+    if outcome.get("kind") == "error":
+        data = outcome.get("data") or {}
+        code = str(data.get("code") or "jobs_refused")
+        raise _job_refusal(
+            _JOB_STATUS_FOR_CODE.get(code, 409),
+            code,
+            str(outcome.get("text") or "The job was refused."),
+            session_id=session_id,
+        )
+    data = outcome.get("data") or {}
+    if not str(data.get("job_id") or ""):
+        # AN OWNER THAT DOES NOT KNOW THE WORD. An older build falls through
+        # the routed dispatch to its configuration notice — a non-error shape
+        # with no job id — and reporting THAT as a receipt would be a silently
+        # dead cancel with a 2xx (the class the wake/monitor routes exist to
+        # remove), so an answer without a job id is treated as "no receipt".
+        raise _job_refusal(
+            503,
+            "jobs_owner_unavailable",
+            "The conversation's runtime did not confirm the job cancel.",
+            session_id=session_id,
+        )
+    return {"job_id": str(data.get("job_id")), "cancelled": bool(data.get("cancelled"))}
+
+
+def _job_refusal(status: int, code: str, message: str, *, session_id: str = "") -> HTTPException:
+    """A job refusal, in the shape the wake and monitor surfaces' refusals use,
+    so the desktop client unwraps all three families with one reader. The
+    status is the caller's (the map's, or the ladder's own)."""
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if session_id:
+        detail["session_id"] = session_id
+    return HTTPException(status, detail)
+
+
+#: A supplement job id on a control route's path. Bounded, deliberately NOT
+#: patterned: a stale id must REACH the runtime's identity gate and be refused
+#: there (the neutral ``already finished`` receipt), not rejected as a shape
+#: error here -- and the gate, never a regex, is the one arbiter of whether an
+#: id names a job (the ``JobId`` rule above, one id space over).
+SupplementJobId = Annotated[str, Path(min_length=1, max_length=64)]
+
+
+class SupplementTarget(Input):
+    """Which of an answer's supplement rows a control op names.
+
+    ``anchor`` is the final assistant message id the row rides under -- the
+    row's own ``anchor`` key (memo §2.4), which the TUI calls
+    ``completion_anchor_id`` -- and every supplement op acts on the PAIR
+    ``(anchor, job)``. The anchor is REQUIRED rather than resolved from the job
+    id because the runtime's identity gate checks exactly this pair (C1b's
+    review R1): a route that re-derived one half from the other would be a
+    second lookup that can disagree with the one that decides. The bound
+    mirrors the shipped renderer's schema (``desktop-contract``'s
+    ``supplementAnchor``: 1..128), and journal entry ids are ``uuid4().hex``
+    (32 chars), so it admits every real anchor.
+    """
+
+    anchor: str = Field(min_length=1, max_length=128)
+
+
+class SupplementSteer(SupplementTarget):
+    """The steer's body: the target pair plus the operator's instruction.
+
+    ``text`` carries memo §2.7's bound at the wire
+    (:data:`~local_operator.supplements.contract.STEER_TEXT_MAX_CHARS`), so an
+    over-bound instruction is a 422 naming the field -- the same refusal the
+    runtime's own dispatch makes for the same text, one layer earlier, where
+    the caller's fix is a different body. A whitespace-only instruction is
+    refused here for the same reason: the dispatch would answer it with an
+    error frame ("supplement_steer needs a non-empty instruction"), which this
+    family's ladder can only render as an unreachable owner -- a false
+    statement about a body that was merely blank. The op itself still
+    normalises the text (``steer_job``'s ``" ".join(...)``): the wire forwards
+    the operator's words verbatim and the runtime is the one place they are
+    flattened.
+    """
+
+    text: str = Field(min_length=1, max_length=STEER_TEXT_MAX_CHARS)
+
+    @field_validator("text")
+    @classmethod
+    def _an_instruction_must_carry_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a steer instruction must not be blank")
+        return value
+
+
+async def _supplement_receipt(
+    remote: Any,
+    *,
+    session_id: str,
+    op: Literal["cancel", "steer", "restart"],
+    anchor: str,
+    job: str,
+    text: str = "",
+) -> dict[str, Any]:
+    """Drive one supplement control op on the session's runtime and receipt its answer.
+
+    THE ONE DISPATCH BEHIND THE THREE ROUTES BELOW, and the session DOOR stays in
+    those routes rather than moving in here: the desktop plane's refusal-matrix
+    walk (``tests/unit/server/test_serve_retire.py``) reads every module-level
+    function that obtains a bridge as a route that must be listed and gated, and
+    a helper holding the ``host(request).session(...)`` call would be a name no
+    matrix row and no router could publish. The ops themselves live on
+    the serving handle (``session/runtime/supplements.py``: ``cancel_job`` /
+    ``steer_job`` / ``restart_job``, reached over the control socket by
+    ``session/attached.py``'s facade methods), so this layer adds a way to
+    REACH them from HTTP -- one line per op mapping to
+    ``bridge.remote.supplement_*``, the interrupt route's own shape -- and not
+    a second implementation of the state machine. Both consequences are
+    deliberate: the runtime's identity gate and its journal-inside-the-write-
+    lock invariants decide every act, and the receipt vocabulary is the
+    runtime's own words (:class:`~local_operator.server.models.desktop_sessions.SupplementReceipt`).
+
+    NO RECEIPT JOURNAL (the jobs-cancel route's own reading): the shipped
+    client sends no request id for one to claim on -- these bodies carry
+    identity and nothing else -- and a retried op that finds nothing live
+    answers the neutral ``already finished`` receipt rather than a duplicate
+    side effect, so there is no duplicate a journal would prevent.
+
+    NO REACHABLE OWNER IS A REFUSAL, NOT A NO-OP: a supplement job exists only
+    in a running runtime's memory, so a session with no live runtime has
+    nothing this request could act on, and the sentence names the condition
+    rather than a remedy that cannot help. The term is REACHABILITY,
+    deliberately not ``is_cold`` (the interrupt route's lesson: a resyncing
+    viewer reads cold while its owner keeps serving), and a RECOVERING facade
+    is dialled like a live one -- a dropped socket says nothing about the job
+    -- with a dial that cannot be served answered by the shared ladder's 503
+    ``runtime_unreachable``.
+    """
+    if not remote.owner_reachable and not remote.recovering:
+        raise _job_refusal(
+            503,
+            "supplements_owner_unavailable",
+            "The conversation has no live runtime, so its highlights cannot be updated.",
+            session_id=session_id,
+        )
+    if op == "steer":
+        receipt = await remote.supplement_steer(anchor, job, text)
+    elif op == "restart":
+        receipt = await remote.supplement_restart(anchor, job)
+    else:
+        receipt = await remote.supplement_cancel(anchor, job)
+    return {"op": op, "anchor": anchor, "job": job, "receipt": str(receipt)}
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/cancel",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_cancel(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Cancel the running attempt of one supplement job (the Highlights block's Cancel).
+
+    WHY THIS ROUTE EXISTS, AND WHY HERE. The supplement control ops already
+    ride the runtime's attach channel (memo §2.7), but the desktop renderer is
+    HTTP-ONLY -- its IPC is main-process HTTP, with no attach channel to this
+    daemon's runtimes -- so the block's controls were reachable from the TUI
+    and the phone and not from the app, where a press answered 404. The fix
+    belongs in this family rather than in the client because the runtime's ops
+    are the one implementation of the semantics; the route is a door to them,
+    and there is one route per op because the shipped client names three
+    paths.
+
+    WHAT THE CALLER GETS BACK. The runtime's receipt, verbatim, in
+    ``SupplementReceipt``: ``cancelled`` when the running attempt was cut (the
+    row's own settle is the durable evidence, exactly as it is for a job
+    cancel), and the neutral ``already finished`` when there was nothing live
+    to cut -- a settled job, one this runtime forgot, or a pair the identity
+    gate refuses. THE NEUTRAL RECEIPT IS DELIBERATE (memo §2.7, reusing
+    image-gen's ``ALREADY_FINISHED_NOTE``, which "must never wear the error
+    ink or glyph"): a surface that lost a race with the job's own end must not
+    be told something happened, and a press that changed nothing must not be
+    rendered as a failure. A STALE JOB ID IS REFUSED BY THAT RECEIPT, NEVER
+    RESOLVED onto the anchor's newer job: the runtime cuts only the task
+    running under the exact ``(anchor, job)`` named (C1b's R1 identity gate),
+    and this route passes the pair through untouched -- there is no lookup here
+    that could re-point it.
+
+    AUTHORISATION and RESPONSE POLICY are the family's, not re-decided here:
+    the router's ``require_desktop`` dependency (bearer token, Origin
+    allowlist, 503 while the plane is closed) gates every route in this module;
+    a session this machine does not hold refuses through the pool's own lookup
+    (404, and a peer's row through its own typed arms); and
+    ``desktop_supplement_response_policy`` stamps ``nosniff`` +
+    ``Cache-Control: no-store`` on every status of the ``/supplements/``
+    namespace, errors included.
+
+    REFUSALS: 503 ``supplements_owner_unavailable`` for a session with no live
+    runtime (see the dispatcher above); the ladder's 404/409/503 for a session
+    it cannot resolve; 422 for a body that is not exactly ``{anchor}``; and an
+    owner that predates the op answers through the attach layer's error frame,
+    which the ladder renders as its own 503.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="cancel", anchor=body.anchor, job=job
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/steer",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_steer(
+    session_id: str, job: SupplementJobId, body: SupplementSteer, request: Request
+):
+    """Steer one supplement job: cut the in-flight attempt, start version + 1 with the text.
+
+    The Adjust control's op (memo §2.7). NOT a turn: it never touches the
+    session's turn lock, steering queue or model context -- it starts a new
+    GENERATOR version with the operator's instruction, and the runtime's own
+    ``steer_job`` owns every part of that distinction.
+
+    THE QUEUE RULE IS THE RUNTIME'S (memo §2.9): when the named job is not the
+    running one, the steer does not cut it -- it is queued behind the running
+    job (depth 1; a newer request replaces the queued one) and runs when that
+    job settles. The receipt is ``steering`` either way, BY DESIGN (the
+    runtime's own test pins the queued case to the same word): it reports that
+    the instruction was ACCEPTED, and this route neither claims nor implies
+    that the new version started immediately. A pair the runtime cannot act on
+    answers the neutral ``already finished`` (see ``supplement_cancel`` for the
+    full receipt vocabulary and the family's authorisation, response policy and
+    refusals).
+
+    ``text`` is bounded at the wire (``SupplementSteer``: 1..500 chars,
+    non-blank) and again by the runtime's dispatch, which is the owner of the
+    spend this op authorises.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote,
+                session_id=session_id,
+                op="steer",
+                anchor=body.anchor,
+                job=job,
+                text=body.text,
+            )
+        )
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/supplements/{job}/restart",
+    response_model=CRUDResponse[SupplementReceipt],
+)
+async def supplement_restart(
+    session_id: str, job: SupplementJobId, body: SupplementTarget, request: Request
+):
+    """Restart one supplement job: version + 1 with the previous instruction (the Retry).
+
+    The Retry affordance's op, offered from ``failed``/``cancelled``/``done``
+    (memo §2.7). It shares the steer's queue rule and receipt vocabulary --
+    ``restarting`` on acceptance, the neutral ``already finished`` for a pair
+    the runtime cannot act on -- and the steer's one distinction from a turn:
+    it spends a generator call, never the session's turn machinery. See
+    ``supplement_cancel`` for the family's authorisation, response policy and
+    refusals, and ``SupplementReceipt`` for the vocabulary.
+    """
+    async with errors(request), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply(
+            await _supplement_receipt(
+                bridge.remote, session_id=session_id, op="restart", anchor=body.anchor, job=job
+            )
+        )
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/working-directory",
     response_model=CRUDResponse[MoveReceipt],
@@ -4836,6 +5392,14 @@ async def events(
     after_seq: int = Query(default=0, ge=0),
     frontend_replace: int = Query(default=0, ge=0),
     entry_ts: int = Query(default=0, ge=0),
+    open_frame: int = Query(default=0, ge=0),
+    journal_order: Annotated[int, Query(ge=0, le=1)] = 0,
+    order_ids: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=128)]] | None,
+        Query(max_length=512),
+    ] = None,
+    peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
+    supplements: int = Query(default=0, ge=0),
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -4853,7 +5417,19 @@ async def events(
             # and the move path then refuses rather than leaving that mounted
             # viewer stale. The flag is retained on the subscription so the
             # fence in ``subscribe`` can refuse a LEGACY mount during a move.
-            sub = bridge.subscribe(frontend_replace=bool(frontend_replace))
+            #
+            # ``supplements=1`` is the same kind of declaration for the
+            # ``supplements-v1`` family (memo §2.7): only a subscriber that
+            # sends it is handed ``supplement_progress`` frames -- live or from
+            # replay -- so an older renderer never meets the family. The rows
+            # themselves are journaled either way; this gates the live carriage,
+            # not the record.
+            sub = bridge.subscribe(
+                frontend_replace=bool(frontend_replace),
+                supplements=bool(supplements),
+                journal_order=bool(journal_order),
+                peer_journal_source=bool(peer_journal_source),
+            )
         except LegacySubscriberDuringMove as error:
             await context.__aexit__(None, None, None)
             raise HTTPException(409, str(error)) from None
@@ -4906,11 +5482,29 @@ async def events(
             # silently skipped there. Closing it *inside* the ``try`` is the
             # load-bearing part: the outer ``finally`` below has not run yet.
             async with aclosing(
-                bridge.events(sub, epoch=epoch, after_seq=after_seq, entry_times=bool(entry_ts))
+                bridge.events(
+                    sub,
+                    epoch=epoch,
+                    after_seq=after_seq,
+                    entry_times=bool(entry_ts),
+                    open_frame=bool(open_frame),
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    peer_journal_source=bool(peer_journal_source),
+                )
             ) as frames:
                 try:
                     async for frame in frames:
-                        yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        ser_at = time.monotonic() if open_trace.enabled() else 0.0
+                        text = "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                        if ser_at:
+                            open_trace.mark(
+                                "a.wire.frame",
+                                (time.monotonic() - ser_at) * 1000,
+                                session=session_id,
+                                kind=frame.get("type") if isinstance(frame, dict) else "",
+                                chars=len(text),
+                            )
+                        yield text
                 finally:
                     # STAMPED BEFORE THE GENERATOR IS CLOSED, AND THE ORDER IS
                     # LOAD-BEARING RATHER THAN TIDY (F-B). Closing it arms the
@@ -4981,7 +5575,7 @@ async def desktop_events(request: Request):
     """
     engine = feed(request)
     if len(engine.subscribers) >= SUBSCRIBER_COUNT:
-        raise HTTPException(503, "Too many desktop feed subscribers")
+        raise HTTPException(503, _wd.feed_subscriber_limit().envelope())
     # Off the loop: the connect floor's store read can wait the contention
     # budget out, and this is the route a client is waiting on (see
     # ``DesktopFeed.subscribe_off_loop``).
@@ -5033,7 +5627,7 @@ async def desktop_presence(
     """
     engine = feed(request)
     if body.subscription_id not in engine.subscribers:
-        raise HTTPException(404, "Unknown desktop feed subscription")
+        raise HTTPException(404, _wd.feed_subscription_unknown().envelope())
     engine.presence.update(
         body.subscription_id,
         can_notify=bool(body.can_notify),

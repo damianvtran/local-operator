@@ -69,6 +69,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
+from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
     from local_operator.harness.types import AudioContent, ImageContent
@@ -103,9 +104,14 @@ from local_operator.session.runtime.types import (
 )
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
+    Transcript,
     is_bookkeeping_entry,
     is_bookkeeping_message,
     transcript_is_bookkeeping_only,
+)
+from local_operator.supplements.contract import (
+    SUPPLEMENT_CUSTOM_TYPE,
+    newest_per_anchor,
 )
 
 logger = logging.getLogger(__name__)
@@ -901,6 +907,21 @@ class ServingSessionHandle(SessionHandle):
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
         self._background_tasks: set[asyncio.Future[Any]] = set()
+        #: ``(selected_selector, provider, model_id)`` of a re-home this owner
+        #: REFUSED because the conversation was busy, retried at the turn end
+        #: (``_retry_deferred_rehome``). Also serves as the reply classified by
+        #: the sign-in pool (``REHOME_BUSY_REPLY``), so the deferral is counted
+        #: on the receipt while its promise — ``rehome_deferred_notice``'s
+        #: "until the turn ends" — is kept by the owner itself (round-2 M1/D6/Q2:
+        #: before this, only a TUI owner retried and a runtime-served session
+        #: stayed on the unreachable model with nothing more said).
+        self._rehome_pending: tuple[str, str, str] | None = None
+        #: The ONE in-flight turn-end retry, held so two turn ends landing
+        #: before it yields cannot both run (round-3 MINOR-2): the retry's CAS
+        #: re-check precedes its own credential read, so two live retries both
+        #: pass it — a duplicate sentence and a redundant same-model set. Held
+        #: by reference like the naming errand, and cleared when it settles.
+        self._rehome_retry_task: asyncio.Task[None] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
         # request_id -> (monotonic instant, settled value) for gates that LANDED
@@ -1032,6 +1053,23 @@ class ServingSessionHandle(SessionHandle):
         #: ``create_task`` whose result nobody holds can be collected before it
         #: runs, which is the failure this attribute exists to prevent.
         self._completion_task: asyncio.Task[None] | None = None
+        #: Turn supplements' runner (``session/runtime/supplements.py``). Built here, once
+        #: per handle, because the subscriber that feeds it is installed at boot. Its task
+        #: is deliberately NOT in ``_background_tasks``: see the runner's module docstring.
+        from local_operator.session.runtime.supplements import SupplementRunner
+
+        self._supplements = SupplementRunner(
+            session,
+            cwd=cwd,
+            config_dir=config_dir,
+            seam=getattr(session, "supplement_seam", None),
+        )
+        # The detached maintenance pass (sweep.py; memo-style housekeeping of orphaned
+        # component blobs and stale rows). SCHEDULED here, never awaited -- the pass is
+        # interval-gated, bounded and runs off the loop's critical path by construction,
+        # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
+        # the feature is disabled.
+        self._supplements.schedule_sweep(loop)
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -1053,6 +1091,13 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
+        # a single frame, so a desktop session is never read with no claim at
+        # all (the band's sentence is unrenderable then) — the same fact the
+        # TUI host publishes on its own adopt edge, from this process's own
+        # store. `publish_model_access` carries its own never-raises guard, so
+        # it cannot fail the boot it rides in on.
+        self.publish_model_access()
         # Last, so a handle that could not be fully built never leaves a live
         # registration behind (see :meth:`_register_secret_session`). The call
         # is synchronous and can stall the loop for up to ``STARTUP_TIMEOUT_S``
@@ -1565,6 +1610,8 @@ class ServingSessionHandle(SessionHandle):
         task = self._completion_task
         if task is not None and not task.done():
             task.cancel()
+        # The supplement job is droppable by contract: shutdown never waits on it.
+        await self._supplements.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
         # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
         # that disposes in place. Recorded BEFORE the abort below so the turn's
@@ -2109,7 +2156,9 @@ class ServingSessionHandle(SessionHandle):
         runs it, and a final fire's re-arm rides ``_hand_wakes_to_successor``
         at the exit. Spooling that window again would mean re-latching
         ``begin_drain``, which ``_abandon_move`` records against: a second
-        retire discards the ``_wake_rearms`` the drain already swallowed.
+        retire re-runs ``retire_wakes_to_inbox``, and the fires the first drain
+        swallowed are already RESERVED in the scheduler's owned view
+        (``WakeScheduler.hold_pending``) — a second retire must not strand them.
         """
         if not getattr(self, "_draining", False):
             return False
@@ -2199,6 +2248,63 @@ class ServingSessionHandle(SessionHandle):
     # THE ORDER IS THE CONTRACT: open the window (publish + heartbeat) BEFORE the
     # announce, exactly as ``process._begin_drain`` announces before it latches. A
     # window opened after the exit was committed would be a queue nobody drains.
+
+    def request_checkpointed_move(
+        self, pair: str, *, turn_id: str = "", boot_build: str = "", phase: str = "resume"
+    ) -> bool:
+        """Ask a BUSY runtime to move at its next committed pair. False: refused.
+
+        The busy-turn sibling of :meth:`begin_update`: that window is opened only
+        from the IDLE decision (``begin_retire``/``may_refresh`` fire on idle), so
+        it cannot carry a turn that is mid-flight. This path deliberately does
+        NOT sample idleness and does NOT cancel the worker — it opens the SAME
+        admission window (new work spools via ``_spool_for_successor``) and
+        latches a checkpoint request on the session, whose record lands at the
+        next turn-pair commit.
+
+        Returns False when the window cannot be opened (already open, empty pair)
+        or the session cannot latch a request; a refusal leaves the runtime and
+        its worker exactly as they were.
+        """
+        if not pair:
+            return False
+        latch = getattr(self._session, "request_checkpoint", None)
+        if not callable(latch):
+            return False
+        if not latch(turn_id=turn_id, boot_build=boot_build, target_build=pair, phase=phase):
+            return False
+        # Open the admission window WITHOUT the idle gate. If the window cannot
+        # open, the request we just latched must not be left half-promised.
+        if not self.begin_update(pair, handler="checkpointed-move"):
+            if self._updating == pair:
+                return True  # already open for this pair: the request stands
+            getattr(self._session, "cancel_checkpoint", lambda: None)()
+            return False
+        return True
+
+    def ready_to_resume(self) -> str:
+        """The checkpoint id a successor may resume from, or "" when there is none.
+
+        Reports only a READABLE record in ``resume`` phase; an unreadable or
+        deferred record yields "" (the refusal to claim continuation), and the
+        successor is expected to report the move deferred rather than continue.
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return ""
+        try:
+            from local_operator.service_handoff import resumable
+            from local_operator.session.transcript import (
+                CHECKPOINT_CUSTOM_TYPE,
+                read_latest_custom,
+            )
+
+            record = read_latest_custom(directory, CHECKPOINT_CUSTOM_TYPE)
+        except Exception:  # noqa: BLE001 — unreadable is not permission to continue
+            return ""
+        if not resumable(record):
+            return ""
+        return str(record.get("turn_id") or "") if record else ""
 
     def begin_update(self, pair: str, handler: str = "stale-build") -> bool:
         """Open the admission window for a move to ``pair``. False: not ours.
@@ -2663,12 +2769,22 @@ class ServingSessionHandle(SessionHandle):
         derived file for processes that have no session; this process has
         the truth in memory. A disposed scheduler reports no wakes so the
         reaper never waits on a schedule that can no longer fire.
+
+        RUNNABLE ROWS ONLY. A held handle (``WakeScheduler.held_schedules``) is
+        owned by this runtime but fired by its SUCCESSOR, so counting its
+        already-due instant here would pin the runtime warm for a delivery this
+        process will never make — the reaper would never reclaim the very runtime
+        that is trying to leave. ``armed_schedules`` is the runnable half of the
+        owned view; a scheduler that predates the split (or a reduced host) has
+        no such property, in which case its ``schedules`` IS its runnable set and
+        reading it is the correct fallback.
         """
         scheduler = getattr(self._session, "wake_scheduler", None)
         if scheduler is None or getattr(scheduler, "disposed", False):
             return None
         try:
-            schedules = scheduler.schedules
+            armed = getattr(scheduler, "armed_schedules", None)
+            schedules = armed if armed is not None else scheduler.schedules
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
@@ -3033,6 +3149,28 @@ class ServingSessionHandle(SessionHandle):
     async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
         return self._session.history_page(before, anchor)
 
+    @property
+    def journal_order_supported(self) -> bool:
+        transcript = getattr(self._session, "transcript", None) or getattr(
+            self._session, "_transcript", None
+        )
+        return isinstance(transcript, Transcript)
+
+    @property
+    def peer_journal_source_supported(self) -> bool:
+        """Whether this runtime serves the COMPLETE peer-source vocabulary.
+
+        The peers' STORED read is served by the relay, not this runtime, so
+        this advertisement gates the runtime RECORD's half of the contract
+        (docs/DESKTOP_API.md "Complete peer-source contract"): an attaching
+        peer viewer declares ``peer_journal_source`` only against a runtime
+        that advertises this string, and the recovery envelope's source facts
+        plus their strict omission for old viewers ride the same negotiation.
+        It is a SEPARATE string from ``journal-order-v1`` because the two are
+        different promises — see ``PEER_JOURNAL_SOURCE_CAPABILITY``.
+        """
+        return self.journal_order_supported
+
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
 
@@ -3063,7 +3201,112 @@ class ServingSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — the relay is additive, never a gate
                 logger.debug("runtime event serialization failed", exc_info=True)
 
-        return self._session.subscribe(handler)
+        unsubscribe_events = self._session.subscribe(handler)
+        transcript = getattr(self._session, "transcript", None) or getattr(
+            self._session, "_transcript", None
+        )
+        if not isinstance(transcript, Transcript):
+            return unsubscribe_events
+        from local_operator.session import transcript_index
+
+        directory = Path(transcript.directory)
+        root, session_id = directory.parent.parent, directory.name
+        pending: dict[str, tuple[dict[str, Any], tuple[int, int, float]]] = {}
+        correction: asyncio.Task[Any] | None = None
+        closed = False
+
+        async def emit_order() -> None:
+            # All-row durable boundaries, NOT tokens, trigger this single-flight
+            # scan. The callback returns immediately; a cold index never blocks
+            # the live relay. The pending map carries identities, not payloads.
+            attempts = 0
+            while pending and not closed:
+                attempts += 1
+                task, _ = transcript_index.start_refresh(root, session_id)
+                try:
+                    await asyncio.shield(task)
+                except Exception:  # noqa: BLE001 - correction never undoes durability
+                    logger.debug("journal order refresh failed", exc_info=True)
+                    pending.clear()
+                    on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                    return
+                index = transcript_index.fresh_resident(root, session_id)
+                if index is None:
+                    if attempts >= 3:
+                        pending.clear()
+                        on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+                        return
+                    continue
+                rows = []
+                reconcile = False
+                for id_, (descriptor, source) in list(pending.items()):
+                    pending.pop(id_, None)
+                    # A later append preserves this prefix; a replaced writer
+                    # inode or a same-size changed source does not. Never label
+                    # a late old-file notification with a rebuilt domain.
+                    if index.sig.get("inode") != source[0] or index.sig.get("size", -1) < source[1]:
+                        reconcile = True
+                        continue
+                    if index.sig.get("size") == source[1] and index.sig.get("mtime") != source[2]:
+                        reconcile = True
+                        continue
+                    seq = index.journal_rows.get(id_)
+                    if seq is not None:
+                        rows.append({**descriptor, "journal_seq": seq})
+                    else:
+                        reconcile = True
+                for at in range(0, len(rows), 128):
+                    on_event(
+                        {
+                            "type": JOURNAL_ORDER_EVENT,
+                            "journal_generation": index.journal_generation,
+                            "rows": rows[at : at + 128],
+                        }
+                    )
+
+                if reconcile:
+                    # Refusing stale provenance is not recovery by itself. A
+                    # quiet send must still learn the new source without a
+                    # next token/read. One signal per rejected batch; never
+                    # relabel old-file descriptors with the rebuilt domain.
+                    on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+
+        def committed(rows: tuple[Any, ...], source: tuple[int, int, float]) -> None:
+            nonlocal correction
+            for row in rows:
+                payload = row.payload
+                details = payload.get("details") or {}
+                pending[row.id] = (
+                    {
+                        "id": row.id,
+                        "type": row.type,
+                        "role": payload.get("role"),
+                        "tool_call_id": payload.get("tool_call_id"),
+                        "anchor": details.get("anchor") if isinstance(details, dict) else None,
+                    },
+                    source,
+                )
+            if len(pending) > 4096:
+                # Bounded even if a cold build outlives an unusual burst. A
+                # coalesced authoritative snapshot is the recovery, not a
+                # silent dropped old-send annotation.
+                pending.clear()
+                on_event({"type": JOURNAL_ORDER_EVENT, "reconcile": True})
+            if correction is None or correction.done():
+                correction = asyncio.create_task(emit_order())
+
+        unsubscribe_commits = transcript.subscribe_commits(committed)
+
+        def unsubscribe() -> None:
+            nonlocal closed
+            closed = True
+            unsubscribe_events()
+            unsubscribe_commits()
+            pending.clear()
+            if correction is not None:
+                correction.cancel()
+
+        return unsubscribe
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
@@ -3085,6 +3328,9 @@ class ServingSessionHandle(SessionHandle):
                 self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
+                # Fallback/recovery is an access edge too: publishing only at
+                # primary selection leaves a signed-out Meta claim on OpenAI.
+                self.publish_model_access()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -3099,6 +3345,9 @@ class ServingSessionHandle(SessionHandle):
             # the first heartbeat and with no client attached.
             if isinstance(event, AgentEndEvent):
                 self._maybe_judge_goal(event)
+                # AFTER the judge and, like it, schedule-only: the supplement job waits for
+                # the pipeline to settle before it does anything (memo §2.1).
+                self._maybe_supplement(event)
 
         unsubscribe = self._session.subscribe(handler)
         try:
@@ -3669,6 +3918,24 @@ class ServingSessionHandle(SessionHandle):
             )
         except Exception:  # noqa: BLE001 — the event path never fails on the judge
             logger.debug("goal judge trigger failed", exc_info=True)
+
+    def _maybe_supplement(self, event: AgentEndEvent) -> None:
+        """Schedule a turn supplement off a turn's end (docs/design/turn-supplements.md §2.1).
+
+        SYNCHRONOUS and total, like :meth:`_maybe_judge_goal`: every refusal is a silent
+        return and the work is a detached task, so the answer, the attention marker and the
+        notifications always go out first. Ownership is checked here for the judge's reason:
+        a follower must never spend or write.
+        """
+        from local_operator.session.goal_judge import owns_the_session
+
+        try:
+            if not owns_the_session(self._session):
+                return
+            loop_running = self._goal_loop is not None and bool(self._goal_loop.running)
+            self._supplements.on_agent_end(event, goal_loop_running=loop_running)
+        except Exception:  # noqa: BLE001 — the event path never fails on this feature
+            logger.debug("supplement trigger failed", exc_info=True)
 
     def rearm_goal_judge(self) -> None:
         """Trigger 3, once per boot: re-engage a goal whose judge was in flight.
@@ -4734,8 +5001,42 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
         from local_operator.model.effort import resolve_effort_in
+        from local_operator.session.model_admission import (
+            native_chat_provider_ids,
+            require_owner_provider,
+        )
 
+        current = self._session.model
+        effective = getattr(self._session, "effective_model", None) or current
+        # A session with no spec yet has NOTHING established: an absent model
+        # cannot affirm a provider, and this handle is the one live-switch
+        # surface with no picker, no catalogue and no config file in front of it
+        # -- any client can send any pair, including on a session that has not
+        # chosen a model yet. Degrade to "nothing established" rather than
+        # raising AttributeError out of the admission: the refusal that belongs
+        # here is the one ``build_model_spec`` raises BELOW (the decision-only
+        # sentence ``test_the_wire_op_refuses_a_decision_only_provider`` pins),
+        # and rehome/peer switches must still be able to land.
+        established = {spec.provider for spec in (current, effective) if spec is not None}
+        require_owner_provider(
+            provider,
+            established=established,
+            native=native_chat_provider_ids(),
+        )
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        if provider == "meta-muse":
+            from local_operator.harness.types import ModelSpec
+
+            # Resolve the same selected account BEFORE publishing primary/spec.
+            # This is the existing metadata seam, not an inference or Codex call.
+            resolver = getattr(
+                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+            )
+            if callable(resolver):
+                result = resolver(spec)
+                resolved = await result if inspect.isawaitable(result) else result
+                if isinstance(resolved, ModelSpec):
+                    spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={
@@ -4749,7 +5050,313 @@ class ServingSessionHandle(SessionHandle):
         # the fallback displaced — see ``Session.set_model``.
         self._session.set_model(spec, explicit=True)
         self._refresh_state()
+        # The claim follows the model it is about: a switch can land on a
+        # provider this host has no credential for, and a reader must not keep
+        # reading the previous model's answer. ALL switch routes land here —
+        # the phone's sheet, a peer's ``peer_set_model``, the desktop's
+        # ``rehome_if_current`` — so this is the one place the claim can go
+        # stale from a model change.
+        self.publish_model_access()
         return f"model: {self._projection.model_label}"
+
+    def publish_model_access(self) -> None:
+        """Publish "can the session's model actually run here" (the composer band).
+
+        The serve-side half of the claim the TUI host publishes from its own
+        controller (``session/frontend_state.FrontendModelAccess``): a
+        desktop-only session — served by THIS process, with no TUI host
+        anywhere — otherwise carries no claim at all, and the band's "not
+        signed in to <provider>" sentence can never render.
+
+        Called at the edges that CHANGE the fact: this host taking the session
+        up (``__init__``, before it serves any frame) and every model switch
+        (see :meth:`set_model_effort`). Deliberately NOT from ``_refresh_state``:
+        that runs after every folded event, and the credential read behind this
+        is a SQLite one.
+
+        NEVER RAISES: the claim is additive state, and a boot edge that cannot
+        read a store must not fail the boot it rode in on. An unreadable store
+        publishes ``None`` — "no claim" — rather than leaving a stale ``ok`` in
+        place, which is the one degradation a reader could act on wrongly.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            from local_operator.providers.model_access import serving_model_access_here
+
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            store.refresh_model_access(
+                serving_model_access_here(
+                    f"{spec.provider}/{spec.model_id}", config_dir=self._config_dir
+                )
+            )
+        except Exception:  # noqa: BLE001 — additive state never fails its edge
+            logger.debug("model access publication failed", exc_info=True)
+
+    @_on_session_loop
+    async def rehome_if_current(
+        self,
+        expected_selector: str,
+        provider: str,
+        model_id: str,
+        *,
+        from_pending: bool = False,
+    ) -> str:
+        """Move this session off an unreachable model — a COMPARE-AND-SET switch.
+
+        WHY THIS IS NOT ``set_model``. A sign-in re-homes a session the user did
+        not ask to move: they signed in to provider B while the conversation sat
+        on provider A, whose credential is gone. The desktop decides which
+        sessions are candidates from its own mirror (idle, stranded, bound here),
+        but that read is a snapshot taken BEFORE this request: by the time it
+        arrives the user may have already picked a model with ``/model``, and a
+        blind switch would clobber a deliberate choice with a stale one. So the
+        OWNER — the only party that can see its own live state — re-checks every
+        term here, and applies nothing unless all of them still hold:
+
+        * the selected model is STILL exactly ``expected_selector``;
+        * the conversation is idle (no turn, gate, compaction, queued prompt or
+          goal loop, and no running subagents) — a re-home must never cut across
+          live work, since the model in force decides the NEXT request only and
+          there is nothing to gain by racing a turn;
+        * the outbound provider is STILL stranded (it was signed out again, or
+          this device borrowed no credential for it);
+        * the inbound provider is accessible HERE, on this process's own store.
+
+        ``accessible`` is re-read from the store rather than trusted from the
+        caller for the same reason the target is re-validated by
+        ``receive_peer_model``: the sender may run under a different config root,
+        and this process is the one that will run the turns.
+
+        The receipt is a word — ``rehomed: <old> → <new>`` or ``kept: <why>`` —
+        because the caller counts successes, and every refusal has to be legible
+        in a log without the sentence that explains it. A successful switch also
+        emits the transcript notice (``rehome_notice``), which is the only place
+        the USER is told their session moved and why.
+
+        ``from_pending`` is the turn-end RETRY of a refusal this owner already
+        spoke (``_retry_deferred_rehome``). It changes the answer's shape, not
+        the checks: a still-busy conversation re-arms silently (the sentence was
+        said once, at the refusal), and every cannot-land path closes the arm
+        through :meth:`_close_deferred_rehome` — speaking the close-out when the
+        repair is still needed, silent when nothing is wrong any more. The
+        first-login gate is re-applied on every attempt, retry included: the
+        authority can lapse between the refusal and the turn end.
+        """
+        self._check_loop_thread()
+        from local_operator.mobile import peer_model
+        from local_operator.providers.model_access import (
+            REHOME_BUSY_REPLY,
+            credentialed_chat_providers_here,
+            is_accessible,
+            is_first_provider_login,
+            is_stranded,
+            rehome_deferred_notice,
+            rehome_notice,
+        )
+
+        session = self._session
+        current = peer_model.selected_label(session)
+        if current != expected_selector:
+            # The user (or a peer) picked something between the sign-in and this
+            # request. Whatever they chose wins; a re-home never overwrites a
+            # live decision — and a deferred arm this retry owns closes in
+            # silence, because the choice is what replaced the complaint.
+            self._close_deferred_rehome(from_pending, speak=False)
+            return f"kept: the model moved to {current or 'nothing'} since the sign-in"
+        old_provider = current.partition("/")[0]
+        if self.is_conversationally_active():
+            # The refusal is SPOKEN, not just returned: the caller counts it, but
+            # only the conversation itself can tell the user their session did
+            # not move and why (U1). Armed for the turn end at the same time —
+            # this owner keeps the sentence's promise itself
+            # (``_retry_deferred_rehome``), and a retry that is still busy keeps
+            # the arm without re-saying what it already said.
+            self._rehome_pending = (current, provider, model_id)
+            if not from_pending:
+                self._emit_notice(rehome_deferred_notice(current), "info")
+            return REHOME_BUSY_REPLY
+        try:
+            if session.running_subagents() > 0:
+                self._rehome_pending = (current, provider, model_id)
+                if not from_pending:
+                    self._emit_notice(rehome_deferred_notice(current), "info")
+                return REHOME_BUSY_REPLY
+        except Exception:  # noqa: BLE001 — an unreadable work state is assumed busy
+            # Assumed busy, so the retry stays armed for the next turn end — the
+            # same fail-closed reading ``_idle_for_rehome`` makes on the TUI side.
+            self._rehome_pending = (current, provider, model_id)
+            return "kept: this session's work state is unreadable"
+        accessible = await asyncio.to_thread(credentialed_chat_providers_here)
+        if accessible is None:
+            self._close_deferred_rehome(from_pending, speak=True)
+            return "kept: the credential store could not be read"
+        if not is_stranded(old_provider, accessible):
+            # The old provider works again: nothing is wrong to complain about.
+            self._close_deferred_rehome(from_pending, speak=False)
+            return f"kept: {old_provider} is signed in again"
+        if not is_accessible(provider, accessible):
+            self._close_deferred_rehome(from_pending, speak=True)
+            return f"kept: {provider} is not signed in on this device"
+        if not is_first_provider_login(accessible, provider):
+            # The gate, re-applied on every attempt: a later provider login took
+            # the authority away, and the conversation stays put — spoken, so the
+            # promise is visibly withdrawn rather than silently dropped.
+            self._close_deferred_rehome(from_pending, speak=True)
+            return f"kept: {provider} is not this device's first provider login"
+        # THE COMPARE RE-RUNS IMMEDIATELY BEFORE THE SET (review MAJOR/MINOR-1):
+        # the checks above ran before the credential read yielded the loop, and a
+        # pick or a turn landing inside that await would otherwise be clobbered —
+        # the exact race the entry CAS exists to lose. Same-connection frames are
+        # serialized by the dispatch chain, so this window needs another
+        # connection (a phone or peer picking) or a turn starting; both are
+        # reachable, and both must keep their choice.
+        current = peer_model.selected_label(session)
+        if current != expected_selector:
+            self._close_deferred_rehome(from_pending, speak=False)
+            return f"kept: the model moved to {current or 'nothing'} since the sign-in"
+        if self.is_conversationally_active():
+            # The SAME shape as the entry branches (round-2 MINOR-2): the pool
+            # counts this reply as deferred, so the conversation must be told —
+            # the silence here was one refusal that reached the receipt but not
+            # the reader.
+            self._rehome_pending = (current, provider, model_id)
+            if not from_pending:
+                self._emit_notice(rehome_deferred_notice(current), "info")
+            return REHOME_BUSY_REPLY
+        if self._disposing:
+            # The LAST check before the set, and the third window (round-4 Q1):
+            # a dispose landing while THIS retry was parked on the credential
+            # read. The schedule and spawn guards cannot see it — the read
+            # yielded the loop after they ran — and without this the set and
+            # its notice would land on a handle that is going away, breaking
+            # "retiring work begins no new work" at the one moment it still can.
+            return "kept: the runtime is retiring"
+        await self.set_model_effort(provider, model_id, None)
+        # The answer comes from the read-back, never from the switch's own
+        # receipt: ``set_model`` assigns the spec before its journal writes and
+        # its stream notify, so a raise from a later step still leaves a switch
+        # in force (see ``receive_peer_model``, which reads back for the same
+        # reason).
+        new_label = peer_model.selected_label(session)
+        if new_label != f"{provider}/{model_id}":
+            # The switch did not take, so the conversation is still on the
+            # unreachable model: the repair is still NEEDED and cannot land —
+            # the close-out speaks rather than leaving an arm that silently
+            # re-tries at every later turn end (round-3 MINOR-3). ``speak``
+            # matches every other still-stranded cannot-land branch.
+            self._close_deferred_rehome(from_pending, speak=True)
+            return f"kept: the switch did not take (still {new_label or 'nothing'})"
+        self._rehome_pending = None
+        self._emit_notice(rehome_notice(current, new_label), "info")
+        return f"rehomed: {current} → {new_label}"
+
+    def _close_deferred_rehome(self, from_pending: bool, *, speak: bool) -> None:
+        """Close the deferred arm on a path where it can no longer land.
+
+        The turn-end retry (``_retry_deferred_rehome``) is the promise
+        ``rehome_deferred_notice`` makes ("until the turn ends") being kept; this
+        is the other outcome, and it is SPOKEN once when the repair is still
+        needed — a promise that silently evaporates is the round-1 U1 silence
+        one turn later (round-2 M1/D6/Q2, D5/U3/Q1). ``speak=False`` is for the
+        states where nothing is wrong any more (the old provider is credentialed
+        again, or the user moved the model themselves), where the sentence would
+        invent a complaint.
+
+        A call that did not come from the retry never owned an arm and is a
+        no-op, so the sign-in pass can call every branch uniformly.
+        """
+        if not from_pending:
+            return
+        armed = self._rehome_pending
+        self._rehome_pending = None
+        if armed is None or not speak:
+            return
+        from local_operator.providers.model_access import rehome_still_stranded_notice
+
+        # ``info``: ``NoticeEvent.kind`` has no ``note`` rung on the wire yet
+        # (design round 2, D7 — recorded as deferred in the PR thread), so this
+        # paints one tier dimmer than the TUI's own notice for the same state.
+        # The precedent the deferral cites is `_on_config_change`'s loosening
+        # refusal ("``note`` … is NOT available to a runtime notice"), not an
+        # approvals-default helper: that rung exists only for embedded hosts
+        # (review round 3, NIT-1).
+        self._emit_notice(rehome_still_stranded_notice(armed[0]), "info")
+
+    def _schedule_rehome_retry(self) -> None:
+        """Run :meth:`_retry_deferred_rehome` once the turn boundary is behind us.
+
+        The hook fires inside the pipeline's ``finally``, still under
+        ``_turn_lock`` (see ``_on_turn_settled``), and the retry's idle test
+        reads that lock, so it lands on the NEXT loop iteration via ``call_soon``
+        — the same shape ``_publish_busy_soon`` uses, including its closed-loop
+        guard.
+
+        A DISPOSING handle starts no retry: retiring work must not begin new
+        turns of its own (round-3 MINOR-2), and the arm dies with the handle.
+        The in-flight guard lives in :meth:`_spawn_rehome_retry`, which is where
+        it can be exact — two ``call_soon`` callbacks can be queued before either
+        runs, so only the loop-thread check sees them both.
+        """
+        if self._rehome_pending is None or self._disposing:
+            return
+        try:
+            self._loop.call_soon(self._spawn_rehome_retry)
+        except RuntimeError:
+            # Loop closed under a disposing handle: nothing left to retry.
+            return
+
+    def _spawn_rehome_retry(self) -> None:
+        """Start the ONE in-flight retry, held by reference like the naming errand.
+
+        Both guards live here, not at the scheduling site: this runs on the
+        loop thread with no await between the check and the ``create_task``, so
+        it is the only place two queued settles can be told apart (round-3
+        MINOR-2 — the probe's double move was exactly two retries passing the
+        same CAS because the re-check precedes its own credential read).
+        """
+        if self._disposing:
+            return
+        task = self._rehome_retry_task
+        if task is not None and not task.done():
+            return
+        task = self._loop.create_task(self._retry_deferred_rehome())
+        self._rehome_retry_task = task
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(self._forget_rehome_retry)
+
+    def _forget_rehome_retry(self, task: asyncio.Task[None]) -> None:
+        """Release the in-flight slot when the retry settles (or is cancelled)."""
+        if self._rehome_retry_task is task:
+            self._rehome_retry_task = None
+
+    async def _retry_deferred_rehome(self) -> None:
+        """The serve-side half of the deferral promise (round-2 M1/D6/Q2).
+
+        The TUI retries at its own turn end (``_settle_deferred_rehome``); a
+        session served by THIS process has no TUI, so without this the sentence's
+        "until the turn ends" was a promise nobody kept and the conversation
+        stayed on the unreachable model for good. The retry is the SAME
+        compare-and-set with every term re-read — the first-login gate included —
+        and either outcome SPEAKS through the owner: the ordinary move notice,
+        or the close-out when the repair can no longer land.
+
+        A handle that began retiring between the schedule and this task does
+        nothing (see ``_spawn_rehome_retry``): the arm goes with the handle.
+        """
+        if self._disposing:
+            return
+        pending = self._rehome_pending
+        if pending is None:
+            return
+        expected, provider, model_id = pending
+        try:
+            await self.rehome_if_current(expected, provider, model_id, from_pending=True)
+        except Exception:  # noqa: BLE001 — a retry must never fail a settled turn
+            logger.debug("deferred re-home retry failed", exc_info=True)
+            self._rehome_pending = None
 
     @_on_session_loop
     async def receive_peer_model(
@@ -5648,6 +6255,7 @@ class ServingSessionHandle(SessionHandle):
         self._publish_busy_soon()
         self._schedule_completion_announce()
         self._maybe_heal_name()
+        self._schedule_rehome_retry()
 
     def _schedule_completion_announce(self, *, attempt: int = 0) -> None:
         """Run :meth:`_announce_completion` off the event loop, and retry it.
@@ -5775,6 +6383,17 @@ class ServingSessionHandle(SessionHandle):
         opened nor can see in any list. Settled rather than deferred, and the
         same absence of contention as the silenced arm above: no claim, no
         release, and the durable mark left exactly as another surface needs it.
+
+        A PROCESS WHOSE HOME IS NOT THE USER'S DOES NOT CLIMB IT, silently
+        (``tui.notify.desktop_belongs_to_this_process(report=False)``): the
+        third arm, for the shapes the first two structurally cannot catch —
+        ``lop exec`` and agent-runtime-svc's per-run ``HOME`` do not declare
+        themselves with a switch and can host real providers. Nothing here can
+        reach the user's screen, and before this arm every such run paid the
+        ladder's claim/release churn plus a one-shot WARNING in its stderr
+        (which the adapter persists as an audit event). SETTLED for the same
+        reason as above: the unseen mark stays, so the user's own surfaces are
+        unaffected.
         """
         try:
             from local_operator.tui.notify import notifications_enabled
@@ -5782,6 +6401,25 @@ class ServingSessionHandle(SessionHandle):
             if not notifications_enabled():
                 return _ANNOUNCE_SETTLED
             if not _session_may_announce(getattr(self, "_session", None)):
+                return _ANNOUNCE_SETTLED
+            from local_operator.tui.notify import desktop_belongs_to_this_process
+
+            # A RUN, NOT A PERSON: this process's HOME is not the user's
+            # (``lop exec``, a per-run agent-runtime-svc home), so nothing this
+            # arm raises could land on a screen the user is in front of, and
+            # SETTLED is the honest answer — nothing is owed TO THIS PROCESS.
+            # Before this check the arm fell through to ``detached_notify``,
+            # whose own identity gate refused, and the refusal armed the
+            # 2/8/30 s retry ladder and printed a one-shot WARNING into the
+            # run's stderr (which the agent-runtime-svc adapter persists as an
+            # audit event) on EVERY per-run execution.
+            #
+            # ``report=False``: the warning exists for a human who lost toasts
+            # to a redirected home; an automation run is not one, and its one
+            # line per process became one line per run. A containerised user
+            # still hears it from their interactive path, because the report is
+            # per process, not per call.
+            if not desktop_belongs_to_this_process(report=False):
                 return _ANNOUNCE_SETTLED
             if self._watching_surfaces():
                 # Rung 1. Cheap and first: no store read, no filesystem probe.
@@ -5879,7 +6517,11 @@ class ServingSessionHandle(SessionHandle):
         can begin with a dash.
         """
         from local_operator.notifications import compose
-        from local_operator.tui.notify import argv_safe, detached_notify
+        from local_operator.tui.notify import (
+            DURABLE_CLICK_WINDOW_S,
+            argv_safe,
+            detached_notify,
+        )
 
         session_dir = getattr(getattr(self._session, "transcript", None), "directory", None)
         composed = compose(
@@ -5887,12 +6529,33 @@ class ServingSessionHandle(SessionHandle):
             session_dir=session_dir,
             session_name=self._notifiable_session_name(),
         )
+        # HER CHECK-IN IS THE BANNER THAT IS ANSWERED LATER, so it asks for a
+        # durable click (see ``detached_notify(durable_click_s=...)``): the
+        # cadence row posts at 08:30 and the person clicks it from Notification
+        # Centre whenever they next sit down. Three consequences ride that one
+        # argument — a long-lived macOS click helper, a synchronously-built
+        # identity bundle on a cold machine, and a synchronously-known Linux
+        # ``--action`` probe — all of which block for up to seconds, which is
+        # safe HERE because ``_announce_completion`` (this method's only
+        # caller) runs under ``asyncio.to_thread``, never on the event loop.
+        # Every other session keeps the 30 s helper and the never-blocking
+        # first toast: a completion toast is read within moments, and paying a
+        # resident process per banner for it would be cost with no reader.
+        #
+        # The keyword is passed ONLY for her, so every other session's call is
+        # byte-for-byte the call it was before this existed.
+        durable: dict[str, float] = (
+            {"durable_click_s": DURABLE_CLICK_WINDOW_S}
+            if getattr(self._session, "_aida_duty", False)
+            else {}
+        )
         return bool(
             detached_notify(
                 argv_safe(composed.title),
                 argv_safe(composed.body),
                 session_id=session_id,
                 subtitle=composed.status,
+                **durable,
             )
         )
 
@@ -6712,6 +7375,11 @@ class ServingSessionHandle(SessionHandle):
             # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
             # green either way. The dead line is gone; this argument is not.
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
+        if command == "language":
+            # The terminal's funnel, served: one `settings_io.write_setting`
+            # against the `language` key; receipts word for word (see
+            # `_language_slash`).
+            return self._language_slash(args, SlashResult)
         # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
         # ``slash_result`` is authorised on ``slash``, which a ``drive`` member
         # holds while holding no ``delete`` — and these three produce exactly the
@@ -6738,6 +7406,13 @@ class ServingSessionHandle(SessionHandle):
             return await self._wake_slash(session, args, SlashResult)
         if command == "monitor":
             return await self._monitor_slash(session, args, SlashResult)
+        if command == "jobs":
+            return await self._jobs_slash(session, args, SlashResult)
+        if command == "highlights":
+            # Supplement actions (memo §3.2 T5) as a routed verb: the follower's
+            # typed command and the phone composer land here with the VERB only,
+            # so the target is chosen runtime-side (``newest_actionable``).
+            return await self._highlights_slash(args, SlashResult)
         if command == "loop":
             from local_operator.slash_commands import unknown_flag_refusal
 
@@ -7146,6 +7821,152 @@ class ServingSessionHandle(SessionHandle):
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _jobs_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one job mutation INSIDE the session that owns the manager.
+
+        Reached from the desktop by
+        ``POST /v1/desktop/sessions/{id}/jobs/{job_id}/cancel`` when a live
+        runtime holds the session (see ``routes/desktop_sessions``), never by
+        a user typing ``/jobs``: the name is a routed-command word in the
+        ladder above, not a registry entry, so no palette row exists for it
+        and no terminal offers it (``wake``/``monitor``/``desktop_mcp`` are
+        the same shape of internal word).
+
+        WHY THIS PATH EXISTS. ``AsyncJobManager`` state lives only in the
+        process that owns the session — there is no file or index an external
+        writer could reach (the wake/monitor surfaces' cold paths exist
+        because THEIR state persists; a job's does not) — so a cancel has to
+        reach the owner's own manager. The call below is the SAME one
+        ``jobs op='cancel'`` makes (``AsyncJobManager.cancel``: abort the
+        signal, cancel the task, await it), deliberately not a second
+        mechanism, so the runner's own cancellation semantics — a video
+        runner's bounded ``best_effort_cancel`` — apply identically whoever
+        asked. Only the refusal classes are this side's own, and they are
+        typed as codes so the route maps a status without reading prose.
+        """
+        import json
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("job payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._jobs_failure(
+                SlashResult, "The job request could not be read.", "jobs_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        job_id = str(payload.get("job_id") or "")
+        if op != "cancel":
+            return self._jobs_failure(SlashResult, f"Unknown job operation {op!r}.", "jobs_invalid")
+
+        manager = getattr(session, "jobs", None)
+        if manager is None:
+            # The jobs tool's own sentence for the same state (``execute_jobs``
+            # in ``tools/builtin``), so a cancel and a ``jobs op='cancel'`` on
+            # one session cannot describe it two ways.
+            return self._jobs_failure(
+                SlashResult,
+                "job tracking is not available in this session (no job manager attached).",
+                "jobs_unavailable",
+            )
+
+        job = manager.get(job_id)
+        if job is None:
+            # The frozen phrase from the engine's own wording map
+            # (``tools/image_tool``'s ``_CANCEL_PHRASES``, quoted rather than
+            # respelled): the class the rail renders for a refused/unknown-job
+            # cancel — "the frozen ``not_found``-class phrase, never a generic
+            # error" (design spec §2.2).
+            from local_operator.tools.image_tool import _CANCEL_PHRASES
+
+            return self._jobs_failure(SlashResult, _CANCEL_PHRASES["not_found"], "jobs_not_found")
+
+        cancelled = await manager.cancel(job.id)
+        if not cancelled:
+            # The row passed the lookup but the manager still refused: it
+            # settled in the window between. The tool's own honest sentence
+            # for this outcome, kept so the two callers report one thing —
+            # the press asked for a stop that cannot happen, and must not be
+            # painted as one.
+            return self._jobs_failure(
+                SlashResult,
+                f"job {job.id} was not cancelled (status: {job.status})",
+                "jobs_not_cancelled",
+            )
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(
+            kind="notice",
+            text=f"cancelled job {job.id} ({job.label})",
+            data={"job_id": job.id, "cancelled": True},
+        )
+
+    @staticmethod
+    def _jobs_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _highlights_slash(self, arg: str, SlashResult: Any) -> Any:
+        """``/highlights cancel | retry | adjust <text>`` — the routed supplement actions.
+
+        The runtime half of the TUI's ``_cmd_highlights`` (memo §3.2 T5). The command is
+        advertised ``authoritative_session``, so a follower's typed command and the phone
+        composer both land here carrying the VERB only; the target is the newest actionable
+        job the runner still holds (``SupplementRunner.newest_actionable``). The receipts
+        are the TUI's words for the same ops, kept word for word (``_run_highlights_op``'s
+        map), so one gesture reads one sentence whether the session is local or detached.
+        """
+        words = arg.split(maxsplit=1)
+        verb = words[0].strip().lower() if words and words[0].strip() else ""
+        text = words[1].strip() if len(words) > 1 else ""
+        if verb not in ("cancel", "retry", "adjust"):
+            return SlashResult(
+                kind="notice",
+                text="Usage: /highlights cancel | retry | adjust <text>",
+                style="warning",
+            )
+        if verb == "adjust" and not text:
+            return SlashResult(
+                kind="notice", text="Usage: /highlights adjust <text>", style="warning"
+            )
+        target = await self._supplements.newest_actionable(verb)
+        if target is None:
+            missing = {
+                "cancel": "nothing is being prepared right now",
+                "retry": "nothing to retry — no highlights were cancelled or failed",
+                "adjust": "no highlights to adjust yet",
+            }
+            return SlashResult(kind="notice", text=missing[verb], style="warning")
+        anchor, job = target
+        try:
+            if verb == "adjust":
+                receipt = await self._supplements.steer_job(anchor, job, text)
+            elif verb == "retry":
+                receipt = await self._supplements.restart_job(anchor, job)
+            else:
+                receipt = await self._supplements.cancel_job(anchor, job)
+        except Exception as exc:  # noqa: BLE001 — a refused op is a notice, not a turn error
+            return SlashResult(
+                kind="notice",
+                text=str(exc) or "could not update highlights",
+                style="warning",
+            )
+        receipts = {
+            "cancelled": "Highlights cancelled",
+            "steering": "Updating highlights…",
+            "restarting": "Preparing highlights again…",
+            "already finished": "those highlights already finished",
+        }
+        return SlashResult(
+            kind="notice", text=receipts.get(str(receipt), str(receipt)), style="info"
+        )
 
     def _archive_slash(self, session: Any, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` on a DETACHED runtime.
@@ -7609,10 +8430,14 @@ class ServingSessionHandle(SessionHandle):
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
-                # can do rather than promising a detach it cannot perform.
+                # can do rather than promising a detach it cannot perform. The
+                # sentence is the CONTRACT's own (see
+                # ``tui/app.py::_team_detach_receipt``), byte-for-byte, so the
+                # three refusal surfaces cannot drift (M12 follow-up, #2072).
                 return SlashResult(
                     kind="notice",
-                    text="this session cannot run a team, so there is no team to detach",
+                    text="this session can list and chart teams, but not run one, "
+                    "so there is no team to detach",
                     style="warning",
                 )
             # Read BEFORE the call, and off the OBJECT rather than its name
@@ -7684,7 +8509,8 @@ class ServingSessionHandle(SessionHandle):
             # refusal because nothing on screen says which one you got.
             return SlashResult(
                 kind="notice",
-                text="this session cannot run a team. /team chart <name> shows a roster",
+                text="this session can list and chart teams, but not run one. "
+                "/team chart <name> shows a roster",
                 style="warning",
             )
         # Read BEFORE the attach: it is the team a TEAM SWITCH displaces, and
@@ -8346,6 +9172,86 @@ class ServingSessionHandle(SessionHandle):
         )
         return SlashResult(kind="notice", text=text, style="info")
 
+    def _language_slash(self, arg: str, SlashResult: Any) -> Any:
+        """Report the language, and CHANGE it — the terminal's own funnel.
+
+        One ``settings_io.write_setting`` against the ``language`` registry
+        key, the same call ``OperatorApp._cmd_language`` makes, so a phone
+        switch and a terminal switch write one value space the same way.
+        Applying the swap is the FRONTEND's half: a running TUI re-renders
+        from its config watcher (slice C's external-change path announces
+        it), which is why this branch writes and receipts but never repaints.
+
+        The receipts mirror the terminal's word for word — the ``/effort``
+        precedent — the option list and the "already" no-op included.
+        """
+        from local_operator import settings_io
+        from local_operator.i18n.resolve import (
+            DEFAULT_LANGUAGE,
+            config_value,
+            language_name,
+            language_options,
+            normalise_locale,
+            resolve_language,
+        )
+
+        wanted = arg.strip()
+        resolved = resolve_language()
+        options = dict(language_options())
+        if not wanted:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"language: {resolved} ({language_name(resolved)}) — "
+                    f"/language <{'|'.join(options)}>; space"
+                ),
+                style="info",
+            )
+        key = (
+            DEFAULT_LANGUAGE
+            if wanted.casefold() == DEFAULT_LANGUAGE
+            else normalise_locale(wanted) or wanted
+        )
+        if key not in options:
+            # SHIPPED locales only, exactly as the terminal refuses: an
+            # unaudited locale keys no catalogue and would render codes.
+            return SlashResult(
+                kind="notice",
+                text=f"unknown language {wanted!r} — available: {', '.join(options)}",
+                style="warning",
+            )
+        stored = config_value()
+        current = (normalise_locale(stored) or stored) if stored else DEFAULT_LANGUAGE
+        if key == current:
+            return SlashResult(
+                kind="notice",
+                text=f"language: already {key} — resolves to {resolved} "
+                f"({language_name(resolved)})",
+                style="info",
+            )
+        setting = settings_io.resolve_key("language")
+        if setting is None:  # the registry owns the key; guard a broken build
+            return SlashResult(
+                kind="notice",
+                text="language: the setting is not registered in this build",
+                style="warning",
+            )
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            settings_io.write_setting(ConfigManager(config_dir()), setting, key)
+        except Exception as error:  # noqa: BLE001 — reported to the caller verbatim
+            return SlashResult(
+                kind="notice", text=f"language: could not save {key} — {error}", style="warning"
+            )
+        active = resolve_language()
+        return SlashResult(
+            kind="notice",
+            text=f"language: {key} saved — active {active} ({language_name(active)})",
+            style="info",
+        )
+
     @staticmethod
     def _adopt_remedy(saved: str, *, may_loosen: bool | None = None) -> str:
         """The command that matches ``config.yml``, and where it has to be typed.
@@ -8778,6 +9684,48 @@ class ServingSessionHandle(SessionHandle):
         }
 
     @_on_session_loop
+    async def job_cancel(self, job_id: str) -> str:
+        """``job_cancel``: cancel ONE background job by id — the rail's only mechanism.
+
+        Lands on :meth:`AsyncJobManager.cancel`, the engine call the ``jobs``
+        tool's ``op='cancel'`` already makes (contract §4.1): a phone or a
+        delegated surface requests the same stop the agent could, and the
+        runner's own cancellation semantics are what the settle then states —
+        for a media walk, ``best_effort_cancel`` and its receipt token. This
+        op never paints an outcome of its own.
+
+        An unknown id is a refusal in words (the dispatcher renders it as the
+        error frame); a job that already settled is the neutral reading the
+        tool itself returns — the caller wanted it stopped and it is stopped.
+        Optional capability, getattr-probed by the dispatch — no
+        ``PROTOCOL_VERSION`` move.
+
+        THE DELIBERATE OMISSION (review round 1, R1-2). The ``jobs`` TOOL's
+        cancel path additionally attributes a deliberate stop for ``task``
+        rows — ``SubagentComms.begin_stop`` stamps ``ended_by``/
+        ``cancel_reason`` and stages the durable ``subagent-stop-<job>.v1.json``
+        receipt — and this op deliberately does NOT. The two paths agree on
+        the engine call and the receipt words; the attribution is left out
+        rather than mirrored because the actor for a phone- or peer-issued
+        cancel has no name in the wire's vocabulary yet (a new ``stopped by …``
+        string every surface would render), and the right home for the
+        alignment is a stop-issue helper shared with ``tools/builtin.py``, not
+        a second inline copy of the stamp sequence. THE CONDITION TO REVISIT:
+        when a task-job stop rides this op — a carrier cancelling ``task`` /
+        subagent rows through the rail — align it via that shared helper
+        first. Blast radius today is nil: v1 mounts no carrier, and the video
+        jobs this op was built for are not ``task`` rows.
+        """
+        self._check_loop_thread()
+        job = self._session.jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"unknown job {job_id}")
+        cancelled = await self._session.jobs.cancel(job_id)
+        if not cancelled:
+            return f"job {job_id} was not cancelled (status: {job.status})"
+        return f"cancelled job {job_id} ({job.label})"
+
+    @_on_session_loop
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()
@@ -8924,6 +9872,75 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale count is not worth a turn
             logger.debug("could not publish the subagent counts", exc_info=True)
 
+    # -- turn-supplement control ops (lane C1b; memo §2.7) --------------------------------
+    # The runtime socket owns another thread even for daemon/exec. Lazy reads
+    # and controls must hop before touching the runner or journal; an on-loop
+    # test cannot detect an omitted hop, so real threaded RPC pins all five.
+
+    @_on_session_loop
+    async def supplement_cancel(self, anchor: str, job: str) -> str:
+        """Cancel a running generator job. Idempotent; a settled job answers neutrally.
+
+        Every one of these four ops is getattr-probed by the dispatch, like ``cancel``: a
+        handle from before this feature answers the unknown-op error rather than a silent
+        no-op, and the probe is why no protocol version moved.
+        """
+        self._check_loop_thread()
+        return await self._supplements.cancel_job(anchor, job)
+
+    @_on_session_loop
+    async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
+        """Cut the in-flight attempt and start version + 1 with the user's instruction."""
+        self._check_loop_thread()
+        return await self._supplements.steer_job(anchor, job, text)
+
+    @_on_session_loop
+    async def supplement_restart(self, anchor: str, job: str) -> str:
+        """Version + 1 with the previous instruction (or none): the Retry affordance."""
+        self._check_loop_thread()
+        return await self._supplements.restart_job(anchor, job)
+
+    @_on_session_loop
+    async def supplement_dismiss(self, anchor: str) -> str:
+        """Hide the row for good and count it as a spam signal (memo §2.7, §5.2)."""
+        self._check_loop_thread()
+        return await self._supplements.dismiss(anchor)
+
+    @_on_session_loop
+    async def supplements_for(self, anchors: list[str]) -> dict[str, dict[str, Any]]:
+        """``{anchor: newest row}`` for the given anchors (memo §2.7's lazy read op).
+
+        Implemented here because the capability that gates every live supplement event is
+        advertised only by a handle that HONOURS this op (``server.py``: "advertising what
+        the handle cannot honour is worse than omitting it"). A surface calls it when an
+        answer row mounts; rows it did not ask about are not returned.
+
+        Cost: one journal read per call, filtered to the requested anchors. That is the
+        documented price of the lazy-load rule (§2.11) and it is paid only by a viewer that
+        negotiated ``supplements-v1``; a byte-scan fast path is a follow-up (memo P9's
+        measurement is for the relay route, which is lane C2's).
+        """
+        self._check_loop_thread()
+        wanted = {str(anchor) for anchor in anchors or [] if str(anchor)}
+        if not wanted:
+            return {}
+        rows: list[dict[str, Any]] = []
+        try:
+            transcript = self._session.transcript
+            for entry in transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                if payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                    continue
+                details = payload.get("details")
+                if isinstance(details, dict) and str(details.get("anchor", "")) in wanted:
+                    rows.append(details)
+        except Exception:  # noqa: BLE001 -- a read that fails returns nothing, never raises
+            logger.debug("supplements_for could not read the journal", exc_info=True)
+            return {}
+        return {anchor: dict(row) for anchor, row in newest_per_anchor(rows).items()}
+
     def _check_loop_thread(self) -> None:
         """Enforce that a body below this line is on the loop owning the session.
 
@@ -9058,6 +10075,7 @@ class ServingSessionHandle(SessionHandle):
                 context_window=store.read_field("context_window"),
                 context_is_estimate=store.read_field("context_is_estimate"),
                 usage=usage,
+                spend_channels=store.spend_channels_copy(),
             )
         # Publish the child roster beside the session state, the way the TUI
         # host does (``mobile/tui_handle.py::_refresh_state``). The folded

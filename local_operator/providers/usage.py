@@ -27,6 +27,12 @@ What local-operator DOES fetch, grouped by the credential it needs:
   backend `/wham/usage`), ``kimi`` (`/coding/v1/usages`), ``xai``/
   ``xai-oauth`` (billing), ``radient`` (authenticated tenant credit balance).
 
+``meta-muse`` (Muse Code) has no verified read-only quota endpoint. Its login
+already stores a passive allowance receipt; the usage route reads that receipt
+without spending an inference request. Stream receipts are request provenance,
+not stored account snapshots. A signed-in
+account with no receipt still reports a provider row, but no invented numbers.
+
 ``kimi`` is the only provider with both, and its two routes are different
 endpoints on different hosts rather than two ways of authenticating one.
 
@@ -95,6 +101,7 @@ UNIT_LABELS = {
     "percent": "%",
     "tokens": "tokens",
     "requests": "req",
+    "credits": "credits",
     "unknown": "",
 }
 
@@ -189,6 +196,7 @@ FetcherKind = Literal[
     "qwencloud-console-usage",
     "zai-quota",
     "radient-balance",
+    "meta-muse-observation",
 ]
 
 #: Provider id (canonical) -> ``(oauth_fetcher, api_key_fetcher)``.
@@ -214,6 +222,10 @@ FetcherKind = Literal[
 #: the point, and re-adding one without the others would recreate the defect.
 _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "radient": ("radient-balance", None),
+    # Muse's OAuth row owns the passive receipt, not a public balance API.
+    # Register it here so enumeration, shared caching and every surface use
+    # the same report; probing inference for quota would spend the allowance.
+    "meta-muse": ("meta-muse-observation", None),
     "openrouter": (None, "openrouter"),
     "anthropic": ("anthropic-oauth", None),
     "openai": ("openai-oauth", None),
@@ -234,7 +246,7 @@ _FETCHERS: dict[str, tuple[FetcherKind | None, FetcherKind | None]] = {
     "zai-oauth": ("zai-quota", "zai-quota"),
 }
 
-#: Providers with a live quota endpoint, for callers that only need the question
+#: Providers with a quota source (live or passive), for callers that only need the question
 #: "does this provider report usage?" answered without importing every fetcher.
 #:
 #: DERIVED from the dispatch table, never hand-listed. This is the set that gates
@@ -315,6 +327,29 @@ class UsageLimit:
     #: Free-form display text, never parsed back — a fetcher that has no split
     #: to report leaves it empty and the renderer emits no line.
     detail: str = ""
+    #: Paid allowance is an ALTERNATIVE to included quota, never an additional
+    #: gate. Eligibility must be explicit vendor evidence, not inferred from an
+    #: id suffix or a positive wallet the account cannot actually spend.
+    paid_fallback: bool = False
+    available: bool | None = None
+    #: Only providers whose paid allowance explicitly covers model-family caps
+    #: may bypass those caps. Unknown scope conservatively retains them.
+    supersedes_tiers: bool = False
+    #: Uncapped is distinct from missing/malformed amounts; it requires explicit
+    #: endpoint evidence and never manufactures a denominator or percentage.
+    unlimited: bool = False
+
+    def paid_usable(self) -> bool:
+        """Definite eligibility AND definite headroom; unknown cannot unblock."""
+        if not self.paid_fallback or self.available is not True:
+            return False
+        if self.unlimited:
+            return True
+        fraction = self.amount.fraction()
+        if fraction is not None:
+            return math.isfinite(fraction) and 0 <= fraction < 1
+        remaining = self.amount.remaining
+        return remaining is not None and math.isfinite(remaining) and remaining > 0
 
     def effective_status(self) -> str:
         return self.status or self.amount.status()
@@ -397,29 +432,59 @@ def usage_health(
     reserve_percent: float = 10.0,
     now_ms: float | None = None,
 ) -> QuotaHealth:
-    """Reduce a normalized report to the limits that gate ``model_id``.
+    """Included plan OR payable headroom, with independent model caps retained.
 
-    Shared windows always apply; tier windows apply only when their tier name
-    appears in the model id. Anthropic's enabled extra-usage meter supersedes
-    the included-plan windows because paid headroom keeps requests runnable
-    after the plan reaches 100%.
+    A depleted paid meter cannot close an unexhausted included plan. Conversely,
+    balance-only credits can keep an exhausted plan serving without a fictional
+    percentage; reserve thresholds only apply to amounts with real denominators.
     """
     lowered_model = model_id.lower()
-    extra = [
+    included = [limit for limit in report.limits if not limit.paid_fallback]
+    relevant = [
         limit
-        for limit in report.limits
-        if limit.id.endswith(":extra") and limit.amount.fraction() is not None
+        for limit in included
+        if limit.shared or not limit.tier or limit.tier.lower() in lowered_model
     ]
-    if extra:
-        relevant = extra
-    else:
-        relevant = [
-            limit
-            for limit in report.limits
-            if limit.shared
-            or (limit.tier and limit.tier.lower() in lowered_model)
-            or (not limit.shared and not limit.tier)
-        ]
+    plan = _usage_windows_health(relevant, reserve_percent=reserve_percent, now_ms=now_ms)
+    if plan.state == "healthy":
+        return plan
+    best = plan
+    for paid in report.limits:
+        if not paid.paid_usable():
+            continue
+        tiers = [limit for limit in relevant if limit.tier and not limit.shared]
+        if not paid.supersedes_tiers and tiers:
+            cap = _usage_windows_health(tiers, reserve_percent=reserve_percent, now_ms=now_ms)
+            if cap.state == "depleted":
+                # Shared exhaustion is already bypassed by this paid path. The
+                # remaining restriction is the family cap, so an account-wide
+                # block would incorrectly hide these credits from other models.
+                if best.state == "depleted":
+                    best = cap
+                continue
+        else:
+            cap = QuotaHealth("healthy")
+        paid_health = (
+            _usage_windows_health([paid], reserve_percent=reserve_percent, now_ms=now_ms)
+            if paid.amount.fraction() is not None and not paid.unlimited
+            else QuotaHealth("healthy")
+        )
+        if cap.state == "reserve" and (
+            paid_health.remaining_fraction is None
+            or (cap.remaining_fraction or 0) < paid_health.remaining_fraction
+        ):
+            paid_health = cap
+        if paid_health.state == "healthy":
+            return paid_health
+        if paid_health.state == "reserve" and best.state not in ("healthy", "reserve"):
+            best = paid_health
+    return best
+
+
+def _usage_windows_health(
+    relevant: list[UsageLimit], *, reserve_percent: float, now_ms: float | None
+) -> QuotaHealth:
+    """Reduce conjunctive windows after choosing the included or paid path."""
     measured: list[tuple[UsageLimit, float]] = []
     for limit in relevant:
         fraction = limit.amount.fraction()
@@ -563,7 +628,13 @@ def shared_tier_saturation(
     shared: list[float] = []
     tier_binding = False
     for limit in report.limits:
-        if limit.id.endswith(":extra"):
+        # A payable meter is an ALTERNATIVE to the plan, not part of the shared
+        # plan pool: counting it here collapsed the shared headroom this
+        # function exists to measure (regression the tier-spent notice tests
+        # caught). The legacy ``:extra`` id is the same concept on rows written
+        # before the explicit marker existed (``anthropic:extra``), kept so a
+        # pre-marker wire shape reads the way it always did.
+        if limit.paid_fallback or limit.id.endswith(":extra"):
             continue
         fraction = limit.amount.fraction()
         if fraction is None:
@@ -1275,16 +1346,30 @@ def _anthropic_extra_usage(payload: dict[str, Any]) -> UsageLimit | None:
                 unit="usd",
             ),
             window="1 month",
+            paid_fallback=True,
+            available=(cap is not None and cap > 0)
+            or ("limit" in spend and spend["limit"] is None),
+            unlimited=("limit" in spend and spend["limit"] is None),
+            supersedes_tiers=True,
         )
     extra = payload.get("extra_usage")
     if not isinstance(extra, dict) or extra.get("is_enabled") is not True:
         return None
-    places = extra.get("decimal_places")
+    places = extra.get("decimal_places", 2)
+    # Reject invalid precision before exponentiation: a malformed vendor object
+    # must neither grant uncapped spend nor overflow the float normalization.
+    if type(places) is not int or not 0 <= places <= 308:
+        return None
     used = _num(extra.get("used_credits"))
-    if used is None:
+    if used is None or used < 0 or isinstance(extra.get("used_credits"), bool):
         return None
     monthly = _num(extra.get("monthly_limit"))
-    divisor = 10 ** (places if isinstance(places, int) and places >= 0 else 2)
+    if isinstance(extra.get("monthly_limit"), bool):
+        return None
+    divisor = 10**places
+    # Both legacy amounts are minor units; scaling only the cap falsely
+    # exhausts an account with $12.50 used of $100.00 at 1250% utilization.
+    used /= divisor
     cap = monthly / divisor if monthly and monthly > 0 else None
     return UsageLimit(
         id="anthropic:extra",
@@ -1296,6 +1381,11 @@ def _anthropic_extra_usage(payload: dict[str, Any]) -> UsageLimit | None:
             unit="usd",
         ),
         window="1 month",
+        paid_fallback=True,
+        available=(cap is not None and cap > 0)
+        or ("monthly_limit" in extra and extra["monthly_limit"] is None),
+        unlimited=("monthly_limit" in extra and extra["monthly_limit"] is None),
+        supersedes_tiers=True,
     )
 
 
@@ -1546,6 +1636,44 @@ async def fetch_openai_oauth(
                     limit.label = f"{limit.window} ({display})"
                     limits.append(limit)
 
+    credits = payload.get("credits")
+    spend = payload.get("spend_control")
+    if isinstance(credits, dict):
+        # WHAM's balance is decimal credits, not money. Message estimates are
+        # advisory only; reset-credit counts are a different product entirely.
+        balance = _num(credits.get("balance"))
+        if isinstance(credits.get("balance"), bool) or (balance is not None and balance < 0):
+            balance = None
+        eligible = (
+            credits.get("has_credits") is True
+            and isinstance(credits.get("unlimited"), bool)
+            and credits.get("overage_limit_reached") is False
+            and isinstance(spend, dict)
+            and spend.get("reached") is False
+        )
+        unlimited = credits.get("unlimited") is True
+        estimates = []
+        for key, label in (("approx_local_messages", "local"), ("approx_cloud_messages", "cloud")):
+            counts = credits.get(key)
+            if (
+                isinstance(counts, list)
+                and counts
+                and all(type(n) is int and n >= 0 for n in counts)
+            ):
+                estimates.append(f"approx. {label} messages: {'/'.join(str(n) for n in counts)}")
+        limits.append(
+            UsageLimit(
+                id="openai:credits",
+                label="Extra credits",
+                amount=UsageAmount(remaining=balance, unit="credits"),
+                paid_fallback=True,
+                available=eligible,
+                unlimited=unlimited,
+                detail=" · ".join(estimates),
+                # No evidence that credits supersede additional Spark caps.
+                supersedes_tiers=False,
+            )
+        )
     if not limits:
         return None
     plan = payload.get("plan_type")
@@ -1749,6 +1877,8 @@ def _xai_on_demand(config: dict[str, Any]) -> UsageLimit | None:
         ),
         window="1 month",
         shared=True,
+        paid_fallback=True,
+        available=True,
     )
 
 
@@ -1882,6 +2012,12 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
         monthly_config = await _xai_billing_config(client, access_token, XAI_BILLING_URL)
         if monthly_config is not None:
             limits.extend(_xai_monthly_limits(monthly_config))
+            # Each response owns its paid meter. Keeping the first config
+            # alone hides a monthly on-demand allowance when credits returned
+            # only the migration flag (the two endpoints need not duplicate it).
+            monthly_paid = _xai_on_demand(monthly_config)
+            if monthly_paid is not None:
+                limits.append(monthly_paid)
             config = config or monthly_config
 
     if config is not None:
@@ -2142,7 +2278,9 @@ async def fetch_qwencloud_token_plan(client: httpx.AsyncClient, token: str) -> U
             UsageLimit(
                 id="credits-packs",
                 label="Credit Packs",
-                amount=UsageAmount(remaining=packs, unit="unknown"),
+                amount=UsageAmount(remaining=packs, unit="credits"),
+                paid_fallback=True,
+                available=True,
             )
         )
     return UsageReport(provider="alibaba-token-plan", limits=limits) if limits else None
@@ -2345,6 +2483,72 @@ async def fetch_usage(
     return None
 
 
+# These are local, fixed provenance statements, not arbitrary upstream notes.
+# Public usage serialization may safely retain ONLY these strings for Muse;
+# other providers' notes can contain untrusted endpoint/error vocabulary.
+META_MUSE_ALLOWANCE_NOTE = "Last sign-in allowance; refresh does not query Muse."
+META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded."
+META_MUSE_USAGE_NOTES = frozenset({META_MUSE_ALLOWANCE_NOTE, META_MUSE_NO_OBSERVATION_NOTE})
+
+
+def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
+    """Read a stored allowance receipt without turning its age into a live probe.
+
+    Meta's observed sources are key-mint ``subs_usage`` and the Responses SSE
+    ``response.subscription_usage`` event (see ``meta_muse_usage``). Neither is
+    a read-only quota API, and only the sign-in receipt is stored on the OAuth
+    row; SSE receipts remain request provenance. Reuse their sanitizer, but
+    retain the receipt's own timestamp: the sanitizer timestamps NEW
+    observations, whereas /usage is
+    only reading one. An absent/undated receipt says unknown, never zero usage.
+    """
+    from local_operator.providers.meta_muse_usage import subscription_observation
+
+    note = META_MUSE_ALLOWANCE_NOTE
+    # No observation is not a just-fetched reading. Zero is the existing
+    # non-observation stamp: freshness/quota consumers require fetched_at > 0.
+    unknown = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
+    raw = (creds or {}).get("subscription_observation")
+    if not isinstance(raw, dict):
+        return unknown
+    stamp = raw.get("observedAtMs")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return unknown
+    observed_at = _num(stamp)
+    if observed_at is None or not 0 < observed_at <= time.time() * 1000:
+        return unknown
+    try:
+        receipt = subscription_observation(raw)
+    except (OverflowError, ValueError):
+        # The store can outlive parser versions. Corrupt metadata must not
+        # disappear via the controller's exception isolation or invent a meter.
+        return unknown
+    if receipt is None:
+        return unknown
+    limits: list[UsageLimit] = []
+    for name in ("window", "weekly"):
+        entry = receipt.get(name)
+        if not isinstance(entry, dict):
+            continue
+        duration = entry.get("windowDurationMins")
+        label = _window_label(
+            duration * 60 if duration is not None else None,
+            "Weekly" if name == "weekly" else "Window",
+        )
+        limits.append(
+            UsageLimit(
+                id=f"meta-muse:{name}",
+                label=label,
+                amount=UsageAmount(used_fraction=entry["usedPercent"] / 100, unit="percent"),
+                window="weekly" if name == "weekly" else "rolling",
+                resets_at_ms=entry.get("resetsAtMs"),
+                # Both windows gate the subscription account, not one model.
+                shared=True,
+            )
+        )
+    return UsageReport(provider="meta-muse", fetched_at=int(observed_at), limits=limits, notes=note)
+
+
 async def _run_fetcher(
     client: httpx.AsyncClient,
     kind: FetcherKind,
@@ -2354,6 +2558,8 @@ async def _run_fetcher(
     creds: dict[str, Any] | None = None,
 ) -> UsageReport | None:
     """One fetcher by kind. Split out so the credential choice above stays legible."""
+    if kind == "meta-muse-observation":
+        return meta_muse_usage_report(creds)
     if kind == "openrouter":
         return await fetch_openrouter(client, secret)
     if kind == "anthropic-oauth":

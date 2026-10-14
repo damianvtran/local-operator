@@ -28,9 +28,11 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
+    CustomMessage,
     ModelSpec,
     StreamEvent,
     StreamTextDelta,
@@ -122,6 +124,16 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
 
 def reminders_in(stream: SteeringStream, index: int) -> list[str]:
     return [text for text in stream.request_texts(index) if "<system-reminder>" in text]
+
+
+def reminders(session: Session) -> list[Any]:
+    """Every todo reminder appended to the live context so far, expired ones
+    included — expiry is a RENDER decision, the live list is never rewritten."""
+    return [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
+    ]
 
 
 @pytest.mark.asyncio
@@ -253,10 +265,16 @@ async def test_a_model_that_cannot_proceed_is_nudged_once_and_then_released(tmp_
 
 
 @pytest.mark.asyncio
-async def test_blocking_an_item_ends_the_turn_without_a_second_nudge(tmp_path) -> None:
-    """The honest escape hatch. ``block`` is how a model stops with work
-    outstanding without lying that it finished it — so a blocked list must not
-    keep the turn alive."""
+async def test_blocking_an_item_earns_one_reconciliation_nudge(tmp_path) -> None:
+    """The honest escape hatch, now ACCOUNTED for instead of merely permitted.
+
+    ``block`` is how a model stops with work outstanding without lying that it
+    finished it — and it is MOVEMENT, so it earns exactly one nudge asking the
+    model to say what it did with the parked item. That is the contract change:
+    a blocked list used to earn no nudge at all, which is how a session parked
+    six items and ended turns for ~14 hours. The turn still ends — after ONE
+    accounting pass, not a loop — so the honest stop survives.
+    """
     stream = SteeringStream(
         [
             {"events": todo_call("c1", {"op": "init", "items": ["get prod credentials"]})},
@@ -272,17 +290,208 @@ async def test_blocking_an_item_ends_the_turn_without_a_second_nudge(tmp_path) -
                 )
             },
             {"events": [StreamTextDelta(delta="Blocked on credentials — over to you.")]},
+            # The accounting turn the reconciliation nudge buys: the model states
+            # what the block waits on. Its yield is byte-identical to the last,
+            # so the turn ends here rather than nudging again.
+            {
+                "events": [
+                    StreamTextDelta(
+                        delta=(
+                            "Still blocked on the prod credential; nothing is watching it "
+                            "until you provide it."
+                        )
+                    )
+                ]
+            },
         ]
     )
     session = make_session(tmp_path, stream)
 
     await session.prompt("deploy")
 
-    assert len(stream.requests) == 4, "nudged once, then released after the block"
-    assert reminders_in(stream, 3) == [], "a blocked list must not re-arm the guardrail"
-    assert builtin.open_todos("e2e") == [], "blocked is not open work"
+    assert len(stream.requests) == 5, "one reconciliation nudge, then released"
+    assert reminders_in(stream, 3) == [], "the block itself is not yet accounted for"
+    accounted = reminders_in(stream, 4)
+    assert len(accounted) == 1, "the reconciliation nudge must reach the model"
+    assert "get prod credentials" in accounted[0]
+    assert "needs a credential only the user can provide" in accounted[0]
+    assert "account for each blocked item" in accounted[0]
+    # Pending is empty and the item is parked, not closed: blocked is reconciled
+    # as blocked, never quietly treated as open work or as done.
+    assert builtin.open_todos("e2e") == []
+    assert [item["text"] for item in builtin.blocked_todos("e2e")] == ["get prod credentials"]
     assert builtin.TODO_STORE["e2e"][0]["items"][0]["status"] == "blocked"
 
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> None:
+    """THE over-fire repro, end to end: an accounted parked set must not be
+    re-asserted on the next turn's first yield. Before the cross-turn latch,
+    every fresh turn reset it and the first prose yield was overridden — the
+    measured shape: ~97 of ~116 quiet-end attempts overridden across two
+    sessions holding 5-6 blocked items and ZERO pending. Turn 2 here yields in
+    plain prose, the same guard decision a quiet ``no_reply`` batch takes at
+    the boundary (a scripted ``no_reply`` is expressible in this harness, but
+    against a fresh USER prompt its quiet-end door refuses by design — "A
+    person asked this turn" — so prose is the honest shape for this
+    assertion)."""
+    stream = SteeringStream(
+        [
+            {"events": todo_call("c1", {"op": "init", "items": ["get prod credentials"]})},
+            {"events": [StreamTextDelta(delta="I need credentials for this.")]},
+            {
+                "events": todo_call(
+                    "c2",
+                    {
+                        "op": "block",
+                        "items": ["get prod credentials"],
+                        "reason": "needs a credential only the user can provide",
+                    },
+                )
+            },
+            {"events": [StreamTextDelta(delta="Blocked on credentials — over to you.")]},
+            # The accounting pass the reconciliation nudge buys.
+            {
+                "events": [
+                    StreamTextDelta(
+                        delta=(
+                            "Still blocked on the prod credential; nothing is watching it "
+                            "until you provide it."
+                        )
+                    )
+                ]
+            },
+            # Second turn, fresh prompt: the set is already accounted, so this
+            # prose yield must STAND — no new request, no new reminder. The old
+            # per-turn re-arm bought one more of each here.
+            {"events": [StreamTextDelta(delta="Nothing further from me.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("deploy")
+    assert session._blocked_reminder_fingerprint == (("Todos", "get prod credentials", "blocked"),)
+    await session.prompt("thanks — anything else?")
+
+    # Turn 1: five requests (the reconciliation pass included); turn 2: ONE.
+    assert len(stream.requests) == 6, "turn 2 was re-asserted — the parked set re-fired"
+    # Exactly two nudges ever fired — the pending one and the blocked one; the
+    # fresh turn added none.
+    assert len(reminders(session)) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_pending_work_still_fires_after_a_parked_set_is_accounted(tmp_path) -> None:
+    """The direction the blocked latch must NOT close: with the parked set
+    accounted, movement in the PENDING group still re-enters the turn. The next
+    turn records new work, yields, and earns a nudge whose text carries the
+    pending section only — the accounted parked set contributes no section."""
+    stream = SteeringStream(
+        [
+            {"events": todo_call("c1", {"op": "init", "items": ["get prod credentials"]})},
+            {"events": [StreamTextDelta(delta="I need credentials for this.")]},
+            {
+                "events": todo_call(
+                    "c2",
+                    {
+                        "op": "block",
+                        "items": ["get prod credentials"],
+                        "reason": "needs a credential only the user can provide",
+                    },
+                )
+            },
+            {"events": [StreamTextDelta(delta="Blocked on credentials — over to you.")]},
+            {
+                "events": [
+                    StreamTextDelta(
+                        delta=(
+                            "Still blocked on the prod credential; nothing is watching it "
+                            "until you provide it."
+                        )
+                    )
+                ]
+            },
+            # Turn 2: new work arrives and is recorded.
+            {"events": todo_call("c3", {"op": "add", "items": ["write the follow-up"]})},
+            # The yield after the add must be held: pending work is open work.
+            {"events": [StreamTextDelta(delta="That's next on the list.")]},
+            # Nudged, the model settles honestly.
+            {"events": [StreamTextDelta(delta="Waiting on the credential before that.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("deploy")
+    await session.prompt("one more thing: the follow-up")
+
+    assert len(stream.requests) == 8
+    nudge = reminders_in(stream, 7)
+    assert len(nudge) == 1, "the new pending item must put the model back to work"
+    assert "write the follow-up" in nudge[0]
+    assert "Do not end the turn while pending items remain" in nudge[0]
+    # The accounted parked set contributes NO section: blocked did not move.
+    assert "account for each blocked item" not in nudge[0]
+    assert "get prod credentials" not in nudge[0]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_late_steer_still_re_enters_a_quiet_turn(tmp_path) -> None:
+    """The yield collector is untouched by the blocked latch — this pins it.
+    With the parked set accounted (the guard silent), a steer typed while the
+    accounting response is in flight must still re-enter the turn and be
+    handled: the injections are the loop's, and a quiet guard is not a quiet
+    session."""
+    session: Session | None = None
+
+    def steer_late() -> None:
+        # Typed mid-request; the loop drains it at the yield boundary the guard
+        # just declined.
+        assert session is not None
+        session.steer("also fold in the staging check")
+
+    stream = SteeringStream(
+        [
+            {"events": todo_call("c1", {"op": "init", "items": ["get prod credentials"]})},
+            {"events": [StreamTextDelta(delta="I need credentials for this.")]},
+            {
+                "events": todo_call(
+                    "c2",
+                    {
+                        "op": "block",
+                        "items": ["get prod credentials"],
+                        "reason": "needs a credential only the user can provide",
+                    },
+                )
+            },
+            {"events": [StreamTextDelta(delta="Blocked on credentials — over to you.")]},
+            # The accounting pass — with the steer arriving mid-request.
+            {
+                "events": [
+                    StreamTextDelta(
+                        delta=(
+                            "Still blocked on the prod credential; nothing is watching it "
+                            "until you provide it."
+                        )
+                    )
+                ],
+                "steer": steer_late,
+            },
+            # The steer, not the guard, bought this request.
+            {"events": [StreamTextDelta(delta="Noted — the staging check is on the list.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("deploy")
+
+    assert len(stream.requests) == 6, "the late steer must re-enter a quiet turn"
+    assert any("staging check" in text for text in stream.request_texts(5))
+    # The guard itself did not: the two nudges of turn 1, and nothing new.
+    assert len(reminders(session)) == 2
     await session.dispose()
 
 

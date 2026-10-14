@@ -41,6 +41,7 @@ from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     MAX_REJECTED_REPLY_CHARS,
     MAX_TOLERATED_TRAILING_CHARS,
+    ActionBatchRefused,
     DecisionParseError,
     ProviderModelClient,
     ProviderStreamAbortedError,
@@ -229,6 +230,150 @@ def test_parse_decision_rejects_a_batch_bound_to_a_stale_observation() -> None:
 
     with pytest.raises(DecisionParseError):
         parse_decision(finish_payload(stale), current, route=ROUTE)
+
+
+def test_parse_decision_inherits_a_binding_stated_once_on_a_sibling() -> None:
+    """A batch may bind on one action and omit the echo on the others.
+
+    The shape is the one read out of a sealed 2026-09 OSWorld rejection: a
+    two-action batch whose FIRST action carries the current observation_id and
+    whose second omits it. Refusing it spent a billed corrective round trip on
+    a formality -- refused turns ran ~10% of that campaign's calls (137 of
+    1340) and tracked task failure -- so the decoder completes the omission,
+    and everything downstream sees the binding on every action.
+    """
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {"kind": "type", "observation_id": current.observation_id, "text": "hello"},
+                {"kind": "key", "keys": ["ENTER"]},
+            ],
+            "public_observations": "typed hello",
+        }
+    )
+
+    decision = parse_decision(payload, current, route=ROUTE)
+
+    assert [action.observation_id for action in decision.action_batch.actions] == [
+        current.observation_id,
+        current.observation_id,
+    ]
+    decision.action_batch.validate_for(current)
+
+
+def test_parse_decision_inherits_a_binding_stated_on_any_action() -> None:
+    """The stated binding may sit on ANY action -- the omitted sibling may lead."""
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {"kind": "type", "text": "hello"},
+                {"kind": "key", "observation_id": current.observation_id, "keys": ["ENTER"]},
+            ]
+        }
+    )
+
+    decision = parse_decision(payload, current, route=ROUTE)
+
+    assert {action.observation_id for action in decision.action_batch.actions} == {
+        current.observation_id
+    }
+
+
+def test_parse_decision_refuses_a_stale_binding_however_the_siblings_read() -> None:
+    """Inheritance must not launder an action meant for a previous screen.
+
+    A stated id that names another observation refuses the whole batch wherever
+    it sits; filling the siblings' omissions from the CURRENT observation
+    instead would admit exactly the stale decision the echo exists to expose.
+    """
+
+    stale = observation(0)
+    current = observation(1)
+    on_first = [
+        {"kind": "type", "observation_id": stale.observation_id, "text": "hello"},
+        {"kind": "key", "keys": ["ENTER"]},
+    ]
+    on_second = [
+        {"kind": "type", "text": "hello"},
+        {"kind": "key", "observation_id": stale.observation_id, "keys": ["ENTER"]},
+    ]
+
+    for actions in (on_first, on_second):
+        with pytest.raises(ActionBatchRefused) as info:
+            parse_decision(json.dumps({"actions": actions}), current, route=ROUTE)
+        assert info.value.class_key == "observation-binding"
+
+
+def test_parse_decision_refuses_a_batch_that_states_no_binding_at_all() -> None:
+    """Every-omission stays refused: nothing stated cannot be completed safely.
+
+    With no stated binding, a batch composed against a previous screen would
+    silently inherit the CURRENT observation -- the failure the echo exists to
+    expose -- so only an ESTABLISHED binding is inherited.
+    """
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {"kind": "type", "text": "hello"},
+                {"kind": "key", "keys": ["ENTER"]},
+            ]
+        }
+    )
+
+    with pytest.raises(ActionBatchRefused) as info:
+        parse_decision(payload, current, route=ROUTE)
+
+    assert info.value.class_key == "observation-binding"
+
+
+def test_parse_decision_refuses_a_stated_binding_of_the_wrong_type() -> None:
+    """A present-but-wrong value is a STATEMENT, not an omission: never filled."""
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {"kind": "type", "observation_id": 7, "text": "hello"},
+                {"kind": "key", "keys": ["ENTER"]},
+            ]
+        }
+    )
+
+    with pytest.raises(ActionBatchRefused) as info:
+        parse_decision(payload, current, route=ROUTE)
+
+    assert info.value.class_key == "observation-binding"
+
+
+def test_parse_decision_still_refuses_a_sibling_that_omits_its_kind() -> None:
+    """Inheritance completes the BINDING only -- other defects keep their class.
+
+    An action with no ``kind`` tag has no declared vocabulary to validate
+    against and stays refused by the validator (the same boundary
+    ``public_reply.drop_sibling_action_fields`` records), now with the shape
+    hint rather than the binding refusal that used to mask it.
+    """
+
+    current = observation()
+    payload = json.dumps(
+        {
+            "actions": [
+                {"kind": "type", "observation_id": current.observation_id, "text": "hello"},
+                {"keys": ["ENTER"]},
+            ]
+        }
+    )
+
+    with pytest.raises(ActionBatchRefused) as info:
+        parse_decision(payload, current, route=ROUTE)
+
+    assert info.value.class_key == "field-invalid"
 
 
 @pytest.mark.parametrize(
@@ -2918,12 +3063,20 @@ _REJECTION_HINT_CASES = [
     (
         "observation-binding",
         "observation-binding",
-        ['"observation_id" of the observation being answered'],
+        [
+            '"observation_id" of the observation being answered',
+            "at least one action",
+            "inherit",
+        ],
     ),
     (
         "stale-envelope-binding",
         "observation-binding",
-        ['"observation_id" of the observation being answered'],
+        [
+            '"observation_id" of the observation being answered',
+            "at least one action",
+            "inherit",
+        ],
     ),
 ]
 
@@ -4779,6 +4932,7 @@ def test_the_action_field_table_is_derived_from_every_kind() -> None:
     declared_kinds = {
         "click",
         "double_click",
+        "drag",
         "type",
         "key",
         "paste_text",

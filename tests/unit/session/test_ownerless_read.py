@@ -41,7 +41,11 @@ import pytest
 
 from local_operator.harness.types import Message
 from local_operator.session import attached as remote_module
-from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
+from local_operator.session.attached import (
+    NO_OWNER_MEMO_S,
+    READ_ATTACH_BUDGET_S,
+    AttachedSession,
+)
 from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendSync,
@@ -398,6 +402,96 @@ async def test_a_read_reports_no_runtime_only_when_there_is_none(
     assert viewer.cold_reason == "no-runtime"
     assert viewer.attaching is False
     await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_second_read_inside_the_memo_reuses_the_no_owner_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sibling reads of one open share ONE locate, not one apiece.
+
+    ``_remote_history`` retries the attach inside a single open immediately
+    after the acquire's attempt, and the app fires several reads per open — each
+    used to ask the owner's registry again (a mesh round trip apiece on the peer
+    seam). The memo answers "no record" for ``NO_OWNER_MEMO_S``; this cell pins
+    the STRUCTURAL fact — one locate for two reads inside the window — not a
+    timing bound, and control mode keeps its own answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    viewer = await _cold_viewer(tmp_path)
+
+    locates: list[int] = []
+    owner_cls = type(viewer._owner)  # noqa: SLF001 — the locate seam under the memo
+    real_locate = owner_cls.locate
+
+    def _counting_locate(self: Any) -> Any:
+        locates.append(1)
+        return real_locate(self)
+
+    monkeypatch.setattr(owner_cls, "locate", _counting_locate)
+
+    assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+    assert len(locates) == 1
+    assert viewer.cold_reason == "no-runtime"
+    # Armed for the window — not forever (and the deadline is what expiry reads).
+    armed_until = viewer._no_owner_until  # noqa: SLF001 — the memo's deadline
+    assert time.monotonic() < armed_until <= time.monotonic() + NO_OWNER_MEMO_S
+    # The same-open retry's shape: no second ask inside the window.
+    assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+    assert len(locates) == 1, "the memo must answer the second read without a dial"
+    assert viewer.cold_reason == "no-runtime"
+    # CONTROL MODE IS NOT MEMOIZED: no budget means the live arm or the typed
+    # refusal, never a read's fallback.
+    assert await viewer.attach_existing() is False
+    assert len(locates) == 2, "control mode must keep dialling"
+    await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_no_owner_memo_expires_and_yields_the_moment_a_record_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The memo is a deadline and a fact, never a lock-out.
+
+    Two ways out: the window passes (moved into the past here rather than waited
+    out — a sleep would be a bet on wall time), or a record appears, which must
+    be dialled immediately however fresh the memo is.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    viewer = await _cold_viewer(tmp_path)
+
+    locates: list[int] = []
+    owner_cls = type(viewer._owner)  # noqa: SLF001 — the locate seam under the memo
+    real_locate = owner_cls.locate
+
+    def _counting_locate(self: Any) -> Any:
+        locates.append(1)
+        return real_locate(self)
+
+    monkeypatch.setattr(owner_cls, "locate", _counting_locate)
+
+    assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+    assert len(locates) == 1
+
+    # EXPIRED, AND A RECORD HAS APPEARED: the decayed window is only a deadline —
+    # once it lapses the read asks again, SEES the record (the reason moves to
+    # the record's own token), and the memo is cleared against it.
+    owner = _FakeOwner(SESSION_ID, tmp_path)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    try:
+        viewer._no_owner_until = time.monotonic() - 0.001  # noqa: SLF001 — expired
+        assert await viewer.attach_existing(budget=READ_ATTACH_BUDGET_S) is False
+        assert len(locates) == 2, "an expired memo must not answer"
+        assert viewer.cold_reason == "owner-silent"
+        assert viewer._no_owner_until == 0.0, "the record clears the memo"  # noqa: SLF001
+        # (The read above dialled and RETAINED the dial — RISK 2's own cells own
+        # what the next read does with it; this cell's claim ends at the clear.)
+    finally:
+        await viewer.dispose()
+        await owner.stop()
 
 
 @pytest.mark.asyncio

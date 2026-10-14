@@ -460,6 +460,8 @@ def server_own_turn_only(cfg: Any) -> bool:
 
 def load_all_mcp_configs(
     cwd: str | os.PathLike[str],
+    *,
+    boundary: Path | None = None,
 ) -> tuple[dict[str, MCPServerConfig], dict[str, str]]:
     """Load every MCP server config visible from ``cwd``.
 
@@ -483,9 +485,32 @@ def load_all_mcp_configs(
     ``enabledServers``, which wins over a config's own ``enabled: false``.
     Suppressed (disabled) servers are dropped from the result entirely — they
     must not shadow lower-priority sources.
+
+    ``boundary`` is the world boundary a bounded caller validated (the
+    benchmark's SDK world — see ``SessionSpec.world_root``). When set, EVERY
+    candidate but the isolated config dir's own file must RESOLVE inside the
+    boundary — not merely spell a path inside it: the HOME-relative sources
+    join only when the world genuinely owns them (a world must not silently
+    inherit the controller home's or the operator home's server
+    declarations), and the cwd-scoped sources are canonicalized too, so a
+    ``<world>/.mcp.json`` symlinked out to a file elsewhere cannot enter as
+    "world content" (measured: it did, and its servers connected — see
+    ``QA round 1``). The one trusted exemption stays: the config dir's own
+    ``mcp.json`` is the explicitly scoped controller source the episode's
+    action declaration lives in (see ``evaluation.session_arm``). ``None``
+    is every ordinary call, unchanged.
     """
     root = Path(cwd).expanduser()
     home = Path.home()
+    world: Path | None = None
+    if boundary is not None:
+        world = Path(boundary).expanduser().resolve()
+        cwd_root = Path(cwd).expanduser().resolve()
+        if not (cwd_root == world or cwd_root.is_relative_to(world)):
+            raise ValueError(
+                f"cwd {cwd_root} is not inside the boundary {world}; a world boundary "
+                "only clips discovery that starts inside it"
+            )
 
     project_path = root / ".local-operator" / "mcp.json"
     project_dot_path = root / ".mcp.json"
@@ -516,6 +541,27 @@ def load_all_mcp_configs(
         # User scope only; Codex project-scoped config is out of scope here.
         (home / ".codex" / "config.toml", _read_toml, ("mcp_servers",)),
     ]
+
+    if world is not None:
+        # ONE canonical-containment pass for every candidate but the isolated
+        # config dir's own file. ``resolve`` is the load-bearing call for the
+        # cwd-scoped rows: their SPELLING is always inside the world, but a
+        # symlinked file resolves outside it, and that was the measured hole
+        # — ``<world>/.mcp.json -> <outer>.json`` entered as world content and
+        # its servers were connected and catalogued to the model (QA round 1,
+        # Q2). A nonexistent candidate resolves to its normalized path and is
+        # kept (its read yields ``None``); the home-relative rows keep the
+        # pre-existing join-only-if-inside semantics, which this predicate
+        # states in canonical form.
+
+        def _in_world(path: Path) -> bool:
+            try:
+                canonical = path.expanduser().resolve()
+            except OSError:
+                return False
+            return canonical == world or canonical.is_relative_to(world)
+
+        candidates = [row for row in candidates if row[0] == user_path or _in_world(row[0])]
 
     claude_path = home / ".claude.json"
     # First pass: collect every candidate per name (priority order) and the

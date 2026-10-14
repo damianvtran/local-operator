@@ -96,17 +96,28 @@ def test_discover_and_load_defaults_a_config_dir_cache(tmp_path: Path, monkeypat
     (tmp_path / "cfg").mkdir()
     (tmp_path / "home").mkdir()
     captured: list[object] = []
+    forwarded: list[object] = []
 
     class FakeManager:
         def __init__(
-            self, cwd, tool_cache, auth_store=None, *, secret_base=None, register_secret=None
+            self,
+            cwd,
+            tool_cache,
+            auth_store=None,
+            *,
+            secret_base=None,
+            register_secret=None,
+            boundary=None,
         ):
             captured.append(tool_cache)
+            forwarded.append(boundary)
             # The owner config root and the redaction sink are forwarded, not
             # defaulted away: a loader that dropped them would resolve `${NAME}`
             # against the wrong store and register nothing for the sinks to
             # scrub, and this double exists to catch exactly that at the call
-            # site (`mcp/secret_refs.py`).
+            # site (`mcp/secret_refs.py`). ``boundary`` rides the same seam for
+            # the world clip (QA round 1, Q1): the loader must forward it, and
+            # the default stays ``None`` for every ordinary call.
             assert secret_base is None and register_secret is None
 
         async def discover_and_connect(self):
@@ -123,6 +134,9 @@ def test_discover_and_load_defaults_a_config_dir_cache(tmp_path: Path, monkeypat
     asyncio.run(discover_and_load_mcp_tools(str(tmp_path)))
     assert len(captured) == 1
     assert isinstance(captured[0], McpToolCache)
+    assert forwarded == [None], "the ordinary call must not invent a boundary"
+    asyncio.run(discover_and_load_mcp_tools(str(tmp_path), boundary=tmp_path))
+    assert forwarded[-1] == tmp_path, "the loader must forward the world boundary"
     assert captured[0]._path.parent == tmp_path / "cfg"
 
 

@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -46,6 +47,16 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The open-frame trace names a real output file, read once at import.
+    # Inheriting it could append test timings to the operator's trace; tests
+    # that exercise tracing must opt in with their own isolated output path.
+    "LOP_OPEN_TRACE",
+    # Managed ownership descriptors address real processes/resources. Inherited
+    # values can identify an operator's lease, not a fixture; scrub rather than
+    # declaring them harmless. Tests opt in with their OWN bound owner values.
+    "LOP_OWNED_LEASE_PATH",
+    "LOP_OWNED_OWNER_ID",
+    "LOP_OWNED_SOURCE_PIN",
     # The click ladder's launch rung looks for `local-operator-ui` on PATH,
     # which on a machine that has the app installed FINDS IT. A test that drives
     # `open_session` without doubling the rung therefore starts the operator's
@@ -57,6 +68,12 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
+    # a directory list that WIDENS what the server will serve. An inherited value
+    # would make every server test's root set depend on the developer's shell --
+    # and on an operator's machine it names real directories, so a test could be
+    # made to serve files out of one.
+    "LOCAL_OPERATOR_STATIC_ROOTS",
     # The unbounded-search guard's escape hatch (``tools/search_guard.ALLOW_ENV``).
     # An inherited value would waive the refusal every cell in
     # ``test_bash_search_interception.py`` asserts — the same ESCAPE-HATCH class
@@ -90,6 +107,21 @@ _AMBIENT_VARS = (
     # (``test_ask_queue_e2e.py``'s autouse pin, ``test_ask_gate_e2e.py``'s
     # kill-switch cell), which is where that reason is written down.
     "LOP_ASK_GATE",
+    # The quiet turn's kill switch (``tools/builtin.no_reply_enabled``, read
+    # once at import from ``LOP_NO_REPLY``). Same ESCAPE-HATCH class as the two
+    # above: silence is the shipped default, and an operator or a QA rig that
+    # exported a kill value would silently unmount ``no_reply`` for every cell
+    # in ``test_no_reply_tool.py``, ``test_attention_notify.py`` and the e2e
+    # pair — green cells pinning a door nobody advertised, with the refusal
+    # paths untested. The kill-switch cell sets the resolved constant through
+    # ``monkeypatch`` explicitly, which is where that reason is written down.
+    "LOP_NO_REPLY",
+    # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
+    # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
+    # shipped default, and an inherited kill value would silently move every cell that
+    # drives it onto the "nothing happens" arm while asserting the one nobody runs. Cells
+    # that mean "off" set it through ``monkeypatch`` explicitly.
+    "LOP_SUPPLEMENTS",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
@@ -177,6 +209,16 @@ _AMBIENT_VARS = (
     # SAS-mismatch arm would never be exercised. Scrubbed here, and a test that
     # needs the seam sets it explicitly.
     "LOP_NETWORK_TEST_MODE",
+    # The spawn-lineage record (``macos_disclaim.ENV_SPAWN_CHAIN``): written into
+    # every long-lived child's environment by ``spawn_disclaimed`` and read back
+    # by the child's boot record and signal receipt. It names real processes (the
+    # spawner and its ancestors), so a value inherited from the developer's shell
+    # -- or from a lop session that launched pytest, which is the COMMON case,
+    # since every runtime is born with one -- would be prepended to by every test
+    # that spawns and asserted on by every test that reads a chain, making the
+    # recorded lineage depend on who ran the suite. Tests that need a chain set it
+    # explicitly.
+    "LOP_SPAWN_CHAIN",
     # The delegation allowance the guard reads beside them: set by the `bash`
     # tool on commands run by a session that HOLDS `task`, and the second route
     # by which an agent's shell may legitimately open a session. An inherited
@@ -369,6 +411,29 @@ _AMBIENT_VARS = (
     # than explained.
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    # The OSC 8 hyperlink capability markers of the REAL terminal the suite is
+    # run from (``terminals.py::is_hyperlinked``, the supplement file callouts'
+    # paint decision): ``VTE_VERSION`` is exported by every VTE-based terminal
+    # (GNOME Terminal, Tilix, gnome-console) and ``KONSOLE_VERSION`` by
+    # Konsole, and both are READ as values -- a version integer compared
+    # against a minimum -- so an inherited one moves the branch: a cell
+    # painting through the ambient probe would take the link path on a VTE
+    # host while CI takes plain text, green either way. Scrubbed rather than
+    # explained: the probe's own cells pin ``is_hyperlinked`` through explicit
+    # env maps (``test_link_targets.py``) and the callout cells pin
+    # ``hyperlinks=`` (``test_supplement_surface.py``), so nothing needs a live
+    # terminal's value to survive -- and with it scrubbed no unpinned cell can
+    # silently measure the developer's machine as the terminal under test.
+    "VTE_VERSION",
+    "KONSOLE_VERSION",
+    # The hyperlink escape hatch (``terminals.py::HYPERLINKS_ENV``), the same
+    # ESCAPE-HATCH class as the ``ALLOW_*`` names above: it overrides BOTH
+    # directions of the detection every ``is_hyperlinked`` cell asserts, so an
+    # operator's exported value would move a cell onto a forced branch while
+    # it still looked like it tested the probe. Cells that mean a forced
+    # branch pass it in their own env map (``test_link_targets.py`` pins both
+    # directions that way), which keeps the opt-in visible.
+    "LOCAL_OPERATOR_HYPERLINKS",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
@@ -417,11 +482,24 @@ def arm_process_desktop_gates() -> None:
         os.environ[name] = value
 
 
+def scrub_import_time_environment() -> None:
+    """Clear resource destinations before production modules capture them.
+
+    A function-scoped fixture runs after collection: relay imports open_trace
+    while collecting its tests, so clearing the variable in that fixture leaves
+    the already-captured output path live. Match the desktop gates' import-time
+    and configure-time protection without changing production's once-at-import
+    semantics. A tracing test can still opt in afterward in its own subprocess.
+    """
+    os.environ.pop("LOP_OPEN_TRACE", None)
+
+
 # At IMPORT, not only in a hook: a collection-time import (a module-scope helper,
 # a fixture that builds a child env) runs before ``pytest_configure`` in a worker
 # that receives already-collected items, and the whole point of setting it here
 # is that no child can be spawned before it is in the environment.
 arm_process_desktop_gates()
+scrub_import_time_environment()
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -432,6 +510,7 @@ def pytest_configure(config: pytest.Config) -> None:
     session's first test.
     """
     arm_process_desktop_gates()
+    scrub_import_time_environment()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -507,6 +586,45 @@ def warm_tiktoken_encoding() -> None:
 
 
 @pytest.fixture(autouse=True)
+def restore_active_locale() -> Iterator[None]:
+    """Give every worker's next test English copy, including cached constants.
+
+    The active locale is deliberately process-global: a live language switch
+    updates every resolver and registered module constant. That same lifetime
+    crosses test boundaries in xdist workers; fixing only known language tests
+    leaves the next app/config-driven mutator free to contaminate unrelated
+    English assertions (the marker receipt became ``1 image jointe`` in CI).
+
+    Use the public setter, not a scalar monkeypatch: restoring the locale alone
+    leaves constants materialised by refresh callbacks in the old language.
+    The monkeypatch fixture below makes its undo precede this teardown, so
+    refreshers read the real catalogue rather than a deleted fixture tree, and
+    test-only callbacks/eligibility patches cannot participate in the reset.
+    """
+    from local_operator.i18n import text
+
+    text.set_active_locale("en")
+    try:
+        yield
+    finally:
+        text.set_active_locale("en")
+
+
+@pytest.fixture
+def monkeypatch(restore_active_locale: None) -> Iterator[pytest.MonkeyPatch]:
+    """Keep pytest's standard patch API, but declare locale teardown ordering.
+
+    An autouse fixture alone does not guarantee this dependency: other autouse
+    fixtures already request monkeypatch. Declaring it here ensures pytest
+    unwinds ALL fixture-owned patches before running locale refresh callbacks,
+    even when a test fails. This context has the same undo semantics as pytest's
+    built-in fixture; it does not undo patches early from another finalizer.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
+
+
+@pytest.fixture(autouse=True)
 def isolate_environment(tmp_path_factory, monkeypatch):
     """Point HOME at a scratch dir and clear provider/config env vars.
 
@@ -567,6 +685,81 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def refuse_real_notifier_spawn(monkeypatch):
+    """Refuse to START a real notification helper from a unit test, except in dry-run.
+
+    WHY A GUARD AT THE Popen BOUNDARY, ON TOP OF THE GATES ABOVE. The gates stop
+    the PRODUCT from announcing — a runtime reads them before it calls
+    ``detached_notify``. They mean nothing to a test that starts the
+    notification HELPER itself: the macOS helper is a compiled Objective-C
+    binary that talks to Notification Centre and reads none of them, and this
+    suite compiles and runs that real binary. Its one safety story is the
+    dry-run seam, ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1``, which makes the helper
+    report what it would do and exit before touching Notification Centre; the
+    F7 pin in ``test_click_durability.py`` holds the seam to exactly ``"1"``.
+    What this guard adds is the case a caller FORGETS: a spawn of a
+    ``notifier``/``notifier-*`` child that does not declare the seam is refused
+    here, for every test — instead of posting a banner to the developer's
+    screen that no assertion ever notices. That failure mode is real and was
+    seen on this feature: 2026-10-09 20:44:18, a compiled helper built from a
+    source that had no seam reached Notification Centre and presented a banner.
+
+    The ``osascript`` arm is the same rule for the fallback route: a test must
+    stub ``notify._spawn_detached_ok`` (or ``subprocess`` itself) rather than
+    spawn a real ``osascript -e 'display notification ...'``.
+
+    A test that deliberately runs the real helper opts in the visible way the
+    gates above document: pass ``LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1`` in the
+    child's environment. The pins are ``test_click_durability.py::
+    test_a_unit_run_cannot_start_a_real_notifier_without_the_seam`` and, for
+    the class contract, ``::test_the_spawn_guard_keeps_the_popen_class_contract``.
+    """
+
+    # The base is the REAL ``Popen``: this class body evaluates before the
+    # ``setattr`` below, so the name still holds the unpatched class.
+    class _GuardedPopen(subprocess.Popen[bytes]):
+        """The refusal, expressed as a Popen SUBCLASS — never a replacement.
+
+        WHY NOT A FUNCTION (round-3 regression). Whatever occupies
+        ``subprocess.Popen`` here IS Popen for every consumer in the process,
+        and consumers subscript it at runtime — the ``mcp`` package evaluates
+        ``subprocess.Popen[bytes]`` as its platform utility modules import,
+        and the repo's own annotations name ``Popen[...]`` widely. A plain
+        function answers the subscript — and ``isinstance()`` — with
+        ``TypeError: 'function' object is not subscriptable``: a measured 35
+        tests across the MCP auth and desktop catalog suites went red on the
+        broken head. Subclassing keeps ``Popen[str]``, ``isinstance`` and
+        ``issubclass`` working; the pin is
+        ``test_click_durability.py::test_the_spawn_guard_keeps_the_popen_class_contract``.
+        """
+
+        def __init__(self, args, *rest, **kwargs):
+            argv = [args] if isinstance(args, (str, bytes)) else list(args)
+            name = os.path.basename(str(argv[0])) if argv else ""
+            if name == "notifier" or name.startswith("notifier-"):
+                child_env = kwargs.get("env")
+                seam = (child_env if child_env is not None else os.environ).get(
+                    "LOCAL_OPERATOR_NOTIFIER_DRY_RUN"
+                )
+                if seam != "1":
+                    raise RuntimeError(
+                        f"refusing to start {argv[0]!r} without "
+                        "LOCAL_OPERATOR_NOTIFIER_DRY_RUN=1: the dry-run seam is the "
+                        "only way a unit run reaches the notification helper (see "
+                        "tests/conftest.py::refuse_real_notifier_spawn)"
+                    )
+            if name == "osascript" and any("display notification" in str(arg) for arg in argv):
+                raise RuntimeError(
+                    "refusing to spawn a real 'osascript display notification' from a "
+                    "test; stub the spawn instead (see "
+                    "tests/conftest.py::refuse_real_notifier_spawn)"
+                )
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+
+
+@pytest.fixture(autouse=True)
 def isolate_implicit_local_discovery(monkeypatch):
     """Keyless discovery must not read a developer's default-port runtimes.
 
@@ -611,6 +804,50 @@ def reset_store_maintenance() -> Iterator[None]:
         yield
     finally:
         reset_store_maintenance_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def reset_page_cache_between_tests() -> Iterator[None]:
+    """Give every test a worker that has served no transcript page yet.
+
+    ``local_operator.session.page_cache`` keys decoded pages on the journal's
+    file identity, ``(directory, st_ino, st_size)``, in one process-wide cache
+    (its module docstring argues why identity, not a generation counter, is the
+    invalidation). That identity is right for the product and cross-test state
+    for the suite: any later test that reads a journal can be answered from an
+    earlier one's page.
+
+    The collision is not hypothetical. CI run 38037554993 shard 3 (job
+    114171921826) failed
+    ``tests/unit/tui/test_subagent_view.py::test_the_no_fact_fallback_labels_an``
+    ``envelope_by_its_own_kind``, parameter ``[False-False-Parent]``, serving
+    an EARLIER parameter's page (``Parent · redirected`` where ``Parent`` was
+    expected). This repo deletes a PASSING test's ``tmp_path``
+    (``tmp_path_retention_policy = "failed"``) and ``_pytest.tmpdir`` numbers
+    the next directory from the suffixes that still EXIST, so a later parameter
+    gets the earlier one's path back; the kernel recycles the freed inode; and
+    the two journals are byte-length twins. Same ``(directory, st_ino,
+    st_size)``, different bytes, and the cached page answers — a hit the cache
+    cannot tell from a hit on the current file. The in-place rewrite at an
+    unchanged size, the other shape its docstring names, is the same defect one
+    test drives deterministically; see
+    ``tests/unit/session/test_page_cache_isolation.py``.
+
+    Reset BEFORE and AFTER each test, like ``reset_store_maintenance``: before,
+    so no test can be answered from another's cache; after, so nothing this
+    test left can be served inside a teardown that follows. This replaces the
+    file-local fixture ``tests/unit/session/test_page_cache.py`` carried — it
+    was right, it was just scoped to the one file that already knew. It does
+    not touch the product-side residual (a production fix changes the key and
+    its cache semantics), which stays the page-cache owners' call.
+    """
+    from local_operator.session.page_cache import reset_page_cache
+
+    reset_page_cache()
+    try:
+        yield
+    finally:
+        reset_page_cache()
 
 
 def _redaction_filter() -> logging.Filter | None:
@@ -1060,14 +1297,54 @@ def _temp_roots(item: pytest.Item) -> tuple[Path, ...]:
     already failed. `Exception`, not `OSError`, for the same reason the sweep
     itself suppresses broadly — a test may have replaced the path machinery this
     walk depends on, and discovering nothing is the right failure here.
+
+    ``tmp_path`` is named in ``funcargs`` for every test that REQUESTS it, but
+    NOT for one that only receives it through a dynamically resolved fixture
+    (``request.getfixturevalue``) — the network fixtures' house idiom
+    (``devices`` and everything built on it). Measured on a ``secret_mesh``-shaped
+    cell: 0 roots here, the candidate list collapsed to the single default-config
+    entry, and the broker under the resolved root survived its test — the
+    fixture-mediated leak of #2078/#2033. ``_resolved_tmp_path`` is the fallback
+    for that shape.
     """
     tmp_path = getattr(item, "funcargs", {}).get("tmp_path")
+    if not isinstance(tmp_path, Path):
+        tmp_path = _resolved_tmp_path(item)
     if not isinstance(tmp_path, Path):
         return ()
     with suppress(Exception):
         if tmp_path.is_dir():
             return (tmp_path, *(child for child in tmp_path.rglob("*") if child.is_dir()))
     return ()
+
+
+def _resolved_tmp_path(item: pytest.Item) -> Path | None:
+    """The ``tmp_path`` THIS item had resolved, when ``funcargs`` does not name it.
+
+    Read off the request tree's shared fixture map (``_fixture_defs`` on the
+    item's top request): pytest creates ONE dict at the top request and passes it
+    down by reference to every ``SubRequest`` (``fixtures.py``'s
+    ``SubRequest.__init__``), and each resolution — including a dynamic
+    ``request.getfixturevalue`` chain — records its value there. So the top
+    request still names a ``tmp_path`` the item's static fixture closure never
+    did.
+
+    Private and read-only, both deliberate. There is no public query for "was
+    this fixture already resolved": asking through ``getfixturevalue`` would
+    CREATE a fresh directory for every test that never used one. If a pytest
+    upgrade stops exposing the map, this degrades to ``None`` (the pre-fallback
+    behaviour) and
+    ``test_a_broker_under_a_fixture_mediated_root_is_dead_once_that_test_has_torn_down``
+    reddens, rather than a leak resuming silently.
+    """
+    request = getattr(item, "funcargs", {}).get("request")
+    fixture_defs = getattr(request, "_fixture_defs", None)
+    fixturedef = fixture_defs.get("tmp_path") if isinstance(fixture_defs, dict) else None
+    cached = getattr(fixturedef, "cached_result", None)
+    if not isinstance(cached, tuple) or not cached:
+        return None
+    value = cached[0]
+    return value if isinstance(value, Path) else None
 
 
 @pytest.fixture(autouse=True)

@@ -18,6 +18,7 @@ store RETURNED as dropped, which is how the shipped store loses one).
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing as mp
 import sqlite3
 import threading
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.analytics import recorder as recorder_module
 from local_operator.analytics import store as store_module
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.recorder import AnalyticsRecorder, reset_recorder_for_test
@@ -401,6 +403,92 @@ def test_flush_for_test_reports_a_batch_the_real_store_dropped(tmp_path, monkeyp
         rec.close()
 
 
+def test_flush_for_test_outwaits_a_write_lock_held_past_five_seconds(tmp_path):
+    """A healthy-but-slow write must not be reported as a failure.
+
+    Why this exists: an independent probe held the SQLite write lock
+    elsewhere and watched the writer blocked INSIDE ``_flush`` on the store
+    write — the queue was already drained (``qsize == 0``) while
+    ``unfinished_tasks`` stayed frozen at 1 — and the write completed the
+    moment the lock released. The old 5 s barrier budget sits INSIDE the
+    store's own permitted busy wait (5 s per attempt, retried), so it
+    raised ``TimeoutError`` on a write that was never lost, only not yet
+    settled: the intermittent CI failure this pins.
+
+    The lock here is a real second connection's ``BEGIN IMMEDIATE``, held
+    for 6 s — past the old budget, far under the store's real settle
+    ceiling — and released by a timer while the barrier waits. After the
+    fix the barrier must ride out the lock and the row must be readable;
+    on the old budget it raises at 5 s with the row still in flight.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    holder: sqlite3.Connection | None = None
+    releaser: threading.Timer | None = None
+    try:
+        # Warm the writer's connection first, so the lock below is taken
+        # against the INSERT rather than the schema-creation path.
+        rec.record(_snap(session_id="before"))
+        rec.flush_for_test()
+        assert store.aggregate().calls == 1
+
+        holder = sqlite3.connect(str(tmp_path / "a.db"), check_same_thread=False)
+        holder.execute("BEGIN IMMEDIATE")  # hold the write lock
+
+        rec.record(_snap(session_id="slow"))
+        releaser = threading.Timer(6.0, holder.rollback)
+        releaser.start()
+        rec.flush_for_test()
+        releaser.cancel()
+        assert store.aggregate().calls == 2
+    finally:
+        if releaser is not None:
+            releaser.cancel()
+        if holder is not None:
+            holder.rollback()
+            holder.close()
+        rec.close()
+
+
+def test_flush_default_budget_is_derived_from_the_store_settle_ceiling():
+    """The default barrier budget must never name its own number again.
+
+    Pinning the DERIVATION rather than a value: if the store's busy
+    timeout or retry count changes, this budget moves with it, and a
+    future edit that hard-codes a shorter default fails here instead of
+    re-creating the held-lock flake in CI. The ceiling itself must also
+    exceed one write phase's busy waits alone, because the open retries
+    in front of a write are part of what the barrier waits on.
+    """
+    default = inspect.signature(AnalyticsRecorder.flush_for_test).parameters["timeout"].default
+    assert default == (
+        store_module.WRITE_SETTLE_CEILING_S + recorder_module._FLUSH_FOR_TEST_MARGIN_S
+    )
+    one_write_phase_s = store_module._WRITE_RETRIES * (store_module._BUSY_TIMEOUT_MS / 1000.0)
+    assert store_module.WRITE_SETTLE_CEILING_S > one_write_phase_s
+
+
+def test_flush_with_a_short_explicit_timeout_still_raises_promptly(tmp_path):
+    """A genuinely non-settling writer is still reported, promptly.
+
+    The widened default must not weaken the barrier into patience without
+    limit: a caller that passes a short timeout gets its ``TimeoutError``
+    at that deadline, not at the derived ceiling.
+    """
+    store = _BlockedBatchStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.record(_snap())
+        assert store.entered.wait(5.0), "the writer never reached the batch write"
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="1 unsettled item"):
+            rec.flush_for_test(timeout=0.2)
+        assert time.monotonic() - started < 5.0
+    finally:
+        store.release.set()
+        rec.close()
+
+
 def test_flush_for_test_raises_at_its_deadline_instead_of_returning(tmp_path):
     """Expiry is a failure, not a return: a barrier without its guarantee IS the bug.
 
@@ -466,34 +554,90 @@ def test_parallel_processes_write_atomically(tmp_path):
     store.close()
 
 
+def _assert_single_new_writer(rec: AnalyticsRecorder, before: set[threading.Thread]) -> None:
+    # Names are shared by every recorder, including the process singleton a
+    # preceding stream test can legitimately leave alive. Subtract objects so
+    # that predecessor cannot hide a new writer, while two new same-name
+    # writers still violate the original one-writer invariant.
+    writers = {
+        thread
+        for thread in set(threading.enumerate()) - before
+        if thread.name == "lo-analytics-writer"
+    }
+    owned = rec._thread
+    assert owned is not None and owned.ident is not None and owned.is_alive()
+    assert writers == {owned}, f"expected ONE new writer thread, got {writers}"
+
+
 def test_tool_calls_ride_the_same_queue_and_writer_thread(tmp_path):
-    """One writer, never two.
+    """Call samples, tool calls and names share exactly one live writer.
 
-    ``AGENTS.md`` is explicit that a second thread writing to the store is
-    forbidden: two threads opening their first connection to a fresh database
-    race in a way that leaves the writer unable to see its own commits. Tool
-    calls therefore share the queue, the thread and the connection that call
-    samples and name upserts already use \u2014 asserted here by counting the
-    recorder's threads, not by trusting the implementation.
+    Two first connections to a fresh store can race, so merely finding the
+    recorder's declared thread is insufficient: enumerate the newly started
+    writers as well, and prove all three task kinds reached the same store.
     """
-    import threading
-
     store = AnalyticsStore(tmp_path / "a.db")
     rec = AnalyticsRecorder(store=store)
-    before = {t.name for t in threading.enumerate()}
-    rec.record(_snap(session_id="s1"))
-    for i in range(10):
-        rec.record_tool_call("s1", "read", "model", "" if i % 2 else "execution", 12.0)
-    rec.note_session_name("s1", "named")
-    rec.flush_for_test()
-    writers = {t.name for t in threading.enumerate()} - before
-    assert writers == {"lo-analytics-writer"}, f"expected ONE writer thread, got {writers}"
+    before = set(threading.enumerate())
+    try:
+        rec.record(_snap(session_id="s1"))
+        for i in range(10):
+            rec.record_tool_call("s1", "read", "model", "" if i % 2 else "execution", 12.0)
+        rec.note_session_name("s1", "named")
+        rec.flush_for_test()
+        _assert_single_new_writer(rec, before)
 
-    stats = store.session_report("s1").tool_calls
-    assert stats is not None
-    assert stats.total == 10 and stats.ok == 5
-    assert stats.faults == {"execution": 5}
-    rec.close()
+        aggregate = store.aggregate()
+        assert aggregate.calls == 1
+        assert getattr(aggregate, "session_names", {}).get("s1") == "named"
+        stats = store.session_report("s1").tool_calls
+        assert stats is not None
+        assert stats.total == 10 and stats.ok == 5
+        assert stats.faults == {"execution": 5}
+    finally:
+        # A failed barrier or assertion must not leak this writer into the next
+        # test and turn one failure into an order-dependent name collision.
+        rec.close()
+
+
+def test_tool_writer_ignores_a_preceding_same_name_singleton(tmp_path):
+    """Replay the stream-recorder predecessor that made name subtraction lie."""
+    store = AnalyticsStore(tmp_path / "predecessor.db")
+    predecessor = reset_recorder_for_test(store)
+    try:
+        predecessor.record(_snap(session_id="predecessor"))
+        predecessor.flush_for_test()
+        assert store.aggregate().calls == 1
+        thread = predecessor._thread
+        assert thread is not None and thread.is_alive()
+        assert thread.name == "lo-analytics-writer"
+
+        test_tool_calls_ride_the_same_queue_and_writer_thread(tmp_path / "subject")
+        # The subject's cleanup must not stop an unrelated predecessor.
+        assert thread.is_alive()
+    finally:
+        predecessor.close()
+
+
+def test_single_writer_check_rejects_two_real_same_name_writers(tmp_path):
+    """An identity-based fix must still reject the defect the old test guarded."""
+    stores = [AnalyticsStore(tmp_path / f"writer-{i}.db") for i in range(2)]
+    recorders = [AnalyticsRecorder(store=store) for store in stores]
+    before = set(threading.enumerate())
+    try:
+        for i, rec in enumerate(recorders):
+            rec.record(_snap(session_id=f"writer-{i}"))
+            rec.flush_for_test()
+            assert stores[i].aggregate().calls == 1
+        threads = [rec._thread for rec in recorders]
+        assert all(thread is not None and thread.is_alive() for thread in threads)
+        assert threads[0] is not threads[1]
+        assert {thread.name for thread in threads if thread is not None} == {"lo-analytics-writer"}
+        with pytest.raises(AssertionError, match="expected ONE new writer thread"):
+            _assert_single_new_writer(recorders[0], before)
+    finally:
+        for rec in recorders:
+            rec.close()
 
 
 def test_record_tool_call_never_raises(tmp_path):

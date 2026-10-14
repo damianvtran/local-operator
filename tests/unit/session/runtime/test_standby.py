@@ -49,6 +49,7 @@ from typing import Any, Iterator, cast
 
 import pytest
 
+from local_operator import macos_disclaim
 from local_operator.harness import approval
 from local_operator.session.runtime import reclaim, standby
 from local_operator.session.runtime.types import HOST_RUN_DIRNAME, RUNTIME_MODULE
@@ -188,7 +189,10 @@ def test_one_standby_per_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
         def wait(self, timeout: float | None = None) -> int:
             return 0
 
-    monkeypatch.setattr(standby.subprocess, "Popen", lambda *a, **k: _Child())
+    # The spawn seam is ``macos_disclaim.spawn_disclaimed`` (the disclaimed
+    # spawn that owns detachment and the macOS responsibility disclaim,
+    # 2026-10-09): a fake here keeps the suite from spawning real standbys.
+    monkeypatch.setattr(macos_disclaim, "spawn_disclaimed", lambda *a, **k: _Child())
     standby.reset_for_tests()
     try:
         first = standby._spawn_standby(tmp_path, sys.executable)
@@ -225,7 +229,7 @@ def test_no_standby_means_the_ordinary_cold_spawn(
             return None
 
     monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
-    monkeypatch.setattr(launch_module.subprocess, "Popen", lambda argv, **kw: _Child())
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", lambda argv, **kw: _Child())
     monkeypatch.setattr(launch_module, "open_operator_cap_handoff", _FakeHandoff)
     process = launch_module._spawn_runtime("sess-cold01", str(tmp_path), defer_materialise=True)
     capture = getattr(process, "lop_capture_path", None)
@@ -450,7 +454,7 @@ def test_an_impostor_listener_receives_no_capability(
                 return None
 
         monkeypatch.setattr(launch_module, "open_operator_cap_handoff", fake_handoff)
-        monkeypatch.setattr(launch_module.subprocess, "Popen", lambda argv, **kw: _Child())
+        monkeypatch.setattr(launch_module, "spawn_disclaimed", lambda argv, **kw: _Child())
         process = launch_module._spawn_runtime("sess-thief1", str(root), defer_materialise=True)
         capture = getattr(process, "lop_capture_path", None)
         if capture is not None:
@@ -515,7 +519,7 @@ def test_a_failed_adoption_does_not_reuse_the_handoff(
         return _Child()
 
     monkeypatch.setattr(launch_module, "open_operator_cap_handoff", fake_handoff)
-    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
     process = launch_module._spawn_runtime("sess-fresh1", str(tmp_path), defer_materialise=True)
     capture = getattr(process, "lop_capture_path", None)
     if capture is not None:
@@ -1996,7 +2000,7 @@ def test_the_spawned_child_carries_the_slots_idle_window(
         seen.update(kwargs)
         return _Child()
 
-    monkeypatch.setattr(standby.subprocess, "Popen", _popen)
+    monkeypatch.setattr(macos_disclaim, "spawn_disclaimed", _popen)
     daemon_spare = standby._spawn_standby(tmp_path, sys.executable, standby.SLOT_DAEMON)
     assert seen["env"][standby.STANDBY_IDLE_ENV] == "0"
     daemon_spare.close()

@@ -37,7 +37,7 @@ from local_operator.session.transcript import Transcript
 
 #: The model from the report: 1M advertised context, vision-capable.
 BIG_MODEL = ModelSpec(provider="test", model_id="opus-like", context_window=1_000_000)
-#: A 200k-context model, where the 600k absolute default cannot ever be reached
+#: A 200k-context model, where the 400k absolute default cannot ever be reached
 #: and the percentage has to govern instead.
 SMALL_MODEL = ModelSpec(provider="test", model_id="sonnet-like", context_window=200_000)
 
@@ -128,18 +128,18 @@ async def test_a_1m_session_does_not_compact_at_235k(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_1m_session_compacts_just_past_600k(tmp_path, monkeypatch):
-    """min(80% x 1M, 600k) = 600k: the absolute ceiling governs a huge window,
+async def test_a_1m_session_compacts_just_past_400k(tmp_path, monkeypatch):
+    """min(80% x 1M, 400k) = 400k: the absolute ceiling governs a huge window,
     because re-sending 800k tokens on every request is slow and expensive even
     though it fits."""
     session = make_session(tmp_path)
     await talk(session)
 
-    pin_measured_context(monkeypatch, 600_000)  # exactly on the line: stable
+    pin_measured_context(monkeypatch, 400_000)  # exactly on the line: stable
     refused = await session._plan_compaction(respect_threshold=True)
     assert refusal_reason(refused) == "below_threshold"
 
-    pin_measured_context(monkeypatch, 600_001)
+    pin_measured_context(monkeypatch, 400_001)
     plan = await session._plan_compaction(respect_threshold=True)
     assert refusal_reason(plan) is None  # a plan, not a refusal
     outcome = await session._run_compaction(as_plan(plan), reason="context-window")
@@ -149,7 +149,7 @@ async def test_a_1m_session_compacts_just_past_600k(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_200k_session_still_compacts_at_80_percent(tmp_path, monkeypatch):
-    """The 600k absolute default is larger than the whole 200k window. min()
+    """The 400k absolute default is larger than the whole 200k window. min()
     makes it inert rather than disabling compaction: the percentage governs and
     the pass fires at 160k."""
     session = make_session(tmp_path, model=SMALL_MODEL)
@@ -297,3 +297,78 @@ def test_the_cut_keeps_working_as_the_run_grows():
         cut = find_cut_point(messages, 20_000)
         assert cut is not None, f"run of {rounds} tool rounds was uncompactable"
         assert messages[cut].role != "tool"
+
+
+# ---------------------------------------------------------------------------
+# The task floor must not starve the gate (session 439818272d84, 0.68.28)
+# ---------------------------------------------------------------------------
+
+
+def _preserved_turn(index: int) -> Message:
+    """One carried-forward user turn: a plain message with the preserve flag.
+
+    The exact shape every pass after the first re-injects (a replayed user
+    message carrying ``PRESERVED_USER_TURN_KEY``); built here directly because
+    this state is constructed rather than grown through a pass.
+    """
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+
+    message = Message(role="user", content=[TextContent(text=f"preserved user turn {index}")])
+    message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+    return message
+
+
+@pytest.mark.asyncio
+async def test_the_task_floor_cannot_starve_the_automatic_gate(tmp_path, monkeypatch, caplog):
+    """Session 439818272d84: an 8-hour, silent, self-locking stall.
+
+    The session's last genuine user turn was hours old while peer/wake traffic
+    kept the context growing, and its live shape was ``[marker, *preserved,
+    anchor, *window]`` — exactly what a pass leaves behind. The preserve floor
+    anchored on ``anchor`` (nothing newer qualified), so ``keep_recent``
+    became the span from the anchor to the end: the WHOLE compactable window.
+    The widened walk stopped exactly at the preserved-block boundary, where
+    ``find_cut_point``'s summarizable count is empty (the marker and preserved
+    turns deliberately do not count) and it answered ``None``. The refusal
+    then RECURRED every turn — the anchor never moved while every new message
+    grew the window and the floor by the same span — until a typed user
+    message re-anchored the floor ~8 h later; 400k→549k provider tokens of
+    context were carried with zero passes in between. Pinned at the decision
+    level: this state must yield a plan, and the fallback must say so.
+    """
+    import logging
+
+    from local_operator.compaction.marker import build_compaction_marker
+
+    session = make_session(
+        tmp_path,
+        compaction_settings=CompactionSettings(keep_recent_tokens=KEEP_RECENT),
+    )
+    marker = build_compaction_marker("an earlier pass")
+    anchor = Message(role="user", content=[TextContent(text="the last genuine user turn")])
+    window: list[Message] = []
+    for index in range(5):
+        window.append(_tool_call_assistant(index))
+        window.append(_tool_result(index, "word " * 15))
+    for message in [anchor, *window]:
+        await session._transcript.append_message(message)
+    session._context.messages = [
+        marker,
+        *[_preserved_turn(index) for index in range(4)],
+        anchor,
+        *window,
+    ]
+    pin_measured_context(monkeypatch, 600_500)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+        plan = await session._plan_compaction(respect_threshold=True)
+
+    assert refusal_reason(plan) is None, (
+        "the preserve floor pinned the cut at the preserved-block boundary and "
+        "starved the automatic gate, exactly as on session 439818272d84"
+    )
+    assert "falling back to the plain recency window" in caplog.text
+    outcome = await session._run_compaction(as_plan(plan), reason="context-window")
+    assert outcome.ran is True
+    assert session._transcript.latest_entry("compaction") is not None
+    await session.dispose()

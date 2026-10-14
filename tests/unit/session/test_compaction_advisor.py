@@ -197,7 +197,7 @@ async def test_accepted_hint_lowers_the_trigger(tmp_path, monkeypatch):
     await talk(session)
     pin_measured_context(monkeypatch, 400_000)
 
-    # Without a hint the ordinary 600k trigger governs.
+    # Without a hint the ordinary 400k trigger governs.
     assert refusal_reason(await session._plan_compaction(respect_threshold=True)) == (
         "below_threshold"
     )
@@ -627,10 +627,11 @@ VISION_MODEL = ModelSpec(provider="test", model_id="sees", context_window=1_000_
 CONSTRAINT = "NEVER touch billing.py"
 
 #: Turn count and per-turn filler sized so ``compact_to_archive`` actually
-#: RENDERS PNG frames instead of taking its archive-text early return.
+#: RENDERS PNG frames instead of taking its archive-text early return, AND so
+#: those pages keep their images under the replay policy.
 #:
-#: This is load-bearing, not arbitrary. ``compact_to_archive`` returns
-#: ``Archive(frames=[], ...)`` when the serialized history is under
+#: The first half is load-bearing, not arbitrary. ``compact_to_archive``
+#: returns ``Archive(frames=[], ...)`` when the serialized history is under
 #: ``2 * _edge_chars_for(shape, context_window)``, so a small fixture exercises
 #: the text path while asserting ``strategy == "snapcompact"`` — which is how
 #: the first version of these tests claimed to cover image replay while
@@ -638,8 +639,13 @@ CONSTRAINT = "NEVER touch billing.py"
 #: size: 6 frames and ~155k chars of archive text. Shrinking it silently
 #: returns the tests to the text-only path, so ``_assert_frames_rendered``
 #: fails loudly rather than letting that pass unnoticed.
+#:
+#: The second half is the replay policy: natural-prose pages bill cheaper as
+#: text than as frames and replay as text, which would silently move these
+#: tests off the very image path they exist to pin. High-entropy filler
+#: tokenizes far above one frame's visual-token bill and keeps its images.
 FRAME_TURNS = 12
-FRAME_WORDS = 2000
+DENSE_CHUNK = ("ZXCVBNMASDFGHJKLqwertyuiop1234567890mMnBvC" * 500)[:14_000]
 
 
 def _snapcompact_payload(session: Session) -> dict[str, Any]:
@@ -672,7 +678,7 @@ async def _talk_to_frame_size(session: Session) -> None:
     """Open with the constraint, then bury it under enough history to image."""
     await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
     for index in range(FRAME_TURNS):
-        await session.prompt(f"question {index} " + "detail " * FRAME_WORDS)
+        await session.prompt(f"question {index} " + DENSE_CHUNK)
 
 
 @pytest.mark.asyncio
@@ -705,6 +711,18 @@ async def test_resume_after_an_advisory_snapcompact_pass(tmp_path, monkeypatch):
     # The point of this test: real PNG frames, not the archive-text fallback.
     frame_count = _assert_frames_rendered(session)
     assert frame_count > 0
+    # Under the replay policy the pass may carry some pages as text; the image
+    # blocks a resume must bring back are the frames the archive says it
+    # replays (its image-kind pages), and there must be at least one or this
+    # test proves nothing about the image path.
+    from local_operator.compaction.snapcompact import Archive, replayed_frame_count
+
+    payload = _snapcompact_payload(session)
+    replayed_frames = replayed_frame_count(Archive.model_validate(payload))
+    assert replayed_frames > 0, (
+        "the archive replays no frames under the policy, so this test would prove "
+        "nothing about the image replay it exists to pin"
+    )
 
     directory = session._transcript.directory
     await session.dispose()
@@ -735,9 +753,9 @@ async def test_resume_after_an_advisory_snapcompact_pass(tmp_path, monkeypatch):
     replayed_images = [
         block for block in (rendered.content or []) if isinstance(block, ImageContent)
     ]
-    assert len(replayed_images) == frame_count, (
-        f"resume replayed {len(replayed_images)} image blocks for {frame_count} archived "
-        "frames — the image-replay path did not round trip"
+    assert len(replayed_images) == replayed_frames, (
+        f"resume replayed {len(replayed_images)} image blocks for {replayed_frames} "
+        "replayable frames — the image-replay path did not round trip"
     )
     # Each frame must be non-empty PNG data: a present-but-empty block is the
     # shape a decode failure leaves behind.
@@ -788,7 +806,7 @@ async def test_two_advisory_snapcompact_passes_still_replay(tmp_path, monkeypatc
 # provider figure fails the ORDINARY trigger, so in production the advisor was
 # only ever consulted once the context had already passed the line it exists to
 # pull down. Measured before the fix: ctx 350k/400k/500k/590k -> 0 advisor
-# calls on a 600k trigger; 650k -> 1.
+# calls on a 600k trigger (then the default); 650k -> 1.
 #
 # So these tests drive `_on_turn_end` (the real boundary hook the tool loop
 # calls) and assert on the SPAWN, never on the helper. A regression that
@@ -844,16 +862,21 @@ async def _settle_background(session: Session, tries: int = 50) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("context_tokens", [350_000, 400_000, 500_000, 590_000])
+# Strictly BELOW the 400k default trigger: the advisor's band is
+# [advisor_trigger_tokens, trigger), so a size above the line would pass for
+# the wrong reason (a size pass is already due there).
+@pytest.mark.parametrize("context_tokens", [300_000, 350_000, 390_000, 399_000])
 async def test_advisor_fires_in_its_own_band_through_the_real_boundary(
     tmp_path, monkeypatch, context_tokens
 ):
     """THE blocker-1 regression: between `advisor_trigger_tokens` (300k) and
-    the ordinary trigger (600k), a real turn boundary must reach the advisor.
+    the ordinary trigger (400k), a real turn boundary must reach the advisor.
 
-    These four sizes are the exact ones that produced zero calls before the
-    fix. Driving `_on_turn_end` rather than `_maybe_spawn_advisor` is the
-    entire point: the helper was always reachable, the boundary was not.
+    These four sizes sit in that band. The defect was first measured when the
+    trigger was 600k (350k/400k/500k/590k produced zero calls); the sizes moved
+    with the default but the property is the same. Driving `_on_turn_end`
+    rather than `_maybe_spawn_advisor` is the entire point: the helper was
+    always reachable, the boundary was not.
     """
     stream = BoundaryStream()
     session = make_session(tmp_path, stream=stream, compaction_settings=advisor_settings())
@@ -880,7 +903,9 @@ async def test_a_landed_hint_survives_the_mid_turn_pre_gate(tmp_path, monkeypatc
     """The spawn alone is not enough: the pre-gate must also let a boundary
     through once a usable hint exists, or the hint is spawned, lands, and is
     then unreachable because the gate returned before the plan gate could read
-    it. Asserted as a real compaction pass at 400k, below the 600k trigger.
+    it. Asserted as a real compaction pass at 400k: exactly ON the 400k default
+    trigger, where a size pass needs strictly more, so it is the hint — not
+    size — that fires this pass.
 
     The pass an advisory authorises now runs OFF the turn and applies at the
     next safe boundary, so the receipt arrives one boundary later than it used
@@ -1010,7 +1035,7 @@ async def test_one_boundary_spawns_at_most_one_advisor_call(tmp_path, monkeypatc
     during the `_persist_new_messages` await between the two sites spawned a
     second one (agent review round 2, minor-1).
 
-    Driven at 700k — above the 600k trigger, so the pre-gate does NOT return
+    Driven at 700k — above the trigger, so the pre-gate does NOT return
     early and both former sites are reachable — with `advisor_every_n_turns=0`
     so the interval gate cannot mask a duplicate the way the shipped default
     does.
@@ -1123,11 +1148,15 @@ async def test_the_preserve_cap_is_the_smaller_of_a_task_and_a_capacity_bound(tm
     assert cap_for(32_768, "floored") == 20_000
 
     # A user who widens the verbatim window widens the task term with it,
-    # still bounded by capacity.
-    wide = CompactionSettings(keep_recent_tokens=250_000)
+    # still bounded by capacity. 150k keeps the capacity term (400k // 2 =
+    # 200k) the binding one: at the 250k this once used, the outer ``max``
+    # against keep_recent would bind instead and the test would stop pinning
+    # the capacity bound.
+    wide = CompactionSettings(keep_recent_tokens=150_000)
     assert cap_for(1_000_000, "wide", wide) == min(
-        250_000 * _TASK_FLOOR_KEEP_MULTIPLE, resolve_threshold_tokens(1_000_000, wide) // 2
+        150_000 * _TASK_FLOOR_KEEP_MULTIPLE, resolve_threshold_tokens(1_000_000, wide) // 2
     )
+    assert cap_for(1_000_000, "wide2", wide) == 200_000
 
 
 @pytest.mark.asyncio
@@ -1170,8 +1199,12 @@ async def test_the_preserve_cap_bounds_the_task_boundary_floor(tmp_path, monkeyp
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # 100,000, not the 300,000 the window-derived cap would have allowed.
-    assert captured[-1] == 100_000
+    # The FIRST call carries the floor-derived budget — 100,000, not the
+    # 300,000 the window-derived cap would have allowed. A retry at the base
+    # budget may follow when the widened walk finds nothing (the
+    # preserve-floor fallback); the capped figure is what the floor may hand
+    # the cut, and it can never exceed this.
+    assert captured[0] == 100_000
     await session.dispose()
 
 
@@ -1217,8 +1250,9 @@ async def test_the_preserve_cap_tightens_the_advisor_hint_clamp(tmp_path, monkey
     await session._plan_compaction(respect_threshold=True)
 
     assert captured, "find_cut_point was never reached"
-    # Clamped to the new cap, where the window-derived cap gave 300,000.
-    assert captured[-1] == 100_000
+    # Clamped to the new cap, where the window-derived cap gave 300,000. The
+    # clamped figure rides the FIRST call; a base-budget retry may follow.
+    assert captured[0] == 100_000
     await session.dispose()
 
 

@@ -103,3 +103,17 @@ class SttOutcome:
     text: str
     path: AudioPath
     attempts: tuple[SttAttempt, ...]
+    #: The hub's parsed cost object for this call (PR-3), or ``None`` when the
+    #: serving rung reported none — a BYO leg (the vendor is not the hub), or
+    #: an older hub whose envelope carries no cost. Typed ``object`` because
+    #: the concrete class lives in ``clients/radient_cost.py`` and this leaf
+    #: package must not import a client; the emitting route reads it with the
+    #: adapter that knows the shape. ``None`` must stay distinguishable from a
+    #: stated zero — absence is not free.
+    cost: object | None = None
+    #: The provider the served envelope named (PR-3), else ``""``: the
+    #: Radient transcription result carries its own ``provider`` field, and an
+    #: emitting route must use it when the cost object does not (an amount-less
+    #: older envelope still names the vendor — QA round 1, Q3). A BYO rung
+    #: leaves it empty; the route knows that leg from the path itself.
+    provider: str = ""

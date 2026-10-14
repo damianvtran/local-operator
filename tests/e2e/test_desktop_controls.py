@@ -56,6 +56,38 @@ def _message_row_ids(transcript: Path) -> list[str]:
     ]
 
 
+def _completion_publication_event(session, command_id: str, monkeypatch) -> asyncio.Event:
+    """Observe the actual publisher and its durable anchor, not just stream end."""
+    published = asyncio.Event()
+    original = session._publish_attention_outcome
+
+    async def observe():
+        await original()
+        transcript = session._transcript.directory / "transcript.jsonl"
+        rows = [json.loads(line) for line in transcript.read_text().splitlines() if line.strip()]
+        messages = [row for row in rows if row.get("type") == "message"]
+        users = [row for row in messages if row["payload"].get("role") == "user"]
+        markers = [
+            row["payload"]["details"]
+            for row in rows
+            if row.get("type") == "custom"
+            and row["payload"].get("custom_type") == "completion_attention"
+        ]
+        if (
+            users
+            and users[-1]["payload"].get("producer_command_id") == command_id
+            and messages[-1]["payload"].get("role") == "assistant"
+            and markers
+            and markers[-1].get("kind") == "complete"
+            and markers[-1].get("anchor") == messages[-1]["id"]
+        ):
+            print(f"Published turn witness: command {command_id}, anchor {messages[-1]['id']}")
+            published.set()
+
+    monkeypatch.setattr(session, "_publish_attention_outcome", observe)
+    return published
+
+
 def _census(stream: ScriptedStream) -> list[str]:
     """The kinds of provider call this session has made, in call order.
 
@@ -178,7 +210,13 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # omission. THE TAB WILL CONSUME a destination that renders a LIVE
             # node graph (networks, member devices, link state) — not a receipt of
             # a CLI run, which is why no existing destination name fits and one
-            # must be added with the tab.
+            # must be added with the tab. `/highlights`, whose affordance on the
+            # desktop is the supplement block's OWN control pair (the UI side of
+            # memo §3.2 T5) rather than a slash-command destination: apart from
+            # that pair there is nothing for a route to reach, and offering a
+            # destination whose renderer has no adapter is the
+            # offered-and-then-dead-ends row the `/mobile` lesson refuses. The
+            # decision is stated on the `highlights` entry in `slash_commands.py`.
             # `/info` used to be the
             # other one — its every field describes the PROCESS AND HOST it
             # runs in (install prefix, resolved import path, pid, control port,
@@ -197,7 +235,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
-            assert withheld == {"keys", "links", "mobile", "network", "notifications"}
+            assert withheld == {
+                "highlights",
+                "keys",
+                "links",
+                "mobile",
+                "network",
+                "notifications",
+            }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
             # catalogue's `aliases` are copied straight off `spec.aliases`
@@ -206,7 +251,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # any alias added or dropped — the one thing this line exists to
             # notice. Update the number when you intend to change the offered
             # alias surface; a diff here is the review prompt.
-            assert sum(len(row["aliases"]) for row in catalog) == 9
+            assert sum(len(row["aliases"]) for row in catalog) == 10
             created = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
             )
@@ -858,6 +903,117 @@ async def test_desktop_interrupt_stops_the_turn_and_keeps_the_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mutate_copy", [False, True], ids=["late-publication", "real-copy-write"])
+async def test_named_fork_snapshot_waits_for_publication_without_hiding_writes(
+    headless_tui_env: Path, workspace: Path, monkeypatch, mutate_copy: bool
+):
+    """A late real publisher is setup work; a real copy write still fails."""
+    from local_operator import fork as fork_module
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    durable = asyncio.Event()
+    waiting = asyncio.Event()
+    copying = asyncio.Event()
+    counts = {}
+    order = []
+    publish = Session._publish_attention_outcome
+    copy = Transcript.fork_snapshot
+    witness = _completion_publication_event
+    fork = fork_module.fork_session
+
+    async def held_publication(session):
+        if session._attention_outcome is None:
+            return await publish(session)
+        counts[session.session_id] = counts.get(session.session_id, 0) + 1
+        if counts[session.session_id] == 3:
+            order.append("publisher-held")
+            entered.set()
+            await asyncio.wait_for(release.wait(), 15)
+            await publish(session)
+            order.append("published")
+            durable.set()
+            return
+        return await publish(session)
+
+    def observed_witness(session, command_id, patch):
+        event = witness(session, command_id, patch)
+        wait = event.wait
+
+        async def observed_wait():
+            order.append("publication-wait")
+            waiting.set()
+            return await wait()
+
+        patch.setattr(event, "wait", observed_wait)
+        return event
+
+    async def observed_copy(transcript, *args, **kwargs):
+        order.append("copy")
+        copying.set()
+        # Under the old setup this is the first release signal: publication
+        # crosses its stale snapshot, reproducing the original strict failure.
+        # The repaired setup instead waits for the real publisher BEFORE copy.
+        release.set()
+        await asyncio.wait_for(durable.wait(), 15)
+        return await copy(transcript, *args, **kwargs)
+
+    def corrupt_copy(config_dir, parent_id, *args, **kwargs):
+        result = fork(config_dir, parent_id, *args, **kwargs)
+        # Mutate the REAL parent's file from the real copy worker, not the
+        # predicate or a fabricated read result. The strict assertion must
+        # still catch a fork that writes its parent after making a valid child.
+        path = config_dir / "sessions" / parent_id / "transcript.jsonl"
+        row = {
+            "id": uuid.uuid4().hex,
+            "ts": 0,
+            "type": "custom",
+            "payload": {"custom_type": "fork_mutation_probe", "details": {}},
+        }
+        with path.open("ab") as stream:
+            stream.write((json.dumps(row) + "\n").encode())
+        return result
+
+    async def release_after_wait_or_copy():
+        await asyncio.wait_for(entered.wait(), 15)
+        tasks = [asyncio.create_task(waiting.wait()), asyncio.create_task(copying.wait())]
+        try:
+            done, _ = await asyncio.wait(tasks, timeout=15, return_when=asyncio.FIRST_COMPLETED)
+            assert done, "fixture reached neither publication wait nor fork copy"
+            release.set()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    monkeypatch.setattr(Session, "_publish_attention_outcome", held_publication)
+    monkeypatch.setattr(Transcript, "fork_snapshot", observed_copy)
+    monkeypatch.setattr(sys.modules[__name__], "_completion_publication_event", observed_witness)
+    if mutate_copy:
+        monkeypatch.setattr(fork_module, "fork_session", corrupt_copy)
+    controller = asyncio.create_task(release_after_wait_or_copy())
+    try:
+        if mutate_copy:
+            with pytest.raises(AssertionError, match="fork changed parent transcript"):
+                await test_a_fork_cut_through_a_named_entry(
+                    headless_tui_env, workspace, monkeypatch
+                )
+            print("Strict parent comparison rejected the real fork_mutation_probe write")
+        else:
+            await test_a_fork_cut_through_a_named_entry(headless_tui_env, workspace, monkeypatch)
+        await controller
+        assert entered.is_set() and waiting.is_set() and durable.is_set() and copying.is_set()
+        assert order.index("publication-wait") < order.index("published") < order.index("copy")
+        print(f"Named fork publication order: {order}")
+    finally:
+        release.set()
+        controller.cancel()
+        await asyncio.gather(controller, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_a_fork_cut_through_a_named_entry(
     headless_tui_env: Path, workspace: Path, monkeypatch
 ):
@@ -912,13 +1068,24 @@ async def test_a_fork_cut_through_a_named_entry(
             await runtime.start_in_process()
             (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
 
+            third_command = request_id()
+            published = _completion_publication_event(session, third_command, monkeypatch)
             # Real turns, admitted through the route the composer uses.
-            for text in ("First question", "Second question", "Third question"):
+            for text, command_id in zip(
+                ("First question", "Second question", "Third question"),
+                (request_id(), request_id(), third_command),
+            ):
                 admitted = await client.post(
-                    target + "/messages", json={"request_id": request_id(), "text": text}
+                    target + "/messages", json={"request_id": command_id, "text": text}
                 )
                 assert admitted.status_code == 200, admitted.text
 
+            # Named forks may run mid-turn, and streaming clears before the
+            # turn's finally journals completion_attention. Quiesce this test's
+            # last real producer BEFORE measuring copy immutability; otherwise
+            # a legitimate completion append can masquerade as a fork write.
+            # Keep the existing 15s fixture bound and the FULL byte comparison.
+            await asyncio.wait_for(published.wait(), 15)
             parent_transcript = root / "sessions" / sid / "transcript.jsonl"
             parent_ids = _message_row_ids(parent_transcript)
             assert len(parent_ids) >= 3, parent_ids
@@ -948,7 +1115,7 @@ async def test_a_fork_cut_through_a_named_entry(
             # copied AND nothing before it was dropped.
             child_ids = _message_row_ids(root / "sessions" / cut_child / "transcript.jsonl")
             assert child_ids == parent_ids[: cut_index + 1], child_ids
-            assert parent_transcript.read_bytes() == parent_bytes
+            assert parent_transcript.read_bytes() == parent_bytes, "fork changed parent transcript"
             print(
                 f"Fork at a named entry: {len(parent_ids)} parent rows -> "
                 f"{len(child_ids)} child rows, exactly the prefix through "
@@ -978,7 +1145,7 @@ async def test_a_fork_cut_through_a_named_entry(
             refusal = refused_fork.json()["detail"]
             assert refusal["code"] == "fork_refused", refusal
             assert refusal["reason"] == "entry_unknown", refusal
-            assert refusal["message"] == (
+            assert refusal["text"] == (
                 "that message is not part of this conversation; "
                 "pick a message from this session to fork from"
             ), refusal
@@ -986,7 +1153,7 @@ async def test_a_fork_cut_through_a_named_entry(
             assert parent_transcript.read_bytes() == parent_bytes
             print(
                 f"A foreign entry id: 409 {refusal['code']}/{refusal['reason']} — "
-                f"{refusal['message']}"
+                f"{refusal['text']}"
             )
 
             # The ABSENT target is still the call this route has always made.
@@ -1028,14 +1195,14 @@ async def test_a_fork_cut_through_a_named_entry(
             anchor_detail = anchor_refusal.json()["detail"]
             assert anchor_detail["code"] == "fork_refused", anchor_detail
             assert anchor_detail["reason"] == "before_anchor", anchor_detail
-            assert anchor_detail["message"] == (
+            assert anchor_detail["text"] == (
                 "that message sits before the conversation's last summary; "
                 "fork from a message after the summary instead"
             ), anchor_detail
             assert parent_transcript.read_bytes() == anchored_bytes
             print(
                 f"A cut before the newest anchor: 409 {anchor_detail['code']}/"
-                f"{anchor_detail['reason']} — {anchor_detail['message']}"
+                f"{anchor_detail['reason']} — {anchor_detail['text']}"
             )
 
             # A MALFORMED INTERIOR refuses the cut too, with its own cause. The
@@ -1067,13 +1234,13 @@ async def test_a_fork_cut_through_a_named_entry(
             broken_detail = broken.json()["detail"]
             assert broken_detail["code"] == "fork_refused", broken_detail
             assert broken_detail["reason"] == "incomplete_tool_calls", broken_detail
-            assert broken_detail["message"] == (
+            assert broken_detail["text"] == (
                 "history has incomplete tool calls before later messages"
             ), broken_detail
             assert parent_transcript.read_bytes() == broken_bytes
             print(
                 f"A malformed interior: 409 {broken_detail['code']}/"
-                f"{broken_detail['reason']} — {broken_detail['message']}"
+                f"{broken_detail['reason']} — {broken_detail['text']}"
             )
 
             # A SECOND BOUNDARY FORK WHILE ONE IS ALREADY WAITING refuses with its
@@ -1096,10 +1263,10 @@ async def test_a_fork_cut_through_a_named_entry(
             pending_detail = second.json()["detail"]
             assert pending_detail["code"] == "fork_refused", pending_detail
             assert pending_detail["reason"] == "fork_pending", pending_detail
-            assert pending_detail["message"] == "A fork is already waiting for a safe boundary"
+            assert pending_detail["text"] == "A fork is already waiting for a safe boundary"
             print(
                 f"A second boundary fork: 409 {pending_detail['code']}/"
-                f"{pending_detail['reason']} — {pending_detail['message']}"
+                f"{pending_detail['reason']} — {pending_detail['text']}"
             )
             # Release the parked turn before teardown: the pending fork then lands
             # at its boundary, which is exactly what the refusal protected.

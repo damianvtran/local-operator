@@ -26,6 +26,7 @@ the wiring connected to nothing.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -328,6 +329,82 @@ async def test_a_quiet_delivery_turn_notifies_nothing() -> None:
         _end_turn(app, TurnEnded(aborted=False, error=None))
         await pilot.pause()
     assert notifier.kinds == ["complete"]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_driven_end_reaches_the_funnel_quiet(tmp_path: Path) -> None:
+    """The cell above is handed ``notify=False`` by the test; this one SOURCES
+    it — a real peer-woken run computes its end, and the value rides the real
+    ``EventController`` bridge into the app's real turn-end handler, so the
+    whole seam runs: session -> bridge -> ``on_turn_ended`` -> notifier. No
+    toast fires, while the user-driven control through the same path still
+    toasts.
+
+    Both arms boot the real app over a real session (the factory hands it
+    over, the adoption shape ``test_attention.py`` uses), so a regression on
+    either side of the seam — the computed value or its forwarding — shows up
+    here as a toast that should not exist, or a missing one that should.
+    """
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    # -- peer arm: a peer-woken run answered with ordinary TEXT --------------
+    peer = make_session(
+        tmp_path,
+        ScriptedStream([[StreamTextDelta(delta="peer reply"), StreamEndEvent(stop_reason="stop")]]),
+    )
+    notifier = RecordingNotifier()
+
+    async def peer_factory():
+        return peer
+
+    app = OperatorApp(peer_factory)
+    try:
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _boot(pilot, app)
+            app._notifier = notifier  # type: ignore[assignment]
+            await peer.receive_peer_message(
+                "child reporting in",
+                mode="mailbox",
+                wake=True,
+                sender={"pid": 42, "conversation_name": "child"},
+            )
+            for _ in range(50):
+                await pilot.pause()
+                if peer._attention_run_settled and not peer.is_streaming:
+                    break
+            await pilot.pause()
+            assert peer._attention_run_settled, "the peer turn settled inside the app"
+            assert notifier.kinds == [], "a peer-driven end raises no toast"
+    finally:
+        await peer.dispose()
+
+    # -- control arm: the user's own turn through the same path --------------
+    control = make_session(
+        tmp_path / "control",
+        ScriptedStream([[StreamTextDelta(delta="user reply"), StreamEndEvent(stop_reason="stop")]]),
+    )
+    notifier = RecordingNotifier()
+
+    async def control_factory():
+        return control
+
+    app = OperatorApp(control_factory)
+    try:
+        async with app.run_test(size=(80, 24)) as pilot:
+            await _boot(pilot, app)
+            app._notifier = notifier  # type: ignore[assignment]
+            await control.prompt("status?")
+            for _ in range(50):
+                await pilot.pause()
+                if (control._attention_run_settled and not control.is_streaming) or (
+                    notifier.kinds
+                ):
+                    break
+            await pilot.pause()
+            assert notifier.kinds == ["complete"], "the control still toasts"
+    finally:
+        await control.dispose()
 
 
 @pytest.mark.asyncio

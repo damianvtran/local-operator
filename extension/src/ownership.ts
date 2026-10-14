@@ -49,7 +49,11 @@ function identity(params: Params): [string, string, string] {
   const session = String(params.requester ?? "");
   const generation = String(params.owner_generation ?? "");
   if (!/^[a-zA-Z0-9_-]{32,}$/.test(proof) || !session.startsWith("session:") || !generation) {
-    throw new BridgeCommandError("owner_refused", "missing private browser ownership proof");
+    // `refusal: "foreign"` — a typed discriminator so the session can tell a
+    // SHAPE/foreign refusal from a stale-generation one WITHOUT substring-
+    // matching the message. Additive on the wire (an old daemon drops unknown
+    // `data` keys); it never re-types the code, so no proto bump.
+    throw new BridgeCommandError("owner_refused", "missing private browser ownership proof", { refusal: "foreign" });
   }
   return [proof, session, generation];
 }
@@ -63,8 +67,11 @@ async function mutate<T>(params: Params, fn: (scope: Scope) => T, create = false
     const before = JSON.stringify(all);
     let scope = all[proof];
     if (!scope && create) scope = all[proof] = { session, generation, allocations: {} };
-    if (!scope || scope.session !== session || scope.generation !== generation) {
-      throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved");
+    if (!scope || scope.session !== session) {
+      throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved", { refusal: "foreign" });
+    }
+    if (scope.generation !== generation) {
+      throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved", { refusal: "stale" });
     }
     // The READ must stay inside the lane: the proof/session/generation check
     // above IS the fencing decision, and reading outside it would let a
@@ -140,8 +147,11 @@ export function withOwnership(
         const scope = all[proof];
         if (!scope) return { ownership_version: 1, state: "unresolved" };
         const predecessors = Array.isArray(params.previous_generations) ? params.previous_generations : [];
-        if (scope.session !== session || (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation))) {
-          throw new BridgeCommandError("owner_refused", "browser owner generation is stale");
+        if (scope.session !== session) {
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "foreign" });
+        }
+        if (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation)) {
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "stale" });
         }
         // A resume retires the ended scope. Keying this on the generation
         // CHANGING was unreachable for an in-process child: that path
@@ -173,7 +183,7 @@ export function withOwnership(
         return scope.allocations[id];
       }, true);
       if (params.tab) {
-        if (existing?.tab !== params.tab) throw new BridgeCommandError("owner_refused", "tab does not belong to allocation");
+        if (existing?.tab !== params.tab) throw new BridgeCommandError("owner_refused", "tab does not belong to allocation", { refusal: "foreign" });
         return handler();
       }
       if (existing?.tab && (await getSurfaces())[existing.tab]) {
@@ -231,7 +241,7 @@ export function withOwnership(
     }
     if (scope.terminal && method !== "close" && method !== "tabs") throw new BridgeCommandError("owner_refused", "browser scope ended");
     if (params.tab && !Object.values(scope.allocations).some(a => a.tab === params.tab)) {
-      throw new BridgeCommandError("owner_refused", "tab does not belong to this browser owner");
+      throw new BridgeCommandError("owner_refused", "tab does not belong to this browser owner", { refusal: "foreign" });
     }
     return handler();
   };

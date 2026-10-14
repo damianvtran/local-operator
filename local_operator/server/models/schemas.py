@@ -895,6 +895,10 @@ class HealthCheckResponse(BaseModel):
         default="",
         description="How that install was made: uv-tool, pipx, pip, editable or unknown",
     )
+    rolling_reload_contract: str = Field(
+        default="",
+        description="Positive daemon-owned request/scheduler continuity contract; empty is unknown",
+    )
 
 
 class WebsocketConnectionType(str, Enum):
@@ -1139,6 +1143,17 @@ class SpeechRequest(BaseModel):
         description=(
             'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
             "Omitted when unset so the provider can auto-detect."
+        ),
+    )
+    session_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional conversation id this synthesis belongs to (PR-3). Additive "
+            "and tolerant: a daemon that predates the field ignores it, a current "
+            "one records the call's cost against the session (analytics, and the "
+            "pending marker the session's published spend can state). Omitted "
+            "when unset — the call is then recorded with no session, never "
+            "guessed onto one."
         ),
     )
 

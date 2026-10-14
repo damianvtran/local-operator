@@ -21,8 +21,9 @@ from typing import Any
 
 import pytest
 
-from local_operator.cli import sessions_cleanup_command
+from local_operator.cli import _content_row_text, sessions_cleanup_command
 from local_operator.config import ConfigManager
+from local_operator.session import delegated_retention as dr
 from local_operator.session.cleanup import CLEANUP_LOG_NAME, mark_store
 
 
@@ -35,6 +36,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         max_inactive_days=None,
         max_total_bytes=None,
         remove_empty=None,
+        delegated_max_age_hours=None,
         json=False,
     )
     base.update(overrides)
@@ -88,12 +90,16 @@ def test_dry_run_lists_with_the_switch_off_and_says_so(store: Path, capsys: Any)
     assert sessions_cleanup_command(_args(dry_run=True)) == 0
     out = capsys.readouterr().out
     assert "session.cleanup.enabled is off" in out and "preview only" in out
-    assert out.count("would remove") == 3 + 1  # three rows plus the summary line
+    rows = [line for line in out.splitlines() if line.startswith("  would remove ")]
+    assert len(rows) == 3 and "would remove 3" in out  # three rows plus the summary line
     assert "nothing was removed (dry run)" in out
     assert _count(store) == 18
 
 
-def test_no_limits_names_the_switch_and_json_is_always_json(store: Path, capsys: Any) -> None:
+def test_no_limits_and_delegated_off_names_the_switch_and_json_is_always_json(
+    store: Path, capsys: Any
+) -> None:
+    _config(store, delegated={"enabled": False})
     assert sessions_cleanup_command(_args()) == 1
     assert "session.cleanup.enabled is off" in capsys.readouterr().err
     assert sessions_cleanup_command(_args(json=True)) == 1
@@ -109,7 +115,7 @@ def test_enabled_run_lists_first_then_asks_then_removes(
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     assert sessions_cleanup_command(_args()) == 0
     out = capsys.readouterr().out
-    assert out.index("about to remove 3") < out.index("will remove") < out.index("removed 3")
+    assert out.index("will remove 3") < out.index("will remove  ") < out.index("removed 3")
     assert _count(store) == 15
     rows = [
         json.loads(line)
@@ -167,3 +173,326 @@ def test_negative_limits_are_rejected_by_the_parser() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         _non_negative_int("-3")
     assert _non_negative_int("0") == 0
+
+
+# -- the two classes ---------------------------------------------------------
+
+
+def _delegated(root: Path, name: str, *, age_h: float = 100.0, origin: str = "subagent") -> Path:
+    directory = root / "sessions" / name
+    directory.mkdir()
+    (directory / "origin.json").write_text(json.dumps({"origin": origin}))
+    transcript = directory / "transcript.jsonl"
+    transcript.write_text('{"type":"message"}\n')
+    stamp = time.time() - age_h * 3600
+    os.utime(transcript, (stamp, stamp))
+    return directory
+
+
+def test_dry_run_prints_one_section_per_class_with_the_parent_class_off(
+    store: Path, capsys: Any
+) -> None:
+    """Today this exits 1 'no limits configured'; the delegated class needs no limits."""
+    _delegated(store, "kid-old-0001")
+    _delegated(store, "kid-new-0001", age_h=1)
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert out.index("== Your conversations (parent sessions) ==") < out.index(
+        "== Delegated work (subagents and background sessions) =="
+    )
+    assert "parent class: off" in out
+    assert "policy: on, remove delegated sessions idle over 48h" in out
+    assert "would remove kid-old-0001" in out and "kept         kid-new-0001" in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "a dry run removes nothing"
+
+
+def test_a_real_run_removes_the_delegated_rows_and_leaves_the_users_sessions(
+    store: Path, capsys: Any
+) -> None:
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "removed      kid-old-0001" in out and not (store / "sessions" / "kid-old-0001").exists()
+    assert _count(store) == 18, "the 15 transcripts and 3 empties are the parent class, untouched"
+    rows = [json.loads(x) for x in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()]
+    assert [(r["session"], r["policy"], r["actor"]) for r in rows] == [
+        ("kid-old-0001", "delegated_max_age", "cli")
+    ]
+
+
+def test_the_age_override_widens_and_narrows_the_window(store: Path, capsys: Any) -> None:
+    _delegated(store, "kid-60h-00001", age_h=60)
+    assert sessions_cleanup_command(_args(dry_run=True, delegated_max_age_hours=72)) == 0
+    assert "kept         kid-60h-00001" in capsys.readouterr().out
+    assert sessions_cleanup_command(_args(dry_run=True, delegated_max_age_hours=24)) == 0
+    assert "would remove kid-60h-00001" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", ["1", "721", "abc", "0", "-5"])
+def test_the_age_override_is_validated_like_the_setting(text: str) -> None:
+    from local_operator.cli import _delegated_hours
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _delegated_hours(text)
+    assert _delegated_hours("2") == 2 and _delegated_hours("720") == 720
+
+
+def test_json_keeps_its_old_keys_and_gains_per_class_objects(store: Path, capsys: Any) -> None:
+    _delegated(store, "kid-old-0001")
+    _config(store, enabled=True, remove_empty=True)
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {
+        "outcome",
+        "enabled",
+        "forced",
+        "dry_run",
+        "scanned",
+        "removed",
+        "protected",
+        "errors",
+        "skipped",
+        "confirmed",
+        "record",
+    } <= set(payload)
+    assert {c["session"] for c in payload["removed"]} == {"e00", "e01", "e02", "kid-old-0001"}
+    assert payload["parent"]["removed"] and payload["delegated"]["enabled"] is True
+    assert [c["session"] for c in payload["delegated"]["removed"]] == ["kid-old-0001"]
+    assert payload["delegated"]["max_age_hours"] == 48
+    # F3: ONE population, every directory once — the old sum added the parent
+    # class to the delegated pass's whole-store count (18 + 19 = 37 here; 15 +
+    # 18 = 33 in the review's probe). Asserts the VALUE, not just the key.
+    assert payload["scanned"] == _count(store) == 19
+
+
+def test_parent_limits_with_the_switch_off_refuse_even_though_delegated_is_on(
+    store: Path, capsys: Any
+) -> None:
+    """Delegated being on must not turn a refused parent run into 'nothing to remove'."""
+    _config(store, enabled=False, max_sessions=3)
+    assert sessions_cleanup_command(_args()) == 2
+    assert "session.cleanup.enabled is off" in capsys.readouterr().err
+    assert _count(store) == 18
+
+
+def test_a_force_run_with_the_delegated_switch_off_still_honours_force(store: Path) -> None:
+    _config(store, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    assert (store / "sessions" / "kid-old-0001").exists()
+    assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
+    assert not (store / "sessions" / "kid-old-0001").exists()
+
+
+# -- a class that will not run reads "would remove" (F1) ----------------------
+
+
+def test_a_real_run_with_the_parent_switch_off_previews_the_parent_rows(
+    store: Path, capsys: Any
+) -> None:
+    """F1: parent off + delegated on — the parent rows are a PREVIEW, and the
+    listing must say so ("would remove" + the off-note), not promise them."""
+    _config(store, enabled=False, remove_empty=True)
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section = out.split("== Delegated work")[0]
+    assert "note: session.cleanup.enabled is off" in parent_section
+    assert "this is a preview only" in parent_section
+    assert "would remove 3" in parent_section
+    assert "will remove" not in parent_section
+    assert "removed      kid-old-0001" in out
+    assert not (store / "sessions" / "kid-old-0001").exists()
+    assert (store / "sessions" / "e00").exists(), "the parent class was not run"
+
+
+def test_a_real_run_with_the_delegated_switch_off_previews_its_rows(
+    store: Path, capsys: Any
+) -> None:
+    """The mirror: delegated off + parent on."""
+    _config(store, enabled=True, remove_empty=True, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    parent_section, delegated_section = out.split("== Delegated work")
+    assert "will remove 3" in parent_section
+    assert "note: delegated cleanup is off in config; this is a preview only" in delegated_section
+    assert "would remove kid-old-0001" in delegated_section
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists(), "the delegated class was not run"
+    assert not (store / "sessions" / "e00").exists(), "the parent class did run"
+
+
+def test_a_real_run_with_nothing_to_do_never_promises_a_removal(store: Path, capsys: Any) -> None:
+    """F1's probe: delegated off with rows to show and nothing removable in the
+    running class used to print "will remove 3" and then "nothing to remove"."""
+    _config(store, enabled=True, max_sessions=999, delegated={"enabled": False})
+    _delegated(store, "kid-old-0001")
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "nothing to remove" in out
+    assert "would remove kid-old-0001" in out
+    assert "note: delegated cleanup is off in config; this is a preview only" in out
+    assert "will remove kid-old-0001" not in out
+    assert (store / "sessions" / "kid-old-0001").exists()
+
+
+# -- the scratchpad-content block --------------------------------------------
+
+
+def _content_pad(store: Path, name: str) -> Path:
+    """A scratchpad for a delegated session the RECORD pass keeps.
+
+    The keep comes from an active parent with a roster edge, so the delegated
+    rows stay empty and these tests exercise the content carve-out, not a
+    record removal.
+    """
+    sessions = store / "sessions"
+    parent = sessions / f"parent-{name}"
+    parent.mkdir()
+    (parent / "transcript.jsonl").write_text('{"type":"message"}\n')
+    (parent / dr.ROSTER_NAME).write_text(
+        json.dumps({"version": 1, "records": [{"session_dir": str(sessions / name)}]})
+    )
+    directory = _delegated(store, name)
+    pad = directory / "scratchpad"
+    pad.mkdir()
+    return pad
+
+
+def _big_log(path: Path, *, size_mb: int = 11, age_h: float = 24) -> Path:
+    """A sparse file of roughly ``size_mb`` MiB, last modified ``age_h`` ago."""
+    with open(path, "wb") as handle:
+        handle.seek(size_mb * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    stamp = time.time() - age_h * 3600
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_dry_run_shows_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
+    pad = _content_pad(store, "content-kid-01")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: would reclaim 1 pad(s)" in out
+    assert "(1 stale output)" in out
+    assert "content-kid-01" in out and "(stale output past the window; 1 entry)" in out
+    assert big.exists(), "a dry run removes nothing"
+
+
+def test_json_carries_the_scratchpad_content_block(store: Path, capsys: Any) -> None:
+    pad = _content_pad(store, "content-kid-02")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    scratch = payload["delegated"]["scratchpad"]
+    assert scratch["enabled"] is True
+    assert [row["session"] for row in scratch["reclaimed"]] == ["content-kid-02"]
+    assert scratch["classes"] == {"stale output": 1}
+    assert scratch["bytes"] == big.stat().st_size
+    assert scratch["kept"] == [] and scratch["remaining"] == 0
+    assert payload["delegated"]["removed"] == []  # no record rows: nothing removed
+
+
+def test_a_content_only_run_confirms_with_its_own_sentence_and_reclaims(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pad = _content_pad(store, "content-kid-03")
+    big = _big_log(pad / "desktop-suite.log")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert sessions_cleanup_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "reclaim scratchpad content from 1 session(s)? type 'yes' to confirm" in out
+    assert not big.exists()
+    assert "reclaimed scratchpad content from 1 session(s)" in out
+    rows = [
+        json.loads(line)
+        for line in (store / "sessions" / CLEANUP_LOG_NAME).read_text().splitlines()
+    ]
+    assert len(rows) == 1 and rows[0]["policy"] == "delegated_scratchpad"
+    assert rows[0]["session"] == "content-kid-03" and rows[0]["actor"] == "cli"
+
+
+def test_the_scratchpad_switch_off_reclaims_nothing_and_says_so(store: Path, capsys: Any) -> None:
+    _config(store, delegated={"scratchpad": {"enabled": False}})
+    pad = _content_pad(store, "content-kid-04")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "scratchpad content: off (session.cleanup.delegated.scratchpad.enabled is off" in out
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    assert big.exists(), "the switch gates only the content phase"
+    assert "nothing to remove" in capsys.readouterr().out
+
+
+def test_force_runs_the_content_phase_when_the_scratchpad_switch_is_off(
+    store: Path,
+) -> None:
+    _config(store, delegated={"scratchpad": {"enabled": False}})
+    pad = _content_pad(store, "content-kid-05")
+    big = _big_log(pad / "desktop-suite.log")
+    assert sessions_cleanup_command(_args(force=True, yes=True)) == 0
+    assert not big.exists()
+
+
+def test_a_worktree_row_says_its_removal_is_a_git_worktree_remove() -> None:
+    row = dr.ContentRow(
+        session="abcdef123456",
+        reason="merged-clean clone past the window",
+        bytes=1024,
+        entries=3,
+        classes=("merged-clean clone",),
+        method="worktree-remove",
+    )
+    assert "; worktree remove" in _content_row_text(row, "would reclaim")
+    plain = dr.ContentRow(
+        session="abcdef123456",
+        reason="stale output past the window",
+        bytes=1024,
+        entries=1,
+        classes=("stale output",),
+    )
+    assert "worktree remove" not in _content_row_text(plain, "will reclaim")
+
+
+def test_a_two_bundle_row_lists_both_rescues() -> None:
+    row = dr.ContentRow(
+        session="abcdef123456",
+        reason="merged-clean clone past the window",
+        bytes=2048,
+        entries=6,
+        classes=("merged-clean clone",),
+        rescue_bundle="/pads/reap-rescue-clone-a.bundle",
+        rescue_bundle_bytes=11,
+        rescue_bundles=("/pads/reap-rescue-clone-a.bundle", "/pads/reap-rescue-clone-b.bundle"),
+    )
+    text = _content_row_text(row, "would reclaim")
+    assert "rescue bundles reap-rescue-clone-a.bundle, reap-rescue-clone-b.bundle" in text
+
+
+def test_apply_confines_content_to_the_previewed_pads(
+    store: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator import cli as cli_module
+
+    pad_x = _content_pad(store, "content-kid-06")
+    big_x = _big_log(pad_x / "desktop-suite.log")
+    grown: list[Path] = []
+    original = cli_module._print_content
+
+    def mutate(delegated: Any, verb: str) -> None:
+        original(delegated, verb)
+        # A pad that becomes eligible AFTER the preview (the preview's own rows
+        # were computed before this runs). The apply must not ride it in.
+        if not grown:
+            pad_y = _content_pad(store, "content-kid-07")
+            grown.append(_big_log(pad_y / "sibling-fail.log"))
+
+    monkeypatch.setattr(cli_module, "_print_content", mutate)
+    assert sessions_cleanup_command(_args(yes=True)) == 0
+    out = capsys.readouterr().out
+    assert "reclaimed scratchpad content from 1 session(s)" in out
+    assert not big_x.exists(), "the previewed pad is reclaimed"
+    assert grown and grown[0].exists(), "a pad that became eligible after the preview is not"

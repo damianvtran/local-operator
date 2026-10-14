@@ -34,6 +34,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.network.types import MeshRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_approvals import (
@@ -66,7 +67,7 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     operator (or their next action) can act on all of them.
     """
     status = 404 if error.code == "unknown_approval" else 409
-    return HTTPException(status, {"code": error.code, "message": str(error)})
+    return HTTPException(status, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
 
 
 async def _local(request: Request, work: Any) -> Any:

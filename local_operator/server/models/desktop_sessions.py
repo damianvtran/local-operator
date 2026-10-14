@@ -187,12 +187,12 @@ class SessionRow(BaseModel):
     #: a row this build cannot answer for carries the null rather than an
     #: omission.
     #:
-    #: REMOTE ROWS carry no VALUE in this build — the mesh lane owns the
-    #: producer half and adds the same name and unit later; until then the
-    #: key holds the declared default on those rows like every other field only
-    #: the local half fills, and an older daemon omits it entirely. A client
-    #: reads null/absent as "fall back to the row's creation time", which is
-    #: also what it does before the first user message of a session exists.
+    #: REMOTE ROWS carry the peer's claim whenever the peer computes one (the
+    #: mesh producer half: ``network/relay.py`` computes it on outbound peer
+    #: rows); a peer that predates it omits the key entirely, and a peer row
+    #: whose transcript holds no typed user send holds the declared default. A
+    #: client reads null/absent as "fall back to the row's creation time",
+    #: which is also what it does before the first user message exists.
     last_user_at: float | None = None
 
     @field_validator("subagents_running", "subagents_queued", mode="before")
@@ -371,6 +371,17 @@ class SessionList(BaseModel):
     scope: ScopedAsk | None = None
     #: The per-group census, present only when ``with_counts=true`` asked for it.
     counts: ScopeCounts | None = None
+    #: The ONE-TIME notice that delegated sessions (subagent and background
+    #: runs) were cleaned up, or ``None``. Carried by EVERY listed read until the
+    #: renderer acknowledges it (``POST /v1/desktop/delegated-cleanup-notice/ack``
+    #: flips the on-disk ``notice_acknowledged`` flag); a read must never consume
+    #: it, because this route is polled by many callers — including the app's own
+    #: attach and auth probes, which must not eat the band before the renderer
+    #: renders it (``session.delegated_retention``; the TUI keeps its
+    #: consume-on-show read). ``message`` is the finished text; render it as a
+    #: notice, once. Additive and defaulted: a client that ignores it behaves as
+    #: it always has.
+    delegated_cleanup_notice: dict[str, Any] | None = None
 
     # THE FOUR FIELDS ABOVE ARE ADDITIVE AND ALWAYS PRESENT, which is the whole
     # compatibility promise stated precisely: a request that sends none of
@@ -637,9 +648,118 @@ class HistoryEntry(BaseModel):
     #: ``extra`` on this model is pydantic's ``ignore``, so an older renderer drops
     #: the key and keeps today's behaviour. See ``HistoryTsSource``.
     ts_source: HistoryTsSource
+    # Source position is distinct from time and only emitted for an opted-in
+    # reader with a verified page/index view. None must not add strict DTO keys
+    # to legacy responses (the same exclude_if policy as open-frame facts).
+    journal_seq: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+
+
+class RunFacts(BaseModel):
+    """One run's facts, for a client that must draw its bar before the turn is
+    fully loaded.
+
+    THE COUNTS ARE FILLED ONLY FOR A SETTLED RUN, and that is the honesty this
+    model exists to carry rather than a default anyone should read past: a live
+    tail's rows are still arriving, so a number taken now is one the client would
+    have to correct in front of the reader — exactly the after-paint change the
+    open frame exists to remove. An unsettled run is still LISTED (a client needs
+    to know which run it is and that it is live) with its counts absent, and a
+    client keeps its own fold for it.
+
+    ``complete`` is false only when the index could not read a row body inside
+    this run, which makes the counts a lower bound. Measured on this machine: 0
+    of 65,755 tool rows across the twelve largest journals exceed that limit.
+    """
+
+    #: The client's own run identity: the closing answer's id when the run has
+    #: one, else its last row's id (``runsOf`` in the desktop renderer), so a bar
+    #: can be matched against the run it already holds.
+    run_key: str
+    #: The run's opening USER row, absent for a run with no user row (a wake or
+    #: hub run). This is the id a client matching by ``opening_user_id`` uses,
+    #: and the one the page's extension guarantees is on the page when
+    #: ``head_cut`` is false.
+    opening_user_id: str | None = None
+    closing_answer_id: str | None = None
+    settled: bool
+    outcome: str | None = None
+    complete: bool = True
+    started_ts: float
+    ended_ts: float
+    #: Absent together whenever ``settled`` is false — see the class note.
+    action_count: int | None = None
+    failed_count: int | None = None
+    #: Absent (``null``) rather than ``0`` when NO row of the run reported a
+    #: duration: the desktop's own ``workedSeconds`` states null for that case,
+    #: and a bar that prints "0s" where the fold prints nothing is the kind of
+    #: disagreement this contract exists to remove.
+    worked_seconds: float | None = None
+    #: The subset of ``action_count`` / ``worked_seconds`` that the desktop HIDES
+    #: when ``display.hide_cross_session`` is on — ``send`` tool rows, classified
+    #: by the same arm as ``cross-session-visibility.ts::visibleRecords``. Additive
+    #: and documented for the client that hides them; a client with the setting off
+    #: ignores both.
+    cross_session_action_count: int | None = None
+    cross_session_worked_seconds: float | None = None
 
 
 class HistoryPage(BaseModel):
+    #: THE COMPLETE PEER-SOURCE FACTS (docs/DESKTOP_API.md "Complete peer-source
+    #: contract"), each ABSENT unless the request declared
+    #: ``peer_journal_source`` and the authenticated owner ACKed: an old
+    #: renderer's page therefore carries no new key at all. ``exclude_if``
+    #: (rather than a default) keeps today's bytes for every legacy answer,
+    #: exactly as the open-frame and journal-order fields already do.
+    #:
+    #: ``peer_journal_source`` IS THE PER-RESPONSE ACK: true only when this
+    #: answer is a complete result under the negotiated contract. A client
+    #: must treat its absence as ``unsupported`` — never infer completeness
+    #: from the presence of any other key.
+    peer_journal_source: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: The expected-generation mismatch correction: the caller's loaded bodies
+    #: belong to another domain, the answer names the current generation so a
+    #: re-read is owed, and the generation is NOT an authority to install.
+    reconcile: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: The payload purpose's per-ID partition over the requested set, plus the
+    #: named companion dependencies (bodies carry the requested rows; companion
+    #: conversation payloads ride ``dependency_entries`` and are named here so
+    #: no consumer confuses them with requested rows). ``source_retry_ids`` is
+    #: the explicit smaller-batch retry, never a silent truncation.
+    source_present_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_missing_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_unavailable_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_remaining_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    source_retry_ids: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_dependency_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    #: Companion bodies for the named dependencies, same row shape as entries
+    #: (see ``_wire_entry`` on the owner): only ever present on a payload
+    #: answer, and only for ids that ``source_dependency_ids`` names.
+    dependency_entries: list["HistoryEntry"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    journal_generation: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    journal_order_state: Literal["ready", "building", "unsupported", "unavailable"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Bounded same-session lookup for already-loaded rows outside this page:
+    # in particular a cached send that aged out before the viewer subscribed.
+    # Missing ids are named, not assigned fabricated ordinals.
+    journal_ordinals: dict[str, int] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    journal_missing_ids: list[str] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool
@@ -650,6 +770,36 @@ class HistoryPage(BaseModel):
     #: made. The frozen wire (design §D9) draws the field as optional for
     #: exactly this reason, and an older client ignores a key it does not know.
     has_newer: bool | None = None
+    #: The open frame's per-run facts, its freshness state and its honest cut
+    #: flag — ABSENT unless the request carried ``open_frame=1`` (see
+    #: ``docs/DESKTOP_API.md`` §"The open frame"). ``None`` rather than a default
+    #: so an older renderer's page carries no new key AT ALL: the promise is
+    #: byte-for-byte, and a defaulted field would serialise as ``null`` on every
+    #: page and break it.
+    #: The open frame's three keys, ABSENT unless the request carried
+    #: ``open_frame=1`` (see ``docs/DESKTOP_API.md`` §"The open frame").
+    #:
+    #: ``exclude_if`` RATHER THAN A SERIALIZER, and the reason is the published
+    #: schema (review round 1, F7): a ``mode="wrap"`` serializer returns
+    #: ``dict[str, Any]``, and pydantic then publishes this model as
+    #: ``{"additionalProperties": true, "type": "object"}`` — so the properties
+    #: this contract is made of would vanish from ``docs/openapi.json`` the next
+    #: time it is regenerated. ``exclude_if`` omits the JSON key when the value is
+    #: unset AND leaves the model's schema intact: the promise is byte-for-byte
+    #: (no new key on an older client's page) and the documented shape at once.
+    #: ``has_newer`` keeps its existing ``null`` — that is today's shape, and only
+    #: these three are conditional.
+    runs: list[RunFacts] | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: ``ready`` | ``building`` | ``unavailable`` | ``unsupported``. ``building``
+    #: means an index scan was started and THIS answer carries no facts; a client
+    #: keeps its own condensation and the next frame will have them.
+    runs_state: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    #: True when the extension was refused or a cap cut rows from the page: the
+    #: oldest run on the page has no opening user row on it, and ``runs`` is where
+    #: that run's true size lives. False only when the page's oldest row IS a user
+    #: row — an anchored page reports True as soon as a cap dropped rows from it,
+    #: because a jump window never claims its oldest run is whole.
+    head_cut: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.
@@ -1143,6 +1293,71 @@ class InterruptReceipt(BaseModel):
     #: model as the route's ``response_model``, so an undeclared ``replayed``
     #: is silently dropped on the way out.
     replayed: bool = False
+
+
+class JobCancelReceipt(BaseModel):
+    """What a job cancel was ACKNOWLEDGED as, and nothing more.
+
+    THE PRESS IS AN ACKNOWLEDGEMENT, NOT AN OUTCOME — the honesty rule every
+    surface keeps (design spec §2.1): ``cancelled`` here means the session's
+    manager received the cancel and signalled the job's runner; the row itself
+    paints ``cancelled`` only when its own settle lands. That is also why
+    there is no status field: after ``AsyncJobManager.cancel`` returns, the
+    manager row reads ``cancelled`` while the runner is still unwinding, and
+    any word about the job's state would be a claim this moment cannot
+    support — the job row's next wire state is the outcome's own evidence.
+
+    The UI reads no field off this receipt (its call site is typed
+    ``unknown`` and converges on the canonical re-read either way); the
+    fields exist for the route's tests and any later reader, not for a
+    surface to paint from.
+    """
+
+    job_id: str
+    cancelled: bool
+
+
+class SupplementReceipt(BaseModel):
+    """What a supplement control op was ACKNOWLEDGED as, in the runtime's own words.
+
+    THE THREE OPS behind the Highlights block's controls (``cancel``,
+    ``steer``, ``restart``; memo §2.7). ``receipt`` is the RUNTIME's word,
+    verbatim and never composed or re-worded here -- the
+    ``InterruptReceipt.receipt`` rule, one family over -- and its vocabulary is
+    the closed set the runtime's ops answer with:
+
+    * ``cancelled``        -- the running attempt was cut; a ``cancelled`` row
+      is written (the row's own settle is the outcome's durable evidence,
+      exactly as it is for a job cancel above);
+    * ``steering``         -- the steer was ACCEPTED: the in-flight attempt was
+      cut and version + 1 starts with the instruction, or -- when the named job
+      was not the running one -- the request is QUEUED behind the running job
+      (memo §2.9, depth 1; a newer request replaces the queued one). The word
+      is the same either way BY DESIGN (the runtime's own test pins the queued
+      case to ``steering``): the surface paints acceptance, never a claim that
+      the new version started immediately;
+    * ``restarting``       -- the restart was accepted, same queue rule;
+    * ``already finished`` -- the NEUTRAL receipt for a job this op cannot act
+      on: one that settled, one the runtime forgot, or a pair its identity gate
+      refuses. The neutrality is deliberate (memo §2.7, reusing image-gen's
+      ``ALREADY_FINISHED_NOTE``, which "must never wear the error ink or
+      glyph"): a surface that lost a race with the job's own end must not be
+      told something happened. A STALE JOB ID IS REFUSED BY THIS RECEIPT,
+      never resolved onto a newer job -- the runtime's identity gate decides,
+      and the route adds no lookup of its own.
+
+    ``op``/``anchor``/``job`` echo the request's own identity so a caller can
+    key a receipt to the pair it sent without correlating arrays: ``anchor`` is
+    the answer the row rides under and ``job`` is the id the press named. Like
+    ``JobCancelReceipt``'s fields, these exist for the route's tests and any
+    later reader; the shipped UI reads none of them, converging on the live
+    events and the canonical re-read either way.
+    """
+
+    op: Literal["cancel", "steer", "restart"]
+    anchor: str
+    job: str
+    receipt: str
 
 
 class MoveReceipt(BaseModel):

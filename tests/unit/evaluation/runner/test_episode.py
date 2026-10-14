@@ -41,6 +41,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeConfig,
     EpisodeRunner,
 )
+from local_operator.evaluation.runner.model import EpisodeModelClient
 from local_operator.evaluation.runner.provider_client import ProviderModelClient
 from local_operator.harness.types import (
     ModelSpec,
@@ -58,6 +59,7 @@ from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
     build_spec,
+    observation,
     payloads,
     selector,
 )
@@ -78,7 +80,7 @@ def _runner(
     episode_id: str,
     *,
     adapter: FakeAdapter,
-    model: ScriptedModel,
+    model: EpisodeModelClient,
     responder: Any = None,
     max_steps: int = 4,
     redactions: RedactionSet | None = None,
@@ -640,6 +642,103 @@ async def test_scored_zero_is_distinct_from_unscored(tmp_path: Path, episode_id:
     root = outcome.bundle_root
     assert root is not None
     assert verify_bundle(root).valid
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_channel_reply_survives_episode_recording(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """B1 regression: every re-reader of an accepted reply reads it the same way.
+
+    The episode records each accepted reply by RE-DECODING it
+    (``redact_public_reply``); a reply accepted only by the channel's
+    structural reading must carry that fact across the boundary
+    (``ModelDecision.channel_arguments``), or the re-decode refuses OUTSIDE
+    every rejection handler and the episode seals failed/unscored as an
+    adapter error. The wrapped-with-note shape is the r3 family this change
+    exists to recover -- the note is exactly what made the pre-fix re-decode
+    raise -- while the no-note and bare spellings pin that the ordinary paths
+    did not move.
+    """
+
+    # Deferred: test_public_reply imports this module for ``_rescue_ok``.
+    from tests.unit.evaluation.runner.test_provider_client import (
+        _client,
+        finish_payload,
+    )
+    from tests.unit.evaluation.runner.test_public_reply import envelope
+    from tests.unit.evaluation.runner.test_reply_channel import ChannelStream, _spec
+
+    cases = (
+        (
+            "wrapped-with-note",
+            lambda current: json.dumps(
+                {"reply_json": envelope(finish_payload(current), "Live notes")}
+            ),
+        ),
+        ("wrapped-no-note", lambda current: json.dumps({"reply_json": finish_payload(current)})),
+        ("bare-with-note", lambda current: envelope(finish_payload(current), "Live notes")),
+    )
+    for label, build in cases:
+        case_episode = f"{episode_id}-{label}"
+        current = observation(case_episode, 0)
+        client = _client(ChannelStream(build(current)), model_spec=_spec(supports_tools=True))
+        adapter = FakeAdapter(
+            tmp_path, case_episode, score=ScoreArtifact(status="scored", binary=1)
+        )
+        runner = _runner(tmp_path, case_episode, adapter=adapter, model=client)
+
+        outcome = await runner.run()
+
+        assert outcome.status == "completed", (label, outcome.status)
+        assert outcome.score is not None and outcome.score.status == "scored", label
+        assert outcome.bundle_root is not None and verify_bundle(outcome.bundle_root).valid, label
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_second_batch_in_an_actions_string_never_executes(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Round-2 residual (M1/Q3): fail-closed at the runner, nothing executed.
+
+    Pre-fix the runner COMPLETED / SCORED on this reply -- the visible batch
+    executed and the hidden same-observation batch was silently dropped
+    (measured on the real runner). With the string reader carrying the channel
+    fact the reply is rejected at the real client, the corrective path is
+    exhausted against the static stream, and the episode seals failed/unscored
+    with ``model``-category ``decision-rejected`` errors -- and the adapter
+    never sees an ``execute`` for either batch.
+    """
+
+    # Deferred: test_public_reply imports this module for ``_rescue_ok``.
+    from tests.unit.evaluation.runner.test_provider_client import (
+        _client,
+        finish_payload,
+    )
+    from tests.unit.evaluation.runner.test_reply_channel import ChannelStream, _spec
+
+    current = observation(episode_id, 0)
+    action = json.loads(finish_payload(current))["actions"][0]
+    array = json.dumps([dict(action)])
+    hidden = json.dumps({"zzz": {"actions": [dict(action)]}})
+    reply = json.dumps({"actions": array + " , " + hidden})
+
+    client = _client(ChannelStream(reply), model_spec=_spec(supports_tools=True))
+    adapter = FakeAdapter(tmp_path, episode_id, score=ScoreArtifact(status="scored", binary=1))
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=client)
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.status == "unscored"
+    assert "execute" not in adapter.calls
+    assert outcome.bundle_root is not None
+    rejected = [
+        error
+        for error in payloads(outcome.bundle_root, ErrorPayload)
+        if error.diagnostic_code == "decision-rejected"
+    ]
+    assert rejected and all(error.category == "model" for error in rejected)
 
 
 @pytest.mark.asyncio

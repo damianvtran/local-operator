@@ -36,6 +36,29 @@ from local_operator.session.retention import SESSIONS_DIRNAME
 if TYPE_CHECKING:
     from pathlib import Path
 
+# One opt-in spelling across owner and viewer. Publication/frame sequence is
+# not this coordinate; this capability only carries journal-index authority.
+JOURNAL_ORDER_CAPABILITY = "journal-order-v1"
+JOURNAL_ORDER_EVENT = "journal_order_ready"
+
+#: THE COMPLETE PEER SOURCE CONTRACT (docs/DESKTOP_API.md "Complete peer-source
+#: contract"). ``journal-order-v1`` is the LOCAL half #2274 landed; a peer
+#: viewer that needs the owner's own source facts — bounded metadata/payload
+#: purposes on the stored-history RPC and the negotiated recovery envelope —
+#: requires this SEPARATE string, because the two are different promises:
+#: journal-order-v1 says "this owner has an index", this one says "this owner
+#: will answer typed source reads with the exact per-ID partitions and will
+#: gate every new field family on this declaration". An owner that advertises
+#: only journal-order-v1 keeps today's byte-compatible unsupported peer path —
+#: never a manufactured local substitute (the #2274 limit line).
+PEER_JOURNAL_SOURCE_CAPABILITY = "peer-journal-source-v1"
+
+#: The viewer's declaration half of the two-half gate, carried on auth frames
+#: and stored-read requests exactly like ``journal_order``: absent means "this
+#: build does not speak the complete contract", and every complete-semantics
+#: field is then omitted for it (strict old DTOs included).
+PEER_JOURNAL_SOURCE_FLAG = "peer_journal_source"
+
 #: Bumped on any breaking change to control frames or web payloads. The
 #: runtime and daemon always ship together; the phone UI learns the
 #: version in its bootstrap payload and can warn on a stale cached bundle.
@@ -1509,6 +1532,9 @@ class SessionRecord:
     #: older than any terminal that can read it. A viewer compares this with
     #: its own build to NAME skew rather than fail silently under it.
     version: str = ""
+    #: Native registry of THIS owner, not the daemon/UI. None means legacy
+    #: unreported support; an absent catalogue row is never negative evidence.
+    native_provider_ids: list[str] | None = None
     #: The git ref of that install when ``lop-update`` recorded one; ``""``
     #: for PyPI/pipx/editable installs. Needed because same-version rebuilds
     #: are this host's common drift — see ``update.BuildStamp``.
@@ -1583,6 +1609,13 @@ class SessionRecord:
         # only a deserialized key-less record is assumed pre-field.
         known = {f for f in SessionRecord.__dataclass_fields__}
         fields = {k: v for k, v in data.items() if k in known}
+        advertised = fields.get("native_provider_ids")
+        if advertised is not None and not (
+            isinstance(advertised, list) and all(isinstance(item, str) for item in advertised)
+        ):
+            # A malformed advertisement is unknown, never an empty authoritative
+            # provider set that would reject otherwise compatible conversations.
+            fields["native_provider_ids"] = None
         if "started" not in data:
             fields["started"] = True
         return SessionRecord(**fields)

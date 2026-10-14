@@ -13,6 +13,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_settings as _we
 from local_operator.paths import config_dir
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.models.schemas import (
@@ -98,7 +99,11 @@ async def get_config(
         )
     except Exception as e:
         logger.exception("Error retrieving configuration")
-        raise HTTPException(status_code=500, detail=f"Error retrieving configuration: {e}")
+        # Envelope per RFC §2.6: `code` for clients, `text` for readers that
+        # only show the string; the exception text rides as a param, untranslated.
+        raise HTTPException(
+            status_code=500, detail=_we.config_retrieve_failed(error=str(e)).envelope()
+        )
 
 
 @router.patch(
@@ -168,7 +173,7 @@ async def update_config(
         updates = {k: v for k, v in config_update.model_dump().items() if v is not None}
 
         if not updates:
-            raise HTTPException(status_code=400, detail="No valid update fields provided")
+            raise HTTPException(status_code=400, detail=_we.no_update_fields().envelope())
 
         # Update the configuration
         config_manager.update_config(updates)
@@ -191,7 +196,9 @@ async def update_config(
         raise
     except Exception as e:
         logger.exception("Error updating configuration")
-        raise HTTPException(status_code=500, detail=f"Error updating configuration: {e}")
+        raise HTTPException(
+            status_code=500, detail=_we.config_update_failed(error=str(e)).envelope()
+        )
 
 
 @router.get(
@@ -249,7 +256,9 @@ async def get_system_prompt() -> CRUDResponse[SystemPromptResponse] | Response:
         raise
     except Exception as e:
         logger.exception("Error retrieving system prompt")
-        raise HTTPException(status_code=500, detail=f"Error retrieving system prompt: {e}")
+        raise HTTPException(
+            status_code=500, detail=_we.system_prompt_retrieve_failed(error=str(e)).envelope()
+        )
 
 
 @router.patch(
@@ -316,4 +325,6 @@ async def update_system_prompt(system_prompt_update: SystemPromptUpdate) -> JSON
         return JSONResponse(status_code=200, content=jsonable_encoder(response))
     except Exception as e:
         logger.exception("Error updating system prompt")
-        raise HTTPException(status_code=500, detail=f"Error updating system prompt: {e}")
+        raise HTTPException(
+            status_code=500, detail=_we.system_prompt_update_failed(error=str(e)).envelope()
+        )

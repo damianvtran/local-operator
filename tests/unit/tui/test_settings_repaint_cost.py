@@ -83,6 +83,21 @@ def _scratch_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 async def _measure(monkeypatch: pytest.MonkeyPatch) -> PressCounts:
+    # PIN THE MEASUREMENT WINDOW (H1 remediation round 1, Q4). The welcome
+    # splash's mark pulse and the app's spinners run on repaint TIMERS gated on
+    # `motion_enabled()` — the switch `scripts/visual_capture.py` pins with
+    # `LOCAL_OPERATOR_NO_SHIMMER` "so every frame is reproducible". An
+    # unattended pulse resolves two theme colours per 0.08 s tick, and those
+    # calls land in this guard's armed window whenever a swell happens to
+    # overlap the sample — the cause of the intermittently-red combined-batch
+    # runs, identified by a caller-attribution probe: one failing run recorded
+    # exactly +114 `welcome.py:mark_pulse_color` calls against a passing run,
+    # accounting for the entire excess (2674 vs 2560), with the settings page's
+    # own count byte-stable across contexts (2560, 3/3 runs). Pinning the same
+    # switch CI and the snapshot harness use makes the count a fact about the
+    # PAGE again; no ceiling moved, and the mutation this guard exists to catch
+    # is untouched.
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=_SIZE) as pilot:
         await pilot.pause()

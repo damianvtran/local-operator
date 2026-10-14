@@ -68,6 +68,7 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
@@ -111,6 +112,11 @@ def _entry_owners() -> dict[str, str]:
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.
         KERNEL_MARKER_NAME: "local_operator.tools.eval",
+        # The pending-voice markers (``session.channel_spend``): copied, so a
+        # session moved while a voice charge is still unfoled arrives with the
+        # fact the published object states (sync.COPY_SET_NAMES's comment has
+        # the full argument).
+        PENDING_SIDECAR_NAME: "session.channel_spend",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
@@ -256,6 +262,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/owned_process.py": (
+        2,
+        "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
+        "status live under. The run root is the caller's own durable ``--run-root`` "
+        "(refused when volatile) and never a session directory; the segment carries no "
+        "translated text -- machine state about ONE managed process, not a session entry. "
+        "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
+        "lease path, not a pathname or a translated/copyable session entry",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/paths.py": (
         5,
@@ -267,7 +282,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
+    "local_operator/server/utils/local_tokens.py": (
+        1,
+        "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
+        "records under ``<config>/run/serve`` — machine-local boot state a receiving "
+        "device must mint its own, never inherit; not an entry of a session directory",
+    ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    "local_operator/clients/radient_cost.py": (
+        1,
+        "``HEADER_PREFIX`` (``x-radient-cost-``) prefixes an HTTP RESPONSE header "
+        "name: the adapter reads the media server's cost block off the wire, and "
+        "nothing in this module is an entry of a session directory",
+    ),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
     # conversations subtree under it, not entries inside a session: they are the
     # names ``paths.py`` declares for the same directories (see the entry above),
@@ -295,6 +322,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "the distribution name and the PyPI version cache: names in the update "
         "channel, never a file in a session",
+    ),
+    "local_operator/install_transaction.py": (
+        3,
+        "``install.lock``, ``.install-attempt.json`` and ``.update-operations`` "
+        "belong to the node-local INSTALLROOT/generation authority, not a session "
+        "directory. Kernel locks and PID/birth-bound build attempts must never "
+        "travel with a session move, and ``OPERATION_DIR`` holds the durable "
+        "update-operation records for this INSTALLROOT — machine-local recovery "
+        "state bound to one install, exactly as untransportable as the lock and "
+        "the attempt file beside it.",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
@@ -371,6 +408,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the device-id file under the agent home, beside the provider's own config",
     ),
     "local_operator/providers/qwencloud_console.py": (1, "a SECRET's name"),
+    "local_operator/providers/meta_muse_credentials.py": (
+        1,
+        "REF_PREFIX is an encrypted provider-secret SQL namespace, not a session "
+        "directory entry; neither sealed keys nor account references travel with sessions",
+    ),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
     "local_operator/mobile/push_devices.py": (
@@ -411,6 +453,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the cleanup log and last-cleanup record (sessions root) and the store marker "
         "that gates removal: none of them is a file a session directory holds",
     ),
+    "local_operator/session/delegated_retention.py": (
+        4,
+        "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
+        "sweep lock): the former sits at the sessions root, the latter at the config root; "
+        "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
+        "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
+        "to a tree's name; the result is written beside that tree inside the pad and is never "
+        "a bare session entry. "
+        "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
+    ),
     "local_operator/session_factory.py": (
         2,
         "the store-maintenance lock and stamp at the config root",
@@ -418,8 +470,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/archived.py": (1, "the archived-ids list, a store-level record"),
     "local_operator/session/search_index.py": (1, "the search index, a store-level record"),
     "local_operator/session/transcript_index.py": (
-        1,
-        "the transcript index cache directory under the cache root, a store-level record",
+        2,
+        "the transcript index cache directory under the cache root, a store-level record; "
+        "and the tool name whose rows the desktop hides when display.hide_cross_session is "
+        "on, a comparison word rather than a path",
     ),
     "local_operator/session/retention.py": (
         1,
@@ -450,6 +504,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/i18n/catalogues.py": (
+        1,
+        "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
+        "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
+        "data shipped with the wheel, never an entry of a session directory",
+    ),
     "local_operator/network/audit.py": (
         1,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
@@ -465,6 +525,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
+    ),
+    "local_operator/network/rollouts.py": (
+        1,
+        "``ROLLOUTS_DIRNAME`` (``rollouts``): the rollout RECORDS directory under "
+        "``<config>/network/rollouts`` — a device-local orchestration store beside "
+        "the approval store above, never an entry of a session directory and never "
+        "carried in one",
     ),
     "local_operator/network/sync.py": (
         6,
@@ -582,6 +649,29 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``monitors`` under the store root: the derived index, the ``wakes`` twin",
     ),
+    # ``INDEX_DIRNAME`` and ``CACHE_DIRNAME`` are both spelled ``code_requests``: the
+    # derived per-session index under the store root and the scan cache under
+    # ``cache/``. Neither is part of a session directory, and both are regenerated
+    # from the transcript by the scanner, so a session travelling between devices
+    # carries neither value (review round 1, Q3).
+    "local_operator/code_requests/ledger.py": (
+        2,
+        "``code_requests``: the derived index under the store root and the scan cache "
+        "under ``cache/`` — the ``monitors`` twin, both regenerable from the transcript",
+    ),
+    "local_operator/code_requests/cache.py": (
+        1,
+        "``_DIRTY_DIRNAME`` (``.dirty``): the session dirty-mark directory under "
+        "``<config>/cache/code_requests/`` — cached fetch state, regenerable from the "
+        "transcript and the TTLs, and never an entry of a session directory (the "
+        "``ledger.py`` / ``monitors`` case; review round 1, F5)",
+    ),
+    "local_operator/code_requests/detect.py": (
+        1,
+        "``SELF_TOOL_NAME``: the code-request TOOL's name — an identifier resolved "
+        "through the tool registry (the ``reply_channel``/``action-tool`` "
+        "identifier-not-a-path case), never a file a session directory holds",
+    ),
     "local_operator/monitors/state.py": (
         1,
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
@@ -615,8 +705,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        2,
-        "the agent and team directories the desktop app reads: the profile store",
+        3,
+        "the agent and team directories the desktop app reads (the profile store), plus "
+        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
+        "invalidate one conversation's rows (review round 1, Q3)",
     ),
     "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
@@ -641,6 +733,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_MARKER`` (``.build-stamp``): the notifier app's own build stamp, written into its "
         "package directory",
     ),
+    "local_operator/spawn/remembered.py": (
+        1,
+        "``_FILE`` (``last-terminal.json``): the attended-terminal memory, written under "
+        "``<config>/notifier/`` — machine-local state about an emulator, never an entry of "
+        "a session directory",
+    ),
+    "local_operator/tui/notify.py": (
+        1,
+        "``_ACTION_PROBE_FILE`` (``notify-send-actions.json``): the per-binary ``--action`` "
+        "probe cache under ``<config>/notifier/`` — machine-local state about an installed "
+        "binary, never an entry of a session directory",
+    ),
     # ---- the signed helper app the macOS wheel ships ----
     "local_operator/operator/macos/keyagent.py": (
         2,
@@ -663,6 +767,31 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``config.evidence_root/<episode-id>-<arm-id>`` -- an evidence directory "
         "the caller owns (the benchmark run root), never an entry of a session "
         "directory; a replica re-creates the reserve rather than carrying it",
+    ),
+    # ---- the turn-supplement feature's rule IDS ----
+    "local_operator/supplements/denylist.py": (
+        4,
+        "``RULE_CONFIG_DIR``/``RULE_NAME``/``RULE_NAME_PREFIX``/``RULE_SUFFIX`` are rule "
+        "IDS: the tags ``is_sensitive`` returns and a surface logs to say which class "
+        "refused a path (the module's docstring: 'every rule has a stable id'). Bare "
+        "words, never entries of a session directory; they trip this guard only because "
+        "their constant names end in DIR/NAME/PREFIX/SUFFIX while their values read as "
+        "path-shaped spellings",
+    ),
+    # ---- the turn-supplement sweep: the blob STORE's own layout, none of it an
+    # ---- entry OF a session directory
+    "local_operator/supplements/sweep.py": (
+        3,
+        "``.bin``/``.json`` are the attachment store's two file-name SUFFIXES, "
+        "suffixed to a digest (``<digest>.bin``/``.json``) and never a bare entry "
+        "name: a component blob is carried by the session whose transcript "
+        "REFERENCES it, as the ``attachments/<digest>.bin``/``.json`` members "
+        "``sync._member_stamps`` derives from ``referenced_attachments_in`` (a "
+        "supplement row's ``attachment`` key is that literal reference), so neither "
+        "suffix belongs in ``COPY_SET_NAMES`` or ``EXCLUDED_ENTRIES``. "
+        "``_SESSIONS_DIRNAME`` (``sessions``) is the conversations subtree the "
+        "entries live UNDER -- the same value ``retention.py``/``search_guard.py`` "
+        "declare",
     ),
     # ---- ID / KEY FRAGMENTS (widened guard): a ``*_PREFIX``/``*_SUFFIX`` constant is a
     # ---- FRAGMENT joined to some id or key, never a bare entry of a session directory.
@@ -703,7 +832,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``send-notice-`` prefixes an entry id inside the transcript's own custom rows",
     ),
-    "local_operator/terminals.py": (1, "``xterm-kitty`` is a TERM value, not a path"),
+    "local_operator/terminals.py": (
+        2,
+        "``xterm-kitty`` and ``foot`` are TERM values — terminal capability "
+        "string prefixes the OSC 8 hyperlink probe matches — never session entries",
+    ),
     "local_operator/tui/glyphs.py": (1, "``mcp__`` prefixes a tool name in the glyph table"),
     "local_operator/tui/widgets/editor.py": (
         1,

@@ -24,7 +24,11 @@ from local_operator.harness.types import (
     StreamEvent,
     StreamTextDelta,
 )
-from local_operator.session.session import Session, _default_convert_to_llm
+from local_operator.session.session import (
+    Session,
+    _default_convert_to_llm,
+    _todo_reminder_text,
+)
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 
@@ -128,7 +132,7 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2  # one nudge, then the turn ends
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending"),)
+    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending", ""),)
     await session.dispose()
 
 
@@ -136,7 +140,7 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
     """THE §5.3 coupling guard. A PHASED no-progress list must be nudged exactly
     once, the same as a flat one. If ``session.py:_stamped_todo_fingerprint`` is
-    NOT widened to 3-tuples in lockstep with ``builtin.todo_fingerprint``, the
+    NOT widened to 4-tuples in lockstep with ``builtin.todo_fingerprint``, the
     stamped side compares empty, every reminder expires on every render, and the
     latch nudges again on the second identical yield. That failure is SILENT in
     the flat suite (whose stamps happen to survive) and in any 'does it nudge?'
@@ -153,14 +157,14 @@ async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
     assert len(stream.requests) == 2, "one nudge, then the turn ends — not re-nudged every yield"
     assert len(reminders(session._context.messages)) == 1
     assert session._todo_reminder_fingerprint == (
-        ("Foundation", "decide the domain", "pending"),
-        ("Verification", "run the gate", "pending"),
+        ("Foundation", "decide the domain", "pending", ""),
+        ("Verification", "run the gate", "pending", ""),
     )
     # The reminder must actually REACH the model on the continuation request:
     # that render passes through ``_expire_stale_todo_reminders`` →
     # ``_stamped_todo_fingerprint``. If that normaliser is NOT widened to
-    # 3-tuples in lockstep (§5.3), the stamped side compares empty against the
-    # live 3-tuple, the reminder is judged stale on an UNCHANGED list, and it is
+    # 4-tuples in lockstep (§5.3), the stamped side compares empty against the
+    # live 4-tuple, the reminder is judged stale on an UNCHANGED list, and it is
     # stripped from this request — so the model never sees the nudge. Asserting
     # the text is present on request 2 is what catches the silent coupling break.
     sent = stream.requests[1].messages[-1].text
@@ -218,21 +222,128 @@ async def test_a_fresh_user_turn_rearms_the_latch(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_blocked_only_list_does_not_fire(tmp_path) -> None:
-    """``blocked`` is the honest stop: the guardrail must let the turn end so
-    the user can answer, instead of pushing the model to invent progress."""
+async def test_blocked_only_list_fires_a_reconciliation_nudge(tmp_path) -> None:
+    """Blocked is no longer a list the guardrail ignores. The honest stop still
+    ends the turn, but the model must account for what it parked first — this is
+    the ~14-hours-on-six-blocked-items case. Exactly ONE pass: the byte-identical
+    re-yield after the accounting is released, so the block is reconciled, never
+    forbidden."""
     builtin.TODO_STORE[SESSION_ID] = [
         {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"},
         {"text": "old plan", "status": "dropped"},
         {"text": "schema", "status": "done"},
     ]
-    stream = ScriptedStream(prose_turns(1))
+    stream = ScriptedStream(prose_turns(4))
     session = make_session(tmp_path, stream)
 
     await session.prompt("go")
 
-    assert len(stream.requests) == 1
-    assert reminders(session._context.messages) == []
+    assert len(stream.requests) == 2  # one accounting pass, then released
+    assert len(reminders(session._context.messages)) == 1
+    # It reached the model on the continuation request, naming the parked item,
+    # the condition it is parked on, and the reconciliation it owes.
+    sent = stream.requests[1].messages[-1].text
+    assert "pick a domain" in sent
+    assert "needs the user's call" in sent  # the reason IS the condition to re-check
+    assert "account for each blocked item" in sent
+    # Settled work is still not re-asserted, and the pending paragraph stays out
+    # of a list with nothing pending: it is an instruction about work that is not
+    # there, and the model would have to reconcile it against its own list.
+    assert "old plan" not in sent and "schema" not in sent
+    assert "Do not end the turn while pending items remain" not in sent
+    # The latch still compares the FULL list, settled items included, and a
+    # blocked item's reason is part of it (the round-1 remediation).
+    assert session._todo_reminder_fingerprint == (
+        ("Todos", "pick a domain", "blocked", "needs the user's call"),
+        ("Todos", "old plan", "dropped", ""),
+        ("Todos", "schema", "done", ""),
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_parked_blocked_list_is_reconciled_once_across_turns(tmp_path) -> None:
+    """REPLACES the old 2-prompts/4-requests contract (the over-fire repro).
+    That contract re-armed the blocked latch on every fresh user turn, so an
+    unchanged parked set was re-asserted on every turn — every peer wake, every
+    quiet end. Measured across two operator sessions, both with ZERO pending and
+    5-6 parked items: ~97 of ~116 quiet-end attempts were overridden by
+    continued model output. The blocked group is now reconciled ONCE per
+    identity change, ACROSS turns: turn 1 fires, turn 2 adds nothing — 3
+    requests / 1 reminder, against the old 4 / 2."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"}
+    ]
+    stream = ScriptedStream(prose_turns(6))
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("go")
+    # The latch is the blocked group's IDENTITY — (phase, text, status), no reason.
+    assert session._blocked_reminder_fingerprint == (("Todos", "pick a domain", "blocked"),)
+    await session.prompt("use example.com")
+
+    # One reconciliation in turn 1; the fresh turn is NOT re-armed for a set whose
+    # identity did not change (pending keeps the per-turn re-arm; blocked does not).
+    assert len(stream.requests) == 3
+    assert len(reminders(session._context.messages)) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_blocked_item_earns_exactly_one_more_reconciliation(tmp_path) -> None:
+    """A new blocked item is a new IDENTITY, not churn. The parked set was
+    accounted, but parking more work changes what the reminder must ask the
+    model to reconcile — exactly one more nudge, then quiet again."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")  # the set is accounted for in prose
+    assert await session._todo_continuation() == []
+
+    builtin.TODO_STORE[SESSION_ID].append(
+        {"text": "reserve the name", "status": "blocked", "reason": "waiting on the registrar"}
+    )
+
+    nudges = await session._todo_continuation()
+    assert len(nudges) == 1, "a new parked item earns one more reconciliation"
+    nudge = nudges[0]
+    assert isinstance(nudge, CustomMessage)
+    assert "reserve the name" in nudge.details["text"]
+    assert "account for each blocked item" in nudge.details["text"]
+    assert await session._todo_continuation() == [], "and then it is quiet again"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unblocked_or_resolved_change_earns_one_reconciliation(tmp_path) -> None:
+    """The exit that matters most: the condition cleared, so a parked item
+    leaves the blocked group. The status change IS an identity change, so the
+    model owes exactly one pass saying where the moved item now stands — its
+    pending row appears, and the parked set is re-stated alongside it only
+    because the identity moved. Then quiet again."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"},
+        {"text": "reserve the name", "status": "blocked", "reason": "waiting on the registrar"},
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")  # the two-item set is accounted
+    assert await session._todo_continuation() == []
+
+    # The user's call arrives: one parked item unblocks and is work again.
+    builtin.TODO_STORE[SESSION_ID][0]["status"] = "pending"
+    builtin.TODO_STORE[SESSION_ID][0].pop("reason", None)
+
+    nudges = await session._todo_continuation()
+    assert len(nudges) == 1
+    nudge = nudges[0]
+    assert isinstance(nudge, CustomMessage)
+    assert "pick a domain" in nudge.details["text"]  # unblocked: open work again
+    assert "reserve the name" in nudge.details["text"]  # still parked, still asserted
+    assert "Do not end the turn while pending items remain" in nudge.details["text"]
+    assert await session._todo_continuation() == []
     await session.dispose()
 
 
@@ -337,6 +448,99 @@ async def test_reminder_expires_when_the_list_moves(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reason_only_rewrite_expires_the_assertion_without_a_new_nudge(
+    tmp_path,
+) -> None:
+    """Two halves. The reason is rendered, so a re-``block`` that corrects the
+    condition must still EXPIRE the stale assertion — a reason-blind latch kept
+    it alive forever, the round-1 finding. But the reason is NOT the blocked
+    group's identity: the rewrite is the model's own recheck bookkeeping, so it
+    must not re-fire a reconciliation — the old full-fingerprint movement check
+    nudged again here, and that churn is one of the two legs of the over-fire."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    assert len(reminders(session._context.messages)) == 1
+    # The latch holds while nothing moves — the one-accounting-pass bound.
+    assert await session._todo_continuation() == []
+
+    # Status and text unchanged: only the condition the reminder renders moved.
+    builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal cleared it; waiting on finance"
+
+    rendered = session._render_history(session._context.messages)
+    expired = not any("<system-reminder>" in message.text for message in rendered)
+    assert expired, "the stale reminder asserts the old condition and must expire"
+    # A reason-only rewrite is bookkeeping, not a new ask: nothing re-fires.
+    assert await session._todo_continuation() == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reason_churn_does_not_re_fire_the_blocked_reconciliation(tmp_path) -> None:
+    """The identity-vs-churn discriminator. Status and text stand still and only
+    the reason is rewritten — the model updating its own recheck notes. The FULL
+    fingerprint (reason included) moved, so the rendered assertion expires; the
+    blocked IDENTITY did not, so no reconciliation re-fires where the old
+    per-turn re-arm treated the rewrite as movement and nudged again."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    assert len(reminders(session._context.messages)) == 1
+
+    builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal cleared it; waiting on finance"
+
+    assert (
+        await session._todo_continuation() == []
+    ), "a reason-only rewrite is bookkeeping, not a new ask"
+    rendered = session._render_history(session._context.messages)
+    assert not any(
+        "<system-reminder>" in message.text for message in rendered
+    ), "the stale assertion still expires against the full fingerprint"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_re_parked_set_earns_a_new_reconciliation(tmp_path) -> None:
+    """Round-1 F1. The empty identity is never asked ABOUT (there is nothing to
+    reconcile when nothing is parked), but it must still be RECORDED: a set that
+    resolves to EMPTY and is later re-blocked with a byte-identical (phase,
+    text, status) is a NEW identity, not "still accounted" — without the
+    silent-path write it would stay silent permanently."""
+    builtin.TODO_STORE[SESSION_ID] = [
+        {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
+    ]
+    stream = ScriptedStream(prose_turns(2))
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")  # the initial park earns its single pass
+    assert len(reminders(session._context.messages)) == 1
+    assert await session._todo_continuation() == []
+
+    # Resolve it to EMPTY: nothing to ask about, but the ledger must move.
+    builtin.TODO_STORE[SESSION_ID][0]["status"] = "done"
+    builtin.TODO_STORE[SESSION_ID][0].pop("reason", None)
+    assert await session._todo_continuation() == []
+    assert session._blocked_reminder_fingerprint == ()
+
+    # Re-block the SAME text: identical (phase, text, status) to the first park,
+    # and a new identity against the recorded empty set — so it earns its pass.
+    builtin.TODO_STORE[SESSION_ID][0]["status"] = "blocked"
+    builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal review reopened it"
+    nudges = await session._todo_continuation()
+    assert len(nudges) == 1, "a re-parked set is a new identity and earns its pass"
+    nudge = nudges[0]
+    assert isinstance(nudge, CustomMessage)
+    assert "deploy" in nudge.details["text"]
+    assert await session._todo_continuation() == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unstamped_reminder_expires(tmp_path) -> None:
     """No stamp means the claim cannot be checked, and an unverifiable nudge is
     worth less than one turn without it."""
@@ -345,7 +549,7 @@ async def test_unstamped_reminder_expires(tmp_path) -> None:
     session = make_session(tmp_path, stream)
 
     kept = session._live_todo_reminders(
-        [Message.user("go"), _reminder("stamped", (("Todos", "ship it", "pending"),))]
+        [Message.user("go"), _reminder("stamped", (("Todos", "ship it", "pending", ""),))]
     )
     dropped = session._live_todo_reminders([Message.user("go"), _reminder("no stamp")])
 
@@ -355,8 +559,10 @@ async def test_unstamped_reminder_expires(tmp_path) -> None:
 
 
 def test_phased_open_todos_flattens_pending_and_excludes_blocked() -> None:
-    """The guardrail's \"open\" is pending across ALL phases; blocked stays out so
-    a phased list can still stop honestly."""
+    """``open_todos`` is the PENDING projection across all phases — blocked stays
+    out of it (the guardrail draws it separately through ``blocked_todos``, which
+    is what keeps the two obligations apart). Both flatten the same phased store
+    in phase-then-item order."""
     builtin.TODO_STORE[SESSION_ID] = [
         {
             "name": "A",
@@ -375,15 +581,52 @@ def test_phased_open_todos_flattens_pending_and_excludes_blocked() -> None:
     ]
 
     assert [item["text"] for item in builtin.open_todos(SESSION_ID)] == ["one", "two"]
+    assert [item["text"] for item in builtin.blocked_todos(SESSION_ID)] == ["held"]
 
 
-def test_stamped_fingerprint_round_trips_a_three_tuple() -> None:
+# --- the reminder text ------------------------------------------------------
+
+
+def test_reminder_text_states_each_group_only_when_present() -> None:
+    """One text, two groups. Pending rows carry their paragraph; blocked rows
+    carry their reason and the reconciliation paragraph. A group with no items
+    contributes no paragraph, because an instruction about work that is not on
+    the list is noise the model has to reconcile away."""
+    pending = [{"text": "add the columns", "status": "pending"}]
+    blocked = [{"text": "pick a domain", "status": "blocked", "reason": "needs the user's call"}]
+
+    mixed = _todo_reminder_text(pending, blocked)
+    assert mixed.startswith("<system-reminder>") and mixed.endswith("</system-reminder>")
+    assert "- add the columns" in mixed
+    assert "- pick a domain — blocked: needs the user's call" in mixed
+    assert "Do not end the turn while pending items remain" in mixed
+    assert "Before you finish, account for each blocked item" in mixed
+
+    pending_only = _todo_reminder_text(pending, [])
+    assert "Before you finish, account for each blocked item" not in pending_only
+    # The exits the tool actually offers, and the ask clause, stay named.
+    assert "`todo block`" in pending_only and "`ask` tool" in pending_only
+
+    blocked_only = _todo_reminder_text([], blocked)
+    assert "Do not end the turn while pending items remain" not in blocked_only
+    assert "- pick a domain — blocked: needs the user's call" in blocked_only
+
+    # A blocked row with no reason (a hand-edited or pre-``reason`` store) keeps
+    # the state and drops the empty tail — the panel's own ``— blocked`` form.
+    bare = _todo_reminder_text([], [{"text": "x", "status": "blocked"}])
+    assert bare.count("— blocked") == 1
+    assert "— blocked:" not in bare
+
+
+def test_stamped_fingerprint_round_trips_a_four_tuple() -> None:
     """A reminder's stamped fingerprint survives the JSON list round trip and
-    compares equal to the live 3-tuple, so an unchanged phased list keeps its
+    compares equal to the live 4-tuple, so an unchanged phased list keeps its
     reminder instead of expiring it (the §5.3 failure mode)."""
     from local_operator.session.session import _stamped_todo_fingerprint
 
     # JSON turns the nested tuples into lists; the normaliser must still yield a
-    # 3-tuple that equals what todo_fingerprint emits.
-    details = {"fingerprint": [["Foundation", "decide", "pending"]]}
-    assert _stamped_todo_fingerprint(details) == (("Foundation", "decide", "pending"),)
+    # 4-tuple that equals what todo_fingerprint emits.
+    details = {"fingerprint": [["Foundation", "decide", "blocked", "needs the user"]]}
+    assert _stamped_todo_fingerprint(details) == (
+        ("Foundation", "decide", "blocked", "needs the user"),
+    )

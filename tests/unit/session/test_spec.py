@@ -263,6 +263,9 @@ def test_spec_field_surface_is_pinned() -> None:
         "output_format",
         "output_schema",
         "output_retries",
+        # The model-world boundary (additive; construction/discovery-scoped,
+        # never through the namespace — see sdk._resolve_world_root).
+        "world_root",
     }
 
 

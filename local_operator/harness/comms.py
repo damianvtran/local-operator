@@ -594,6 +594,8 @@ class _ChildRecord:
     #: inherits, or a stale SNAPSHOT of this child's own parent, which it
     #: must look past (D9.4). The live answer is the job row's ``owns_model``.
     owns_model: bool | None = None
+    model_selector: str | None = None
+    model_selection_source: str = ""
     #: Attempt handles superseded by this record. Persisted so a parent can
     #: keep using an id it mentioned before either process or child resumed.
     attempt_aliases: list[str] = field(default_factory=list)
@@ -1351,6 +1353,8 @@ class SubagentComms:
         launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
+        model_selector: str | None = None,
+        model_selection_source: str = "",
         team_name: str = "",
         team_lineage: tuple[str, ...] = (),
         depth: int = 0,
@@ -1391,6 +1395,8 @@ class SubagentComms:
             existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
+            existing.model_selector = model_selector
+            existing.model_selection_source = model_selection_source
             existing.team_name = team_name
             existing.team_lineage = tuple(team_lineage)
             existing.depth = depth
@@ -1406,6 +1412,8 @@ class SubagentComms:
             launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
+            model_selector=model_selector,
+            model_selection_source=model_selection_source,
             team_name=team_name,
             team_lineage=tuple(team_lineage),
             depth=depth,
@@ -1439,7 +1447,12 @@ class SubagentComms:
             record.label = prior.label
             record.parent_job_id = prior.parent_job_id
             record.agent_role = prior.agent_role
-            record.effort = prior.effort
+            # A launch override must survive the alias fold; omission carries
+            # the previous run's selector instead of resurrecting its role pin.
+            if not record.model_selection_source:
+                record.effort = prior.effort
+                record.model_selector = prior.model_selector
+                record.model_selection_source = prior.model_selection_source
             # Carried across the fold like the role, and for the same reason:
             # this record REPLACES a settled attempt, so dropping the denial
             # here would let the second resume of a restricted child come back
@@ -2114,6 +2127,8 @@ class SubagentComms:
                     "launch_message_id": record.launch_message_id,
                     "agent_role": record.agent_role,
                     "effort": record.effort,
+                    "model_selector": record.model_selector,
+                    "model_selection_source": record.model_selection_source,
                     # Rides with the role because it is the half the role
                     # CANNOT express (see the field). Losing it here would
                     # leave the flag alive only for the process, which is the
@@ -2231,6 +2246,12 @@ class SubagentComms:
                 launch_message_id=str(row.get("launch_message_id") or ""),
                 agent_role=str(row.get("agent_role") or ""),
                 effort=str(row.get("effort") or ""),
+                model_selector=(
+                    row.get("model_selector")
+                    if isinstance(row.get("model_selector"), str)
+                    else None
+                ),
+                model_selection_source=str(row.get("model_selection_source") or ""),
                 # Missing defaults to False, which is right for a sidecar
                 # written before this field existed: it reproduces today's
                 # behaviour for old rows and cannot invent a denial that was
@@ -2493,7 +2514,15 @@ class SubagentComms:
         resolve = getattr(self._session, "_resolve_subagent_model", None)
         if callable(resolve):
             try:
-                resolved = resolve(record.agent_role or "task", record.effort or None)
+                resolved = resolve(
+                    record.agent_role or "task",
+                    record.effort or None,
+                    **(
+                        {"model": record.model_selector}
+                        if record.model_selector is not None
+                        else {}
+                    ),
+                )
             except Exception:  # noqa: BLE001 — fall back to the recorded label
                 resolved = None
             if isinstance(resolved, ModelSpec):
@@ -2615,7 +2644,25 @@ class SubagentComms:
         # ContinuationCommand id, which the runtime's handle hands back to
         # ``Session.steer`` as ``message_id``, so the correlation survives
         # that path too.
-        record.child.steer_message(Message.user(str(message.details["text"]), id=message.id))
+        steer_message = Message.user(str(message.details["text"]), id=message.id)
+        # The typed facts a CustomMessage would have carried are flattened away
+        # the moment this persists as a user-role row, and re-parsing the model
+        # envelope is the guessing this programme is deleting. A namespaced
+        # provider_payload marker carries the same facts instead; MERGE it so
+        # any other bookkeeping on the row survives, and keep role/content/
+        # identity untouched — only the payload gains a key.
+        payload = dict(getattr(steer_message, "provider_payload", None) or {})
+        payload.setdefault(
+            "hub_receipt",
+            {
+                "direction": "to_child",
+                "expects_reply": False,
+                "steer": True,
+                "body": text,
+            },
+        )
+        steer_message.provider_payload = payload
+        record.child.steer_message(steer_message)
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:
@@ -2921,7 +2968,42 @@ class SubagentComms:
             return Delivery(job_id, record.label, "failed", "job stopped before the pause landed")
         return Delivery(job_id, record.label, "paused")
 
-    def resume(self, job_id: str, message: str) -> tuple[str | None, str | None]:
+    async def resume_async(
+        self, job_id: str, message: str, *, model: str | None = None
+    ) -> tuple[str | None, str | None]:
+        """Prepare exact selectors before the loop-owned resume transaction."""
+        from local_operator.mobile.peer_model import prepared_subagent_selections
+
+        if model is not None and model != "inherit":
+            from local_operator.harness.subagent import model_may_choose_tier
+
+            if not model_may_choose_tier():
+                return None, "specific task models require subagents.model_choice=model"
+        selectors: list[str] = []
+        record = self._record(job_id)
+        selector = model if model is not None else record.model_selector if record else None
+        if selector is not None and selector != "inherit":
+            selectors.append(selector)
+        # Snapshot selectors here, not mutable comms records in a worker:
+        # a settled owning ancestor can require metadata resolution too.
+        seen: set[str] = set()
+        ancestor_id = record.parent_job_id if record else None
+        while ancestor_id and ancestor_id not in seen:
+            seen.add(ancestor_id)
+            ancestor = self._record(ancestor_id)
+            if ancestor is None:
+                break
+            if ancestor.model_selector is not None and ancestor.model_selector != "inherit":
+                selectors.append(ancestor.model_selector)
+            ancestor_id = ancestor.parent_job_id
+        async with prepared_subagent_selections(selectors):
+            # Status, policy, lineage and transcript presence are rechecked
+            # after the await on the loop that registers/folds the job rows.
+            return self.resume(job_id, message, model=model)
+
+    def resume(
+        self, job_id: str, message: str, *, model: str | None = None
+    ) -> tuple[str | None, str | None]:
         """Relaunch a stopped child against its own transcript: ``(new job id,
         error)``.
 
@@ -2934,6 +3016,11 @@ class SubagentComms:
         """
         from local_operator.harness.subagent import run_subagent
 
+        if model is not None and model != "inherit":
+            from local_operator.harness.subagent import model_may_choose_tier
+
+            if not model_may_choose_tier():
+                return None, "specific task models require subagents.model_choice=model"
         record = self._record(job_id)
         if record is None:
             return None, f"unknown subagent {job_id!r}"
@@ -2999,7 +3086,8 @@ class SubagentComms:
         # ``run_subagent`` defaults ``agent`` to ``"task"``, so omitting these
         # silently downgraded every resumed child to a generic no-role one.
         agent = record.agent_role or "task"
-        effort = record.effort or None
+        selector = model if model is not None else record.model_selector
+        effort = None if model is not None else record.effort or None
         # The team, lineage and depth the child was born under ride the
         # record for the reason ``restricted`` does: the session this rebuilds
         # against need not be the real parent, and a resumed pod worker must
@@ -3052,8 +3140,13 @@ class SubagentComms:
             try:
                 # The role the child RUNS as: a ``team:pod`` lead is pod's
                 # manager, whose tier the first launch priced (BEN-7-D1).
-                resolved = resolve(target.role, effort, strict=True)
-            except SubagentModelUnavailable as exc:
+                resolved = resolve(
+                    target.role,
+                    effort,
+                    strict=True,
+                    **({"model": selector} if selector is not None else {}),
+                )
+            except (SubagentModelUnavailable, ValueError) as exc:
                 return None, f"cannot resume {record.label}: {exc}"
             if isinstance(resolved, ModelSpec):
                 model_spec = resolved
@@ -3070,6 +3163,7 @@ class SubagentComms:
             resume_dir=record.session_dir,
             agent=agent,
             effort=effort,
+            model_selector=selector,
             restricted=record.restricted,
             inherited_model=inherited,
             target=target,

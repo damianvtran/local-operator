@@ -73,6 +73,10 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         ORIGIN_NAME,
         TITLE_SIDECAR_NAME,
     )
+    from local_operator.session.channel_spend import (
+        PENDING_OWNER_APPEND,
+        PENDING_SIDECAR_NAME,
+    )
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
     from local_operator.session.runtime.registry import (
@@ -160,6 +164,25 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     (directory / BOOT_PROMPT_NAME).write_text(
         json.dumps({"version": 1, "text": "start here"}), encoding="utf-8"
     )
+    # THE PENDING-VOICE MARKERS, one line in the exact shape
+    # ``channel_spend.write_pending_record`` emits — in the fixture for the same
+    # reason every entry type is (the round trip below asserts each
+    # ``COPY_SET_NAMES`` member arrives, so a missing one would be testing the
+    # fixture), and written from the owner's own constants so a rename cannot
+    # leave a stale literal here.
+    (directory / PENDING_SIDECAR_NAME).write_text(
+        json.dumps(
+            {
+                "record_id": "tts:seed-1",
+                "channel": "tts",
+                "ts_ms": 1,
+                "reason": PENDING_OWNER_APPEND,
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     # THE BIRTH TIME and a SCRATCHPAD with a file in it: the two entries whose
     # absence from the copy set let a move delete them for good (review round 1,
     # B-M2). In the fixture because every copy test should see them.
@@ -213,6 +236,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         ORIGIN_NAME,
         TITLE_SIDECAR_NAME,
     )
+    from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
@@ -253,6 +277,13 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # how its first cell still learns the namespace was left behind
         # (0b20e09d5; the why is spelled out at ``sync.COPY_SET_NAMES``).
         KERNEL_MARKER_NAME,
+        # The pending-voice markers (``session.channel_spend``): a session that is
+        # forked or moved while a charge is still unfoled must arrive with the fact
+        # stated, or the destination reads as a conversation whose voice spend never
+        # existed while the record sits unjoined in analytics — same class as
+        # ``asks.jsonl`` and ``goal.json`` above (the argument is at
+        # ``sync.COPY_SET_NAMES``).
+        PENDING_SIDECAR_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping

@@ -41,7 +41,7 @@ A registered profile is not automatically a live peer in the current process. In
 
 Use the `task` tool when the current job contains an independent, well-bounded slice that can run concurrently or needs isolated context. A task subagent:
 
-- inherits the parent model and reasoning effort, working directory, approval gate, and compaction budget. `effort` buys a different MODEL for the child, not a deeper reasoning level, and who may choose it is the OPERATOR's decision, not yours. `subagents.model_choice` decides that, and its default is `operator`: no tier is advertised to you and asking for one is refused — omit the field. The way back is theirs to take (set `subagents.model_choice=model` in `/settings`, or `lop config edit subagents.model_choice model`); only then may `effort` name a tier they configured under `subagents.models`, and the `task` schema then lists exactly those. (An operator who wants one role on a stronger model does not need to hand you the picker at all: a role's own profile carries its `effort` pin, and the desktop profile editor writes it.) Below the top level no model-chosen tier applies: `model_choice=model` reaches the top-level session only, so a subagent that launches its own `task` children is never offered `effort` and is refused if it passes a tier, whatever the key says, and it cannot write a tier pin into a role with `agent` create/update either. Its children inherit the model it is running on. Stored role pins are a separate thing and still apply at any depth, however they were written (the operator's profile editor, or a top-level model under `model_choice=model`). The one pin-related call a subagent can still make is `effort='inherit'` on `agent` update, which clears a role's pin (as it always has).
+- inherits the parent model and reasoning effort, working directory, approval gate, and compaction budget. `effort` buys a different MODEL for the child, not a deeper reasoning level, and who may choose it is the OPERATOR's decision, not yours. `subagents.model_choice` decides that, and its default is `operator`: no tier is advertised to you and asking for one is refused — omit the field. `model="inherit"` can still bypass a role pin; exact `model="provider/id"` needs the model-choice arm. The way back is theirs to take (set `subagents.model_choice=model` in `/settings`, or `lop config edit subagents.model_choice model`); only then may `effort` name a tier they configured under `subagents.models`, and the `task` schema then lists exactly those. (An operator who wants one role on a stronger model does not need to hand you the picker at all: a role's own profile carries its `effort` pin, and the desktop profile editor writes it.)
 - receives only the prompt passed to `task`; include every requirement and expected output
 - reports through the parent session's jobs/events — the launch RESULT names the
   model each child will run on (`on <provider/model>`, or `on this session's model
@@ -50,6 +50,28 @@ Use the `task` tool when the current job contains an independent, well-bounded s
 - has its model decided when it starts or resumes. A pinned child (an `effort` tier, or a role's own pin) re-resolves its tier from current config. An inheriting child takes the model of the nearest ancestor that decides one: a parent that is still running gives its current model; a parent that has finished gives its own pin if it had one, and otherwise the choice passes up to ITS parent; your session gives its current model. So a worker of a manager pinned to a cheaper tier resumes on that tier, not on your model, while a worker of an unpinned manager follows your own `/model` switch. `hub op='resume'` therefore does NOT bring a child back on the model it ran on before. The resume receipt names the model the same way the launch result does (`on its parent's model (<provider/model>)` when an ancestor decided it), and adds `(its previous run was on <provider/model>)` when it changed. If a nested child's lineage can no longer be read (an ancestor's record is gone, or was saved by an older version and shows no pin), it keeps its previous model; if it never recorded one, it runs on your session's model. The receipt says which, e.g. `on <provider/model> (its parent's model could not be found; kept its previous model)`. Switching a parent's model — its own `/model`, or a switch sent from the phone or `lop attach` — does not change children already running; pause and resume one to move it.
 - may itself delegate **if and only if its role allows the `task` tool**. A `manager` keeps `task` at any depth, so a manager's child is a manager too; a role that does not delegate (a `reviewer`, a `coder`, a `scout`) is never handed it and must do the work itself. A subagent launched with no role inherits its parent's allowance. When a child does delegate, its own children are listed in its page — in the TUI the roster re-scopes to them and you walk back up with `p`/`Esc`; the desktop UI walks the same tree with its back control and breadcrumbs.
 - is ephemeral; it does not become a registered profile or keep durable specialist state
+- Check actual owner/job state before handing off. A `hub op='send'` queue receipt
+  is not running work: completed/paused/failed owners need explicit
+  `hub op='resume'` on their latest job ID and existing history, with the work
+  message. Never infer execution from delivery or spawn a duplicate actor.
+
+### Per-run model overrides
+
+Use `task(label="design", prompt="…", agent="designer", model="inherit")` to
+keep the role but bypass its model pin. Batch items accept the same `model`.
+Omission keeps existing role/tier defaults; it is **not** explicit inheritance.
+Leave unused optional fields absent. `effort` changes the model tier, not reasoning.
+
+`model="provider/model-id"` chooses an exact per-run model when
+`subagents.model_choice=model`; catalogue and usable credentials are checked before
+launch. `model="inherit"` is also available in operator mode because it uses only
+the parent's already-selected model. Never combine explicit `model` and `effort`.
+
+`hub(op="resume", to=["job-id"], message="continue", model="inherit")` replaces a
+stopped child's pin for that continuation; an exact model pins it instead. With no
+override, resume replays its saved selector, including after restart. Inheritance
+tracks the real parent/ancestor's current model; exact picks stay pinned. Neither
+form edits profiles or config. Receipts name the actual model and selection source.
 
 ## Separate sessions: the `sessions` tool, only when the user asked
 

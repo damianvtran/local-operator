@@ -71,6 +71,7 @@ from local_operator.providers.usage_cache import (
     USAGE_UNAVAILABLE_RETRY_MS,
     UsageCacheStore,
     account_backoff_ms,
+    default_cache_path,
     fingerprint_accounts,
     fingerprint_secret,
     provider_cache_key,
@@ -200,6 +201,18 @@ class CatalogueEntry:
     #: the route by other means renders this; one that cannot keeps using
     #: ``label``. Nothing about ``label`` or the ranking changes.
     listing_name: str = dataclasses.field(default="", kw_only=True)
+    #: Optional native details. Zero/None means unknown, never an inferred plan.
+    max_output_tokens: int = dataclasses.field(default=0, kw_only=True)
+    supports_tools: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_images: bool | None = dataclasses.field(default=None, kw_only=True)
+    supports_audio_input: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning: bool | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_efforts: tuple[str, ...] | None = dataclasses.field(default=None, kw_only=True)
+    reasoning_default_effort: str | None = dataclasses.field(default=None, kw_only=True)
+    family: str | None = dataclasses.field(default=None, kw_only=True)
+    release_date: str | None = dataclasses.field(default=None, kw_only=True)
+    modalities: dict[str, list[str]] | None = dataclasses.field(default=None, kw_only=True)
+    variants: dict[str, dict[str, object]] | None = dataclasses.field(default=None, kw_only=True)
     #: This provider RESELLS the model rather than serving it. The picker ranks
     #: the direct route first when the same model is reachable both ways.
     aggregated: bool = False
@@ -263,7 +276,9 @@ class ControllerAuthStore(Protocol):
         self, provider: str, endpoint: str
     ) -> "StoredCredential | None": ...  # pragma: no cover
 
-    async def get_oauth_access(self, provider: str) -> "OAuthAccess | None": ...  # pragma: no cover
+    async def get_oauth_access(
+        self, provider: str, *, read_only: bool = False
+    ) -> "OAuthAccess | None": ...  # pragma: no cover
 
     async def list_oauth_accesses(
         self, provider: str
@@ -271,7 +286,9 @@ class ControllerAuthStore(Protocol):
 
     def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
-    async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
+    async def get_api_key(
+        self, provider: str, *, read_only: bool = False
+    ) -> str | None: ...  # pragma: no cover
 
 
 def _chat_providers() -> list[ProviderDefinition]:
@@ -434,6 +451,49 @@ class ProviderViewRow:
     credential_types: tuple[str, ...]
 
 
+class ReadOnlyUsageMetadataStore(Protocol):
+    """The metadata-only slice the read-only usage seam needs from a store.
+
+    Narrow on purpose: the paired-phone route must not reach a write, a refresh
+    or a broker call, so this contract exposes read-only accessors only and is
+    satisfied by :meth:`AuthStore.open_read_only` and by a lightweight test
+    stand-in with no database at all.
+    """
+
+    def list_credentials(
+        self, provider: str | None = None
+    ) -> list["StoredCredential"]: ...  # pragma: no cover
+
+
+@dataclasses.dataclass
+class ReadOnlyUsageSnapshot:
+    """One read-only cached-usage answer, with its own freshness.
+
+    A bare list could not express the three states the phone route must tell
+    apart, so this carries them explicitly:
+
+    - ``unavailable``: the store or cache could not be read (corrupt, foreign
+      schema, no required columns). Distinct from empty; MUST NOT render as zero
+      credits.
+    - ``reports``: the cached reports for the persisted account(s), identity
+      stripped. ``[]`` with ``unavailable=False`` is a genuine "nothing cached".
+    - ``may_be_stale`` / ``cached_at``: freshness. The seam opens
+      ``immutable=1`` to guarantee it never WRITES, which means it cannot see an
+      uncheckpointed WAL — so a non-empty ``-wal`` beside the database is the
+      signal that ``reports`` may be behind, possibly still naming an account a
+      committed DELETE removed. Staleness is DISCLOSED, not withheld: the
+      reports are still returned (a blank phone /usage on a busy desktop would
+      be the worse failure), flagged so the surface renders "cached, as of T
+      (may be out of date)" and can exclude a removed account. ``cached_at``
+      (on-disk mtime, the "as of" immutable honours) is that timestamp.
+    """
+
+    reports: list[UsageReport] = dataclasses.field(default_factory=list)
+    unavailable: bool = False
+    may_be_stale: bool = False
+    cached_at: int | None = None
+
+
 class ProviderController:
     """Provider/model/credential/usage facade for interactive front ends."""
 
@@ -462,6 +522,7 @@ class ProviderController:
         # lop session on this machine: several terminals run at once, and one
         # process's refresh is every process's answer.
         self._usage_cache = usage_cache
+        self._meta_catalogue_scope: str | None = None
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -620,7 +681,15 @@ class ProviderController:
     def has_any_credential(self, provider: str) -> bool:
         """Whether ``provider`` (or its storage id) has a stored credential."""
         storage = credential_provider_id(provider)
-        return any(c.provider == storage for c in self.auth_store.list_credentials(provider=None))
+        rows = self.auth_store.list_credentials(provider=None)
+        if storage == "meta-muse":
+            try:
+                extractor_factory = getattr(self.auth_store, "_oauth_key_fn", None)
+                extractor = extractor_factory(storage) if extractor_factory is not None else None
+                return any(c.provider == storage and extractor and extractor(c.data) for c in rows)
+            except Exception:  # noqa: BLE001 - locked/inaccessible is not usable
+                return False
+        return any(c.provider == storage for c in rows)
 
     def is_usable(self, provider: str) -> bool:
         """Whether ``provider`` has a credential the session could actually run on.
@@ -685,6 +754,8 @@ class ProviderController:
         try:
             stored_rows = self.auth_store.list_credentials(provider=None)
             stored = {row.provider for row in stored_rows}
+            if "meta-muse" in stored and not self.has_any_credential("meta-muse"):
+                stored.discard("meta-muse")
             oauth_providers = {
                 row.provider for row in stored_rows if row.credential_type == "oauth"
             }
@@ -753,6 +824,8 @@ class ProviderController:
         try:
             stored_rows = self.auth_store.list_credentials(provider=None)
             stored = {row.provider for row in stored_rows}
+            if "meta-muse" in stored and not self.has_any_credential("meta-muse"):
+                stored.discard("meta-muse")
             oauth_providers = {
                 row.provider for row in stored_rows if row.credential_type == "oauth"
             }
@@ -821,6 +894,175 @@ class ProviderController:
     def usage_reportable_providers(self) -> list[str]:
         """Sorted provider ids that both have an endpoint and a way to reach it."""
         return [p for p in self.usage_enabled_providers() if self.can_report_usage(p)]
+
+    # -- read-only cached usage (paired-phone seam) ------------------------
+    @classmethod
+    def read_only_for_persisted_usage(
+        cls,
+        auth_db_path: "Path | None" = None,
+        usage_cache_path: "Path | None" = None,
+    ) -> "ProviderController":
+        """A controller that reads persisted cached usage and WRITES NOTHING.
+
+        Built for the paired-phone route, where a GET of quota must honour a
+        no-writes promise. The default :class:`AuthStore` constructor opens
+        (mkdir + O_CREAT + WAL PRAGMA + schema DDL + commit + chmod) and
+        :class:`UsageCacheStore` does the same on first use, so a route that
+        merely avoided calling write methods would still have mutated disk. The
+        metadata-only opens happen INSIDE this factory, so there is no window in
+        which a default writing store exists for the route to hold by mistake.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore.open_read_only(auth_db_path)
+        return cls(
+            store,
+            None,
+            usage_cache=(
+                UsageCacheStore(usage_cache_path, read_only=True)
+                if usage_cache_path is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _persisted_account_fingerprint(store: "ReadOnlyUsageMetadataStore", provider: str) -> str:
+        """The fingerprint of the PERSISTED account set for ``provider``.
+
+        Like :meth:`_account_fingerprint`, but WITHOUT the env/runtime/config
+        override keys. A phone read must describe the account the user actually
+        logged in with; an ambient ``ANTHROPIC_API_KEY`` winning the fetch in an
+        interactive session is not that login, and folding it into the key would
+        let the phone read a different account's numbers or miss its own.
+        """
+        parts: list[str] = []
+        try:
+            rows = store.list_credentials(provider)
+        except Exception:  # noqa: BLE001 — unreadable store fingerprints empty
+            rows = []
+        for row in rows:
+            if getattr(row, "credential_type", None) == "oauth":
+                identity = getattr(row, "identity_key", None)
+                parts.append(identity or f"cred:{getattr(row, 'id', 0)}")
+            else:
+                data = getattr(row, "data", None) or {}
+                key = data.get("key") if isinstance(data, dict) else None
+                if key:
+                    parts.append(fingerprint_secret(str(key)))
+        return fingerprint_accounts(parts) if parts else "none"
+
+    def cached_persisted_usage_reports_read_only(
+        self, provider: str | None = None
+    ) -> "ReadOnlyUsageSnapshot":
+        """Cached usage for the CURRENT PERSISTED account, read-only.
+
+        ONE method, because a two-flag variant (``read_only=``/
+        ``persisted_only=``) has a footgun: a caller that forgets the second flag
+        silently reintroduces the env/runtime/config override leak this exists to
+        avoid. Here the safe call is the only call.
+
+        ``provider=None`` returns the persisted-provider INVENTORY; ``provider``
+        names one. Both return a :class:`ReadOnlyUsageSnapshot`, which carries the
+        three states a bare list could not: an UNAVAILABLE read
+        (``unavailable=True``, never rendered as zero credits), a genuine empty
+        result (``reports == []``, ``unavailable=False``), and freshness
+        (``may_be_stale``/``cached_at``).
+
+        Freshness is load-bearing, not decorative: ``immutable=1`` guarantees the
+        no-write property but cannot see an uncheckpointed WAL, so a non-empty
+        ``-wal`` means the numbers may be behind — and an INVENTORY built from
+        them could name an account a committed DELETE removed. Staleness is
+        therefore DISCLOSED, not withheld: the snapshot is RETURNED with
+        ``may_be_stale=True`` (and ``cached_at``), both for the inventory and for
+        an explicit provider, so a busy desktop never blanks the phone's
+        ``/usage`` exactly when the user wants to see credits. A flagged,
+        clearly-labelled snapshot is never PRESENTED as current — the surface
+        renders "cached, as of T (may be out of date)" and may exclude a removed
+        account — which satisfies the safety rule without hiding usable data. The
+        one state that stays UNAVAILABLE is an unreadable/foreign schema, where
+        nothing trustworthy exists to return at all.
+
+        The returned reports carry NO account identity: identity and vendor notes
+        are stripped here rather than trusted to the renderer.
+        """
+        try:
+            store = self.auth_store
+        except Exception:  # noqa: BLE001 — no store = unavailable
+            return ReadOnlyUsageSnapshot(unavailable=True)
+        # NEVER trust the injected cache to be read-only: an ordinary writable
+        # UsageCacheStore handed in by an embedding host would create usage.db
+        # on first use. The seam opens its own read-only handle unconditionally.
+        try:
+            cache = UsageCacheStore(self._usage_read_only_path(), read_only=True)
+        except Exception:  # noqa: BLE001
+            return ReadOnlyUsageSnapshot(unavailable=True)
+        # A store or cache that cannot be read is UNAVAILABLE, not empty — the
+        # distinction the auth path used to collapse into ``[]``. An ABSENT
+        # database is genuinely empty (and nothing was created to find out).
+        if getattr(store, "read_only_unavailable", lambda: False)():
+            return ReadOnlyUsageSnapshot(unavailable=True)
+        if not cache.read_only_available():
+            if cache._db_path.exists():
+                return ReadOnlyUsageSnapshot(unavailable=True)
+            return ReadOnlyUsageSnapshot()
+
+        may_be_stale = cache.read_only_sidecar_present() or bool(
+            getattr(store, "read_only_sidecar_present", lambda: False)()
+        )
+        cached_at = cache.read_only_cached_at()
+        providers = (
+            [self._storage_id(provider)]
+            if provider is not None
+            else self._persisted_providers(store)
+        )
+        out: list[UsageReport] = []
+        for storage in providers:
+            key = provider_cache_key(storage, self._persisted_account_fingerprint(store, storage))
+            readable, loaded = cache.read_reports_read_only(key, include_expired=True)
+            if not readable:
+                # A failed query or undecodable payload: UNAVAILABLE, never a
+                # silently-shortened list that reads as "no quota".
+                return ReadOnlyUsageSnapshot(unavailable=True)
+            out.extend(loaded)
+        # Staleness is DISCLOSED, not withheld. A busy desktop almost always has
+        # a non-empty ``-wal``, so withholding here would blank the phone's
+        # /usage exactly when the user wants to see credits. The rule is "never
+        # present a possibly-deleted account AS CURRENT", which a flagged,
+        # clearly-labelled snapshot satisfies: the surface renders it as "cached,
+        # as of T (may be out of date)" and can exclude a removed account. The
+        # one state that stays UNAVAILABLE is an unreadable/foreign schema, where
+        # nothing trustworthy exists to return at all.
+        return ReadOnlyUsageSnapshot(
+            reports=[self._without_identity(report) for report in out],
+            may_be_stale=may_be_stale,
+            cached_at=cached_at,
+        )
+
+    def _usage_read_only_path(self) -> "Path":
+        """The database path the read-only seam should read.
+
+        An injected cache's own path is honoured (tests aim it at a temp file);
+        the default is the shared cache's.
+        """
+        existing = self._usage_cache
+        if isinstance(existing, UsageCacheStore):
+            return existing.db_path
+        return default_cache_path()
+
+    def _persisted_providers(self, store: "ReadOnlyUsageMetadataStore") -> list[str]:
+        """Storage ids with at least one persisted credential, sorted."""
+        try:
+            rows = store.list_credentials(provider=None)
+        except Exception:  # noqa: BLE001 — unreadable store = no inventory
+            return []
+        return sorted(
+            {getattr(row, "provider", "") for row in rows if getattr(row, "provider", "")}
+        )
+
+    @staticmethod
+    def _without_identity(report: UsageReport) -> UsageReport:
+        """A copy of ``report`` with the account identity removed for the wire."""
+        return dataclasses.replace(report, identity=None, notes=None)
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
@@ -1009,9 +1251,13 @@ class ProviderController:
         callbacks = factory(definition)
         # Desktop hosts hand the URL to their own main-process browser opener.
         # Inject it per flow: changing webbrowser globally would steal another
-        # session's concurrent login. Device flows only publish their URL.
+        # session's concurrent login. Muse's device flow also owns an opener;
+        # its desktop injection must survive this layer to avoid duplicate
+        # browser launches. Other device flows still only publish their URL.
         options: dict[str, Any] = {}
-        if open_browser is not None and definition.callback_port is not None:
+        if open_browser is not None and (
+            definition.callback_port is not None or provider_id == "meta-muse"
+        ):
             options["open_browser"] = open_browser
         # Passed UNCONDITIONALLY, including when it is None, so there is exactly
         # one call shape. Every login callable in the registry takes it: the
@@ -1523,6 +1769,19 @@ class ProviderController:
             elif getattr(row, "id", 0):
                 labels.append(f"cred:{row.id}")
         return labels
+
+    def expected_oauth_identities(self, provider: str) -> list[str]:
+        """Public spelling of :meth:`_expected_oauth_identities`.
+
+        The pre-emptive quota notice (``providers/quota_notice.py``) applies
+        the loader's own per-account rule — "one fresh report per account, or
+        say nothing" — so it must enumerate accounts the SAME way the fetcher
+        does (:meth:`_fetch_provider`), from the same source. A second
+        derivation (reading the store directly, say) would drift the two
+        coverage checks apart, and a missing account would read as a dead
+        one exactly when the notice must stay silent.
+        """
+        return self._expected_oauth_identities(provider)
 
     @staticmethod
     def _account_in_backoff(previous: UsageReport | None, now_ms: int, *, force: bool) -> bool:
@@ -2245,17 +2504,77 @@ class ProviderController:
                 from local_operator.providers.local import config_values
 
                 values = config_values()
+            meta_scope = None
+            if definition.id == "meta-muse":
+                # A first frame cannot decrypt/rotate credentials or scan every
+                # account document. Use explicit metadata identity only when it
+                # is unambiguous; the live pass records its actual selected scope.
+                meta_scope = getattr(self, "_meta_catalogue_scope", None)
+                store = getattr(self, "auth_store", None)
+                if store is not None:
+                    try:
+                        rows = store.list_credentials("meta-muse")
+                    except (sqlite3.Error, OSError):
+                        # An unreadable store cannot establish a unique account,
+                        # and this method runs on the keystroke that opens a
+                        # picker: painting every row unfiltered is the honest
+                        # "cannot tell" (``usable_providers``' own ``None`` means
+                        # the same one level up), and the live pass records the
+                        # scope it actually selected.
+                        rows = []
+                    scopes = {
+                        str(
+                            row.data.get("account_id")
+                            or row.data.get("org_id")
+                            or row.data.get("email")
+                            or ""
+                        )
+                        for row in rows
+                        if row.credential_type == "oauth" and row.disabled_cause is None
+                    }
+                    scopes.discard("")
+                    if len(scopes) == 1:
+                        meta_scope = next(iter(scopes))
+                    elif meta_scope not in scopes:
+                        meta_scope = None
             models, _status = cached_available_models(
-                definition.id, cache_dir=cache_dir, values=values
+                definition.id,
+                cache_dir=cache_dir,
+                values=values,
+                **({"account_id": meta_scope} if definition.id == "meta-muse" else {}),
             )
             listed.append((definition, models))
         priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
         for definition, models in listed:
             connected = usable is None or definition.id in usable
+            # The native-detail channel reaches LISTING rows only. For an id the
+            # shipped registry describes, frame one is the registry's answer:
+            # byte-identical to ``static_catalogue()`` with nothing cached
+            # (``test_the_first_frame_with_nothing_cached_is_the_shipped_rows``)
+            # and still untouched when a cached listing mentions the id
+            # (``test_a_listing_only_rows_prices_reach_the_first_frame``). The
+            # live pass is what upgrades a shipped row; a listing-only id has no
+            # registry answer to defer to, so it carries the full detail block.
+            shipped = static_models(credential_provider_id(definition.id))
             for model in models:
                 # The price chain's answer, where it has one, for a row the SHIPPED
                 # registry does not describe (see `_price_listing_only_rows`).
                 model = priced.get((definition.id, model.id), model)
+                details: dict[str, Any] = {}
+                if model.id not in shipped:
+                    details = {
+                        "max_output_tokens": model.max_tokens,
+                        "supports_tools": model.supports_tools,
+                        "supports_images": model.supports_images,
+                        "supports_audio_input": model.supports_audio_input,
+                        "reasoning": model.reasoning,
+                        "reasoning_efforts": model.reasoning_efforts,
+                        "reasoning_default_effort": model.reasoning_default_effort,
+                        "family": model.family,
+                        "release_date": model.release_date,
+                        "modalities": model.modalities,
+                        "variants": model.variants,
+                    }
                 entries.append(
                     CatalogueEntry(
                         provider=definition.id,
@@ -2271,6 +2590,7 @@ class ProviderController:
                         aggregated=definition.id in AGGREGATOR_PROVIDERS,
                         routed=model.routed,
                         time_of_use=model.time_of_use,
+                        **details,
                     )
                 )
         return entries
@@ -2615,6 +2935,14 @@ class ProviderController:
                 "account_id": account_id,
             }
             if ttl_s is not None:
+                # The caller's TTL reaches EVERY provider untouched, so
+                # ``PICKER_TTL_S`` stays the single statement of picker freshness
+                # (``test_the_picker_ttl_is_the_only_ttl_override``). Muse's
+                # fresh-on-open is the READER's rule: a shortened TTL makes
+                # discovery refetch its authenticated listing instead of reusing
+                # a young document (``discovery._available_models``), with the
+                # fetch lease, failure backoff and stale-cache fallback
+                # unchanged.
                 kwargs["ttl_s"] = ttl_s
             if endpoint is not None:
                 kwargs["base_url"] = endpoint
@@ -2622,6 +2950,14 @@ class ProviderController:
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
+            if definition.id == "meta-muse":
+                import hashlib
+
+                self._meta_catalogue_scope = (
+                    account_id or "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
+                    if is_oauth and api_key
+                    else None
+                )
             if definition.id == "openai" and is_oauth:
                 # Price enrichment may know the API model, but not this route's
                 # limits. Preserve even an unknown OAuth window through it.
@@ -2662,6 +2998,17 @@ class ProviderController:
                         context_window=max(0, model.context_window),
                         default_context_window=model.default_context_window,
                         max_context_window=model.max_context_window,
+                        max_output_tokens=model.max_tokens,
+                        supports_tools=model.supports_tools,
+                        supports_images=model.supports_images,
+                        supports_audio_input=model.supports_audio_input,
+                        reasoning=model.reasoning,
+                        reasoning_efforts=model.reasoning_efforts,
+                        reasoning_default_effort=model.reasoning_default_effort,
+                        family=model.family,
+                        release_date=model.release_date,
+                        modalities=model.modalities,
+                        variants=model.variants,
                         # ``free`` is consumed HERE and goes no further: a
                         # stated zero survives ``_price`` as ``0.0``, which is
                         # already the entry's way of saying free (an unknown is
@@ -2678,7 +3025,21 @@ class ProviderController:
         return entries, statuses
 
     async def _listing_credential(self, provider: str) -> tuple[str | None, bool, str | None]:
+        # Existing embedded hosts implement the original one-argument store
+        # protocol. Keep their calling convention while sharing the identity
+        # decision with the authoring HTTP catalogue below.
+        return await self.listing_credential(provider)
+
+    async def listing_credential(
+        self, provider: str, *, read_only: bool = False
+    ) -> tuple[str | None, bool, str | None]:
         """``(secret, is_oauth, account_id)`` for a model listing call.
+
+        Authoring catalogues pass ``read_only=True``: inspecting available
+        models must not move session stickiness or block a credential beside
+        a running turn. It still uses the serving cascade and native account
+        identity, never an API key guessed from an OAuth bearer. The default
+        preserves existing embedded store implementations and picker calls.
 
         The account id is part of OpenAI's ChatGPT authorization boundary; the
         current Codex catalogue rejects a subscription token without it. Other
@@ -2699,13 +3060,22 @@ class ProviderController:
         current.
         """
         credential_id = credential_provider_id(provider)
-        access = await self.auth_store.get_oauth_access(credential_id)
+        # Do not introduce a new keyword on old hosts unless the caller needs
+        # the read-only contract; the real AuthStore supports both shapes.
+        kwargs = {"read_only": True} if read_only else {}
+        access = await self.auth_store.get_oauth_access(credential_id, **kwargs)
         if access is not None and access.kind == "oauth" and access.access_token:
-            return access.access_token, True, access.account_id or access.org_id
+            return (
+                access.access_token,
+                True,
+                access.account_id
+                or access.org_id
+                or (access.email if credential_id == "meta-muse" else None),
+            )
         if access is not None and access.access_token:
             return access.access_token, False, None
         try:
-            stored = await self.auth_store.get_api_key(credential_id)
+            stored = await self.auth_store.get_api_key(credential_id, **kwargs)
         except Exception:  # noqa: BLE001 — a refresh failure just means no listing
             stored = None
         # The environment is the last tier of the same cascade the stream uses, so

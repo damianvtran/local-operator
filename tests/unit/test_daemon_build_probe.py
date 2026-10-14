@@ -182,8 +182,18 @@ def test_a_real_process_reports_the_generation_it_was_executed_from(
             stderr=subprocess.DEVNULL,
         )
         assert child is not None, "unreachable: Popen returns or raises"
-        readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
-        assert readable, "the child never announced that its exec landed"
+        # WAIT WITH `poll`, NOT `select.select` — the fd NUMBER is the trap.
+        # `select.select` indexes a bit set by the raw fd number, so any fd >=
+        # FD_SETSIZE (1024) makes it raise `ValueError: filedescriptor out of
+        # range in select()` before it waits at all — and a loaded xdist worker
+        # holds that many (measured red on CI main, both cells: runs 38165502284
+        # @19:05Z and 38196014852 @02:46Z). `poll` carries no such limit — it
+        # takes an array of fds and integer milliseconds — so this stays one
+        # wait of the same deadline, with the same loud timeout path below.
+        poller = select.poll()
+        poller.register(read_fd, select.POLLIN)
+        events = poller.poll(int(_EXEC_ANNOUNCEMENT_DEADLINE_S * 1000))
+        assert events, "the child never announced that its exec landed"
         assert os.read(read_fd, 1) == b"1"
         # The raw reading travels into the message: if this ever fails on a runner
         # again, the row `ps` actually returned is in the failure, rather than a
@@ -565,8 +575,18 @@ def test_a_real_process_reports_the_version_of_the_tree_it_runs_from(
             stderr=subprocess.DEVNULL,
         )
         assert child is not None, "unreachable: Popen returns or raises"
-        readable, _, _ = select.select([read_fd], [], [], _EXEC_ANNOUNCEMENT_DEADLINE_S)
-        assert readable, "the child never announced that its exec landed"
+        # WAIT WITH `poll`, NOT `select.select` — the fd NUMBER is the trap.
+        # `select.select` indexes a bit set by the raw fd number, so any fd >=
+        # FD_SETSIZE (1024) makes it raise `ValueError: filedescriptor out of
+        # range in select()` before it waits at all — and a loaded xdist worker
+        # holds that many (measured red on CI main, both cells: runs 38165502284
+        # @19:05Z and 38196014852 @02:46Z). `poll` carries no such limit — it
+        # takes an array of fds and integer milliseconds — so this stays one
+        # wait of the same deadline, with the same loud timeout path below.
+        poller = select.poll()
+        poller.register(read_fd, select.POLLIN)
+        events = poller.poll(int(_EXEC_ANNOUNCEMENT_DEADLINE_S * 1000))
+        assert events, "the child never announced that its exec landed"
         assert os.read(read_fd, 1) == b"1"
         raw = update_mod._process_argv(child.pid)
         assert (

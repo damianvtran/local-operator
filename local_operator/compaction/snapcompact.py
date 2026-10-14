@@ -7,13 +7,23 @@ no network.
 
 Contract (see ``docs/REWRITE.md`` §C snapcompact bullets):
 
-- ``Archive { frames, text, text_head, text_tail }`` is stored in the
-  ``CompactionEntry.preserve_data`` so later compactions re-render from
+- ``Archive { frames, text, text_head, text_tail, middle_kinds, page_digests }``
+  is stored in the ``CompactionEntry.preserve_data`` so later compactions
+  re-render from
   :attr:`Archive.text` (folded in via ``previous_text``) rather than carrying
   old PNGs forward.
 - Tool results are truncated to 2000 chars, useless-flagged results AND their
   paired calls are dropped, head/tail plain-text edges surround the imaged
   middle (foveation: :data:`HQ_EDGE_FRAMES` HQ frames at each edge).
+- Replay is decided per middle page at pass time (``middle_kinds``): a page
+  whose source text stays cheaper than its frame even under the worst
+  provider/local tokenizer divergence the repo has measured
+  (:data:`CROSS_RULER_SLOPE_MARGIN`) replays as that exact text instead of
+  the PNG — same characters, no OCR step. Pages where the frame is the
+  cheaper carrier keep their image, and ``page_digests`` pins each page
+  string to the frame rendered from it, so a replay can prove the text it
+  sends is what the frame drew. Legacy archives (no kinds) replay as frames
+  throughout.
 - Per-provider frame shapes (Anthropic ``11on16-bw`` @1568/1932, OpenAI
   ``8on22-bw`` @1568, Google ``8on22-bw`` @2048). Budgets: at most
   :data:`MAX_FRAMES` frames, ~:data:`FRAME_TOKEN_ESTIMATE` tokens per frame.
@@ -28,6 +38,7 @@ so no imaging library is needed at install time.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -58,6 +69,22 @@ MAX_FRAMES = 80
 #: 1932px frame ~5,000), and budgeting every frame at the ceiling makes the
 #: pass drop history it could afford to keep.
 FRAME_TOKEN_ESTIMATE = 5024
+
+#: How much dearer than its local estimate a provider's tokenizer may bill a
+#: page's TEXT before the frame is the cheaper carrier — the bound the
+#: per-page replay flip must clear (:func:`_middle_page_kinds`). The flip is a
+#: cross-ruler comparison by nature (a local number against a provider
+#: figure), and ``compaction.tokens`` forbids that without a bound: fitted
+#: over a real session, ``claude-opus-5`` bills 1.685x this module's estimate
+#: (``claude-opus-4-8`` 1.622x; an OpenAI control 1.036x, GLM 1.019x) and
+#: per-request ratios run up to 1.90x
+#: (``docs/evidence/compaction-ruler/slope_fit.py``). A page clears the
+#: margin only when its text is cheaper under the WORST measured divergence,
+#: so no measured family can make a flip a loss; families without a
+#: measurement keep that band on the image, the conservative side. One bound
+#: for every reader, not a per-model slope table: ``tokens.py`` settled that
+#: argument (a multiplier table rots on the next retokenization).
+CROSS_RULER_SLOPE_MARGIN = 1.9
 
 #: High-quality frames kept at each chronological edge of a foveated archive
 #: (``HQ_EDGE_FRAMES``).
@@ -99,6 +126,8 @@ __all__ = [
     "strategy_for_model",
     "estimate_archive_tokens",
     "frame_token_estimate_for",
+    "replayed_frame_count",
+    "CROSS_RULER_SLOPE_MARGIN",
 ]
 
 
@@ -550,7 +579,9 @@ class Archive(BaseModel):
     ``text`` is the bounded kept source (oldest to newest) — the single source
     re-rendered on every later compaction; old PNGs are never carried forward.
     ``text_head``/``text_tail`` are the plain-text edges kept verbatim around
-    the imaged middle.
+    the middle. ``middle_kinds`` records how that middle replays, one ``t``
+    (plain text) or ``i`` (image frame) per page, oldest first; ``""`` means a
+    legacy archive whose frames all replay as images.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -561,6 +592,25 @@ class Archive(BaseModel):
     text_tail: str = ""
     shape_id: str = ""
     truncated_chars: int = 0
+    #: One ``t`` (plain text) or ``i`` (image frame) per middle page, oldest
+    #: first — the replay carrier the pass chose for that page (see
+    #: :func:`_middle_page_kinds`). Deliberately ADDITIVE: a missing ``""`` or
+    #: a spelling this reader cannot reconcile with the stored pages replays
+    #: every frame, which is exactly what archives written before this field
+    #: existed must keep doing. Frames are still rendered for text pages, so a
+    #: build that does not know the field replays the archive complete (at the
+    #: old cost), and any replay that cannot re-derive the text pages degrades
+    #: to the same all-image form rather than lose content.
+    middle_kinds: str = ""
+    #: One :func:`_page_digest` per stored frame, oldest first. The replay
+    #: gate requires these to match the re-derived pages before the policy
+    #: path is taken, so the text a replay sends is PROVEN to be the strings
+    #: the frames were rendered from — a page COUNT alone is not proof (a
+    #: reader with different pagination or shape metrics can keep the count
+    #: while shifting every boundary). Additive like ``middle_kinds``: absent
+    #: or short means the archive replays all-image, which is also what every
+    #: pre-policy archive does.
+    page_digests: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ``frames`` is raw PNG bytes in memory and base64 text on disk, and the
@@ -638,6 +688,46 @@ def _paginate(text: str, shape: Shape) -> list[str]:
     if current:
         pages.append("\n".join(current))
     return pages
+
+
+def _middle_page_kinds(pages: Sequence[str], provider: str, model_id: str) -> str:
+    """One ``t``/``i`` per middle page: text unless a frame bills cheaper.
+
+    A cross-ruler comparison, bounded: the text side is a number from the
+    local ruler (``estimate_tokens``) times :data:`CROSS_RULER_SLOPE_MARGIN`
+    — the worst provider/local divergence the repo has measured — and the
+    frame side is the same per-provider billing ruler the pass's budget loop
+    and the session's receipt price frames with. A page replays as plain text
+    only when it is cheaper as text under the worst measured divergence, else
+    as its PNG. Every character survives either way — the frames are literal
+    renders of these pages, and the text pages are the very strings the
+    frames were drawn from, so a flip changes the carrier, never the content.
+    The margin, not the frame price, decides the band between the two: a page
+    that is cheaper as text on the local ruler alone keeps its frame, the
+    conservative side for readers whose tokenizer we have not measured.
+    """
+    per_frame = frame_token_estimate_for(provider, model_id)
+    kinds: list[str] = []
+    for page in pages:
+        if estimate_tokens(Message.assistant(page)) * CROSS_RULER_SLOPE_MARGIN < per_frame:
+            kinds.append("t")
+        else:
+            kinds.append("i")
+    return "".join(kinds)
+
+
+def _page_digest(page: str) -> str:
+    """A page's 64-bit identity for the replay gate — see ``page_digests``.
+
+    Integrity, not security: it pins the exact page STRING the pass paginated
+    and rendered, so a reader whose pagination or shape metrics differ from
+    the writer's can never take the policy path with pages the frames were
+    not drawn from (the same page COUNT is not proof of the same page
+    strings). Sha256 truncated to 16 hex characters — wide enough that no
+    realistic pagination drift collides, short enough to leave the persisted
+    payload geometry-neutral.
+    """
+    return hashlib.sha256(page.encode("utf-8")).hexdigest()[:16]
 
 
 def compact_to_archive(
@@ -743,6 +833,18 @@ def compact_to_archive(
     if truncated_chars:
         text_head += f"\n[... {truncated_chars} chars of oldest history dropped]"
 
+    # Replay policy, decided per page while the pages are in hand: text when
+    # the page stays cheaper even under the worst measured provider/local
+    # divergence (see _middle_page_kinds), else its frame. Frames are STILL
+    # rendered for every page, deliberately, even the pages the policy
+    # replays as text: a build that knows nothing of middle_kinds replays all
+    # frames — complete content, old cost — and a replay that cannot
+    # re-derive the pages from text degrades to the same all-image form. The
+    # dead-frame carriage costs render time once and bytes at rest; dropping
+    # it is a follow-up for after the fleet is known to read kinds.
+    middle_kinds = _middle_page_kinds(pages, provider, model_id)
+    page_digests = [_page_digest(page) for page in pages]
+
     frames = [render_frame(page, shape) for page in pages]
     # Pages carry no trailing newline; joining without one glues the last
     # line of page N onto the first of page N+1, and Archive.text is the
@@ -755,6 +857,8 @@ def compact_to_archive(
         text_tail=text_tail,
         shape_id=shape.id,
         truncated_chars=truncated_chars,
+        middle_kinds=middle_kinds,
+        page_digests=page_digests,
     )
 
 
@@ -767,33 +871,199 @@ def _base64_size(frame: bytes) -> int:
     return (len(frame) + 2) // 3 * 4
 
 
+def _retained_image_positions(
+    sizes: Sequence[int], max_frame_data_bytes: int
+) -> tuple[list[int], int]:
+    """Positions (ascending) of the images a replay sends, and how many it omits.
+
+    Byte budget first: drop the OLDEST over budget, keeping the newest — the
+    newest frame itself always survives. Then foveation: once more than
+    ``2 * HQ_EDGE_FRAMES + 2`` survive, keep only the first and last
+    :data:`HQ_EDGE_FRAMES` and count the interior as omitted. One definition
+    for both replays (legacy all-image and the per-page policy), so "which
+    frames replay" cannot drift between them.
+    """
+    kept: list[int] = []
+    total = 0
+    for index in range(len(sizes) - 1, -1, -1):
+        size = sizes[index]
+        if kept and total + size > max_frame_data_bytes:
+            break
+        kept.insert(0, index)
+        total += size
+    omitted = len(sizes) - len(kept)
+    if len(kept) > 2 * HQ_EDGE_FRAMES + 2:
+        omitted += len(kept) - 2 * HQ_EDGE_FRAMES
+        kept = kept[:HQ_EDGE_FRAMES] + kept[-HQ_EDGE_FRAMES:]
+    return kept, omitted
+
+
+def _middle_pages(archive: Archive) -> list[str] | None:
+    """The middle's pages, exactly as the frames were rendered from them, or
+    ``None`` when this reader cannot re-derive them.
+
+    Frames are renders of ``_paginate(image_text, shape)``, and ``image_text``
+    is the stored ``text`` between its two verbatim edges, so re-paginating
+    that slice reproduces the very page strings the frames were drawn from.
+    That equality is what lets a replay send a page's TEXT instead of its PNG
+    without changing one character — and it is re-verified structurally, not
+    assumed: any inconsistency (missing or foreign ``shape_id``, edges that
+    are not exact prefix/suffix slices, a page count that disagrees with the
+    stored frames) returns ``None``, which degrades the replay to the
+    all-image path. Refusing to guess is what keeps a malformed archive on
+    the one path that cannot lose content.
+    """
+    shape = _shape_from_id(archive.shape_id)
+    if shape is None:
+        return None
+    head, tail = archive.text_head, archive.text_tail
+    if not archive.text.startswith(head) or not archive.text.endswith(tail):
+        return None
+    middle = archive.text[len(head) : len(archive.text) - len(tail)]
+    pages = _paginate(middle, shape)
+    if len(pages) != len(archive.frames):
+        return None
+    return pages
+
+
+def _policy_pages(archive: Archive) -> list[str] | None:
+    """The re-derived pages IF this archive replays under the policy, else ``None``.
+
+    THE single gate, and the reason four surfaces cannot disagree: the
+    replay (:func:`history_blocks`), the reading guide
+    (:func:`archive_summary`), the estimator (:func:`estimate_archive_tokens`)
+    and the session's receipt (:func:`replayed_frame_count`) all read their
+    policy/no-policy decision here, so an archive that is about to DEGRADE —
+    an unreconcilable kinds spelling, pages the reader cannot re-derive, a
+    page count that disagrees with the stored frames, a shape whose
+    pagination no longer reproduces the pages the pass rendered — degrades on
+    all four at once. The digest check is what makes that last one exact: it
+    binds the re-derived page strings, not just their count, to the frames
+    (see ``page_digests``); a same-count boundary shift is refused.
+    """
+    kinds = archive.middle_kinds
+    if not kinds or set(kinds) - {"t", "i"}:
+        return None
+    if len(archive.page_digests) != len(archive.frames):
+        return None
+    if len(kinds) != len(archive.frames):
+        return None
+    pages = _middle_pages(archive)
+    if pages is None or len(pages) != len(kinds):
+        return None
+    if [_page_digest(page) for page in pages] != list(archive.page_digests):
+        return None
+    return pages
+
+
+def replayed_frame_count(archive: Archive) -> int:
+    """How many image frames a replay of this archive carries.
+
+    One definition for the surfaces that must agree about it: the reading
+    guide (:func:`archive_summary`) says this many frames, and the session's
+    receipt prices this many. Read through :func:`_policy_pages`, so a policy
+    archive that will actually replay under the policy counts its image-kind
+    pages, and EVERY other archive — legacy (no kinds), unreconcilable
+    spellings, unprovable pages, a digest mismatch — counts every stored
+    frame, exactly as the replay will send them. Deliberately blind to the
+    byte-budget/foveation drops inside :func:`history_blocks`: the guide and
+    the receipt have never counted those (they describe the archive's own
+    carriage, not one replay's rations), and teaching every caller the drop
+    arithmetic is how they stop agreeing.
+    """
+    pages = _policy_pages(archive)
+    if pages is None:
+        return len(archive.frames)
+    return archive.middle_kinds.count("i")
+
+
+def _policy_middle_blocks(
+    archive: Archive, pages: list[str], max_frame_data_bytes: int
+) -> list[dict[str, Any]]:
+    """Blocks for a per-page policy archive: text pages as text, image pages
+    as frames, in transcript order.
+
+    Adjacent pages of the same material merge into one block; omitted images
+    (byte budget / foveation, counted cumulatively) leave a single
+    ``[N frames elided]`` text block at the position of the first omitted
+    page, so the marker stands where the missing pages were.
+    """
+    kinds = archive.middle_kinds
+    image_pages = [index for index, kind in enumerate(kinds) if kind == "i"]
+    kept_positions, omitted = _retained_image_positions(
+        [_base64_size(archive.frames[index]) for index in image_pages], max_frame_data_bytes
+    )
+    kept_pages = {image_pages[position] for position in kept_positions}
+
+    blocks: list[dict[str, Any]] = []
+    suffix = "\n-------------- imaged middle below\n" if kept_pages else ""
+    if archive.text_head:
+        blocks.append({"kind": "text", "text": archive.text_head + suffix})
+    note_emitted = False
+    text_run: list[str] = []
+    frame_run: list[bytes] = []
+
+    def flush_text() -> None:
+        if text_run:
+            blocks.append({"kind": "text", "text": "\n".join(text_run)})
+            text_run.clear()
+
+    def flush_frames() -> None:
+        if frame_run:
+            blocks.append(
+                {
+                    "kind": "images",
+                    "frames": [base64.b64encode(frame).decode("ascii") for frame in frame_run],
+                }
+            )
+            frame_run.clear()
+
+    for index, kind in enumerate(kinds):
+        if kind == "t":
+            flush_frames()
+            text_run.append(pages[index])
+        elif index in kept_pages:
+            flush_text()
+            frame_run.append(archive.frames[index])
+        elif not note_emitted:
+            flush_text()
+            flush_frames()
+            blocks.append({"kind": "text", "text": f"[{omitted} frames elided]"})
+            note_emitted = True
+    flush_text()
+    flush_frames()
+    if archive.text_tail:
+        blocks.append({"kind": "text", "text": archive.text_tail})
+    return blocks
+
+
 def history_blocks(
     archive: Archive, max_frame_data_bytes: int = FRAME_DATA_BYTES_BUDGET
 ) -> list[dict[str, Any]]:
     """Ordered archive blocks for context rebuild, oldest to newest:
-    plain text at the oldest edge → imaged middle → plain text at the newest
+    plain text at the oldest edge → the middle → plain text at the newest
     edge (``[{'kind': 'text', ...}, {'kind': 'images', ...}, ...]``).
 
-    Foveation keeps the NEWEST frames (oldest are
-    omitted), and an archive middle beyond the HQ edges keeps only the first
-    and last :data:`HQ_EDGE_FRAMES` frames, eliding the interior with a
-    ``[N frames elided]`` marker.
+    The middle replays per page under :attr:`Archive.middle_kinds`: a page
+    marked ``t`` rides as PLAIN TEXT — the exact characters its frame renders
+    — and the rest ride as image frames. Archives without kinds, and archives
+    whose kinds cannot be reconciled with their pages, replay as frames
+    throughout, byte for byte the pre-policy behaviour. Foveation and the byte
+    budget apply to the images either way: the OLDEST over-budget frames are
+    omitted (the newest kept), and more than ``2 * HQ_EDGE_FRAMES + 2``
+    survivors foveate to the first and last :data:`HQ_EDGE_FRAMES`, the
+    interior elided behind a ``[N frames elided]`` marker.
     """
-    # Byte budget: drop the OLDEST frames over budget (keeps the newest).
-    kept: list[bytes] = []
-    total = 0
-    for frame in reversed(archive.frames):
-        size = _base64_size(frame)
-        if kept and total + size > max_frame_data_bytes:
-            break
-        kept.insert(0, frame)
-        total += size
-    omitted = len(archive.frames) - len(kept)
+    kinds = archive.middle_kinds
+    pages = _policy_pages(archive)
+    if pages is not None and len(pages) == len(kinds):
+        return _policy_middle_blocks(archive, pages, max_frame_data_bytes)
 
-    # Foveation: HQ edges only once the middle outruns 2*HQ_EDGE + 2 frames.
-    if len(kept) > 2 * HQ_EDGE_FRAMES + 2:
-        omitted += len(kept) - 2 * HQ_EDGE_FRAMES
-        kept = kept[:HQ_EDGE_FRAMES] + kept[-HQ_EDGE_FRAMES:]
+    # Legacy all-image replay — byte-for-byte what this function always did.
+    kept_positions, omitted = _retained_image_positions(
+        [_base64_size(frame) for frame in archive.frames], max_frame_data_bytes
+    )
+    kept = [archive.frames[index] for index in kept_positions]
 
     blocks: list[dict[str, Any]] = []
     if archive.text_head:
@@ -843,8 +1113,9 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
 
     This is the text slot of the compaction entry when the archive carries the
     real history. It mirrors omp's ``snapcompact-summary.md``: instructions
-    for reading the replayed archive (text edges verbatim, the middle as
-    pixel-font frames), not a paraphrase of the content. The paraphrase is
+    for reading the replayed archive (text edges verbatim; the middle as text
+    or pixel-font frames per the archive's policy), not a paraphrase of the
+    content. The paraphrase is
     what the frames replace — producing one anyway meant shipping the whole
     discarded history to a provider and waiting on the reply, which made the
     "no LLM call, no network" pass 20–50 s slower than the local work it
@@ -861,11 +1132,13 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
     # the wrong grid is worse than none. Fall back to the reader's shape only
     # for archives predating shape_id.
     shape = _shape_from_id(archive.shape_id) or resolve_shape(provider, model_id)
-    middle = (
-        ", with the middle rendered as pixel-font image frames"
-        if archive.frames
-        else ", all as plain text"
-    )
+    frames = replayed_frame_count(archive)
+    if frames == 0:
+        middle = ", all as plain text"
+    elif frames == len(archive.frames):
+        middle = ", with the middle rendered as pixel-font image frames"
+    else:
+        middle = ", with the middle partly as plain text and partly as pixel-font image frames"
     lines = [
         "Resume prior conversation. Earlier turns are archived below, oldest to",
         f"newest{middle}.",
@@ -873,13 +1146,18 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
         "Reading the archive:",
         "- Plain text: verbatim transcript; rely on it exactly.",
     ]
-    if archive.frames:
-        plural = "s" if len(archive.frames) != 1 else ""
+    if frames:
+        plural = "s" if frames != 1 else ""
+        detail = (
+            "each is one page of the transcript"
+            if frames == len(archive.frames)
+            else "each is one of the middle pages carried as an image"
+        )
         lines.append(
-            f"- {len(archive.frames)} image frame{plural}: each is one page of the"
-            f" transcript, a grid up to {shape.chars_per_line} characters wide and"
-            f" {shape.lines_per_frame} rows tall, read left to right, top to bottom."
-            " No word wrap; words may break across rows."
+            f"- {frames} image frame{plural}: {detail}, a grid up to"
+            f" {shape.chars_per_line} characters wide and {shape.lines_per_frame} rows"
+            " tall, read left to right, top to bottom. No word wrap; words may"
+            " break across rows."
         )
     if archive.truncated_chars:
         lines.append(
@@ -894,8 +1172,19 @@ def archive_summary(archive: Archive, provider: str, model_id: str) -> str:
 
 
 def estimate_archive_tokens(archive: Archive) -> int:
-    """Context cost of replaying ``archive``: head/tail text tokens plus the
-    conservative per-frame visual-token estimate."""
+    """Context cost of replaying ``archive``: the plain text the replay carries
+    (edges plus any middle pages carried as text) and the conservative
+    per-frame visual-token estimate for the frames it sends
+    (:func:`replayed_frame_count`)."""
+    frames = replayed_frame_count(archive)
     text = archive.text_head + archive.text_tail
+    if frames != len(archive.frames):
+        pages = _policy_pages(archive)
+        if pages is not None:
+            text = (
+                archive.text_head
+                + "\n".join(page for page, kind in zip(pages, archive.middle_kinds) if kind == "t")
+                + archive.text_tail
+            )
     text_tokens = estimate_tokens(Message.assistant(text)) if text else 0
-    return text_tokens + len(archive.frames) * FRAME_TOKEN_ESTIMATE
+    return text_tokens + frames * FRAME_TOKEN_ESTIMATE

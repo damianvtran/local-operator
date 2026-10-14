@@ -612,3 +612,81 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     unavailable = handle._project_slash(SimpleNamespace(), "", SlashResult)
     assert sc.project_unavailable_text() in unavailable.text
     assert unavailable.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_receipts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Slice C's routed branch: the terminal's funnel and receipts, served.
+
+    The write goes through ``settings_io.write_setting`` — the same funnel the
+    TUI command uses (``OperatorApp._cmd_language``) — so a phone switch and a
+    terminal switch land on the same key with the same value space; applying
+    the swap is the frontend's half (the running TUI re-renders from its config
+    watcher, whose external-change path announces it). Unknown values are
+    refused with the option list, word for word with the terminal, and the
+    ``lang`` alias routes to the same branch.
+    """
+    from types import SimpleNamespace
+
+    from rich.cells import cell_len
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(config_dir))
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
+    handle._session = SimpleNamespace()
+
+    def stored() -> object:
+        """The RAW stored value — the helper the TUI command tests read by."""
+        return ConfigManager(config_dir).get_config().values.get("language")
+
+    setting = settings_io.resolve_key("language")
+    assert setting is not None
+
+    # Bare: the report, word for word with the terminal's.
+    bare = await handle._slash_result("language", "", SlashResult)
+    assert bare.style == "info"
+    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi|hi>; space"
+
+    # Unknown: the option-list refusal, and nothing written.
+    refused = await handle._slash_result("language", "xx", SlashResult)
+    assert refused.style == "warning"
+    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, hi"
+    assert stored() is None
+
+    # The ALIAS routes to the same branch, and the switch writes the key.
+    saved = await handle._slash_result("lang", "en", SlashResult)
+    assert saved.style == "info"
+    assert saved.text == "language: en saved — active en (English)"
+    assert stored() == "en"
+
+    # Repeating the value is the terminal's no-op receipt.
+    already = await handle._slash_result("language", "en", SlashResult)
+    assert already.text == "language: already en — resolves to en (English)"
+
+    # Wave-2 QA: the longest resolved name (vi) must also fit the 70-cell
+    # budget — switch through the same branch, then read the bare report.
+    switched = await handle._slash_result("language", "vi", SlashResult)
+    assert switched.text == "language: vi saved — active vi (Vietnamese)"
+    wide = await handle._slash_result("language", "", SlashResult)
+    assert wide.text == "language: vi (Vietnamese) — /language <auto|en|fr|es|ru|vi|hi>; space"
+    assert cell_len(wide.text) <= 70
+
+    # Hindi grows every bare receipt's option list. Exercise every accepted
+    # value through the real shared write funnel, not a formatter-only budget.
+    for value in ("auto", "en", "fr", "es", "ru", "vi", "hi"):
+        switched = await handle._slash_result("language", value, SlashResult)
+        assert switched.style == "info"
+        assert stored() == value
+        report = await handle._slash_result("language", "", SlashResult)
+        assert "<auto|en|fr|es|ru|vi|hi>; space" in report.text
+        assert cell_len(switched.text) <= 70, switched.text
+        assert cell_len(report.text) <= 70, report.text

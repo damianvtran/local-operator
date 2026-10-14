@@ -41,6 +41,7 @@ construction carries that why).
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -467,6 +468,28 @@ def _read_all(
     return rows, unanswered
 
 
+def _last_user_epoch(peer_row: object) -> float | None:
+    """The peer's ``last_user_at`` claim, or ``None`` — NO claim — for anything else.
+
+    NUMBER-OR-ABSENT is the sidebar lane's contract for this key, and this reads
+    it the same way the desktop's carry half does (``desktop_mesh.py``, through
+    ``peer_number``): a positive finite number rides; a bool (``isinstance(True,
+    int)`` is True — the ``float(True)``-into-1970 hazard this field's siblings
+    were cleaned of), a string, a negative, a non-finite value or a claimed zero
+    is no claim, landing exactly where a missing key lands. The parse
+    (``PeerRow.from_json``) is the FIRST refusal; this is the belt for the
+    shapes no parse produced — a raw row-object from another catalogue
+    implementation, or a test double.
+    """
+    value = getattr(peer_row, "last_user_at", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
 def _started_epoch(peer_row: object) -> float:
     """The peer's ``started`` claim as an epoch — or ``0.0``, NO claim, for anything else.
 
@@ -588,6 +611,13 @@ def _read(
                 # not a number (``_started_epoch``) — sorts last, the honest
                 # direction. See ``resume.SessionRow.created_at``.
                 created_at=_started_epoch(peer_row),
+                # THE ORDERING CLOCK THE RUNNING SECTION ACTUALLY READS, carried
+                # when the peer claimed one (number-or-absent, the sidebar
+                # lane's contract; ``_last_user_epoch`` says why zero and bools
+                # are refused). The origin computes it with the same reader the
+                # local half uses (``session/last_user.py``), so a running
+                # remote row and a running local row order by one clock.
+                last_user_at=_last_user_epoch(peer_row),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

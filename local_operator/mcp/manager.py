@@ -80,6 +80,7 @@ from local_operator.mcp.config import (
 from local_operator.mcp.secret_refs import resolve_config_secrets
 from local_operator.mcp.tool_bridge import (
     build_agent_tool,
+    capture_producer_scope,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
@@ -1819,10 +1820,19 @@ class McpManager:
         *,
         secret_base: os.PathLike[str] | None = None,
         register_secret: Callable[[str], object] | None = None,
+        boundary: Path | None = None,
     ) -> None:
         self.cwd = str(cwd)
         self.secret_base = secret_base
         self._register_secret = register_secret
+        # The world boundary a bounded session validated, or ``None`` for the
+        # every-day manager. EVERY config load below passes it: discovery at
+        # connect time and at reload are the same question, so a manager that
+        # clipped only its first read was the measured leak — the operator's
+        # ``~/.cursor`` server connected and reached a real request after a
+        # reload (QA round 1, Q1). See ``load_all_mcp_configs`` for what the
+        # boundary admits.
+        self._boundary = boundary
         self.tool_cache = tool_cache
         # The session's AuthStore, when injected: every OAuth MCP server's
         # token storage shares it instead of opening its own SQLite
@@ -2073,7 +2083,7 @@ class McpManager:
         reconnects go through ``_connect_round``/``_reconnect``, which stay
         non-interactive.
         """
-        configs, sources = load_all_mcp_configs(self.cwd)
+        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
         cfg = configs.get(name)
         if cfg is None:
             raise McpConnectionError(f"MCP server {name!r} is not configured")
@@ -2135,7 +2145,7 @@ class McpManager:
         become deferred tools; pending without cache contribute nothing until
         the background continuation swaps them in and fires on_tools_changed.
         """
-        configs, sources = load_all_mcp_configs(self.cwd)
+        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
         self._drop_removed_servers(configs)
         return await self._connect_round(configs, sources)
 
@@ -2156,7 +2166,7 @@ class McpManager:
             continuation.cancel()
             gate_task.cancel()
         self._pending_continuations.clear()
-        configs, sources = load_all_mcp_configs(self.cwd)
+        configs, sources = load_all_mcp_configs(self.cwd, boundary=self._boundary)
         self._drop_removed_servers(configs)
         loop = asyncio.get_running_loop()
         for name in list(self._connections):
@@ -4280,7 +4290,20 @@ class McpManager:
         # Flattening can walk megabytes of MCP content and spilling performs
         # filesystem I/O. Keep both off the event loop so one verbose server
         # cannot starve streaming, cancellation, or sibling tool progress.
-        return await asyncio.to_thread(format_mcp_result, result, tool_call_id, tool_label, context)
+        #
+        # Capture provenance's identity is composed HERE, from what the
+        # manager ACTUALLY called (configured origin pair + owning session),
+        # never from anything the server sent; a block claiming an identity
+        # of its own changes nothing downstream.
+        producer_scope = capture_producer_scope(server_name, mcp_tool_name, context.session_id)
+        return await asyncio.to_thread(
+            format_mcp_result,
+            result,
+            tool_call_id,
+            tool_label,
+            context,
+            producer_scope=producer_scope,
+        )
 
     async def _race_abort(
         self, coro: Coroutine[Any, Any, _RaceT], signal: AbortSignal | None

@@ -23,6 +23,36 @@ permissions:
   contents: read
 
 jobs:
+  # A combined release can drift after its constituent PRs passed. Check the
+  # actual event target, unconditionally, before ANY build or asset publication;
+  # neither the PR changes classifier nor a version-only bump may skip this.
+  release-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Verify exact target and catalogue invariants
+        run: |
+          set -euo pipefail
+          # A release tag and a dispatched SHA must resolve to the event commit,
+          # including if a tag was moved between dispatch and checkout.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)"
+          python scripts/i18n/generate.py --check
+          python scripts/i18n/check.py
+
   # ---------------------------------------------------------------------------
   # Browser extension release asset.
   #
@@ -41,6 +71,7 @@ jobs:
   # browser code public without its own approval.
   # ---------------------------------------------------------------------------
   extension-release:
+    needs: [release-invariants]
     runs-on: ubuntu-latest
     # RELEASE ONLY. Everything in this job is derived from the release event's
     # `github.event.release.tag_name` and it attaches an asset to that Release, so a
@@ -55,9 +86,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need history to diff the release tag against the previous tag and
-          # decide whether extension/ changed.
+          # The gate validated this event commit, not a tag that can move while
+          # this job is queued. Keep the tag only as release metadata.
+          ref: ${{ github.sha }}
+          # History is needed to compare the verified commit with its previous release.
           fetch-depth: 0
+
+      - name: Verify immutable source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Decide whether the extension changed since the previous tag
         id: ext-changed
@@ -65,8 +101,8 @@ jobs:
           set -euo pipefail
           CURRENT_TAG="${{ github.event.release.tag_name }}"
           # Find the previous RELEASE tag by ANCESTRY, not by creation date.
-          # `git describe --abbrev=0 <tag>^` returns the nearest tag reachable
-          # from the current tag's first parent — i.e. the release this one was
+          # `git describe --abbrev=0 <event-sha>^` returns the nearest tag reachable
+          # from the verified commit's first parent — i.e. the release this one was
           # actually cut on top of. This is correct even when a backport/hotfix
           # tag was created later on an older commit (the A15 case that a
           # `--sort=-creatordate` scan gets wrong), because reachability, not
@@ -79,11 +115,11 @@ jobs:
           #
           # If there is no ancestor tag (the first release ever), treat the
           # extension as changed so the first release always carries the binary.
-          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' "${CURRENT_TAG}^" 2>/dev/null || true)
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude '*-*' "${GITHUB_SHA}^" 2>/dev/null || true)
           if [ -z "$PREV_TAG" ]; then
             echo "No previous release tag reachable from ${CURRENT_TAG}; attaching the extension."
             echo "changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$PREV_TAG" "$CURRENT_TAG" -- extension/; then
+          elif git diff --quiet "$PREV_TAG" "$GITHUB_SHA" -- extension/; then
             echo "extension/ unchanged since $PREV_TAG; skipping the extension asset."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -138,6 +174,7 @@ jobs:
       # artifact behind a dedicated protected environment before API upload.
 
   release-build:
+    needs: [release-invariants]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -146,7 +183,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Verify immutable source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Get release tag
         id: tag-check
@@ -238,6 +279,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verify immutable source commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - uses: actions/setup-python@v7
         with:

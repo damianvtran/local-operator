@@ -785,6 +785,12 @@ class AskPickerScreen(Container):
     # a traceback that points somewhere else entirely.
     _restored_focus: bool | None = None
     source_binding: tuple[Any, ...] | None = None
+    #: The question this card was built for, ``(tool_name, description)`` for an
+    #: approval. It is what lets an ADOPTION prove the card in hand is this
+    #: gate's card and not a neighbour's — the reveal pre-mounts a gate it
+    #: already holds (`OperatorApp._prearm_known_gate`) and the session's ladder
+    #: adopts that exact object when it runs.
+    gate_question: tuple[str, str] | None = None
 
     def snapshot_state(self) -> AskPickerSnapshot:
         return AskPickerSnapshot(

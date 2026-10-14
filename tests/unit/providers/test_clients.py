@@ -951,6 +951,284 @@ def _public_responses_sse() -> bytes:
     )
 
 
+@pytest.mark.parametrize("route", ["chat", "responses", "codex"])
+async def test_nonterminal_oversized_stream_closes_before_yield(route: str) -> None:
+    """A chatty malformed provider must not keep composing past the local envelope."""
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    responses = route != "chat"
+    closed: list[bool] = []
+    captured: dict[str, Any] = {}
+
+    class Oversized(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if responses:
+                payload = {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "call_test",
+                    "delta": "x" * 129,
+                }
+            else:
+                payload = {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [{"index": 0, "function": {"arguments": "x" * 129}}]
+                            }
+                        }
+                    ]
+                }
+            yield ("data: " + json.dumps(payload) + "\n\n").encode()
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, stream=Oversized(), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        emitted = []
+        with pytest.raises(StreamOutputEnvelopeExceeded) as caught:
+            async for event in client.stream(
+                ChatRequest(
+                    model=ModelSpec(
+                        provider="openai", model_id="test", supports_responses_api=responses
+                    ),
+                    messages=[Message.user("test")],
+                    max_tokens=1,
+                ),
+                "test-token",
+                oauth_access=(
+                    OAuthAccess("test-token", credential_id=1, org_id="test-account", kind="oauth")
+                    if route == "codex"
+                    else None
+                ),
+            ):
+                emitted.append(event)
+    assert closed == [True]
+    assert not any(isinstance(e, StreamToolCallDelta) for e in emitted)
+    assert caught.value.retryable is False
+    assert caught.value.auth_error is False
+    assert caught.value.transport is False
+    if route == "codex":
+        assert "max_output_tokens" not in captured
+    else:
+        assert (
+            captured.get("max_output_tokens")
+            or captured.get("max_completion_tokens")
+            or captured.get("max_tokens")
+        ) == 1
+
+
+async def test_output_envelope_counts_utf8_and_accepts_boundary() -> None:
+    from local_operator.providers.clients import (
+        StreamOutputEnvelopeExceeded,
+        _StreamOutputEnvelope,
+    )
+
+    budget = _StreamOutputEnvelope(1)
+    budget.charge(" " * 124)
+    budget.charge("😀")
+    assert budget.bytes == 128
+    with pytest.raises(StreamOutputEnvelopeExceeded):
+        budget.charge("a")
+    assert budget.bytes == 128
+
+
+async def test_output_envelope_aggregates_mixed_calls_and_preserves_larger_asks() -> None:
+    from local_operator.providers.clients import (
+        StreamOutputEnvelopeExceeded,
+        _StreamOutputEnvelope,
+    )
+
+    budget = _StreamOutputEnvelope(2)
+    for part in ["a" * 64, "b" * 64, "c" * 64, "d" * 64]:
+        budget.charge(part)
+    with pytest.raises(StreamOutputEnvelopeExceeded):
+        budget.charge("e")
+    larger = _StreamOutputEnvelope(3)
+    larger.charge(" " * 384)
+    assert larger.bytes == 384
+
+
+async def test_responses_output_snapshots_do_not_charge_deltas_twice() -> None:
+    from local_operator.providers.clients import (
+        _responses_output_bytes,
+        _StreamOutputEnvelope,
+    )
+
+    envelope = _StreamOutputEnvelope(1)
+    envelope.charge(" " * 128)
+    snapshot = [{"type": "message", "content": [{"type": "output_text", "text": " " * 128}]}]
+    envelope.check(_responses_output_bytes(snapshot))
+    envelope.check(_responses_output_bytes(snapshot))
+    assert envelope.bytes == 128
+
+
+@pytest.mark.parametrize("explicit,model_cap", [(1, 10), (10, 1)])
+async def test_output_envelope_uses_clamped_wire_ask(
+    explicit: int, model_cap: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    # The context clamp has its own matrix below; inject its result here to
+    # discriminate charging the wire ask from charging the caller's larger ask.
+    monkeypatch.setattr("local_operator.providers.clients._effective_max_tokens", lambda request: 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["max_tokens"] == 1
+        payload = {"choices": [{"delta": {"content": " " * 129}}]}
+        return httpx.Response(
+            200, content=_sse([payload]), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=ModelSpec(
+                            provider="radient", model_id="auto", max_output_tokens=model_cap
+                        ),
+                        messages=[Message.user("test")],
+                        max_tokens=explicit,
+                    ),
+                    "test-token",
+                )
+            )
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_output_envelope_legal_space_token_and_mixed_wire_deltas(mixed: bool) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    delta = (
+        {
+            "reasoning_content": "a" * 64,
+            "content": "b" * 63,
+            "tool_calls": [{"index": 0, "function": {"arguments": "{}"}}],
+        }
+        if mixed
+        else {"content": " " * 128}
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": delta, "finish_reason": "stop"}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+        request = ChatRequest(model=ModelSpec(provider="radient", model_id="auto"), max_tokens=1)
+        if mixed:
+            with pytest.raises(StreamOutputEnvelopeExceeded):
+                await _collect(client.stream(request, "test-token"))
+        else:
+            events = await _collect(client.stream(request, "test-token"))
+            assert [e.delta for e in events if isinstance(e, StreamTextDelta)] == [" " * 128]
+            assert any(isinstance(e, StreamEndEvent) for e in events)
+
+
+@pytest.mark.parametrize("codex", [False, True])
+@pytest.mark.parametrize(
+    "channel", ["response.reasoning_text.delta", "response.reasoning_summary_text.delta"]
+)
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_responses_reasoning_is_charged_before_opaque_skip(
+    codex: bool, channel: str, mixed: bool
+) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    payloads: list[dict[str, Any]] = (
+        [
+            {"type": "response.output_text.delta", "delta": "x" * 128},
+            {"type": channel, "delta": "y"},
+        ]
+        if mixed
+        else [{"type": channel, "delta": "x" * 129}]
+    )
+    payloads.append({"type": "response.completed", "response": {"output": []}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=ModelSpec(
+                            provider="openai", model_id="test", supports_responses_api=True
+                        ),
+                        max_tokens=1,
+                    ),
+                    "test-token",
+                    oauth_access=(
+                        OAuthAccess(
+                            "test-token", credential_id=1, org_id="test-account", kind="oauth"
+                        )
+                        if codex
+                        else None
+                    ),
+                )
+            )
+
+
+@pytest.mark.parametrize("codex", [False, True])
+@pytest.mark.parametrize("item_done", [False, True])
+async def test_responses_refusal_snapshot_is_bounded_before_retention(
+    codex: bool, item_done: bool
+) -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    item = {"type": "message", "content": [{"type": "refusal", "refusal": "x" * 129}]}
+    payloads = (
+        [{"type": "response.output_item.done", "output_index": 0, "item": item}]
+        if item_done
+        else []
+    )
+    payloads.append({"type": "response.completed", "response": {"output": [item]}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=_sse(payloads), headers={"content-type": "text/event-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            await _collect(
+                client.stream(
+                    ChatRequest(
+                        model=ModelSpec(
+                            provider="openai", model_id="test", supports_responses_api=True
+                        ),
+                        max_tokens=1,
+                    ),
+                    "test-token",
+                    oauth_access=(
+                        OAuthAccess(
+                            "test-token", credential_id=1, org_id="test-account", kind="oauth"
+                        )
+                        if codex
+                        else None
+                    ),
+                )
+            )
+
+
 async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
     captured: dict[str, Any] = {}
 
@@ -1026,6 +1304,7 @@ async def test_openai_api_key_gpt5_uses_public_responses_end_to_end() -> None:
                 "properties": {"city": {"type": "string"}},
                 "required": ["city"],
             },
+            "strict": False,
         }
     ]
     assert body["reasoning"] == {"effort": "high"}
@@ -4392,10 +4671,9 @@ def test_codex_5_6_body_no_include_when_reasoning_off() -> None:
     assert body["instructions"] == "a\n\nb"
 
 
-def test_public_5_6_body_keeps_original_shape_plus_include() -> None:
-    """The public Responses path returns its ORIGINAL body plus only defect #2's
-    ``include``: top-level instructions, prompt_cache_key, and the 24h retention
-    are all present, and none of the rejected defect-#3 fields appear."""
+def test_public_5_6_body_uses_documented_cache_defaults_plus_include() -> None:
+    """Modern public cache defaults omit legacy 24h retention without adding
+    options or breakpoints; instructions, routing key and reasoning survive."""
     client = OpenAICompatClient("https://api.openai.com/v1")
     body = client._build_responses_body(
         ChatRequest(
@@ -4406,7 +4684,7 @@ def test_public_5_6_body_keeps_original_shape_plus_include() -> None:
         )
     )
     assert body["prompt_cache_key"] == "pub-1"
-    assert body["prompt_cache_retention"] == "24h"
+    assert "prompt_cache_retention" not in body
     assert body["instructions"] == "Stable.\n\nVolatile."
     assert body["include"] == ["reasoning.encrypted_content"]
     assert "prompt_cache_options" not in body

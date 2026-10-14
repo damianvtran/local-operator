@@ -1,0 +1,42 @@
+{
+  "decided": {
+    "live": "files_preparing",
+    "cold": "files_cancelled_retry"
+  },
+  "queued_stale": {
+    "live": "files_preparing",
+    "cold": "files_cancelled_retry"
+  },
+  "queued_no_files": {
+    "live": "preparing",
+    "cold": "cancelled_retry"
+  },
+  "done_populated": {
+    "live": "block",
+    "cold": "block"
+  },
+  "done_files_only": {
+    "live": "block",
+    "cold": "block"
+  },
+  "done_empty": {
+    "live": "nothing",
+    "cold": "nothing"
+  },
+  "failed": {
+    "live": "failed_retry",
+    "cold": "failed_retry"
+  },
+  "cancelled": {
+    "live": "cancelled_retry",
+    "cold": "cancelled_retry"
+  },
+  "superseded": {
+    "live": "nothing",
+    "cold": "nothing"
+  },
+  "dismissed": {
+    "live": "nothing",
+    "cold": "nothing"
+  }
+}

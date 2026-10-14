@@ -438,7 +438,7 @@ async def test_a_control_route_answers_a_silent_owner_busy_and_fast(
         # The sentence is the SHIPPED unreachable one, deliberately (design round
         # 1, D1/D3): the app prefix-matches it for its MCP row and owns the
         # user-facing words for this arm, keyed on the code plus ``retryable``.
-        assert detail["message"].startswith("Session owner is unavailable.")
+        assert detail["text"].startswith("Session owner is unavailable.")
         await owner.stop()
 
 
@@ -470,7 +470,7 @@ async def test_a_control_route_still_names_an_unreachable_runtime(
         detail = response.json()["detail"]
         assert detail["code"] == "runtime_unreachable"
         assert "retryable" not in detail
-        assert detail["message"].startswith("Session owner is unavailable.")
+        assert detail["text"].startswith("Session owner is unavailable.")
 
 
 @pytest.mark.asyncio

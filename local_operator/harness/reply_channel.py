@@ -228,11 +228,15 @@ def envelope_from_tool_call(
     be lost and must not supersede one the model wrote
     (``provider_client._stream``, gated on ``public_reply._states_a_decision``).
 
-    The widening is bounded by everything downstream of this function, which is
-    unchanged: the bytes go to the same decoder, so a foreign-named call
-    carrying two batches, a duplicate key, a non-object, or an object that
-    fails validation is refused by exactly the rules a prose reply is refused
-    by. No shape that was refused on the channel before is accepted now.
+    The widening is bounded by everything downstream of this function, which
+    judges these bytes as it judges any other reply: they go to the same decoder,
+    so a foreign-named call carrying two batches, a duplicate key, a non-object,
+    or an object that fails validation is refused by exactly the rules a prose
+    reply is refused by. Whatever the decoder learns to READ is read on both
+    channels or on neither -- the reply-shape tolerances (a one-action object, an
+    action sequence, a wrapper carrying the decision) are the DECODER's, not
+    this function's, and this function still accepts nothing that the decoder
+    would have refused as a prose reply.
     """
     calls = list(calls)
     if offered_names is not None and list(offered_names) == [name]:

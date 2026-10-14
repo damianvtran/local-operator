@@ -233,8 +233,11 @@ class Task013:
     user_simulator = {"type": "llm", "model": "gpt-4o", "instruction": instruction}
 """
 
-# An f-string whose interpolation is an IMPORTED name: instruction folds
-# partially (literal skeleton kept, instruction_static=False).
+# An f-string whose interpolation is an IMPORTED name: the instruction is
+# not statically resolvable, so it DEFERS -- instruction=None with
+# instruction_static=False. A literal skeleton is never kept: a partial
+# prefix is a fabricated instruction, and the environment supplies the real
+# text at reset (the official post-setup mapping read).
 PARTIAL_INSTRUCTION = """
 from desktop_env.controllers.website import HOST_SUFFIX
 
@@ -242,6 +245,60 @@ class Task014:
     id = "task_partial"
     instruction = f"Open https://streamview.{HOST_SUFFIX}/watch?v=1 and summarise."
     config = []
+"""
+
+# A class body that would RAISE if the module were ever executed: helper() is
+# called while the class body evaluates. ``load_static`` must defer the
+# instruction and RETURN, which is only possible if nothing ran the module.
+# Mirrors the neutral repro against the real corpus ("neutral " + helper()).
+DEFERRED_HELPER_INSTRUCTION = """
+def helper():
+    raise RuntimeError("the parser must never execute this module")
+
+class Task019:
+    id = "task_deferred_helper"
+    instruction = "neutral " + helper()
+    config = [{"type": "launch", "app": "gedit"}]
+    evaluator = {"func": "check_include"}
+"""
+
+# The call-shaped variant (an imported function used as the instruction):
+# outside the closed fold set, deferred the same way, and still no execution.
+DEFERRED_CALL_INSTRUCTION = """
+from os import getcwd
+
+class Task020:
+    id = "task_deferred_call"
+    instruction = getcwd() + "/neutral"
+    config = []
+"""
+
+# Deferral is ONLY for the instruction. A provisioning/policy field that is
+# not statically resolvable refuses the whole module -- before allocation --
+# even next to a deferred instruction.
+DEFERRED_INSTRUCTION_UNKNOWN_POLICY = """
+import os
+
+TARGET_PLATFORM = os.environ["OSWORLD_PLATFORM"]
+
+class Task021:
+    id = "task_deferred_policy"
+    instruction = "neutral " + TARGET_PLATFORM
+    platform = TARGET_PLATFORM
+    config = []
+"""
+
+# A field that REFERENCES the deferred instruction symbol refuses too: the
+# simulator config drives pre-allocation decisions and must resolve
+# completely, so it cannot inherit a value the parse refused to state.
+DEFERRED_INSTRUCTION_REFERENCED = """
+from desktop_env.controllers.website import HOST_SUFFIX
+
+class Task022:
+    id = "task_deferred_ref"
+    instruction = f"Open streamview.{HOST_SUFFIX}."
+    config = []
+    user_simulator = {"type": "llm", "model": "x", "instruction": instruction}
 """
 
 # The same unresolvable interpolation on a DECISION field must refuse.
@@ -295,4 +352,18 @@ class Task012:
     instruction = "Computed instruction."
     config = [{"type": "launch", "app": "files"}]
     evaluator = {"func": os.environ["HOME"]}
+"""
+
+# The ask fixture: a task with a user simulator, so the adapter's ask exchange
+# has an owner. The FakeProvider answers ``simulated user answer`` when the
+# workspace's provider config sets ``has_user_simulator``; without the dict on
+# the task, the adapter refuses the exchange (no simulator owns generation).
+SIMULATOR = """
+class Task018:
+    id = "task_simulator"
+    instruction = "Ask the user which file to edit, then finish."
+    config = [{"type": "launch", "app": "gedit"}]
+    evaluator = {"func": "check_include", "result": {"type": "vm_file", "path": "/tmp/x"}}
+    related_apps = ["gedit"]
+    user_simulator = {"instruction": "You are the helpful synthetic user."}
 """

@@ -1940,6 +1940,121 @@ def test_a_live_delivered_steer_never_renders_the_envelope() -> None:
     assert "<parent-message>" not in row.text
 
 
+def _marked_steer(body: str = "Focus on retries") -> Message:
+    """The producer's typed marker on a persisted hub steer row (``comms.py``)."""
+    message = Message.user(_steer_envelope(body), id="steer-marked-1")
+    message.provider_payload = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": body,
+        }
+    }
+    return message
+
+
+def test_marker_first_folds_keep_kind_body_and_typed_facts() -> None:
+    """A marked row classifies by positive provenance, not by re-reading the
+    envelope: both durable folds and the live rail keep the typed facts beside
+    the body, and the envelope never renders."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    entries = fold_messages_to_entries([_marked_steer()])
+    assert [(entry.kind, entry.text) for entry in entries] == [
+        ("parent_message", "Focus on retries")
+    ]
+    assert entries[0].details.get("steer") is True
+    assert entries[0].details.get("direction") == "to_child"
+
+    fold = make_fold()
+    fold.fold_history([_marked_steer()])
+    history_row = fold.projection.transcript[-1]
+    assert (history_row.kind, history_row.text) == ("parent_message", "Focus on retries")
+    assert history_row.details.get("steer") is True
+
+    live = make_fold()
+    assert live.absorb_user_event(_marked_steer()) is True
+    live_row = live.projection.transcript[-1]
+    assert (live_row.kind, live_row.text) == ("parent_message", "Focus on retries")
+    assert live_row.details.get("steer") is True
+    assert "<parent-message>" not in live_row.text
+
+
+def test_a_malformed_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """A present marker that fails validation is still the modern producer's
+    stamp on the row, so the row stays a human row — never the legacy
+    envelope classification, which is the inference the marker programme
+    deletes (review round 3, R3-1 acceptance). Unstamped rows keep the legacy
+    parse; that half is pinned beside this test."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    message = Message.user(_steer_envelope("Focus on retries"), id="steer-legacy-1")
+    message.provider_payload = {"hub_receipt": {"steer": True}}
+    entries = fold_messages_to_entries([message])
+    assert entries[0].kind == "user"
+
+
+def test_a_stamped_but_invalid_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """R3-1 acceptance on the relay's two folds: an INVALID modern marker on
+    an envelope-looking row stays a user row on BOTH the durable and live
+    paths; the identical UNSTAMPED text keeps the legacy parent parse."""
+    envelope = _steer_envelope("Focus on retries")
+    invalid = Message.user(envelope, id="stamped-invalid")
+    invalid.provider_payload = {
+        "hub_receipt": {"direction": "sideways", "body": "Focus on retries"}
+    }
+    legacy = Message.user(envelope, id="legacy-unstamped")
+
+    fold = make_fold()
+    fold.fold_history([invalid, legacy])
+    by_id = {entry.id: entry for entry in fold.projection.transcript}
+    assert by_id["stamped-invalid"].kind == "user"
+    assert (by_id["legacy-unstamped"].kind, by_id["legacy-unstamped"].text) == (
+        "parent_message",
+        "Focus on retries",
+    )
+
+    live = make_fold()
+    live.absorb_user_event(invalid)
+    assert live.projection.transcript[-1].kind == "user"
+    live.absorb_user_event(legacy)
+    legacy_rows = [entry for entry in live.projection.transcript if entry.id == "legacy-unstamped"]
+    assert legacy_rows and legacy_rows[-1].kind == "parent_message"
+
+
+def test_marker_rows_keep_their_source_image_refs_durable_and_live() -> None:
+    """R3-3 relay half (review round 3): reclassifying a marked row as a
+    receipt keeps its image references — original index/mime — on BOTH folds,
+    exactly as the unmarked control beside it does."""
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    control = Message.user(
+        "with a shot", [ImageContent(data="AAAA", mime_type="image/png")], id="control-1"
+    )
+    control_entry = fold_messages_to_entries([control])[0]
+    assert control_entry.images == [{"index": 0, "mime_type": "image/png"}]
+
+    def marked_with_image() -> Message:
+        message = _marked_steer()
+        message.content.append(ImageContent(data="AAAA", mime_type="image/png"))
+        return message
+
+    entries = fold_messages_to_entries([marked_with_image()])
+    assert entries[0].kind == "parent_message"
+    assert entries[0].images == [{"index": 0, "mime_type": "image/png"}]
+
+    fold = make_fold()
+    fold.fold_history([marked_with_image()])
+    assert fold.projection.transcript[-1].images == [{"index": 0, "mime_type": "image/png"}]
+
+    live = make_fold()
+    assert live.absorb_user_event(marked_with_image()) is True
+    live_row = live.projection.transcript[-1]
+    assert live_row.kind == "parent_message"
+    assert live_row.images == [{"index": 0, "mime_type": "image/png"}]
+
+
 def test_a_phone_typed_envelope_reconciles_its_echo_instead_of_doubling() -> None:
     """A message the phone sent that happens to carry the envelope shape must
     reconcile against its optimistic echo, not append beside it.
@@ -4283,6 +4398,7 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
         context_window=200_000,
         context_is_estimate=True,
         usage={"input_tokens": 9_000, "output_tokens": 100},
+        spend_channels={"version": 1, "tracked": True, "total_micro": 961_000, "rows": []},
     )
     p = fold.projection
     assert p.cumulative_parent_cost == 1.25
@@ -4294,6 +4410,12 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
     assert p.context_window == 200_000
     assert p.context_is_estimate is True
     assert p.usage == {"input_tokens": 9_000, "output_tokens": 100}
+    assert p.spend_channels == {
+        "version": 1,
+        "tracked": True,
+        "total_micro": 961_000,
+        "rows": [],
+    }
 
     version = p.version
     fold.set_spend_context(
@@ -4306,6 +4428,7 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
         context_window=None,
         context_is_estimate=None,
         usage={},
+        spend_channels=None,
     )
     assert p.cumulative_parent_cost is None, "a None reading must overwrite, not skip"
     assert p.child_costs == {}
@@ -4314,4 +4437,93 @@ def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
     assert p.context_tokens is None and p.context_window is None
     assert p.context_is_estimate is None
     assert p.usage == {}
+    assert p.spend_channels is None, (
+        "a withdrawn channel object must overwrite too — a skip would keep a "
+        "stale breakdown alive after the store stopped publishing one"
+    )
     assert p.version > version
+
+
+def test_a_supplement_beat_folds_keep_newest_per_anchor() -> None:
+    """Turn supplements (memo §3.1 row 18; P5's sibling map): beats are
+    self-replacing per anchor, so the fold keeps the NEWEST version and a replay
+    cannot roll a reader back."""
+    from local_operator.harness.types import SupplementProgressEvent
+
+    fold = make_fold()
+    fold.fold_event(SupplementProgressEvent(anchor="a1", job="j1", version=1, state="queued"))
+    fold.fold_event(
+        SupplementProgressEvent(
+            anchor="a1",
+            job="j1",
+            version=2,
+            state="running",
+            stage="generating",
+            elapsed_s=1.5,
+        )
+    )
+    fold.fold_event(SupplementProgressEvent(anchor="a2", job="j2", version=1, state="decided"))
+    # A replayed/late v1 beat after the v2 one: dropped, never a roll-back.
+    fold.fold_event(SupplementProgressEvent(anchor="a1", job="j1", version=1, state="queued"))
+
+    held = fold.projection.supplements
+    assert set(held) == {"a1", "a2"}
+    assert held["a1"]["version"] == 2
+    assert held["a1"]["state"] == "running" and held["a1"]["stage"] == "generating"
+    assert held["a2"]["state"] == "decided"
+
+
+def test_the_projection_wire_carries_the_supplement_map_loosely() -> None:
+    """The map rides the projection as a sibling key: a payload WITHOUT it (an
+    older runtime) rebuilds to the empty default, and one with it survives
+    ``to_json``/``_projection_from_json`` byte-for-byte as data -- an old app
+    build ignores the unknown key instead of tripping on an unknown row kind."""
+    from local_operator.harness.types import SupplementProgressEvent
+
+    fold = make_fold()
+    fold.fold_event(
+        SupplementProgressEvent(
+            anchor="a1",
+            job="j1",
+            version=3,
+            state="done",
+            files=[
+                {
+                    "path": "reports/q3.md",
+                    "name": "q3.md",
+                    "kind": "markdown",
+                    "size_bytes": 1,
+                    "mtime": 1.0,
+                    "why": "w",
+                }
+            ],
+            components=[
+                {
+                    "attachment": "d" * 32,
+                    "title": "t",
+                    "source": "s",
+                    "mime": "text/html",
+                    "height_hint": 320,
+                }
+            ],
+        )
+    )
+    wire = fold.projection.to_json()
+    assert wire["supplements"]["a1"]["version"] == 3
+    assert wire["supplements"]["a1"]["components"][0]["attachment"] == "d" * 32
+
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id="s1",
+        conversation_name="",
+        cwd="",
+        model_label="",
+        control_port=0,
+        control_key="",
+    )
+    rebuilt = _projection_from_json(wire, record)
+    assert rebuilt.supplements["a1"]["version"] == 3
+
+    older = _projection_from_json({k: v for k, v in wire.items() if k != "supplements"}, record)
+    assert older.supplements == {}

@@ -118,6 +118,67 @@ class WireClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
+# A resource envelope, not a tokenizer: o200k_base contains a token spelling
+# 128 ASCII spaces. Smaller byte/token ratios would reject legitimate output.
+# Other tokenizers may differ; this deliberately generous policy bounds retained
+# generated output without claiming exact universal token-budget enforcement.
+STREAM_OUTPUT_BYTES_PER_TOKEN = 128
+
+
+class StreamOutputEnvelopeExceeded(ProviderError):
+    """A provider kept generating beyond this attempt's local resource envelope."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            None,
+            f"Provider stream exceeded the local output resource envelope ({limit:,} bytes). "
+            "This response was stopped before its pending tool calls could run.",
+            kind="unknown",
+            retryable=False,
+            fail_closed=True,
+        )
+
+
+class _StreamOutputEnvelope:
+    """Charge decoded UTF-8 output BEFORE retaining or forwarding each delta.
+
+    Each provider attempt owns one counter shared by prose, reasoning, refusal
+    and every tool call. It follows the actual clamped wire ask, not the model's
+    advertised capability. Codex omits that wire field, so its effective request
+    policy supplies the local budget instead. A larger explicit ask remains
+    larger; no tool-specific size limit or elapsed-time cutoff is introduced.
+    """
+
+    def __init__(self, max_tokens: int) -> None:
+        self.limit = max_tokens * STREAM_OUTPUT_BYTES_PER_TOKEN
+        self.bytes = 0
+
+    def check(self, size: int) -> None:
+        if size > self.limit:
+            raise StreamOutputEnvelopeExceeded(self.limit)
+
+    def charge(self, delta: str) -> None:
+        size = self.bytes + len(delta.encode("utf-8"))
+        self.check(size)
+        self.bytes = size
+
+
+def _responses_output_bytes(items: Sequence[Mapping[str, Any]]) -> int:
+    """Measure a replay snapshot separately: it repeats deltas, not new output."""
+    size = 0
+    for item in items:
+        if item.get("type") == "function_call":
+            size += len(str(item.get("arguments") or "").encode("utf-8"))
+            size += len(str(item.get("name") or "").encode("utf-8"))
+        for part in [*(item.get("content") or []), *(item.get("summary") or [])]:
+            if isinstance(part, Mapping):
+                size += len(str(part.get("text") or "").encode("utf-8"))
+                # Snapshot-only compatible streams carry refusal under its own
+                # field, not text; repeated snapshots remain separate from deltas.
+                size += len(str(part.get("refusal") or "").encode("utf-8"))
+    return size
+
+
 def openrouter_attribution_headers() -> dict[str, str]:
     """Attribution headers identifying Local Operator to OpenRouter.
 
@@ -271,7 +332,10 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     if not isinstance(raw_usage, Mapping):
         return None
     value = raw_usage.get("cost")
-    if value is None:
+    # Reject JSON booleans before Usage's float field can erase their type.
+    # Otherwise the pricing guard sees a seemingly legitimate $1/$0 receipt
+    # and cannot recover the fact that the provider never stated money.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)
@@ -1933,6 +1997,35 @@ def _log_once(message: str, *args: object) -> None:
     logger.warning(message, *args)
 
 
+_GOOGLE_CONTINUATION = (
+    "[harness continuation — not an operator message]\n"
+    "Continue the pending turn from the existing conversation and tool results."
+)
+
+
+def _google_user_boundary(turns: list[dict[str, Any]], *, native: bool = False) -> int:
+    """Close a rendered Google request without inventing an operator prompt.
+
+    Google rejects assistant/model prefill, including imported histories after
+    switches and failover. Repair the FINAL wire shape, not session history:
+    empty assistants and invalid tool pairs may already have been filtered out.
+    A tool response is already a Google user turn (OpenRouter translates it),
+    so leave valid pairs and ordinary user prompts byte-for-byte unchanged.
+    The labelled continuation is transport context only; never persist it or
+    let compaction count it as the operator's latest instruction. Return its
+    token estimate so admission includes the extra bytes we actually send.
+    """
+    if turns and turns[-1].get("role") in ("user", "tool"):
+        return 0
+    turn: dict[str, Any] = {"role": "user"}
+    if native:
+        turn["parts"] = [{"text": _GOOGLE_CONTINUATION}]
+    else:
+        turn["content"] = _GOOGLE_CONTINUATION
+    turns.append(turn)
+    return estimate_messages_tokens([Message.user(_GOOGLE_CONTINUATION)])
+
+
 def _without_unrenderable_tool_calls(messages: Sequence[Message]) -> Sequence[Message]:
     """The history as far as any wire may render it: no nameless tool calls.
 
@@ -2301,14 +2394,38 @@ def _tools_to_openai(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
     ]
 
 
+def _modern_public_cache_defaults(model: ModelSpec, endpoint: str) -> bool:
+    """Restrict the new cache contract to its documented API family.
+
+    Endpoint recognition is deliberately exact: an OpenAI-shaped body or model
+    label does not prove a custom gateway implements the same retention policy.
+    Likewise a future major is not a capability promise. Decimal versions and
+    published suffix/snapshot spellings stay in their anchored GPT family.
+    """
+    if model.provider != "openai" or endpoint != "https://api.openai.com/v1/responses":
+        return False
+    match = re.match(r"^gpt-(5|6)(?:\.(\d+))?(?:-|$)", model.model_id)
+    if match is None:
+        return False
+    return match[1] == "6" or (match[2] is not None and int(match[2]) >= 6)
+
+
 def _tools_to_openai_responses(tools: Sequence[AgentTool]) -> list[dict[str, Any]]:
-    """Responses tools are flat; chat-completions nests fields under ``function``."""
+    """Responses tools are flat; chat-completions nests fields under ``function``.
+
+    Responses attempts strict normalization when this flag is omitted. That
+    turns optional op-specific fields into required ones and makes the model
+    send defaults our validation correctly rejects on the wrong operation.
+    Preserve the harness schema as authored, including free-form MCP arguments;
+    normal validation and approval still happen at dispatch.
+    """
     return [
         {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
             "parameters": tool.parameters or {"type": "object", "properties": {}},
+            "strict": False,
         }
         for tool in tools
     ]
@@ -2715,6 +2832,13 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+        # Aggregator identity alone is not the model family: Google keeps its
+        # final-user requirement through OpenRouter's OpenAI-compatible wire.
+        google_boundary_tokens = 0
+        if request.model.provider == "google" or (
+            request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
+        ):
+            google_boundary_tokens = _google_user_boundary(messages)
         # Admission is finalized AFTER the render, so the placeholders the body
         # just added are counted as the input they are -- the model reads the
         # echo and the provider bills it. ``_effective_max_tokens`` below reads
@@ -2726,7 +2850,9 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens(),
+            extra_native_tokens=(
+                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
+            ),
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -3022,11 +3148,16 @@ class OpenAICompatClient:
             # body above: the Responses API spells `service_tier` identically.
             body["service_tier"] = fast.value
         if request.model.supports_prompt_cache and request.prompt_cache_key:
-            # Preserve the existing public request policy here; modern public
-            # TTL compatibility needs separate API-key validation. The Codex
-            # builder below removes retention, but keeps the routing key.
             body["prompt_cache_key"] = request.prompt_cache_key
-            body["prompt_cache_retention"] = "24h"
+            # GPT-5.6+ and GPT-6 public Responses use the documented implicit
+            # cache/30m default, not the legacy 24h retention contract. Omit the
+            # incompatible field only on this exact public route: compatible
+            # gateways, older models and unknown future families keep their
+            # existing policy. Codex removes retention separately below.
+            if not _modern_public_cache_defaults(
+                request.model, endpoint or f"{self._base_url}/responses"
+            ):
+                body["prompt_cache_retention"] = "24h"
         return body
 
     def _build_codex_responses_body(
@@ -3116,10 +3247,18 @@ class OpenAICompatClient:
 
         headers = self._headers(api_key, oauth_access)
         headers.update(self._grok_conv_headers(request, url))
+        body = self._build_body(request, scope=scope)
+        envelope = _StreamOutputEnvelope(
+            int(
+                body.get("max_completion_tokens")
+                or body.get("max_tokens")
+                or _effective_max_tokens(request)
+            )
+        )
         async with self._http.stream(
             "POST",
             url,
-            json=self._build_body(request, scope=scope),
+            json=body,
             headers=headers,
         ) as response:
             if response.status_code >= 400:
@@ -3232,6 +3371,7 @@ class OpenAICompatClient:
                 for reasoning_key in ("reasoning_content", "reasoning"):
                     fragment = delta.get(reasoning_key)
                     if isinstance(fragment, str) and fragment:
+                        envelope.charge(fragment)
                         reasoning_parts.setdefault(reasoning_key, []).append(fragment)
                         # SURFACED as well as collected. The reasoning is kept
                         # for replay whether or not anyone listens, but a
@@ -3246,11 +3386,13 @@ class OpenAICompatClient:
                         yield StreamReasoningDelta(delta=fragment)
                 text = delta.get("content")
                 if text:
+                    envelope.charge(text)
                     replay_text.append(text)
                     streamed_text = True
                     yield StreamTextDelta(delta=text)
                 refusal = delta.get("refusal")
                 if refusal:
+                    envelope.charge(str(refusal))
                     refusal_parts.append(str(refusal))
                 for tool_delta in delta.get("tool_calls") or []:
                     index = int(tool_delta.get("index", 0))
@@ -3261,7 +3403,9 @@ class OpenAICompatClient:
                     if call_id:
                         saved["id"] = call_id
                     if name:
+                        envelope.charge(name)
                         saved["name"] += name
+                    envelope.charge(function.get("arguments") or "")
                     saved["arguments"] += function.get("arguments") or ""
                     if call_id:
                         yield StreamToolCallDelta(index=index, id=call_id)
@@ -3318,6 +3462,7 @@ class OpenAICompatClient:
         if refusal_parts and stop_reason in ("stop", "length"):
             stop_reason = "refusal"
         error: str | None = None
+        retryable_interruption = False
         if stop_reason == "refusal":
             # Name what actually detected the refusal (design review D2): when
             # the finish reason was an ordinary stop/length and the prose slot
@@ -3336,6 +3481,14 @@ class OpenAICompatClient:
             # the loop journals `error` as the incident, so name the failure,
             # not just the wire field that signalled it.
             error = f"provider reported a mid-stream failure (finish_reason '{finish_reason}')"
+            # Eligible for the loop's bounded interrupted-turn continuation.
+            # WHY this branch is the condition: it fires only for a bare
+            # ``error`` finish -- a refusal took the branch above, a hard
+            # error object raised in ``_compat_stream_error`` before we got
+            # here, and a local envelope violation aborts the session. It is
+            # an ELIGIBILITY, not a causal claim: the stream ended without the
+            # provider saying why, and retryability is unknown from the wire.
+            retryable_interruption = True
         if reasoning_parts:
             calls = []
             valid = True
@@ -3365,7 +3518,21 @@ class OpenAICompatClient:
             provider_payload=provider_payload,
             error=error,
             served_provider=served_provider,
+            retryable_interruption=retryable_interruption,
         )
+
+    def _observe_responses_event(self, payload: dict[str, Any]) -> None:
+        """Dialect hook for safe, non-token provider receipts (default: no-op)."""
+
+    def _observe_responses_headers(self, headers: httpx.Headers) -> None:
+        """Dialect hook for request attribution; never copy all response headers."""
+
+    def _observe_responses_error(self, response: httpx.Response) -> None:
+        """Dialect hook for bounded safe diagnostics before HTTP classification.
+
+        The body has been read, but may reflect credentials or submitted content.
+        Implementations must not retain raw prose or change failover classification.
+        """
 
     async def _stream_responses(
         self,
@@ -3382,6 +3549,9 @@ class OpenAICompatClient:
             self._build_codex_responses_body(request, scope=scope)
             if codex
             else self._build_responses_body(request, scope=scope)
+        )
+        envelope = _StreamOutputEnvelope(
+            int(body.get("max_output_tokens") or _effective_max_tokens(request))
         )
         headers = self._headers(api_key, oauth_access)
         headers.update(self._codex_affinity_headers(request, oauth_access, url))
@@ -3408,7 +3578,10 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
+                self._observe_responses_headers(response.headers)
+                self._observe_responses_error(response)
                 raise_for_status(response)
+            self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -3416,6 +3589,7 @@ class OpenAICompatClient:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
@@ -3426,9 +3600,17 @@ class OpenAICompatClient:
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id"))
                     )
-                # Encrypted reasoning stays opaque. Complete output items are
-                # retained below; deltas never enter the user-visible transcript.
+                # Reasoning remains invisible here, but plaintext deltas still
+                # consume the shared output envelope BEFORE this opaque skip.
+                # Charging later in the dispatcher is unreachable for this family.
                 if event_type.startswith("response.reasoning"):
+                    if event_type in (
+                        "response.reasoning_text.delta",
+                        "response.reasoning_summary_text.delta",
+                    ):
+                        delta = payload.get("delta")
+                        if delta:
+                            envelope.charge(delta)
                     continue
                 if event_type == "response.output_item.added":
                     item = payload.get("item") or {}
@@ -3443,15 +3625,24 @@ class OpenAICompatClient:
                             call_indexes[call_id] = index
                         if item_id:
                             call_indexes[item_id] = index
+                        envelope.charge(item.get("name") or "")
                         yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
                 elif event_type == "response.output_item.done":
                     item = payload.get("item")
                     if isinstance(item, dict):
-                        output_items[int(payload.get("output_index", len(output_items)))] = item
+                        index = int(payload.get("output_index", len(output_items)))
+                        envelope.check(
+                            _responses_output_bytes(
+                                [value for key, value in output_items.items() if key != index]
+                                + [item]
+                            )
+                        )
+                        output_items[index] = item
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
                     if delta:
+                        envelope.charge(delta)
                         fallback_index = int(payload.get("output_index", 0) or 0)
                         yield StreamToolCallDelta(
                             index=call_indexes.get(call_id, fallback_index),
@@ -3460,11 +3651,13 @@ class OpenAICompatClient:
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if delta:
+                        envelope.charge(delta)
                         streamed_text = True
                         yield StreamTextDelta(delta=delta)
                 elif event_type == "response.refusal.delta":
                     delta = payload.get("delta")
                     if delta:
+                        envelope.charge(str(delta))
                         refusal_parts.append(str(delta))
                 elif event_type in ("response.completed", "response.incomplete"):
                     response_obj = payload.get("response") or {}
@@ -3473,6 +3666,11 @@ class OpenAICompatClient:
                     native = response_obj.get("output")
                     if not isinstance(native, list) or not native:
                         native = [output_items[index] for index in sorted(output_items)]
+                    envelope.check(
+                        _responses_output_bytes(
+                            [item for item in native if isinstance(item, Mapping)]
+                        )
+                    )
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []
@@ -4357,9 +4555,6 @@ class GoogleClient:
             await self._http.aclose()
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
-        request = bind_native_context(
-            request, self._base_url, "google-content", scope, _estimate_slope(request.model)
-        )
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -4447,6 +4642,15 @@ class GoogleClient:
             if parts or message.role == "user":
                 contents.append({"role": role, "parts": parts or [{"text": ""}]})
 
+        boundary_tokens = _google_user_boundary(contents, native=True)
+        request = bind_native_context(
+            request,
+            self._base_url,
+            "google-content",
+            scope,
+            _estimate_slope(request.model),
+            extra_native_tokens=boundary_tokens,
+        )
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
@@ -4885,6 +5089,12 @@ def client_for_spec(
         or (definition.base_url if definition else None)
         or "http://localhost:11434/v1"
     )
+    if spec.provider == "meta-muse":
+        # Muse is Responses-only; merely setting supports_responses_api does
+        # not select that wire in the general compatible-provider factory.
+        from local_operator.providers.meta_muse_client import MetaMuseClient
+
+        return MetaMuseClient(base_url=base, http_client=http_client, openai_api="responses")
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = openrouter_attribution_headers()

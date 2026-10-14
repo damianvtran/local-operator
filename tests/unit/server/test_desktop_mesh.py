@@ -456,6 +456,8 @@ async def test_peers_refuses_when_a_network_exists_and_no_relay_answers(
     assert response.status_code == 503, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "relay_unavailable"
+    # E2a note: this refusal is a `MeshRefusal` (network/types), not the
+    # message-envelope family — it keeps `{code, message}` for now.
     assert "lop network start" in detail["message"]
 
 
@@ -684,19 +686,6 @@ async def test_a_remote_row_carries_the_started_claim_as_its_creation_time(
     assert bare["created_at"] == bare["mtime"] == 0.0
 
 
-class _RowWithLastUser(SessionRow):
-    """A producer row carrying the sidebar lane's ``last_user_at`` claim.
-
-    The shape a later slice's producer emits (the relay-side transcript scan is
-    that slice); this half only forwards a claim that is present, or omits the
-    key entirely. The subclass is the carrier — a plain ``SessionRow`` is a
-    tuple without a dict to hold the extra attribute — and the cell sets the
-    value it means.
-    """
-
-    last_user_at: float | None = None
-
-
 def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -708,6 +697,14 @@ def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     and never a null, so the old ``float(True)``-becomes-``1.0`` hazard cannot
     come back through here and the UI's merge reads absence as no claim,
     falling back to ``created_at``, then catalogue order.
+
+    The rows are plain ``SessionRow`` rows carrying the field the producer
+    slice landed (``last_user_at``, defaulted ``None``). This cell's earlier
+    carrier — a ``SessionRow`` subclass holding the attribute — became the
+    pyright error "cannot override ... because parent class ... is a named
+    tuple" the moment the field itself arrived, which is the
+    field-is-the-carrier shape the subclass comment predicted; the claim is
+    now a constructor keyword.
     """
     from local_operator.server.utils.desktop_mesh import remote_session_rows
     from local_operator.session import peer_rows as peer_rows_mod
@@ -716,11 +713,9 @@ def test_a_peers_last_user_claim_is_forwarded_and_absence_is_omitted(
     # must LOOK like it is in a network, or ``remote_session_rows`` answers []
     # before it ever asks for rows (the zero-network guard).
     (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
-    claimed = _RowWithLastUser(OTHER, 1789400000.0, "build box chat")
-    claimed.last_user_at = 1789400111.5
+    claimed = SessionRow(OTHER, 1789400000.0, "build box chat", last_user_at=1789400111.5)
     bare = SessionRow("c" * 12, 1789400000.0, "no claim")
-    bool_claim = _RowWithLastUser("d" * 12, 1789400000.0, "old peer")
-    bool_claim.last_user_at = cast(Any, True)
+    bool_claim = SessionRow("d" * 12, 1789400000.0, "old peer", last_user_at=cast(Any, True))
     monkeypatch.setattr(
         peer_rows_mod, "peer_session_rows", lambda root=None, **kwargs: (claimed, bare, bool_claim)
     )
@@ -1437,7 +1432,10 @@ async def test_transfer_refusal_is_a_409_with_the_moves_own_sentence(
     )
     response = await client.post(f"/v1/desktop/sessions/{MINE}/transfer", json={"to": PEER})
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == {"code": "busy", "message": sentence}
+    # E2a: the refusal is the message envelope now; the sentence rides `text`.
+    body = response.json()["detail"]
+    assert body["code"] == "busy"
+    assert body["text"] == sentence
 
 
 @pytest.mark.asyncio
@@ -1461,7 +1459,10 @@ async def test_an_unconfirmed_move_is_never_reported_as_nothing_changed(
     body = {"to": PEER, "request_id": REQUEST_ID}
     first = await client.post(f"/v1/desktop/sessions/{MINE}/transfer", json=body)
     assert first.status_code == 503, first.text
-    assert first.json()["detail"] == {"code": "deadline_exceeded", "message": sentence}
+    # E2a: the refusal is the message envelope now; the sentence rides `text`.
+    detail = first.json()["detail"]
+    assert detail["code"] == "deadline_exceeded"
+    assert detail["text"] == sentence
     second = await client.post(f"/v1/desktop/sessions/{MINE}/transfer", json=body)
     assert second.status_code == 503, second.text
 
@@ -1575,7 +1576,10 @@ async def test_delete_on_a_peer_keeps_the_refusal_shape(
         "DELETE", f"/v1/desktop/sessions/{OTHER}", json={"confirmed": True}
     )
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == {"code": "session_delete_refused", "message": sentence}
+    # E2a: the refusal is the message envelope now; the sentence rides `text`.
+    body = response.json()["detail"]
+    assert body["code"] == "session_delete_refused"
+    assert body["text"] == sentence
     assert (root / "sessions" / OTHER).is_dir(), "a refused delete removes nothing"
 
 
@@ -1648,9 +1652,9 @@ async def test_an_unreachable_peers_conversation_refuses_in_the_tuis_own_words(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote"
-    assert "build-box" in detail["message"], detail
-    assert "/network doctor build-box" in detail["message"], detail
-    assert "ConnectionRefusedError" not in detail["message"], "the raw token reached the user"
+    assert "build-box" in detail["text"], detail
+    assert "/network doctor build-box" in detail["text"], detail
+    assert "ConnectionRefusedError" not in detail["text"], "the raw token reached the user"
     # AND A LOCAL ID IS UNTOUCHED: the ordinary miss is still the ordinary 404.
     missing = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
     assert missing.status_code == 404, missing.text
@@ -1812,11 +1816,11 @@ async def test_an_unreachable_owner_answers_in_words_not_the_shared_404(
     # The clause names the device once and the doctor command once — the failed
     # dial's own sentence ("…is unreachable…; nothing was changed") is NOT
     # appended, because it restated both facts (design round 1, D2).
-    assert detail["message"].count("build-box") == 2, detail
-    assert "could not be cleared there right now" in detail["message"], detail
-    assert "/network doctor build-box diagnoses the link" in detail["message"], detail
-    assert "nothing was changed" not in detail["message"], detail
-    assert "not found" not in detail["message"], detail
+    assert detail["text"].count("build-box") == 2, detail
+    assert "could not be cleared there right now" in detail["text"], detail
+    assert "/network doctor build-box diagnoses the link" in detail["text"], detail
+    assert "nothing was changed" not in detail["text"], detail
+    assert "not found" not in detail["text"], detail
 
 
 @pytest.mark.asyncio
@@ -1848,7 +1852,7 @@ async def test_a_forwarded_receipt_verdict_keeps_the_local_answer(
     )
     assert superseded.status_code == 409, superseded.text
     assert superseded.json()["detail"]["code"] == "superseded_completion_token", superseded.text
-    assert "current token" in superseded.json()["detail"]["message"], superseded.text
+    assert "current token" in superseded.json()["detail"]["text"], superseded.text
 
     monkeypatch.setattr(
         "local_operator.server.utils.desktop_mesh.receipt_on_owner",
@@ -1898,19 +1902,19 @@ async def test_a_build_behind_owner_answers_the_update_sentence(
     )
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
-    assert set(detail) == {"code", "cause", "message"}, detail
+    assert set(detail) == {"code", "cause", "params", "text"}, detail
     assert detail["code"] == "session_is_remote", detail
     assert detail["cause"] == "owner_build_behind", detail
-    assert detail["message"] == (
+    assert detail["text"] == (
         f"The unread mark for {OTHER} lives on build-box, and it could not be cleared "
         "there right now: build-box runs an older build, and the mark clears when "
         "that device updates."
     ), detail
     # The raw refusal is OUT: no internal op name, no authoriser wording.
-    assert "net_session_receipt" not in detail["message"], detail
-    assert "not an operation" not in detail["message"], detail
+    assert "net_session_receipt" not in detail["text"], detail
+    assert "not an operation" not in detail["text"], detail
     # Named once per clause, as its siblings are.
-    assert detail["message"].count("build-box") == 2, detail
+    assert detail["text"].count("build-box") == 2, detail
 
 
 def test_the_build_behind_sentence_is_the_authorizers_own_unknown_op_refusal() -> None:
@@ -1994,7 +1998,7 @@ async def test_a_refusing_owner_keeps_its_sentence_beside_the_refused_cause(
     assert detail["code"] == "session_is_remote", detail
     assert detail["cause"] == "refused", detail
     # The owner's trailing period is joined once, exactly as before this change.
-    assert detail["message"] == (
+    assert detail["text"] == (
         f"The unread mark for {OTHER} lives on build-box, and it could not be cleared "
         "there right now: build-box did not clear it."
     ), detail
@@ -2022,7 +2026,7 @@ async def test_a_peers_pin_is_refused_in_words_not_a_404(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote", detail
-    assert "build-box" in detail["message"] and "pin" in detail["message"], detail
+    assert "build-box" in detail["text"] and "pin" in detail["text"], detail
 
 
 @pytest.mark.asyncio
@@ -2065,7 +2069,7 @@ async def test_a_peers_delivery_claim_is_refused_in_words_not_a_404(
     assert blocked.status_code == 409, blocked.text
     detail = blocked.json()["detail"]
     assert detail["code"] == "session_is_remote", detail
-    assert "build-box" in detail["message"] and "notification" in detail["message"], detail
+    assert "build-box" in detail["text"] and "notification" in detail["text"], detail
 
     # AND A LOCAL CLAIM STILL RUNS: an unknown token on a local session answers
     # the ordinary false rather than a refusal.

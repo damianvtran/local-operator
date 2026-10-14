@@ -120,7 +120,7 @@ async def test_an_owner_that_never_acks_the_answer_refuses_retryable(
         # The sentence is DELIBERATELY the shipped unreachable one (design round 1,
         # D1/D3): the app prefix-matches it for its MCP row, and the user-facing
         # words for this arm belong to the UI, keyed on the code plus `retryable`.
-        assert detail["message"].startswith("Session owner is unavailable.")
+        assert detail["text"].startswith("Session owner is unavailable.")
         await owner.stop()
 
 
@@ -199,4 +199,4 @@ async def test_a_genuinely_dead_owner_still_refuses_unreachable(
         detail = response.json()["detail"]
         assert detail["code"] == "runtime_unreachable", detail
         assert "retryable" not in detail, detail
-        assert detail["message"].startswith("Session owner is unavailable.")
+        assert detail["text"].startswith("Session owner is unavailable.")

@@ -2,7 +2,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -14,6 +14,7 @@ from local_operator.config import ConfigManager
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.routes.speech import create_agent_speech, create_speech
+from local_operator.session.channel_spend import read_pending_records
 from local_operator.tts.descriptor import DEFAULT_SPEECH_INSTRUCTIONS
 
 
@@ -65,6 +66,17 @@ def speech_request_data():
     }
 
 
+def _media_envelope(detail: object) -> dict[str, Any]:
+    """Validate the JSON shape before inspecting migrated refusal sentences.
+
+    FastAPI accepts arbitrary JSON detail but inherits Starlette's string-typed
+    attribute. Taking object here reflects that wire boundary without a cast or
+    ignoring the analyzer; a string from an unconverted arm must fail at runtime.
+    """
+    assert isinstance(detail, dict)
+    return detail
+
+
 def _speech_logged_the_stack(caplog) -> None:
     """Assert the route logged an ERROR whose stack survived to ``caplog``.
 
@@ -92,7 +104,7 @@ def _speech_logged_the_stack(caplog) -> None:
 @pytest.mark.asyncio
 async def test_create_speech_success(speech_request_data, mock_radient_client):
     """Test successful speech creation."""
-    mock_radient_client.create_speech.return_value = b"audio_data"
+    mock_radient_client.create_speech_response.return_value = (b"audio_data", {})
     speech_request = SpeechRequest(**speech_request_data)
 
     response = await create_speech(speech_request, mock_radient_client)
@@ -103,17 +115,23 @@ async def test_create_speech_success(speech_request_data, mock_radient_client):
     # An ABSENT descriptor means exactly the pre-voicing request: the pass-through
     # forwards the caller's own fields and adds no `voice_descriptor`, so a
     # client that names a voice keeps today's semantics (the agent speak-aloud
-    # route is the one that builds and sends a descriptor).
-    mock_radient_client.create_speech.assert_called_once_with(
-        input_text="Hello, world!",
-        instructions="Please speak in a friendly and engaging tone.",
-        model="tts-1",
-        voice="alloy",
-        response_format="mp3",
-        speed=1.0,
-        provider="openai",
-        language_code=None,
-    )
+    # route is the one that builds and sends a descriptor). The call goes
+    # through the HEADER-CARRYING variant now (PR-3): the legacy path reads the
+    # hub's cost headers for the spend record, so the bytes and the headers are
+    # the same response.
+    sent = mock_radient_client.create_speech_response.call_args.kwargs
+    assert sent.pop("session_id") is None, "no session named: none is invented"
+    assert len(sent.pop("client_request_id")) == 32, "a fresh correlation id rides the call"
+    assert sent == {
+        "input_text": "Hello, world!",
+        "instructions": "Please speak in a friendly and engaging tone.",
+        "model": "tts-1",
+        "voice": "alloy",
+        "response_format": "mp3",
+        "speed": 1.0,
+        "provider": "openai",
+        "language_code": None,
+    }
 
 
 def _agent_less_request(**overrides: Any) -> SpeechRequest:
@@ -221,7 +239,7 @@ async def test_an_explicit_provider_keeps_the_direct_pass_through(tmp_path):
     )
 
     assert response.status_code == 200
-    client.create_speech.assert_called_once_with(
+    client.create_speech_response.assert_called_once_with(
         input_text="Hello",
         instructions=None,
         model=None,
@@ -230,6 +248,8 @@ async def test_an_explicit_provider_keeps_the_direct_pass_through(tmp_path):
         speed=1.0,
         provider="elevenlabs",
         language_code=None,
+        session_id=None,
+        client_request_id=ANY,
     )
 
 
@@ -262,7 +282,7 @@ async def test_a_half_specified_legacy_request_is_forwarded_as_sent(tmp_path):
             _env_config(),
         )
         assert response.status_code == 200
-        sent = client.create_speech.call_args.kwargs
+        sent = client.create_speech_response.call_args.kwargs
         for name, value in expected.items():
             assert sent[name] == value, f"{fields}: {name}"
 
@@ -293,7 +313,7 @@ async def test_an_explicit_speed_pins_pace_on_the_descriptor_path(tmp_path):
 @pytest.mark.asyncio
 async def test_create_speech_http_exception(speech_request_data, mock_radient_client):
     """Test speech creation when Radient client raises HTTPException."""
-    mock_radient_client.create_speech.side_effect = HTTPException(
+    mock_radient_client.create_speech_response.side_effect = HTTPException(
         status_code=404, detail="Model not found"
     )
     speech_request = SpeechRequest(**speech_request_data)
@@ -308,14 +328,18 @@ async def test_create_speech_http_exception(speech_request_data, mock_radient_cl
 @pytest.mark.asyncio
 async def test_create_speech_generic_exception(speech_request_data, mock_radient_client, caplog):
     """Test speech creation when Radient client raises a generic exception."""
-    mock_radient_client.create_speech.side_effect = Exception("Something went wrong")
+    mock_radient_client.create_speech_response.side_effect = Exception("Something went wrong")
     speech_request = SpeechRequest(**speech_request_data)
 
     with pytest.raises(HTTPException) as exc_info:
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 500
-    assert "Failed to generate speech: Something went wrong" in exc_info.value.detail
+    assert exc_info.value.detail == {
+        "code": "wire.errors.media.speech_generate_failed",
+        "params": {"error": "Something went wrong"},
+        "text": "Failed to generate speech: Something went wrong",
+    }
     # The one fault class that needs a stack gets one (review round 2, finding 1).
     _speech_logged_the_stack(caplog)
 
@@ -323,22 +347,25 @@ async def test_create_speech_generic_exception(speech_request_data, mock_radient
 @pytest.mark.asyncio
 async def test_create_speech_passes_language_code_through(mock_radient_client):
     """The language code is plumbing: forwarded exactly when the caller set it."""
-    mock_radient_client.create_speech.return_value = b"audio_data"
+    mock_radient_client.create_speech_response.return_value = (b"audio_data", {})
     speech_request = _speech_request(input="Hola", language_code="es")
 
     response = await create_speech(speech_request, mock_radient_client)
 
     assert response.status_code == 200
-    mock_radient_client.create_speech.assert_called_once_with(
-        input_text="Hola",
-        instructions=None,
-        model="tts-1",
-        voice="alloy",
-        response_format="mp3",
-        speed=1.0,
-        provider="openai",
-        language_code="es",
-    )
+    sent = mock_radient_client.create_speech_response.call_args.kwargs
+    assert sent.pop("session_id") is None
+    assert len(sent.pop("client_request_id")) == 32
+    assert sent == {
+        "input_text": "Hola",
+        "instructions": None,
+        "model": "tts-1",
+        "voice": "alloy",
+        "response_format": "mp3",
+        "speed": 1.0,
+        "provider": "openai",
+        "language_code": "es",
+    }
 
 
 @pytest.mark.parametrize("missing", [None, SecretStr("")])
@@ -352,8 +379,9 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
-    mock_radient_client.create_speech.assert_not_called()
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Sign in to Radient in Settings to enable speaking aloud."
+    mock_radient_client.create_speech_response.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -385,7 +413,7 @@ async def test_create_speech_passes_actionable_refusals_through(
     The upstream's own envelope must not reach the response: it is written for
     an operator, and the raw frame can carry request material.
     """
-    mock_radient_client.create_speech.side_effect = APIError(
+    mock_radient_client.create_speech_response.side_effect = APIError(
         "insufficient credits for this request",
         status_code=status,
         body='{"error": "insufficient credits for this request", "code": "billing"}',
@@ -396,13 +424,14 @@ async def test_create_speech_passes_actionable_refusals_through(
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == status
-    assert exc_info.value.detail == sentence
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == sentence
 
 
 @pytest.mark.asyncio
 async def test_create_speech_keeps_the_502_path_for_an_error_envelope(mock_radient_client):
     """A 200 body that is an error envelope keeps the pre-existing 502 diagnostic."""
-    mock_radient_client.create_speech.side_effect = APIError(
+    mock_radient_client.create_speech_response.side_effect = APIError(
         "Failed to generate speech: Radient returned an error body with a 200 status",
         status_code=200,
         body='{"error": "vendor quota exceeded"}',
@@ -413,16 +442,17 @@ async def test_create_speech_keeps_the_502_path_for_an_error_envelope(mock_radie
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 502
-    assert "Radient reported an error (HTTP 200)" in exc_info.value.detail
+    detail = _media_envelope(exc_info.value.detail)
+    assert "Radient reported an error (HTTP 200)" in detail["text"]
     # The envelope's designed `error` field is extracted; the raw frame is not quoted.
-    assert exc_info.value.detail.endswith("vendor quota exceeded")
-    assert '{"error"' not in exc_info.value.detail
+    assert detail["text"].endswith("vendor quota exceeded")
+    assert '{"error"' not in detail["text"]
 
 
 @pytest.mark.asyncio
 async def test_create_speech_extracts_the_error_field_for_other_statuses(mock_radient_client):
     """A non-actionable status keeps 502 but carries only the designed `error` prose."""
-    mock_radient_client.create_speech.side_effect = APIError(
+    mock_radient_client.create_speech_response.side_effect = APIError(
         "Invalid model",
         status_code=400,
         body='{"error": "unknown model eleven_bogus_v1", "code": "invalid_request"}',
@@ -433,8 +463,9 @@ async def test_create_speech_extracts_the_error_field_for_other_statuses(mock_ra
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 502
-    assert "unknown model eleven_bogus_v1" in exc_info.value.detail
-    assert '{"error"' not in exc_info.value.detail
+    detail = _media_envelope(exc_info.value.detail)
+    assert "unknown model eleven_bogus_v1" in detail["text"]
+    assert '{"error"' not in detail["text"]
 
 
 def _speech_request(**overrides: Any) -> SpeechRequest:
@@ -475,8 +506,9 @@ def _credentialed_client() -> MagicMock:
     # The cascade calls the HEADER-CARRYING variant so it can relay the hub's
     # own ``X-Radient-Speech-Provider`` (the echoed-actual-path rule: a
     # descriptor-bearing request names no leg, so only the hub's receipt knows
-    # which one served). ``create_speech`` stays wired for the untouched
-    # ``/v1/tools/speech`` pass-through.
+    # which one served) AND read the hub's ``X-Radient-Cost-*`` charge headers
+    # for the spend record (PR-3); the direct route's legacy pass-through goes
+    # through the same variant for the same reason.
     client.create_speech_response.return_value = (b"audio_data", {})
     return client
 
@@ -537,17 +569,23 @@ async def test_create_agent_speech_uses_the_elevenlabs_contract(tmp_path):
     # The daemon's own receipt names the rung that ran, even though the hub
     # named no leg back in this fake (``provider_tts_radient`` is the rung).
     assert response.headers["x-radient-speech-path"] == "provider_tts_radient"
-    # assert_called_once_with pins the ABSENCE of provider/voice/speed/model too.
-    radient_client.create_speech_response.assert_called_once_with(
-        "Hello",
-        model=None,
-        voice=None,
-        instructions=None,
-        response_format="mp3",
-        speed=None,
-        provider=None,
-        language_code="es",
-        voice_descriptor={
+    # The call pins the ABSENCE of provider/voice/speed/model too. The PR-3
+    # correlation pair also rides it: the agent route names no conversation
+    # (empty session id — the header itself is omitted client-side), and the
+    # request id is minted per request, so its value is asserted by shape.
+    assert radient_client.create_speech_response.call_args.args == ("Hello",)
+    sent = radient_client.create_speech_response.call_args.kwargs
+    assert sent.pop("session_id") == "", "the agent route names no conversation"
+    assert len(sent.pop("client_request_id")) == 32
+    assert sent == {
+        "model": None,
+        "voice": None,
+        "instructions": None,
+        "response_format": "mp3",
+        "speed": None,
+        "provider": None,
+        "language_code": "es",
+        "voice_descriptor": {
             "version": 1,
             "gender": "female",
             "tone": "warm",
@@ -557,7 +595,7 @@ async def test_create_agent_speech_uses_the_elevenlabs_contract(tmp_path):
             "pace": 1.0,
             "instructions": DEFAULT_SPEECH_INSTRUCTIONS,
         },
-    )
+    }
 
 
 @pytest.mark.asyncio
@@ -703,14 +741,15 @@ async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
                     _env_config(),
                 )
         assert exc_info.value.status_code == expected_status
+        detail = _media_envelope(exc_info.value.detail)
         if expected is None:
             # A rate limit, a fault and a rejected request are not credit
             # conditions: they keep the sentence that names nobody, so it is not
             # asserted as a vendor literal.
-            assert "ElevenLabs" not in exc_info.value.detail
+            assert "ElevenLabs" not in detail["text"]
         else:
-            assert exc_info.value.detail == expected
-        assert "Radient" not in exc_info.value.detail
+            assert detail["text"] == expected
+        assert "Radient" not in detail["text"]
 
 
 @pytest.mark.asyncio
@@ -749,7 +788,8 @@ async def test_a_generic_vendor_refusal_keeps_the_provider_neutral_sentence(tmp_
             )
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "Speech is unavailable right now. Try again in a moment."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Speech is unavailable right now. Try again in a moment."
 
 
 def test_an_over_long_speak_aloud_input_is_refused_at_the_schema():
@@ -789,8 +829,9 @@ async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path, caplog):
         )
 
     assert exc_info.value.status_code == 404
-    assert exc_info.value.detail == "This conversation's agent is no longer available."
-    radient_client.create_speech.assert_not_called()
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "This conversation's agent is no longer available."
+    radient_client.create_speech_response.assert_not_called()
     # The raw id stays support-visible through the log line, not the copy
     # (design round 1, D1).
     assert any(
@@ -828,10 +869,11 @@ async def test_create_agent_speech_requires_a_credential_before_any_work(tmp_pat
             )
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == "Sign in to Radient in Settings to enable speaking aloud."
     configure_call.assert_not_called()
     voice_call.assert_not_called()
-    radient_client.create_speech.assert_not_called()
+    radient_client.create_speech_response.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -864,7 +906,8 @@ async def test_create_agent_speech_passes_refusals_through(tmp_path):
             )
 
     assert exc_info.value.status_code == 402
-    assert exc_info.value.detail == (
+    detail = _media_envelope(exc_info.value.detail)
+    assert detail["text"] == (
         "Your Radient credit balance is too low for speech. "
         "Add credits in the Radient Console to continue."
     )
@@ -898,7 +941,11 @@ async def test_create_agent_speech_500_logs_the_stack(tmp_path, caplog):
             )
 
     assert exc_info.value.status_code == 500
-    assert "Failed to generate speech: boom" in exc_info.value.detail
+    assert exc_info.value.detail == {
+        "code": "wire.errors.media.speech_generate_failed",
+        "params": {"error": "boom"},
+        "text": "Failed to generate speech: boom",
+    }
     _speech_logged_the_stack(caplog)
 
 
@@ -920,3 +967,159 @@ def test_language_codes_must_be_iso639_1(bad):
 def test_language_codes_accept_iso639_1(good):
     assert _speech_request(language_code=good).language_code == good
     assert _agent_speech_request(language_code=good).language_code == good
+
+
+# -- PR-3: the hub's charge becomes a spend record ----------------------------
+
+#: A live-shaped ``X-Radient-Cost-*`` header set (docs.radienthq.com, speech-api
+#: "What you were charged") plus the speech provider receipt, all lower-name
+#: pairs as the client returns them from ``dict(response.headers)``.
+LEGACY_COST_HEADERS = {
+    "X-Radient-Speech-Provider": "elevenlabs",
+    "X-Radient-Cost-Version": "1",
+    "X-Radient-Cost-Amount-Usd": "0.001",
+    "X-Radient-Cost-Basis": "billed",
+    "X-Radient-Cost-Unit": "char",
+    "X-Radient-Cost-Units": "25",
+    "X-Radient-Cost-Usage-Record-Id": "6acabfcf80f7de3d24c98268",
+    "X-Radient-Cost-Provider": "elevenlabs",
+    "X-Radient-Cost-Model": "eleven_flash_v2_5",
+    "X-Radient-Cost-Price-Version": "speech-rates@2026-09-30",
+}
+
+
+def _session_config(tmp_path: Path, session_id: str) -> ConfigManager:
+    """A REAL config manager whose ``sessions/<id>`` directory exists.
+
+    A real manager (not a stand-in): the marker write re-reads config_dir and
+    stats the session directory, and the type checker is right that a
+    ``SimpleNamespace`` would not answer ``config_dir`` the way the caller
+    assumes — the session directory it names must exist for a marker.
+    """
+    config = ConfigManager(config_dir=tmp_path / "config")
+    (tmp_path / "config" / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+    return config
+
+
+@pytest.mark.asyncio
+async def test_the_direct_route_records_the_hub_charge(tmp_path):
+    """The legacy pass-through's cost headers become ONE spend record (PR-3).
+
+    The record is handed to analytics and — because the session id names a
+    local session directory — a pending marker lands in that session's sidecar,
+    which is the §4.2 fallback: the daemon cannot append to the owning
+    runtime's journal, so the fold reports the record as pending rather than
+    folding it (every surface shows the same total, without it).
+    """
+    radient_client = _credentialed_client()
+    radient_client.create_speech_response.return_value = (b"audio_data", dict(LEGACY_COST_HEADERS))
+    captured: list[Any] = []
+
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured.append,
+    ):
+        response = await create_speech(
+            _speech_request(session_id="sess-1"),
+            radient_client,
+            MagicMock(),
+            _session_config(tmp_path, "sess-1"),
+            _env_config(),
+        )
+
+    assert response.status_code == 200 and response.body == b"audio_data"
+    assert len(captured) == 1
+    record = captured[0]
+    assert record.channel == "tts"
+    assert record.session_id == "sess-1"
+    # The hub's stated figures WIN over the client's own count.
+    assert record.amount_micro == 1000
+    assert record.billing_basis == "billed"
+    assert record.cost_source == "server_reported"
+    assert record.units == 25.0 and record.unit == "chars"
+    assert record.provider == "elevenlabs" and record.model == "eleven_flash_v2_5"
+    assert record.request_id == "6acabfcf80f7de3d24c98268"
+    # And the marker the owning fold reads to say "voice: pending_owner_append".
+    pending = read_pending_records(tmp_path / "config" / "sessions" / "sess-1")
+    assert len(pending) == 1 and pending[0]["record_id"] == record.record_id
+    assert pending[0]["reason"] == "pending_owner_append"
+
+
+@pytest.mark.asyncio
+async def test_an_old_hub_without_the_header_set_states_unknown_never_zero(tmp_path):
+    """FALSIFICATION companion: drop the cost headers and the amount must LOSE.
+
+    An older hub answers with no ``X-Radient-Cost-*`` pair at all. The record
+    must then read amount unknown / basis not_tracked / source none — this reds
+    if the seam ever assumes zero for an absent figure — while keeping the
+    client's own billable count and the pending marker (a charge exists even
+    when its figure does not).
+    """
+    radient_client = _credentialed_client()
+    radient_client.create_speech_response.return_value = (b"audio_data", {})
+    captured: list[Any] = []
+
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured.append,
+    ):
+        await create_speech(
+            _speech_request(session_id="sess-2"),
+            radient_client,
+            MagicMock(),
+            _session_config(tmp_path, "sess-2"),
+            _env_config(),
+        )
+
+    record = captured[0]
+    assert record.amount_micro is None
+    assert record.billing_basis == "not_tracked"
+    assert record.cost_source == "none"
+    assert record.units == float(len("Hello")) and record.unit == "chars"
+    assert read_pending_records(tmp_path / "config" / "sessions" / "sess-2")
+
+
+@pytest.mark.asyncio
+async def test_the_descriptor_path_records_the_charge_and_sends_correlation(tmp_path):
+    """The agent-less descriptor path emits the same record and correlates it.
+
+    The session id rides OUT as ``X-Radient-Client-Session-Id`` (the hub stores
+    it on its usage row — the reconcile join) and the record lands against the
+    session. The credential scope is deliberately untouched: the store resolves
+    rungs exactly as before, and the correlation pair is attribution only.
+    """
+    radient_client = _credentialed_client()
+    radient_client.create_speech_response.return_value = (b"audio_data", dict(LEGACY_COST_HEADERS))
+    captured: list[Any] = []
+    config = _session_config(tmp_path, "sess-3")
+
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="female",
+        ),
+        patch(
+            "local_operator.server.utils.voice_spend.enqueue_channel_record",
+            side_effect=captured.append,
+        ),
+    ):
+        response = await create_speech(
+            # The descriptor-driven shape: model and voice absent as a PAIR,
+            # provider never named — built through the typed-dict helper the
+            # file's other descriptor tests use (pyright treats a pydantic
+            # model's defaulted fields as required keyword arguments).
+            _speech_request(input="Hello", model=None, voice=None, session_id="sess-3"),
+            radient_client,
+            _speech_store(tmp_path),
+            config,
+            _env_config(),
+        )
+
+    assert response.status_code == 200
+    sent = radient_client.create_speech_response.call_args.kwargs
+    assert sent["session_id"] == "sess-3"
+    assert len(sent["client_request_id"]) == 32
+    assert captured[0].amount_micro == 1000
+    assert captured[0].session_id == "sess-3"

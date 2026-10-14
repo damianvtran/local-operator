@@ -262,7 +262,9 @@ def require_step_allowed(
     return _view(view.record, run_id=run_id or view.run_id)
 
 
-def begin_run(approval_id: str, *, now: float | None = None, root: Any = None) -> ApprovalView:
+def begin_run(
+    approval_id: str, *, now: float | None = None, root: Any = None, operation: str = ""
+) -> ApprovalView:
     """Open a run: ``approved|failed → connecting``, with a new run id.
 
     The state transition and the id belong to slice (a)'s locked writer; the id
@@ -285,6 +287,14 @@ def begin_run(approval_id: str, *, now: float | None = None, root: Any = None) -
     # edge mints a live token and writes the admit pre-answer, so a tampered
     # record must be refused before either can happen (agent review round 1,
     # Finding 1; the verify call is slice (a)'s ``verify_for_run``).
+    if "credential_finite_share" in view.what and operation != "credential_finite_share":
+        # Every generic runner shares this admission seam. Reusing the normal
+        # signed envelope does not authorize SSH, install, invite or joining.
+        raise MeshRefusal(
+            "finite_apply_required",
+            "Use the exact credential share --approval command; "
+            "this finite request does not authorize onboarding",
+        )
     if view.state == "denied":
         raise _denied_refusal(approval_id, view)
     _call("verify_for_run", approval_id, root=root)

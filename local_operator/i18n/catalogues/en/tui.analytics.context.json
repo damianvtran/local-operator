@@ -1,0 +1,497 @@
+{
+  "tui.analytics.chart.daily_empty": {
+    "note": "The daily chart's empty state, dim, indented two cells at its use site. Shown when the store returned an empty (not None) series: 'no usage yet', not 'failed' — the two must not collapse.",
+    "role": "chart empty state",
+    "tone": "plain, sentence-lowercase"
+  },
+  "tui.analytics.chart.metric_clause": {
+    "note": "Self-describes the active metric and the toggle key: 'cost · t → tokens'. Shared by both charts' section metas so they speak one voice. {active}/{other} arrive from the METRIC_* machine vocabulary (cost/tokens); translating the metric NAMES themselves is a follow-up if that vocabulary becomes user copy.",
+    "role": "chart meta clause",
+    "tone": "compact, key-first"
+  },
+  "tui.analytics.chart.monthly_empty": {
+    "note": "Monthly chart's empty state; sibling of the daily one, same rules.",
+    "role": "chart empty state",
+    "tone": "plain, sentence-lowercase"
+  },
+  "tui.analytics.chart.monthly_meta": {
+    "note": "Prefix that distinguishes the monthly chart's bucket from the daily one; joins the metric clause: 'by calendar month · cost · t → tokens'.",
+    "role": "chart meta prefix",
+    "tone": "functional, lowercase"
+  },
+  "tui.analytics.chart.monthly_title": {
+    "note": "Section title for the monthly bars. Title-case like every section header.",
+    "role": "chart title",
+    "tone": "title-case, one word"
+  },
+  "tui.analytics.empty.hint": {
+    "note": "The one line telling a first-time user how the screen fills; legible on purpose (dim, not faint). Never truncated by design — the block crops rows, this hint is short enough to survive.",
+    "role": "empty-state hint",
+    "tone": "plain, reassuring"
+  },
+  "tui.analytics.empty.title": {
+    "note": "The empty ledger's first line, full-strength fg.",
+    "role": "empty-state title",
+    "tone": "plain sentence"
+  },
+  "tui.analytics.header.metric": {
+    "note": "The pinned title's chart-metric suffix ('bars: cost'), shown only when a chart exists to toggle. Shown while scrolled so the advertised key never reads dead. {metric} is the METRIC_* word.",
+    "role": "screen title suffix",
+    "tone": "compact status"
+  },
+  "tui.analytics.header.scope": {
+    "note": "The pinned title's scope suffix ('all sessions'); faint, appended after the title with a three-space gap the code adds.",
+    "role": "screen title suffix",
+    "tone": "faint, factual"
+  },
+  "tui.analytics.header.title": {
+    "note": "The analytics screen's pinned title. One title voice across overlays (bold fg, not the violet label).",
+    "role": "screen title",
+    "tone": "title-case"
+  },
+  "tui.analytics.hint.expand.compact": {
+    "note": "Hint-ladder tier: expandable rows, narrower box — drops 'esc back' but keeps both expand keys named.",
+    "maxCells": 31,
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.expand.full": {
+    "note": "Hint-ladder tier: expandable rows, no chart toggle to advertise. Widest tier after the metric one.",
+    "maxCells": 42,
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.expand.full_metric": {
+    "note": "Hint-ladder tier: expandable rows WITH charts (adds the metric toggle). The ladder picks the first tier that fits the real box; widths are per-locale concerns after a wave (RFC §7) — re-measure, do not trust this en length.",
+    "maxCells": 57,
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.expand.keys": {
+    "note": "Hint-ladder tier: very narrow — expand abbreviated to the bare key, both keys still named (an abbreviation that drops the key name documents nothing).",
+    "maxCells": 25,
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.expand.keys_bare": {
+    "note": "Hint-ladder floor: the two keys, nothing else. 'esc back' is never re-added below this tier.",
+    "maxCells": 12,
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.none.full": {
+    "note": "Hint tier: no rows and nothing to scroll — only the way out remains.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.none.full_metric": {
+    "note": "Hint tier: no rows, nothing to scroll, charts present — esc plus the metric toggle.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.rows.bare": {
+    "note": "Hint tier: rows exist, narrow — the cursor keys alone.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.rows.full": {
+    "note": "Hint tier: rows exist, no charts — esc plus the cursor keys.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.rows.full_metric": {
+    "note": "Hint tier: rows exist, charts present, wide — esc, the metric toggle, the cursor keys. 'row' (not 'scroll') names the half a reader needs: the cursor moves on every ledger with rows.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.scroll.bare": {
+    "note": "Hint tier: no cursorable rows but scrollable content — the arrows only scroll.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.scroll.full": {
+    "note": "Hint tier: scrollable, no charts — esc plus the scroll keys.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.hint.scroll.full_metric": {
+    "note": "Hint tier: scrollable with charts, wide.",
+    "role": "footer hint tier",
+    "tone": "compact key legend"
+  },
+  "tui.analytics.input.empty": {
+    "note": "The input-attribution block's empty line ('no component data yet'), indented two cells and dim at its use site.",
+    "role": "section empty state",
+    "tone": "plain, sentence-lowercase"
+  },
+  "tui.analytics.input.meta": {
+    "note": "Section meta stating the split is ESTIMATED — the honesty label the section's data level also carries (the ≈ mark).",
+    "role": "section meta",
+    "tone": "caveat, lowercase"
+  },
+  "tui.analytics.input.title": {
+    "note": "Section header for the input attribution table (where the context tokens went).",
+    "role": "section title",
+    "tone": "title-case"
+  },
+  "tui.analytics.legend.cost": {
+    "note": "STILL A FROZEN ENGLISH CONSTANT at extraction time (``analytics_panel.COST_LEGEND``): imported by ``session_panel.py`` for the /session screen, so keying it here would change a surface this slice does not own. Deferred to the slice that takes both screens' legend (or the session-panel slice); the internal three-space run before '$—' is deliberate alignment and must survive any future edit.",
+    "role": "money-marks legend",
+    "tone": "terse glossary"
+  },
+  "tui.analytics.model.capped": {
+    "note": "Says the table is capped so a truncated list never reads as 'these are all your models'. {limit} is the read bound (MODEL_RATES_LIMIT), rendered as digits.",
+    "role": "table disclosure",
+    "tone": "plain, factual"
+  },
+  "tui.analytics.model.empty": {
+    "note": "The ANSWERED-but-empty state: a claim about the ledger, distinct from pending (no answer yet) and failed (query broke). Parenthesised, dim, indented at its use site.",
+    "role": "section empty state",
+    "tone": "parenthetical, lowercase"
+  },
+  "tui.analytics.model.failed": {
+    "note": "The read broke. 'the rest of this report is unaffected' is load-bearing: it tells the reader the failure is scoped, not the screen.",
+    "role": "section error state",
+    "tone": "plain, scoped reassurance"
+  },
+  "tui.analytics.model.legend": {
+    "note": "The two rate columns and what the dash means; drawn whenever ANY cell is unknown. 'wall = whole call' must not be shortened to a rate word — decode vs wall is the diagnosis this table exists for.",
+    "role": "table legend",
+    "tone": "terse glossary"
+  },
+  "tui.analytics.model.meta": {
+    "note": "Scope note: the rows come from the raw ledger, all time — the same scope the headline covers, so a row can be held against the headline.",
+    "role": "section meta",
+    "tone": "terse, factual"
+  },
+  "tui.analytics.model.pending": {
+    "note": "The read is in flight (it is a slow grouped scan): 'no rows' and 'no answer yet' are different facts.",
+    "role": "section pending state",
+    "tone": "plain, lowercase"
+  },
+  "tui.analytics.model.title": {
+    "note": "Section header for the per-model rate table.",
+    "role": "section title",
+    "tone": "title-case"
+  },
+  "tui.analytics.rate.legend": {
+    "note": "Coverage footnote under both tables: the decode rate speaks for {shown} of {total} calls. Drawn once, only when coverage is partial (a fully-measured run draws nothing). {shown}/{total} format with grouping; the noun is invariable — \"calls\" for every total at extraction, never pluralise it.",
+    "role": "table footnote",
+    "tone": "plain, factual"
+  },
+  "tui.analytics.search.by_provider": {
+    "note": "Dim sub-label partitioning the search block's total by provider; indented two cells at its use site. Same words as the model table's header — kept a second key for its distinct role (a partition note, not a table header).",
+    "role": "sub-label",
+    "tone": "title-case"
+  },
+  "tui.analytics.search.counted_read": {
+    "note": "A count of page reads ('3 reads'). Kept apart from searches: a row recorded under <provider>:read exists precisely to keep reads out of the search count.",
+    "role": "count phrase",
+    "tone": "plain count"
+  },
+  "tui.analytics.search.counted_search": {
+    "note": "A count of searches ('5 searches'); the plural of this word is not an s-suffix, which is why it is a catalogue plural rather than a suffix.",
+    "role": "count phrase",
+    "tone": "plain count"
+  },
+  "tui.analytics.search.incl_free_read": {
+    "note": "The cost note's free-volume half for a reads-only session; branch on COUNTERS, never on money (zero usd is also 'unpriced').",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.incl_free_search": {
+    "note": "The cost note's free-volume half for searches; a zero money figure names nothing, the volume form survives the 80-column crop.",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.incl_money_read": {
+    "note": "The cost note's money half (reads kind). {money} arrives pre-formatted by format_cost — including its honesty marks (+/$—) — never re-format it.",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.incl_money_search": {
+    "note": "The cost note's money half (search kind). {money} pre-formatted by format_cost; the '$0.0000 search' defect this branch replaced is why zero never takes it.",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.incl_unpriced_read": {
+    "note": "The cost note for unpriced reads; counted apart from unpriced searches (the split happens before the naming).",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.incl_unpriced_search": {
+    "note": "The cost note for unpriced searches; 'unpriced' is the ledger's counter, not an inference from money.",
+    "role": "cost-note rung",
+    "tone": "compact, lowercase"
+  },
+  "tui.analytics.search.meta_bars": {
+    "note": "Search section meta with the bars advertisement appended ('{meta} · bars: operations'). Only when a bar is actually drawn — below the threshold the clause orphaned a line and cropped mid-word.",
+    "role": "section meta",
+    "tone": "functional"
+  },
+  "tui.analytics.search.meta_live": {
+    "note": "The search block's meta on /analytics: the ledger it reads is the live process-wide one.",
+    "role": "section meta",
+    "tone": "functional"
+  },
+  "tui.analytics.search.note": {
+    "note": "The search block's note: why the numbers exist before disk and who is NOT counted. Wrapped with an indented continuation at its use site; keep the sentence structure if a translation reflows.",
+    "role": "section note",
+    "tone": "explanatory"
+  },
+  "tui.analytics.search.note_join": {
+    "note": "Joins a search-count rung with the read half's own rung; both {note}/{read_note} are ALREADY-RENDERED strings from sibling keys.",
+    "role": "note assembly",
+    "tone": "structural"
+  },
+  "tui.analytics.search.note_read_full": {
+    "note": "Read-count rung for an all-unpriced scope ('3 reads · no published price').",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.note_read_partial": {
+    "note": "Read-count rung mixing priced and unpriced ('5 reads · 2 unpriced'); the unpriced tally is a parameter, the count still leads.",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.note_read_unpriced": {
+    "note": "The short read rung ('5 reads · unpriced'); after it the qualifier wraps to its own indented line rather than being cropped away.",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.note_search_full": {
+    "note": "Search-count rung for an all-unpriced scope; the count is on every rung because it is the part that must not be lost.",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.note_search_partial": {
+    "note": "Search-count rung mixing priced and unpriced; the third number must reconcile with the row above it or a reader recomputes by hand.",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.note_search_unpriced": {
+    "note": "The short search rung; the ladder's tail when width is scarce.",
+    "role": "note ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.row_session": {
+    "note": "The current session's own row in the search block (space between total and session rows is premium; the row exists only when the share is worth showing).",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.search.row_total": {
+    "note": "The search block's reference row: the process-wide total. No bar on it — it is what every other bar is measured against.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.search.share_bare": {
+    "note": "Narrowest share rung ('5 searches · 100% share'): keeps a referent — a bare '· 100%' says a proportion of nothing.",
+    "role": "share ladder rung",
+    "tone": "compact"
+  },
+  "tui.analytics.search.share_short": {
+    "note": "Compact share rung ('· 100% of search'); shorter than 'of search spend' but still names what the share is OF. {counted} is an already-rendered sibling key.",
+    "role": "share ladder rung",
+    "tone": "compact"
+  },
+  "tui.analytics.search.share_spend": {
+    "note": "Widest share rung for the session row; {counted} arrives rendered from the counted_* keys.",
+    "role": "share ladder rung",
+    "tone": "plain"
+  },
+  "tui.analytics.search.summary_free": {
+    "note": "Free-only summary rung ('6 free'); no '· $0.0000' — structurally always zero there, which is why it is absent by design.",
+    "role": "summary ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.summary_free_paid": {
+    "note": "Both-halves summary ('3 of 5 priced free · $0.0000 paid'): the denominator is the PRICED operations, which is what makes the numbers reconcile. {free}/{priced} are plain digits; {money} is format_cost output.",
+    "role": "summary ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.summary_free_paid_short": {
+    "note": "Compact both-halves rung ('3/5 free · $— paid').",
+    "role": "summary ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.summary_paid": {
+    "note": "Paid-only summary rung ('2 paid ($0.0031)').",
+    "role": "summary ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.summary_paid_short": {
+    "note": "Compact paid-only rung ('2 paid') — the money sheds first, the count never.",
+    "role": "summary ladder rung",
+    "tone": "compact count"
+  },
+  "tui.analytics.search.title": {
+    "note": "The search-spend block's section header. Shared by /analytics and /session — one vocabulary, two screens.",
+    "role": "section title",
+    "tone": "title-case"
+  },
+  "tui.analytics.search.unpriced_clause": {
+    "note": "The appended unpriced tally (' · 2 unpriced') on summary ladders; the code adds the leading space. Dropped entirely when there is nothing unpriced.",
+    "role": "summary clause",
+    "tone": "compact"
+  },
+  "tui.analytics.table.by_provider": {
+    "note": "The model-usage provider table's section header (distinct from the search block's dim sub-label of the same words — this one is a full section).",
+    "role": "table header",
+    "tone": "title-case"
+  },
+  "tui.analytics.table.by_session": {
+    "note": "The per-session table's section header; its meta may say 'totals include subagents'.",
+    "role": "table header",
+    "tone": "title-case"
+  },
+  "tui.analytics.table.cache": {
+    "note": "The cache-percentage tail ('42% cache'). {value} is pre-padded by the caller (the column pad lives in code); the WORD lives here for measurement: _row_overhead reads this tail's cell width to budget the row.",
+    "role": "table tail",
+    "tone": "tabular"
+  },
+  "tui.analytics.table.calls": {
+    "note": "The calls-count tail ('317,977 calls'). {value} pre-padded to the column by the caller; the word is measured (cell_len of this rendered tail) by _row_overhead — never hard-code its width.",
+    "role": "table tail",
+    "tone": "tabular"
+  },
+  "tui.analytics.table.coverage": {
+    "note": "The per-model coverage tail ('8/10 calls') — calls covered out of calls made; plain digits, no grouping in either number (they are both small; the original form predates grouping).",
+    "role": "table tail",
+    "tone": "tabular"
+  },
+  "tui.analytics.table.empty": {
+    "note": "The '(none)' line both empty tables draw (session and group sections); parenthesised, dim, indented at its use site.",
+    "role": "table empty state",
+    "tone": "parenthetical"
+  },
+  "tui.analytics.table.subagent_suffix": {
+    "note": "The '+12 subagents' tail a root row advertises after its name (the hidden-row count). Shown in BOTH expand states: a suffix that disappeared on expand would change the widest label and reflow every numeric column on a keypress. Spelled with the word (not a bare '+12') because every other number on the row is money/tokens/calls.",
+    "role": "row suffix",
+    "tone": "metadata, dim"
+  },
+  "tui.analytics.table.tok_s": {
+    "note": "The rate tail ('41.2 tok/s'; '— tok/s' when unmeasured). {value} pre-padded by the caller; the word is width-measured by _row_overhead/_model_rate_section's reserve.",
+    "role": "table tail",
+    "tone": "tabular"
+  },
+  "tui.analytics.table.tokens": {
+    "note": "The tokens tail ('3.7M tokens'). {value} arrives pre-formatted (format_tokens) and pre-padded to the column; the word is cell_len-measured for the row budget.",
+    "role": "table tail",
+    "tone": "tabular"
+  },
+  "tui.analytics.totals.billed_note": {
+    "note": "The billed row's composition note ('3.5M in · 120k out'); {context}/{output} pre-formatted by format_tokens.",
+    "role": "row note",
+    "tone": "compact tabular"
+  },
+  "tui.analytics.totals.cache_hit": {
+    "note": "Row label: cache hit rate.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.cache_hit_note": {
+    "note": "What the cache-hit figure is OF ('of context served from cache'); plain lowercase clause that follows the value.",
+    "role": "row note",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.cache_read": {
+    "note": "Tree-row label under Context read. The code adds the ' \\u251c ' glyph+spaces; the message is the words only.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.cache_read_note": {
+    "note": "One-line explanation for the cache-read tree row.",
+    "role": "row note",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.cache_write": {
+    "note": "Tree-row label (last child: the code adds the ' \\u2514 ' glyph).",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.cache_write_note": {
+    "note": "One-line explanation for the cache-write tree row.",
+    "role": "row note",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.calls_failed": {
+    "note": "The failed-call clause appended to the Totals meta ('(2 failed)') — real information, not chrome; shown only when ok_calls != calls. Plain digits (the original form predates grouping).",
+    "role": "meta clause",
+    "tone": "parenthetical"
+  },
+  "tui.analytics.totals.calls_meta": {
+    "note": "The Totals meta's call count ('426 calls'); the failed clause and '· measured' are appended by code with single spaces.",
+    "role": "section meta",
+    "tone": "compact count"
+  },
+  "tui.analytics.totals.calls_measured": {
+    "note": "The '· measured' suffix on the Totals meta — the denominator honesty for every rate that follows.",
+    "role": "meta suffix",
+    "tone": "compact"
+  },
+  "tui.analytics.totals.context_note": {
+    "note": "The Context-read note restating the tree's composition ('3M fresh · 3.4M cached · 78k written') so compact formatting cannot hide the sum. All three pre-formatted.",
+    "role": "row note",
+    "tone": "compact tabular"
+  },
+  "tui.analytics.totals.context_read": {
+    "note": "Row label: the full context read (the parent of the three cache tree rows). Authoritative provider counts, not estimates.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.days_empty": {
+    "note": "The daily chart's static title when the series is empty (no count to state); the counted form below is the non-empty sibling.",
+    "role": "chart title",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.days_with_usage": {
+    "note": "The daily chart's counted title ('3 days with usage'). 'with usage' is exact: the series skips idle days, so it is not a calendar span. Singular for one.",
+    "role": "chart title",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.decode": {
+    "note": "Row label: decode rate (how fast the models actually generate).",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.decode_note": {
+    "note": "What the decode figure measures; the coverage footnote below the tables says how much of the ledger it speaks for.",
+    "role": "row note",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.fresh": {
+    "note": "Tree-row label: ALL uncached input (new turns plus fresh tool results/system content), NOT 'user input' — labelling it as user messages would be wrong. Glyph added by code.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.fresh_note": {
+    "note": "One-line explanation for the fresh tree row ('new input, billed at full rate').",
+    "role": "row note",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.output": {
+    "note": "Row label: output tokens.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.output_note": {
+    "note": "The output row's generation/thinking split ('12k generation, 4k thinking'); both pre-formatted.",
+    "role": "row note",
+    "tone": "compact tabular"
+  },
+  "tui.analytics.totals.row_billed": {
+    "note": "Row label: total billed tokens.",
+    "role": "row label",
+    "tone": "title-case"
+  },
+  "tui.analytics.totals.subagent_meta": {
+    "note": "The session table's meta when the forest has children: explains why a root's figure exceeds its own spend and that indented rows are already counted in the row above.",
+    "role": "table meta",
+    "tone": "lowercase clause"
+  },
+  "tui.analytics.totals.title": {
+    "note": "The Totals section header.",
+    "role": "section title",
+    "tone": "title-case"
+  }
+}

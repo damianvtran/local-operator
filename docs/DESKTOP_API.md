@@ -169,10 +169,141 @@ claim gates them: `/v1/chat`, `/v1/sse`, `/v1/static`, and the
 This predates the claim handshake and is unchanged by it; on a daemon whose
 allowlist admits an origin, a claim still removes their CORS grant from every
 other origin, so a page can no longer *read* them cross-origin, while an
-allowlist-less daemon keeps the echo (see the `null`-origin residual above) and
-an unauthenticated local caller can still reach them either way. Widening the
+allowlist-less daemon keeps the echo (see the `null`-origin residual above) --
+**except `/v1/static`, which drops it on every daemon, see below** -- and an
+unauthenticated local caller can still reach them either way. Widening the
 gate to cover them is a separate, larger decision and is recorded rather than
 made here.
+
+`/v1/static/*` is the one of those four that now carries its own hardening
+(`server/utils/static_roots.py`), because it is the one that reads arbitrary files
+(except the Host check below, which since P1.5 covers every route of the app):
+
+- **The bound is the connection, not a directory list.** `lop serve` refuses every
+  non-loopback bind (`0.0.0.0`, `::`, LAN addresses, non-loopback-resolving names:
+  exit 1, no override flag), and the route itself serves UNCLAMPED only on a
+  connection the kernel accepted on a loopback address: `path` may be any absolute
+  path that resolves (symlinks followed) to a readable regular file. Anything else
+  -- a non-loopback, unknown or missing accepted address (fail-closed) -- gets the
+  v0.68.23 clamp: the file must resolve inside the agent home, `<config>/sessions`,
+  `<config>/uploads`, the working directory of a running session, or an explicit
+  root (`static.roots` / `LOCAL_OPERATOR_STATIC_ROOTS`; the settings row is now
+  labelled as fallback-only). In that fallback a session whose working directory is
+  `$HOME` or contains it adds nothing, a registered agent's working directory is not
+  a source at all (it is writable through the ungated `PATCH /v1/agents/<id>`), a
+  configured root that contains `$HOME` (`/`, `/Users`, `~/..`) is refused, and a
+  dot-directory below a root (`~/.ssh` under a root at `~`) is never served; the
+  `403` does not say whether the file exists and names the remedy. `..` is refused
+  outright in both postures. This design is
+  `docs/design/file-serving-and-surface-convergence.md` §3.
+- **Host check -- every route, not just this family (P1.5, RFC §3.6).** A `Host`
+  that is a DNS name other than `localhost` (or the daemon's own `--host`) is
+  refused with `403` on every route of the app, so a DNS-rebinding page, which is
+  same-origin and needs no CORS grant, cannot use any of them. Admitted: IP
+  literals (the app dials `http://127.0.0.1:<port>`), `localhost` in its port,
+  case and trailing-dot spellings, and the daemon's announced bind when it is a
+  specific name; a wildcard/empty announced host fails closed -- only IP literals
+  and `localhost` pass and a DNS name is refused (the former wildcard-bind bypass
+  is deleted); an absent `Host` passes (HTTP/1.0 clients; no browser omits it).
+  No route or client exemption exists: the shipped surfaces and the CLI dial
+  `127.0.0.1` literals, and a tunnel or SSH port-forward presents the literal it
+  dialed.
+- **Response policy.** Every response, errors included, carries `nosniff` and a
+  `Content-Security-Policy` ending in `frame-ancestors` (the app only), and no CORS
+  grant is made to an origin that is not on the admitted allowlist -- including, unlike
+  the rest of the legacy surface, on an allowlist-less daemon, because nothing reads
+  these routes with `fetch` (`<img>`/`<video>`/`<iframe src>` are not CORS-gated).
+- **Still open: enforcement.** The routes accept the Phase A token and signed
+  query URLs now (the subsection below carries the contract) but refuse nothing
+  on them yet; the UI change to present either is the recorded follow-up. Also
+  open: a symlink swapped between the check and the open (TOCTOU -- robustness
+  rather than a boundary once no root list bounds the read; the recorded fix is
+  Phase 3), and the accepted `<img>`-observable residual: general mode widens
+  that path existence/dimension signal to the whole disk, and it stays bounded
+  only because the document CSP keeps a preview page off the network
+  (`connect-src https:`, `worker-src blob:` -- pinned by a core-side test; any
+  future widening is a security change through the supplements-lane review,
+  RFC §3.7 item 10).
+- **The former 403 class is retired.** Every UI consumer that passes a user- or
+  agent-named path (composer thumbnails, message attachments, video/HTML previews,
+  canvas file viewer) is served on loopback -- `~/Downloads` picks, session
+  scratchpads, agent output anywhere -- so the `static.roots` remedy is no longer
+  needed in normal operation. What stays open is enforcement of that
+  authentication (above and below): the minting half has landed, refusing
+  arrives with the design's Phases B/C.
+
+### Local surface tokens and signed URLs (Phase A, permissive)
+
+The remaining gap above is authentication, and this is its first phase
+(`docs/design/file-serving-and-surface-convergence.md` §4). It ships
+PERMISSIVE: the credentials exist, validate and are observable, but nothing
+refuses on them yet. That is deliberate -- it lets every surface adopt them
+over a compat window before the later phases switch enforcement on, with no
+mixed-version cliff.
+
+**The serve-record fields.** Every announced boot draws a 256-bit seed
+(`secrets.token_bytes(32)`) and derives two values with HKDF-SHA256 (stdlib):
+the ACCESS TOKEN below, published in the record, and a signing key that never
+leaves the process. The seed is never stored. The record gains two additive
+fields: `access_token` (`"<generation>.<secret>"`) and `boot_generation`; an
+older reader drops them, and an older record parses with empty defaults. A
+restart re-derives the secret and bumps the generation, so a token and the
+record that carried it are classifiable against each other.
+
+**Presenting the token.** A surface reads the record and sends the token as
+`X-Local-Token: <generation>.<secret>`. Phase A, on the general
+(loopback-accepted) posture: a valid token is validated and counted; an
+invalid or stale one is treated as ABSENT -- never a refusal, and every
+malformed shape classifies as invalid rather than erroring -- and the first
+sighting of each stale generation logs one WARNING line (visible at the
+daemon's default log level). Rooted-mode STATIC reads ignore tokens -- the
+observation rides the general posture -- while the sign door accepts them in
+every mode (a valid token opens it on a rooted connection too). A surface
+can compare its token's generation prefix (or the `boot_generation` it cached)
+against the record and re-read on a mismatch. The later phases turn a missing
+or invalid token on a static GET into `401` with the stable code
+`files_token_required`, so clients get one re-read-and-retry rule.
+
+**Signed URLs for `src=` loads.** `POST /v1/static/sign` mints a URL for one
+static route + path + expiry. Authentication: the local access token or the
+desktop bearer; any failure is one stable `401` (the endpoint does not reveal
+which door refused). Body and response:
+
+```jsonc
+// POST /v1/static/sign
+{"route": "images",            // one of images|videos|audio|html
+ "path":  "/Users/me/x.png",   // the path string the URL will carry
+ "ttl_s": 600}                 // optional; default 600 s, cap 3600 s
+
+// 200
+{"url": "/v1/static/images?path=%2FUsers%2Fme%2Fx.png&exp=1730000000&sig=0000000000000000...",
+ "exp": 1730000000}
+```
+
+**The canonical signed bytes** -- both ends build exactly this, nothing else:
+
+```text
+sig = HMAC-SHA256(signing_key, f"{route}\n{path}\n{exp}")    # lowercase hex
+```
+
+`route` is the id above; `path` is the DECODED query value exactly as the
+request carries it (the URL percent-encodes it for the wire and the server
+decodes before verifying -- there is no second canonicalisation dialect);
+`exp` is unix seconds in decimal. The signature binds all three, so swapping
+the path, the route or `exp`, editing `sig`, or using the URL after `exp`
+fails verification -- which runs before any filesystem resolution, so an
+invalid signature can never probe what exists.
+
+**Replay and log exposure.** A signed URL is a bearer URL: whoever holds one
+can replay it until `exp`, and it travels in the query string, so the daemon's
+access log records `path`, `exp` and `sig` on every fetch. The token itself
+never lands in a log (headers are not logged).
+
+**`<video>` Range/seek lifetime.** Streaming issues many Range GETs against
+one URL. Mint with a `ttl_s` covering the viewing session (up to the 3600 s
+cap) and re-sign when the UI's existing version/mtime key changes
+(`html-preview.tsx:137`'s re-key is the precedent); when the later phases
+enforce expiry, a stale URL is a `401`-and-re-sign, not a stream failure.
 
 The deprecated `/v1/ws` socket surface was also in that ungated set and is now
 **gone** — route, mount and fan-out — so it is no longer listed. This is a
@@ -560,13 +691,13 @@ readings.
 | POST `/v1/desktop/sessions/draft` | `{request_id, cwd, target?, model?}` | `{draft_id, replayed?}`; registers an in-memory warmable draft — no directory, no runtime, no listing row (`session_draft_warm`) |
 | POST `/v1/desktop/sessions/preview` | `{request_id, cwd, target?, model?}` | `{frontend: <wire sync payload>}` for a session that does not exist |
 | POST `.../{id}/working-directory` | `{request_id, cwd}` | `{cwd,label,outcome:cold\|rebound\|unchanged,will_wait}`; gated by `features.session_move >= 2` AND `features.frontend_replace >= 1` |
-| GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1` | snapshot frame below (**read envelope**); `entry_ts=1` also applies to the page embedded in `payload.history` |
-| GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
+| GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
+| GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
 | GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`, index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
-| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` governs the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
+| GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1`, `open_frame=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` and `open_frame=1` govern the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 | POST `.../{id}/seen` | `{completion_token}` | `AttentionState`; 409 when the token is not this conversation's current completion |
@@ -1425,6 +1556,226 @@ changes: the row keeps the serve-stamp it has always received and carries
 `ts_source: "served"`. The matching capability key is `entry_ts` in
 `GET /v1/capabilities`' `features`, so a renderer can check before asking.
 
+### The open frame: a turn-aligned, paint-only page (`open_frame: 1`)
+
+The open is the one read every surface performs and the one whose shape every
+surface then re-derives. `open_frame=1` asks the backend for the page in the
+unit the surfaces actually PAINT — rows, runs and their facts — so a renderer
+can draw its final layout from one answer instead of reconciling and
+re-condensing for the next several hundred milliseconds. It is additive in both
+directions: without the flag every answer is byte-for-byte today's, and a
+renderer that reads none of the new fields sees today's page inside them.
+
+**Negotiation.** `open_frame=1` on `GET .../{id}` (the snapshot), `GET
+.../{id}/history` and `GET .../{id}/events` (where it governs the page embedded
+in the open frame's snapshot, exactly as `entry_ts=1` does). The matching
+capability key is `open_frame` in `GET /v1/capabilities`' `features`, so a
+renderer can check before asking. A client sends the flag on all three or on
+none: the snapshot's embedded page and `/history` are served by the same reader,
+and two shapes for one page is the defect the capability exists to prevent.
+
+#### What the flag changes
+
+1. **`limit` counts PAINTABLE rows.** A paintable row is one that survives the
+   strip below — the rows a transcript paints. Today the count is journal
+   entries, so bookkeeping rows (a 349 KB checkpoint, a 716 KB compaction, a
+   `session_spend.v1` row) take window slots AND bytes: on the operator's 40
+   largest journals 1,480 of 3,999 served rows on the tail pages were
+   bookkeeping customs or compactions. `limit` is unchanged in range (1..500);
+   its unit is.
+2. **The page cut extends back to the oldest included run's opening user row.**
+   A page that ends mid-run is what makes a client condense a partial run and
+   then re-condense it as pages land: the run's head is the row that says the
+   run started, and its absence is the whole reason the desktop's align walk
+   exists. The cut therefore counts `limit` paintable rows from the newest end
+   and then continues back to the next USER row above them — a user row is the
+   client's own run opener (`walkTurns`), so a page starting there begins a run
+   rather than cutting one. The rows that hunt added are bounded by
+   `OPEN_FRAME_MAX_EXTRA_ROWS` (100), so a page holds `limit` paintable rows plus
+   at most 100 more — AND THE CAPS WIN OVER `limit` WHEN THEY CONFLICT: `limit`
+   goes up to 500 while `OPEN_FRAME_MAX_ROWS` is 400, so a request for 500 rows
+   of a 3 KB-per-row journal is answered with 400 rows and `head_cut: true`, not
+   with fewer than `limit` rows silently or with more than the page can carry. A
+   page is therefore `min(limit, what the caps allow)` paintable rows, and the
+   flags say which of the two decided it.
+3. **A head the hunt cannot reach is not paid for, and the page says so.**
+   When no user row is within that budget — the operator's own case is a settled
+   run of 600 rows whose head sits hundreds of rows above the window — the page
+   is EXACTLY the `limit` paintable rows the client asked for and
+   `head_cut: true` states that its oldest run is a fragment. Serving the
+   overshoot instead was measured on the S3 fixture at 231 rows and 264 KB
+   against 100 rows and 114 KB, with a partial run at the top either way: the
+   extra rows cannot complete that run, and `runs` (below) states its true size
+   exactly. Two consequences a renderer depends on:
+
+   - `head_cut: true` is NOT a reason to fetch older pages. When `runs` covers
+     the run — matched by `run_key`, `opening_user_id` or `closing_answer_id` —
+     the page and the facts together ARE the final layout: draw the bar from
+     `action_count` / `worked_seconds` and do not walk.
+   - `head_cut: false` does not mean "every run on the page is whole" either: a
+     STEERED run's head is its first user row, and a page can begin at the steer.
+     The facts carry the whole run's span, which is what the bar is drawn from.
+
+   The hard caps still bound the read itself: `OPEN_FRAME_MAX_ROWS` (400)
+   paintable rows or `OPEN_FRAME_MAX_BYTES` (1,572,864) of served entries,
+   whichever comes first, so a 600-row run cannot turn a 300 ms open into a
+   mega-payload.
+4. **Non-painted bytes are stripped.** The strip is built from what each client
+   actually reads, checked in all three repositories before anything was
+   deleted (the file each read was found in is named below, and the whole list
+   is in the PR):
+   - **`custom` rows: an ALLOW-LIST.** The desktop projects a durable row in ONE
+     function (`transcript-reducer.ts::durableRecord`), and that function ends
+     every non-message row it does not recognise: among `type: "custom"` rows
+     only `completion_attention` survives (the notice branch at `:2543`, ahead of
+     the `if (entry.type !== "message") return null` gate at `:2592`). So exactly
+     that one is served and every other `custom` envelope is dropped, whatever it
+     holds. The types that appear in real journals and are dropped this way
+     include `frontend_state_checkpoint_v1` (39.1% of the tail bytes on this
+     machine's 40 largest journals, in rows of about 349 KB), `session_spend.v1`,
+     `session_state`, `system_prefix` (3.2%), `selected_model`,
+     `attention_started`, `wake_schedules`, `monitor_schedules`,
+     `subagent_roster`, `todo_snapshot`, `active_model_route`,
+     `conversation_name`, `aida_*`, `stt_transcript_v1` and
+     `mesh_credential_binding.v1`.
+     `system_prefix` is on that list DESPITE a module comment in
+     `transcript-rows.ts` claiming the prefix rows paint — the audit's strip list
+     repeated the claim. The reducer's gate refuses them, and the comment
+     describes a shape this build does not write; the reducer is the authority.
+     **A `custom` type added later is dropped until it is named**, which is the
+     fail-safe direction: a row no surface can paint may not spend the client's
+     row budget. Message-ROW customs are a different envelope with different
+     rules — the receipts, `job_result`, the ask rows and
+     `session_mcp_unavailable` are PAINTED, and the reducer's
+     `SILENT_CUSTOM_TYPES` names the ones that are not (`hub_communication`,
+     `wake_schedule`, `prune`), so both shapes are handled by the same reader
+     with one predicate each.
+   - **Unknown TOP-LEVEL types are served verbatim.** The allow-list is about the
+     `custom` envelope; an entry type this build has never seen is not this
+     contract's to judge, and a client already ignores what it does not recognise.
+   - **Compaction rows** keep their envelope and three payload keys:
+     `{id, ts, type, payload: {tokens_before, preview_text}}`. `tokens_before`
+     is the pairing fingerprint the reducer matches a live pass against
+     (`transcript-reducer.ts`), and `preview_text` is the marker's own one-line
+     summary (capped at 200 characters) for a surface that wants a caption. The
+     full `summary`, `preserve_data`, `preserved_user_turns*`,
+     `first_kept_entry_id` and `tokens_before`'s siblings are gone: no client
+     in the three repositories reads any of them from a history row, and they
+     are ~700 KB each on this machine.
+   - **Message rows** lose, inside `provider_payload`, `native_replay`,
+     `system_fingerprint` and the response `id` — the provider-replay material
+     the backend needs and no renderer paints (28% of message-row bytes on the
+     real tail pages) — and lose the top-level `usage`. Everything else a
+     renderer reads stays: `content`, `kind`, `role`, `custom_type`,
+     `custom_type`'s `details`, `tool_calls`, `tool_call_id`, `tool_name`,
+     `stop_reason`, `is_error`, `attribution`, and inside `provider_payload`:
+     `details` (tool paths, diffs, counts, `__fault`, `delivery`),
+     `duration_s`, `useless` and `harness_injected`.
+5. **Per-run facts**, for every run that intersects the page, derived from
+   `session/transcript_index.py` (already cached and incremental):
+
+   | field | meaning |
+   | --- | --- |
+   | `run_key` | the key the client's own record for the closing row carries, in `walkTurns`' vocabulary: a tool result is `tool:<call_id>`, a completion-marker notice is the **producer's** `completion-<token>` (the row's `details.anchor`; `prov-<token>` only for a row that carries no anchor — a legacy-journal path, since both producer paths set the anchor and a client derives nothing from the fallback (QA round 2, Q9)), anything else is its entry id. It is a convenience, not the only way in — a client matches a fact to a run it holds by scanning that run's rows for `run_key`, `opening_user_id` or `closing_answer_id` (review round 2, F11) — but a value the client never derives matches nothing on a head-cut run, and the bar falls back to the span it loaded (measured: 99 of 400 actions on a head-cut interrupted run, and "50+" for a 150-action run) |
+   | `opening_user_id` | the run's opening user row; `null` for a run that opens off a non-user row |
+   | `closing_answer_id` | the run's elected answer row, or `null` |
+   | `settled` | the run's outcome was recorded — a marker resolves it, or a newer settled run followed it |
+   | `outcome` | `complete` / `error` / `interrupted` / `open` / `null`, the rail's own vocabulary |
+   | `action_count` | tool rows in the run |
+   | `failed_count` | tool rows whose outcome is a genuine error, by the client's own predicate (a partial `send` delivery, a never-sent call, a stopped call and an interrupted fault are excluded) |
+   | `worked_seconds` | the sum of the run's `duration_s` values — the same quantity the bar and the turn's foot already state — and **`null`, never `0`, when no row reported one** (`workedSeconds` in `trace-fold-model.ts` states null for that case) |
+   | `cross_session_action_count` | how many of `action_count`'s calls are the ones the desktop HIDES when `display.hide_cross_session` is on: tool rows whose `tool_name` is `send`, the same arm as `cross-session-visibility.ts::visibleRecords`, counted whether or not the row's body survived the strip (the client hides the ROW). A client with the setting ON subtracts it — and `cross_session_worked_seconds`, the same split of `worked_seconds` — so its bar matches its own fold; a client with it off ignores both. **Failures are not split**: a hidden `send` row's failure stays inside `failed_count`, because the client's own filter does not split them (review round 2, F12) |
+   | `started_ts` / `ended_ts` | the run's opening row and its closing row, on the journal's clock |
+   | `complete` | `true` unless the index had to drop a row body inside this run (a row over the scanner's 2 MiB keep limit), in which case a count below is a lower bound. Measured 0 of 65,755 tool rows across the twelve largest journals here exceed that limit — the flag exists so a pathological row can never be reported as an exact count |
+
+   **`settled` is the honesty gate.** The count fields are filled ONLY for a
+   settled run. A run still in flight gets `settled: false`, no counts and no
+   `worked_seconds`: a live tail's tool rows are still arriving, so a number
+   taken now is a number the client would have to correct — the exact class of
+   after-paint change this contract exists to remove. A client keeps its own
+   fold for a run it does not find facts for.
+
+   **`runs_state` says where the facts came from**, and it is not decoration:
+   `"ready"` (facts present), `"building"` (no fresh index, so a background
+   scan was started and this answer carries none), `"unavailable"` (no index
+   could be built), `"unsupported"` (this page's source cannot carry facts —
+   see the remote scope below).
+
+   **A FLAGGED OPEN ON A COLD INDEX COSTS MORE THAN THE SAME READ UNFLAGGED, AND
+   THE DEADLINE DOES NOT BOUND THE EXTRA WORK.** The fact wait is bounded
+   (120 ms); the read in front of it is not, because a cold index makes it do work
+   the plain read never does. Measured on 41.5 MB journals with the arms
+   alternated, cold index on both sides: **at least the deadline, and measured
+   +82 ms to +720 ms over the same read unflagged**, the upper end at host load
+   39-55 — the spread is the host state, not the protocol, so the mechanism is the
+   figure to carry and the band is a lower bound. Three of four pairs exceeded the
+   deadline in both arm orders; the 118 MB pairs are inconclusive because
+   page-cache order dominates. That is a stated exception, not a defect to discover: a client that
+   needs the plain read's timing on a cold index should not negotiate the
+   capability for the FIRST open and let the next one (warm, with the facts) pay
+   nothing extra (QA round 2, Q6).
+
+   **`building` CAN REPEAT ACROSS THE OPENS OF ONE COLD READ.** The facts wait is
+   a deadline spent out of the read's own budget (`OPEN_FRAME_SNAPSHOT_BUDGET_S`,
+   120 ms), so a cold scan that does not land inside the snapshot does not land
+   inside the `/history` that follows it either: measured at 118 MB with a
+   checkpoint, the `/history` right after a `building` snapshot answers
+   `building` too (the scan is 559 ms). That is the contract, not a defect — the
+   next frame, or the next open, has the facts, and the client keeps its own
+   condensation meanwhile — and it is stated here so a client does not retry in a
+   loop waiting for a state the same open cannot produce.
+
+   **Why `building` rather than a scan on the hot path.** The index is the only
+   whole-journal source for a run's counts, and its cost was measured on this
+   host before it was put on the open path: `_scan_full` is 28 ms on the 5.9 MB
+   S3 fixture but 169 ms at 35 MB and 559 ms at 118 MB, against a whole open
+   budget of 300 ms. A full scan therefore does NOT ride the open. Facts are
+   served from an index that is already resident and current for the journal's
+   stat (the `checkpoints_view` fast path, one stat); when there is none, the
+   route starts the refresh and answers without facts, and the very next frame
+   — the client's own follow-up, the rail's poll, the reconnect — carries them.
+   An incremental refresh (the append case) measured 8/54/160 ms at 5.9/35/118 MB,
+   which is why a warm index stays cheap and why an unchanged journal costs a
+   stat.
+
+#### The anchored read keeps the reader's own counts
+
+`around_id` is the renderer's FAR JUMP: it asks for a POSITION, and its
+`before`/`after`/`limit` keep counting JOURNAL ROWS exactly as they do today,
+because re-centring the window on paintable rows would move the row the client
+jumped to. The strip still applies (the bytes are the bytes) and `runs` still
+covers the runs intersecting the window, so a jump target's turn facts are
+available; what such a page does NOT promise is that it holds `limit` paintable
+rows.
+
+#### Scope: local journals only, and the seams
+
+**A peer's frame is built by its OWNER, and the stored read is the path that
+reaches it.** A peer-owned id is served by different readers (`_remote_history`
+for the wire window, `_peer_stored_history` through `net_session_history` for
+the owner's stored journal), and the frame — the strip, the cut and the run
+facts — is the owner-side twin of the local build
+(`relay.RelayServer._open_frame_detail`, over the owner's own journal rows).
+THE LIVE WIRE WINDOW KEEPS TODAY'S SHAPE **AND SAYS SO**: its rows are MESSAGES
+rather than journal entries (the strip's key list does not describe them), its
+run facts would need a transcript index over a journal this device does not
+hold, and it answers `runs_state: "unsupported"` when the flag was asked for.
+An owner older than the facts half answers today's page without the three keys;
+the viewer defaults them to `runs: []` / `runs_state: "unsupported"` /
+`head_cut: false`, so a renderer MUST treat `unsupported` and an absent `runs`
+alike: draw today's page and keep its own condensation — no client meets a
+value it does not already tolerate.
+
+**The relay's first frame is not served from this builder in this revision**,
+and the reason is a precondition rather than an appetite: the phone's projection
+folds todos, subagents and asks from rows the strip removes, so a fold started
+from this page would lose derived state that no later read can restore (the
+`/history` fold cannot recover a row the window never carried). The seam is the
+module itself — `local_operator/session/open_frame.py` is a pure function of
+(rows, index facts, limits) with no HTTP or bridge in it, so the daemon can call
+it the day its fold has a bounded suffix to fold from. Until then the daemon
+keeps `DurableFoldCache` and the mobile plane is unchanged by this contract.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -1453,8 +1804,23 @@ Frames carry `{session_id,epoch,seq,type,payload}`; `heartbeat` and overflow `ga
 carry only `{session_id,type}`. This outer epoch/seq is the HTTP **semantic receipt
 cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 
-1. `open` supplies `{subscription_id,gap,watch_ttl_seconds}`. Its seq is connection
+1. `open` supplies `{subscription_id,gap,watch_ttl_seconds,attaching}`. Its seq is connection
    metadata, **not** permission to discard replay up through that number.
+   `attaching` is the SAME fact the snapshot that follows carries, stated one
+   frame earlier so a client can paint a neutral working cue on the open frame
+   instead of committing to "nothing is running" and then correcting itself:
+   `true` means an authenticated dial is in flight and canonical state has not
+   arrived, so live is COMING and the cold frame under it is a placeholder, not
+   an answer. It is `false` on a session with no runtime at all, which is the
+   distinction that matters to a viewer (nothing is coming, so the cold paint IS
+   the answer). Additive: a client that ignores it keeps today's behaviour.
+   **The stream does NOT hold its first frame for that dial.** The read
+   envelope already spends `READ_FIRST_FRAME_GRACE_S` (50 ms) on the attach
+   before this generator runs, and on the fixture S4 the attach landed 356-985 ms
+   after the open — a second 50 ms hold would delay every attaching open for a
+   frame that does not land inside it, which is the cost this contract refuses.
+   What a client gets instead is the truth at the moment of the open, and the
+   `frontend.replace`/rollover frame it already handles when the attach lands.
    `gap:false` is a claim the bridge can honour, and it means exactly this: every
    frame this bridge published after the cursor supplied on the query is in the
    replay that follows, in order. It does **not** mean the painted state is
@@ -1483,10 +1849,12 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    aging budget lands (R10), a frame can still report a frozen owner as live; the
    reader's own budget is `LIVE_FRESHNESS_BUDGET_S`
    (`session/runtime/types.py`). Its
-   history page is the transcript's durable tail — the newest ≤100 entries,
-   `limit` unchanged — read once for this frame, which is the same unbounded read
-   `/history` serves. `has_more` means *older rows exist below the page*, not that
-   the page is partial or lossy: `before_id` paging reaches them, and this is also
+   history page is the transcript's durable tail — the newest ≤100 entries
+   without `open_frame=1`, or the turn-aligned, paint-only page of §"The open
+   frame" with it (`limit` then counts paintable rows; see that section for the
+   strip, the `head_cut` flag and `runs`) — read once for this frame, which is
+   the same read `/history` serves. `has_more` means *older rows exist below the
+   page*, not that the page is partial or lossy: `before_id` paging reaches them, and this is also
    the flag that can now flip to `true` on a reopen where it previously read
    `false` with the older rows silently absent. `frontend.snapshot.history_cursor`
    / `live_cursor` are the DEDUPE watermark for the paired state, NEVER a
@@ -1598,6 +1966,39 @@ harness now honours the rule at the emit site as well: a row the shared
 cannot paint chrome it was never sent. An owner on an older build still sends
 these rows, which is why the marker (and the recogniser) remain the contract.
 
+### Hub deliveries on user-role rows: `provider_payload.hub_receipt`
+
+A comms delivery to a running child (a steer, a note, a question) is persisted
+as a `Message(role="user")` whose text is the model-facing `<parent-message>`
+envelope, because that is what the model must read. The envelope is NOT a
+display body: a surface that re-parses it is guessing provenance from text, and
+a surface that does not recognise it paints the XML as the user's own words.
+
+The producer therefore stamps the typed facts a `hub_message` custom carries
+onto the persisted row, under the same namespaced key both wires already
+carry:
+
+* `message_start.message.provider_payload.hub_receipt` — the live event's copy.
+* the durable row's `payload.provider_payload.hub_receipt` — the same key on the
+  journal entry a `snapshot`/`/history` page serves.
+
+Shape: `{direction: "to_child" | "to_parent", expects_reply: bool, steer: bool,
+body: str}` plus advisory `label`/`job_id` when the producer had them. `body`
+is the edited bytes the reader must see; the row's own `text` remains the
+envelope and is what providers receive — role, content, identity and
+scheduling are unchanged by the marker, and unrelated `provider_payload`
+bookkeeping on the row is merged around, never replaced.
+
+The consumer rule is POSITIVE PROVENANCE, read BEFORE any human-row
+classification: a valid marker means the row is the same hub receipt the
+`hub_message` custom path paints (never a user bubble, never the envelope); a
+malformed or body-less marker is not a receipt and the row keeps its ordinary
+user handling; a row without the marker is untouched, so transcripts written
+before the marker existed keep their legacy treatment. `hub_receipt_marker` in
+`local_operator/harness/hub_receipts.py` is the one definition all surfaces
+read (mobile projection, TUI main and child views; the desktop reducer mirrors
+it byte-for-byte).
+
 ### The `notification` frame
 
 Emitted **if and only if** the bridge observes a newly published, unseen
@@ -1702,6 +2103,104 @@ routes is the renderer's own business — its local TTL dedupe map (keyed on the
 backend-minted `dedupe_key`), its focus gate, and notification-click behaviour.
 The backend still never DELIVERS an OS toast for a leased desktop surface; it
 composes for a frontend that does.
+
+### Turn supplements: the `supplement_v1` row and the `supplement_progress` event
+
+"Highlights" (contract: `local_operator/supplements/contract.py`; design authority
+`docs/design/turn-supplements.md` §2.4/§2.7) is the block an owner runtime may add
+under a final answer — file callouts for what the turn produced, and (once the
+generator lane ships) a small generated graphic. It is decided after the turn's
+`agent_end` is emitted, and it never reaches the model's context.
+
+**The gate is two halves, ANDed** (`supplements.contract.negotiated`): the owner
+advertises `supplements-v1` only when it can honour the lazy read op
+(`supplements_for(anchors[]) → {anchor: newest row}`), and the viewer declares
+`supplements` on its auth frame (`auth["supplements"] = true`; the desktop live path
+declares `?supplements=1` on its events route instead — the `entry_ts` shape; that
+parameter is read by the events route: a subscriber that declares it is the only one
+handed `supplement_progress` frames, live or from replay). Only then
+may the runtime send `supplement_progress` events or project supplement rows; a viewer
+that does not declare receives neither, so it never paints an unknown kind. Rows are
+journaled either way, reach a desktop as ordinary history entries (raw `custom` rows)
+and the other surfaces through the lazy read op.
+
+**The row** — a durable custom entry:
+
+```jsonc
+{"id": "22130e9a88661cd6d09c59fa0f765b2d", "ts": 1791000002.0, "type": "custom",
+ "payload": {"custom_type": "supplement_v1", "details": { /* below */ }}}
+```
+
+`payload.details` (`supplements.contract.SupplementDetails`); the required keys plus the
+staged optionals (`files_more`, `more`, `images`, `decision`, `instruction`, `model`,
+`turns`, `tokens_in`, `tokens_out`, `cost_usd`, `error`, `dismissed`):
+
+```jsonc
+{
+  "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",  // the final assistant message id
+  "job": "3f9c1a7e5b20",     // stable across versions of one anchor
+  "version": 1,              // +1 per regeneration; readers take the NEWEST per anchor
+  "state": "done",           // decided|queued|done|failed|cancelled|skipped
+  "files": [{"path": "reports/latency.md", "name": "latency.md", "kind": "markdown",
+             "size_bytes": 4120, "mtime": 1790999940.0, "why": "written by write"}],
+  "components": [{"attachment": "<32-hex digest>", "title": "Latency by region (ms)",
+                  "source": "bench.csv rows 1-4 (tool result of bash at 10:41)",
+                  "mime": "text/html", "height_hint": 320}],
+  "more": ["rel/path…"],     // ≤ 20; the "N more" paths; same denylist as files
+  "at": 1791000002.0
+}
+```
+
+Paths in `files`/`more` are session-relative (or `~/`-relative), never absolute. A row
+carrying `error: "superseded"` (a newer turn moved past it) or `dismissed: true` renders
+NOTHING on every surface, whatever its state.
+
+**The stale-row rule, for every reader.** Read the newest version per `anchor`; when a
+non-terminal row (`decided`/`queued`) has no live job in the answering runtime — a cold
+read, or a cut job — render it as `cancelled · Retry`, never a spinner that cannot
+finish. A terminal `done` row with nothing inside renders nothing either.
+
+**The event** — `supplement_progress`, a new `AgentEvent` family (additive on the
+tolerant frame; no `PROTOCOL_VERSION` bump), sent only to viewers that negotiated:
+
+```jsonc
+{"type": "supplement_progress", "anchor": "a1b2…", "job": "3f9c1a7e5b20", "version": 2,
+ "state": "running",     // + running|cancelling, which are LIVE-ONLY, never journaled
+ "stage": "generating",  // deciding|generating|validating|repairing; "" outside running
+ "elapsed_s": 41.5,
+ "files": [], "components": [],  // only on decided/done; done carries the components
+ "error": "", "error_type": ""}
+```
+
+It arrives only AFTER the turn's `agent_end`, and it carries the `anchor`, so a late
+event (the next turn already started) still lands on the right answer. `lop exec` never
+produces one (its turns are outside the trigger), and SDK event streams are unchanged.
+Under backpressure, supplement frames fold keep-newest — the family is
+self-replacing by construction — and its fold key lives in `session/delta_merge.py`.
+
+**Not in this release.** No image components (v1 documents carry HTML only); no mesh
+transfer (a file or component a peer device holds reads as "on <peer>" with previews
+disabled — `GET …/attachments/{digest}` already answers 409 `attachment_on_peer`); the
+native (phone) WebView frame is pending its own lane; and the static preview routes
+(`/v1/static/*`) are not yet token-ENFORCED -- Phase A accepts tokens and mints
+short-lived signed URLs (see the static section), but refusing is a later phase
+and the client change to present a credential is the recorded follow-up. Shipped since
+this contract's head: two renderer lanes consume the wire today -- the TUI (the file
+callouts, the `N more` disclosure and the state line; an HTML component is skipped
+silently, no placeholder) and the desktop UI (the same callouts and state line, each
+component in a sandboxed frame with its one `Source: ...` caption) -- while the relay
+web renderer is in review (core PR #2222) and the native phone renderer is a separate
+lane, not shipped.
+The READ half is implemented (routes lane C2): the desktop document route serves the
+assembled component as `{html}` by digest (`nosniff`, `Cache-Control: no-store`, 409
+`attachment_on_peer` passed through for a peer-held blob, an unassemblable blob an
+ordinary 404), keyed by `AttachmentDigest` so a caller-supplied path can never be part
+of the request; the `?supplements=1` events-route reader gates `supplement_progress`
+per subscriber on live AND replay; and the relay serves both the document (`{html}`,
+the digest additionally reference-checked against that session's journal) and the
+recorded file callout (`row["files"][i]`, suffix-allowlisted `Content-Type` — never
+`text/html`, SVG or `+xml` — a 10 MB cap, and the §4.3 denylist re-applied per
+request).
 
 ### Verification
 
@@ -1921,10 +2420,13 @@ to.
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FOUR `os.stat` calls — `attention.db` with its two journal
+last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
 sidecars, plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
-`config.yml` — with a SQLite read only when the store actually moved, and a
+`config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
+publishes a `config` frame naming the changed keys and the freshly resolved
+`language` (the same value `GET /v1/capabilities` carries), so a language write
+reaches the app live whichever process performed it — with a SQLite read only when the store actually moved, and a
 record read only for a record whose own file moved. That is what takes background
 detection from the 1 s poll's floor to a p50 of roughly one tick. A quiet tick
 makes no SQL and no record read at all. The revision gate stays the
@@ -1975,7 +2477,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the four stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,
@@ -2221,6 +2723,59 @@ the user forbade. With nothing else running, the click falls through to the
 terminal — the same place it lands when the launch is allowed and the app is
 absent.
 
+### Making the click survive until it is made
+
+A banner is often clicked long after it was posted. The case that shaped this
+section is the daily check-in from Aida, the built-in assistant session
+(`local_operator/aida/`): it is posted at 08:30 by a runtime that exits
+immediately afterwards, and the person clicks it from the notification list
+whenever they next sit down. For the click to land, each platform has to keep
+something alive or ready until then.
+
+- **macOS.** A click is delivered to the helper process that posted the banner,
+  so that process has to still be running. It waits for the number of seconds
+  given as its fifth argument after the program name (`argv[5]`), clamped to
+  1 s – 24 h and defaulting to 30 s. Aida's banner passes 24 h
+  (`notify.DURABLE_CLICK_WINDOW_S`); every other banner keeps 30 s. A 24 h wait
+  is a ceiling, not a promise: a logout, reboot or crash ends the helper sooner,
+  and a click after that does nothing (relaunching the program takes its
+  no-arguments usage branch and exits). That is also what happens at the end of
+  the window — the banner stays in the notification list and is inert, which is
+  deliberate: removing it would make an unanswered check-in disappear from the
+  one place the user can still find it. The click command is stored on the
+  notification itself, so when several helpers of the same app are alive the
+  click runs the command of the banner that was clicked. The sender app is
+  pre-warmed when a TUI or the desktop daemon starts
+  (`resume_click.prepare_for_clicks`) and built synchronously for a durable
+  banner, because the fallback used on a cold machine (`osascript`) cannot be
+  clicked at all. `BUILD_STAMP` is `"3"` so installs whose helper ignores the
+  wait argument rebuild. **Not verified on a real Notification Centre:** the
+  one real-banner click probe was skipped by the operator, so late-click
+  delivery is read from the code and not measured.
+- **Linux.** Whether `notify-send` understands `--action` is probed once and
+  kept in `<config>/notifier/notify-send-actions.json`, per binary (path, mtime
+  and size), so the first banner of a fresh runtime is already clickable. Only
+  an answer the probe actually returned is kept; a timeout or error is retried
+  by the next process. A banner that asks for a durable click probes
+  synchronously when nothing is known. The waiter is still
+  `notify-send --expire-time=5000 --action`: a click after the notification
+  daemon has dropped the popup is not delivered by every desktop. **Not
+  verified:** no Linux host or notification daemon was available.
+- **Windows.** A runtime banner does not exist there (`detached_notify` has no
+  Windows branch and `notify-send` is absent), so rungs 1–4 are never reached
+  from one. What a Windows user gets is the desktop app's own toast, only while
+  the app is running, and its click is handled inside the app. Raising a banner
+  from the runtime with a click that opens the conversation needs a registered
+  toast activator and a Windows host to test it on; neither exists here, so none
+  is claimed. This is a recorded limitation (see also `docs/XPLATFORM.md`).
+- **Rung 4's terminal.** A click's process sits in no terminal, so detection
+  finds none. The rung therefore tries the terminal the user last ran the TUI
+  in (`<config>/notifier/last-terminal.json`) before the macOS Terminal.app last
+  resort. The memory is refreshed on each TUI start, cleared when a TUI starts
+  somewhere that cannot be identified (or in cmux, which is never recorded
+  because it opens unfocused), and ignored after 30 days. A remembered terminal
+  that is no longer installed falls through to Terminal.app.
+
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |
@@ -2236,6 +2791,8 @@ absent.
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
 | `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
+| `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
+| `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
@@ -2249,3 +2806,199 @@ path).
 it is deliberately a NEW key rather than a bump of `subagent_transcript`, whose
 reader gate asks with no minimum version: a bump would leave an older backend
 passing that gate while the live half does not exist.
+
+
+## Journal source order (opt-in `journal_order=1`)
+
+`features.journal_order: 1` states that the build supports journal-index order,
+not that every row or owner is ready. A viewer declares `journal_order=1` on
+history, snapshot and events. Without that declaration the new keys/events are
+absent (including JSON null defaults), preserving older strict DTOs. Older
+backends omit the vocabulary: clients retain an explicit legacy fallback, not
+a fabricated journal coordinate.
+
+A verified page carries `journal_order_state: ready`, `journal_generation`,
+and each entry's `journal_seq`. This is the 0-based complete-line ordinal from
+the existing transcript index, including rows omitted from search/rail views.
+It is **not** the bridge/frame publication `seq`, a message timestamp, or an
+arrival counter. Times remain presentation data. The page payload and index
+must share the reader's verified inode/size/mtime view; raced pages, cold or
+stale indexes omit authority and say `building`/`unavailable`. A peer with no
+owner-provided domain says `unsupported`; the receiver never assigns ordinals
+from its own disk. Missing information does not erase previously proven facts.
+
+`order_ids` is an optional, bounded lookup on these existing requests: at most
+512 entry IDs, each 1..128 characters. It has no effect without the declaration.
+The same-session index returns `journal_ordinals` for found IDs and explicitly
+names `journal_missing_ids`; it never truncates and pretends all were ranked.
+This handles an already-loaded optimistic send whose durable row aged out of
+the page before the viewer subscribed. Invalid query shapes return 422. The
+lookup shares the page's verified source/generation; it is not another journal
+scan or a global cross-session ID service.
+
+Generation is opaque **equality only**. Appends retain it; a rewrite/full
+rebuild/cache loss remints it and invalidates old ordinals. Clients capture a
+conversation order revision at request dispatch and commit for all snapshot,
+history, anchored and jump reads. An unmatched non-authoritative domain asks
+for one coalesced authoritative snapshot rather than switching generations;
+late old-revision responses cannot undo the installed domain. No UUID ordering
+or timestamp comparison can replace that fence.
+
+The owner advertises `journal-order-v1` only with an all-row post-fsync observer;
+the attach viewer declares `journal_order: true`. After a successful durable
+batch, background existing-index singleflight emits `journal_order_ready` with
+`journal_generation` and bounded `rows` descriptors (`id`, `journal_seq`, role,
+tool-call identity and supplement anchor where applicable). This corrects an
+already-streamed row even if the history-delta filter excluded it, without a
+later token/page. A streamed settle before fsync remains provisional. No scan
+runs per token or synchronously in the bridge event relay. Desktop subscribers
+also opt in, for live and replay alike. The mesh's closed owner-dial auth
+allowlist forwards `journal_order`; it does not drop the declaration or borrow
+receiver authority. The actual attach handshake omits it for older owners and
+the runtime ANDs declaration with its own capability. New route flags use
+Annotated query constraints with ordinary Python defaults (0/None), so direct
+route callers retain legacy behavior as well as HTTP-bound callers.
+Cold page indexes issue the same late
+metadata correction; a raced/unavailable source requests authoritative reconcile.
+
+Order metadata is NOT frontend state: a snapshot's sequence watermark cannot
+supersede an off-page correction absent from its bounded page/ID lookup. The
+pre-open drain preserves negotiated corrections after the snapshot unless the
+same published frame was already delivered in initial replay. Rejected writer
+provenance (including a real compaction while the index builds) or missing
+mapping emits one coalesced reconcile per batch, never an old-file coordinate
+labeled with the rebuilt domain. Safe old page-cache degradation after a
+same-inode/same-size rewrite remains unchanged: it omits authority until a
+fresh page is served; this contract does not refactor that cache.
+
+Consumers use one transitive ordering policy: confirmed same-domain source
+positions are distinct from explicit provisional admission/anchor blocks.
+Do not compare by ordinal for one pair and by time for another (that creates
+cycles). Tools/supplements retain their owning message/call and their own entry
+ordinal separately; row identity owns attachments, sender and payload. Metadata
+updates must change order even when payload bytes did not change, and omitted
+metadata on a live update cannot clear a known coordinate.
+
+
+## Complete peer-source contract (advertised; no consumer until the UI slice)
+
+`peer-journal-source-v1` IS advertised by this build — on every relay link
+(`network/wire.py`), on the runtime record (`session/runtime/serving.py` +
+`runtime/server.py`) and as the `peer_journal_source` feature key
+(`server/features.py`). ADVERTISING IS NOT ACTIVATION: every read still passes
+the four-part gate — owner advertisement, viewer declaration, authenticated
+session source, per-response acknowledgment — and absent any half the answer
+stays the legacy bytes. A remote `journal_order` alone remains
+byte-compatible unsupported, and local ordering and local mobile partial
+negotiation are unchanged. The recovery envelope's source facts are
+receiver-side implemented and inert until a UI slice consumes them. Every new
+field is omitted for legacy viewers on live and replay paths.
+
+The authority bootstrap uses the existing session GET but applies only source
+metadata via `applyJournalOrderMetadata`: install the equality-only order domain
+under session/view/read witnesses, never incidentally adopt page bodies, causal
+call owners, tail/cursor coverage or frontend state. Explicit verified page/body
+acceptance is a DIFFERENT typed path. Lookup coordinates do not reattest a loaded
+old body or release a provisional/local user. Fresh body plus coordinates must
+be admitted atomically; stale-domain loaded bodies remain payload-owed.
+`JournalOrderRead` remains `{revision, demand}`; generation is separate. A raced
+same-domain wake keeps its new reference-identity debt without blanket rejection
+of still-valid old facts. Per-ID body-owed revisions fence body acceptance.
+
+Proposed purposes on the existing view-authorized stored-history RPC:
+
+| Purpose | Authority and bounds |
+| --- | --- |
+| page | Verified bounded page; explicit page acceptance only |
+| metadata | Requested raw-ID facts only; no body/cursor/frontend effects |
+| payload | Expected accepted generation REQUIRED; fresh projected bodies and same-read coordinates together |
+| availability | One bounded deferred index refresh/join signal (4 s owner wait, inside the read-sized hop); no rows or generation authority. A build past the bound emits ONE explicit reconcile correction; further declared typed/page reads of that failed wave report `unavailable`, not a dead `building`. Explicit retry before readiness remains unavailable; an actual current-owner `ready` read clears the latch. No retry-per-render or longer wait is implied. Owner/attach-client changes invalidate the old wave; closed bridges, stale completions and refused grants cannot establish its failure on a new source. ACK, bodies, cursors and previously proven facts are preserved, and undeclared legacy responses are unchanged |
+
+Requested IDs plus explicit dependency IDs are bounded at 512. Missing means
+proven absent, unavailable means present but unsafe/unprojectable, remaining
+means budget-deferred; these are not interchangeable. Exact encoded response
+limits include every metadata map. Raw-ID lookup demand unions canonical,
+quarantined and loaded-body-owed IDs BEFORE the no-debt/no-generation guard.
+No alias, clock, wire sequence or receiver disk supplies source authority.
+
+Proof prerequisites the advertisement was gated on (held before this slice shipped):
+
+* Extend the SAME index with validated raw-ID byte ranges, retaining no bodies;
+  FD-before/after, path identity and index source must agree for bounded reads.
+* Prove actual settled projection equivalence including prune/injection/media
+  dependencies. If closure cannot be bounded, report unavailable, not missing;
+  a raw row converter is not a universal settled replay projector.
+* Availability must defer at the dispatcher, not return None from an inline
+  handler (which yields an empty ACK), and must not occupy the shared four slow
+  workers or stall reader/prompt/live traffic. Recheck link/grant/session before
+  one final answer. Cancellation cleanup must state actual protocol bounds.
+
+The index witness inherits the existing inode/size/mtime assumption, not
+cryptographic detection of externally preserved-stat rewrites. No new cache,
+service, domain, payload queue, runtime lease, permission or view-grant expansion
+is authorized. Complete-core review/QA precedes separate UI adoption. The UI
+continuity amendment must separate metadata facts from rank/body/causal-owner
+admission and retain later source demand while admitting valid earlier facts.
+
+
+### Recovery-delta source facts (receiver side, unpublished)
+
+A facade retains, per attachment, the last owner-attested ``{raw id:
+journal_seq}`` observed on its own order wakes for one generation: merged within
+a generation, atomically replaced on rotation, invalidated by ``reconcile``,
+bounded at 4096 (overflow invalidates rather than growing a partial map), and
+disposed on every rebind, go-cold and dispose. A recovery ``history_delta`` may
+carry ``journal_generation``, ``journal_ordinals`` and the owner-stamped
+``entry_times`` subset ONLY when the attachment declared the complete contract
+and EVERY delta row was attested in the retained domain — all-or-nothing,
+because a partial map under a packet-level claim would over-release rows the
+owner never attested. Omission is the designed common case (rows committed
+while disconnected were never observed on this attachment) and settles through
+the fresh authority read and the payload-by-ID fallback, never through a wrong
+display. The family is per-subscriber: a non-declaring subscriber's
+``history_delta`` frame is byte-identical to the pre-contract event on the live
+and replay paths alike. Retention is passive — it rewrites no event and
+publishes no frame.
+
+
+### Bounded structural source-body subset (unpublished implementation)
+
+The same transcript-index cache schema now proposes version 7: raw ranges and
+body-free structural facts share the existing full/suffix scanner. Facts are
+extracted from already parsed JSON before hidden-row and assistant-call
+classification loses identity. Inverse prune/call/compaction/duplicate views are
+built once with the resident index or cache load, not by a payload request.
+No notices, arguments, preserved text or message bodies enter the new table.
+Suffix facts follow the existing window-row cut; last-ID ranges alone never
+certify duplicate identities. The reader's segment row count is not a whole
+journal count after incremental re-derivation.
+
+The separate internal source-body getter discovers a complete ordinary
+non-ask call unit and its last effective prune through the captured cut, reads
+only those ranges on one source-coherent FD, and reuses the actual per-row
+replay operation. It does not build an incomplete selected Transcript or infer
+context/preserve graphs. Preserved candidates, ambiguous/ask/divert/hidden or
+cross-cut units, opaque causal scope, unknown global scope, supplements and
+unbounded legacy media expansion are terminal unavailable. Inline media and
+artifact references retain their real typed body. A wholly historical ordinary
+unit may have an audit-equivalent body; units crossing the governing cut cannot
+be partially certified. A raw prune is named as a dependency, never leaked as
+an unsolicited conversation row.
+
+Each original raw ID has exactly one of present/missing/unavailable/remaining.
+Missing requires proven source absence; unproven identity scope is envelope
+unavailable. Intrinsic units over 512 unique IDs, 512 KiB raw bytes or an empty
+encoded frame are unavailable. Aggregate budgets defer complete units as
+remaining, with a smaller requested-ID retry batch that leaves room for explicit
+dependencies. Huge units must not starve later small units. Encoded metadata is
+never silently trimmed, and expanded media is never dropped to manufacture fit.
+All body reads inherit the existing inode/size/mtime limitation, including
+stat-preserving external rewrites. Publication still requires current view,
+client, expected-domain and body-owed revision fences after awaits.
+
+This implements no public DTO, complete capability, availability lane or UI
+fallback/admission policy. Initial unprovable tails must decline optimization
+before new-domain adoption. Later unavailable units retain known/provisional
+records and require explicit source-unconfirmed reconcile; unavailable is not
+missing, reset, or a reason to poll an old peer. Metadata bootstrap remains
+lookup facts/domain only, never rank/causal-owner admission on an old body.

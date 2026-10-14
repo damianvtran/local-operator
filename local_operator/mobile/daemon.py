@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import copy
 import gzip
+import html
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -59,6 +60,11 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n import catalogues
+from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.keys import relay_login
+from local_operator.i18n.messages import Msg, render
+from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -1619,6 +1625,13 @@ def _live_generation_is_user_facing(session_id: str) -> bool:
     return is_user_session_origin(session_origin(directory))
 
 
+#: Children whose todo snapshot the cold durable projection reads, newest first
+#: (see ``_durable_projection``). 96 covers every roster a person watches while
+#: keeping the added cold CPU under ~100 ms on the 255-child real rosters that
+#: measured a 2-3x projection regression without it.
+_COLD_TODO_CHILD_LIMIT = 96
+
+
 def _durable_projection(session_id: str) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
@@ -1627,6 +1640,20 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     the bytes appended since. The projection object itself is rebuilt on
     every call (callers mutate and fence it), so what is cached is the fold,
     not the projection.
+
+    THE OPEN-FRAME SEAM (first-paint lanes T2/T3). This function is where the
+    phone's first frame is assembled: the fold's replay, then
+    ``ProjectionFold.fold_history``, then ``_cap_tail``. The desktop's
+    ``open_frame: 1`` page builder (``docs/DESKTOP_API.md``,
+    ``local_operator/session/open_frame.py``; docs-only at the time of
+    writing) serves the same question — the rows a surface paints, with the
+    turn facts and the bookkeeping stripped — so the day it lands, THIS is the
+    call to replace: the run facts would come from the server instead of being
+    re-derived here, and the phone would negotiate on the ``open_frame`` key
+    the relay already lifts from ``server/features.py``. Nothing here depends
+    on that landing: the fold's own boundary (``DurableFoldState.keep_start_id``)
+    is the anchor a bounded-suffix fold needs, so lane T3 can bound this read
+    without touching the shape above it.
     """
     from local_operator.mobile.projection import (
         SUBAGENT_ERROR_CHARS,
@@ -1665,6 +1692,11 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     # fold_history reads messages without mutating them, so the cached list
     # can be shared; the fold builds its own TranscriptEntry rows.
     fold.fold_history(state.history)
+    #: Turn supplements (memo §3.1 row 18): the durable rows are CUSTOM entries,
+    #: which fold_history (messages only) never sees, so the sibling map is
+    #: copied from the durable fold's own per-anchor collection. Old app builds
+    #: ignore the key; new ones render the settled blocks on a cold open.
+    projection.supplements = {anchor: dict(row) for anchor, row in state.supplements.items()}
 
     # The persisted roster is the restart-safe ownership record for child
     # routes. Rebuilding from it keeps old session projections useful without
@@ -1672,6 +1704,24 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
     snapshot = state.latest_customs.get("subagent_roster") or {}
     jobs = {str(row.get("id") or ""): row for row in snapshot.get("jobs") or []}
     records = [row for row in snapshot.get("records") or [] if row.get("job_id")]
+    # WHICH CHILDREN GET THEIR TODO SNAPSHOT READ COLD (review round 1, F2).
+    # Every child costs one backward byte scan of its transcript — measured ~1 ms
+    # each, which is fine for the rosters this used to see (1 record) and not fine
+    # for the full one the sidecar now supplies: 255 children added ~255 ms to a
+    # projection whose whole base cost was 393-504 ms, against a 300 ms first-paint
+    # target. The snapshot is a FALLBACK (``todo_snapshot(child)`` is tried first
+    # and is a fold lookup), so the budget is spent on the children a user is most
+    # likely looking at: the newest ones, which is what a roster's append order
+    # makes the last rows. Older children still render — with their label, status,
+    # agent and prompt — and simply carry no todo rows, and NOTHING SAYS SO: the
+    # panel cannot tell "this child has no todos" from "this child is past the
+    # budget", which is a silent loss of information the phone used to show
+    # (review round 2, F10 — accepted with the loss recorded here). The follow-up
+    # that removes it is a LAZY per-child read: ``api_subagent_detail`` already
+    # serves one child on demand, so the todo snapshot belongs there rather than in
+    # a cold projection answering for 96 children at once. The alternative measured
+    # worse than the regression it was fixing (2-3x the whole projection).
+    todo_children = {str(record["job_id"]) for record in records[-_COLD_TODO_CHILD_LIMIT:]}
     by_parent: dict[str | None, list[str]] = {}
     for record in records:
         parent = str(record["parent_job_id"]) if record.get("parent_job_id") else None
@@ -1700,7 +1750,12 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
             ancestors.insert(0, str(ancestor.get("label") or cursor))
             cursor = str(ancestor["parent_job_id"]) if ancestor.get("parent_job_id") else None
         raw_todos = todo_snapshot(child_dir.name) if child_dir else []
-        if not raw_todos and child_dir is not None and child_dir.is_dir():
+        if (
+            not raw_todos
+            and child_dir is not None
+            and child_dir.is_dir()
+            and job_id in todo_children
+        ):
             # The child's todo snapshot through the dedicated snapshot cache:
             # a deep roster used to full-parse every child transcript on every
             # durable projection, once per child. Routed around the fold cache
@@ -2470,6 +2525,39 @@ async def _engage_and_publish(
     return detail
 
 
+def _journal_page(
+    directory: Path,
+    state: Any,
+    *,
+    before: str,
+    limit: int,
+) -> tuple[list[Any], bool]:
+    """The journal's rows immediately older than ``before``, or an honest end.
+
+    The reader behind every cursor page (see :func:`_history_page` for why the
+    cursor pages the journal rather than the render). ``None`` from the reader
+    means the cursor names no journal row at all — a row from a transcript that
+    was replaced under the client, or an id narrowed wrongly — and the client
+    then treats the answer as end-of-history rather than looping on the same
+    rows.
+
+    ``prunes_complete`` is the fold state's own fact (see
+    ``DurableFoldState.scan_from_bof``): with a whole-journal fold its prune map
+    is the file's own, and with a bounded suffix fold it is not, in which case
+    the reader rebuilds the map before serving anything.
+    """
+    from local_operator.mobile.durable import journal_rows_older_than
+
+    rows = journal_rows_older_than(
+        directory,
+        state.prunes,
+        before_id=before,
+        limit=limit,
+        prunes_complete=bool(getattr(state, "scan_from_bof", True)),
+    )
+    return rows if rows is not None else ([], False)
+
+
 def _history_page(
     session_id: str, before: str | None, limit: int, *, durable_only: bool = True
 ) -> tuple[list[Any], bool]:
@@ -2481,6 +2569,30 @@ def _history_page(
     tail since — not the whole-file re-parse every page used to pay. Runs off
     the event loop (``asyncio.to_thread`` at the call site): even the cached
     path touches disk and the fold is not loop-safe work.
+
+    TWO SOURCES, CHOSEN BY THE QUESTION. Without a cursor this is the newest
+    page a surface shows on open, so it comes from the render. With one it comes
+    from the JOURNAL (:func:`_journal_page`) — and that split is what makes the
+    phone's history complete and loop-free.
+
+    WHY NOT THE RENDER, for a cursor page. Paging it alone stopped a phone
+    reader at the last compaction — measured on the S6 fixture, 640 of 3,348
+    journal rows were reachable and the rest were evidence of a conversation the
+    phone could not show — and it also served rows twice. The render's order is
+    not the journal's: it opens with the compaction marker and re-injects the
+    latest compaction's ``preserved_user_turns`` UNDER THEIR ORIGINAL ROW IDS,
+    and those same rows sit in the journal below the cut. A cursor that lands on
+    one of them therefore answers a page around the render's head plus a refill
+    from the compaction boundary — rows the client already holds — so
+    ``has_more`` stays true and the walk cycles (measured: 117,020 mounted rows
+    holding 408 distinct ids). 60 of the 60 largest journals on this host carry
+    preserved turns, so that is the ordinary shape, not a corner.
+
+    The desktop has always answered this question from the journal, and the rows
+    agree because both surfaces fold them with the same fold
+    (``fold_messages_to_entries``); the marker id fix in :mod:`.durable` is what
+    makes the row identities match. One row is served once, at its journal
+    position, in journal order.
     """
     if durable_only:
         directory = _durable_user_session_dir(session_id)
@@ -2499,7 +2611,6 @@ def _history_page(
         return [], False
     try:
         state = _durable_fold_cache().load(directory)
-        entries = state.render
     except FileNotFoundError:
         return [], False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
@@ -2507,31 +2618,38 @@ def _history_page(
         return [], False
 
     if before:
-        # A ``before`` that resolves to nothing means the client's anchor was
-        # pruned (a compaction between scrolls). Serving the newest page then
-        # would duplicate the client's live window — return empty and let the
-        # client treat it as end-of-history rather than loop on the same rows.
-        anchor = next((i for i, e in enumerate(entries) if e.id == before), None)
-        if anchor is None:
-            return [], False
-        cut = anchor
-    else:
-        cut = len(entries)
-    older = entries[:cut]
-    page = older[-limit:] if len(older) > limit else older
-    has_more = len(older) > len(page)
-    return page, has_more
+        # Every cursor page comes from the journal: the render's order is not the
+        # journal's, and its head re-serves rows whose originals sit below the
+        # cut. See this function's docstring for the measurement.
+        return _journal_page(directory, state, before=before, limit=limit)
+    entries = state.render
+    page = entries[-limit:] if len(entries) > limit else list(entries)
+    return page, len(entries) > len(page)
 
 
 def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[bytes, str] | None:
-    """Decode the ``index``-th image block of message ``entry_id`` from the
-    session's on-disk transcript into raw bytes plus mime type.
+    """The image family's resolution: ``_attachment_bytes`` with ``kind="image"``.
+
+    Kept as its own name because the image route and its tests read through
+    it; the split changed no image semantics — the walk below still counts
+    inline images and store-backed artifacts of kind ``image`` on one shared
+    index.
+    """
+    return _attachment_bytes(record, entry_id, index, "image")
+
+
+def _attachment_bytes(
+    record: SessionRecord, entry_id: str, index: int, kind: str
+) -> tuple[bytes, str] | None:
+    """Decode the ``index``-th block of ``kind`` on message ``entry_id`` from
+    the session's on-disk transcript into raw bytes plus mime type.
 
     Reads from disk (not the live fold) so it serves attachments from history
     the projection tail dropped as well as recent ones, and reuses the
-    transcript's own attachment resolution — the same base64 the model saw.
-    Returns ``None`` for any miss (unknown message, out-of-range index, a
-    reference that no longer resolves) so the caller answers a clean 404.
+    transcript's own attachment resolution — the same bytes the model saw (or
+    the store digest it referenced). Returns ``None`` for any miss (unknown
+    message, out-of-range index, an unknown kind, a reference that no longer
+    resolves) so the caller answers a clean 404.
 
     Runs off the event loop (``asyncio.to_thread`` at the call site): building
     the history rehydrates every message and is not loop-safe work.
@@ -2579,18 +2697,29 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
             )
     if message is None or not isinstance(message.content, list):
         return None
-    # ``index`` is the position among IMAGE blocks (what _image_refs emits),
-    # not among all content blocks — text blocks do not count. THE WALK IS THE
-    # CONTRACT with ``projection._image_refs``: both count inline image blocks
-    # and output artifacts of kind ``image`` (``AttachmentContent``) on one
-    # shared index, in content order; either side changing alone fetches the
-    # wrong bytes for every later block.
-    blocks = [
-        block
-        for block in message.content
-        if isinstance(block, ImageContent)
-        or (isinstance(block, AttachmentContent) and block.kind == "image")
-    ]
+    # ``index`` is the position among blocks of ``kind`` (what the family's
+    # refs walk emits), not among all content blocks — text blocks do not
+    # count. THE WALK IS THE CONTRACT with the projection: ``kind="image"``
+    # (``projection._image_refs``) counts inline image blocks and output
+    # artifacts of kind ``image`` on one shared index; ``kind="video"``
+    # (``projection._video_refs``) counts ONLY output artifacts of kind
+    # ``video``, in its own index space. Either side changing alone fetches
+    # the wrong bytes for every later block.
+    if kind == "image":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, ImageContent)
+            or (isinstance(block, AttachmentContent) and block.kind == "image")
+        ]
+    elif kind == "video":
+        blocks = [
+            block
+            for block in message.content
+            if isinstance(block, AttachmentContent) and block.kind == "video"
+        ]
+    else:
+        return None
     if index < 0 or index >= len(blocks):
         return None
     block = blocks[index]
@@ -2604,7 +2733,8 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         if resolved is None:
             return None
         raw, sidecar_mime = resolved
-        return raw, block.content_type or sidecar_mime or "image/png"
+        fallback = "image/png" if kind == "image" else "video/mp4"
+        return raw, block.content_type or sidecar_mime or fallback
     data = block.data
     if not data:
         return None
@@ -2614,6 +2744,52 @@ def _image_bytes(record: SessionRecord, entry_id: str, index: int) -> tuple[byte
         logger.warning("image fetch: undecodable base64 for %s[%d]", entry_id, index)
         return None
     return raw, block.mime_type or "image/png"
+
+
+#: A single byte-range (RFC 9110 ``bytes=`` forms): an optional first byte
+#: with an optional inclusive last, or the suffix form (``bytes=-N``).
+#: Anchored, so a malformed or MULTI-range header (``bytes=0-1,5-6``) does
+#: not match and the caller serves the full 200 — the spec's remedy for a
+#: Range the server does not honour.
+_SINGLE_RANGE = re.compile(r"bytes=(\d*)-(\d*)", re.ASCII)
+
+
+def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisfiable"] | None:
+    """Resolve one ``Range`` header against ``size``.
+
+    Three answers, and each has a different HTTP shape on purpose: the
+    inclusive ``(first, last)`` window to serve as 206; ``None`` when there
+    is no single satisfiable range to honour (absent, malformed, multi, or
+    an inverted pair like ``bytes=5-3`` — all ignored, full 200), and
+    ``"unsatisfiable"`` for the one case the spec answers differently: a
+    start at or past EOF is a 416, so a media client learns its request was
+    refused instead of receiving a whole body it did not ask for.
+    """
+    match = _SINGLE_RANGE.fullmatch(header.strip())
+    if match is None:
+        return None
+    first_txt, last_txt = match.groups()
+    if not first_txt and not last_txt:
+        return None  # ``bytes=-``: not one of the grammar's forms; ignore.
+    if first_txt:
+        first = int(first_txt)
+        if first >= size:
+            return "unsatisfiable"
+        if not last_txt:
+            return (first, size - 1)
+        last = int(last_txt)
+        if last < first:
+            return None  # An inverted pair is invalid; ignore the header.
+        return (first, min(last, size - 1))
+    # Suffix form: the LAST N bytes. A suffix at or past EOF is the whole
+    # representation (206 with everything), never an error; ``-0`` selects
+    # nothing and is unsatisfiable by definition.
+    length = int(last_txt)
+    if length == 0:
+        return "unsatisfiable"
+    if length >= size:
+        return (0, size - 1) if size > 0 else "unsatisfiable"
+    return (size - length, size - 1)
 
 
 def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
@@ -2670,6 +2846,19 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
+        #: half of the settings doorbell): one queue per open SSE response.
+        #: Doorbell-style — a watcher listener hands the change over, the
+        #: generator re-resolves and stamps when it drains. Mirrors
+        #: ``table.list_subscribers``.
+        self.config_subscribers: set[asyncio.Queue[Any]] = set()
+        #: The fan-out listener's unsubscribe for that channel, held so the
+        #: LAST subscriber can let go of the fan-out. The watcher itself is
+        #: the process-wide singleton (``config_watch.process_watcher``) and is
+        #: deliberately never stopped here: ``service.amain`` starts it for
+        #: display-following anyway, and its idle cost is the one stat per 2 s
+        #: the module already budgets for across 50 processes.
+        self._config_unsubscribe: Callable[[], None] | None = None
         # Push/ack-sync S5: the emit loop's host, and ``None`` on every machine
         # that has not armed one. The worker is INJECTED rather than built here
         # because its transport is the cloud's (S7), and the transport is the
@@ -2823,6 +3012,49 @@ class MobileDaemon:
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
+
+    # -- the relay's config channel (wave-5 slice D) -----------------------
+
+    def attach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Register one ``/api/config/events`` queue; first-in starts the fan-out.
+
+        The watcher is the process-wide ``config_watch`` singleton, started at
+        boot for display-following — the same stat-poll every sibling process
+        uses on this machine — so the relay's language is resolved from the
+        SAME file through the SAME resolver as every other surface: no second
+        truth and no replay.
+        """
+        self.config_subscribers.add(queue)
+        if self._config_unsubscribe is None:
+            try:
+                from local_operator.config_watch import process_watcher
+                from local_operator.paths import config_dir
+
+                watcher = process_watcher(config_dir())
+                watcher.start()  # idempotent; boot already did it in the normal path
+                self._config_unsubscribe = watcher.subscribe(self._fan_out_config_change)
+            except Exception:  # noqa: BLE001 — a dead fan-out costs live updates, not the stream
+                logger.warning("config subscriber could not be attached", exc_info=True)
+
+    def detach_config_subscriber(self, queue: "asyncio.Queue[Any]") -> None:
+        """Last-out releases the fan-out (the watcher itself stays; see ``__init__``)."""
+        self.config_subscribers.discard(queue)
+        if not self.config_subscribers and self._config_unsubscribe is not None:
+            self._config_unsubscribe()
+            self._config_unsubscribe = None
+
+    def _fan_out_config_change(self, change: Any) -> None:
+        """One change to every open stream; a full queue drops the EXTRA change.
+
+        Called on the loop thread, synchronously (``config_watch``'s listener
+        contract). Dropping is safe: the next frame carries the then-current
+        resolved language either way, and ``changed_keys`` is advisory.
+        """
+        for queue in list(self.config_subscribers):
+            try:
+                queue.put_nowait(change)
+            except asyncio.QueueFull:
+                continue
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""
@@ -4150,6 +4382,54 @@ async def _wait_for_owner_to_unpublish(session_id: str, retired_pid: int, timeou
         await asyncio.sleep(0.05)
 
 
+# ---------------------------------------------------------------------------
+# Turn supplements (memo §2.7) -- the relay's read routes
+# ---------------------------------------------------------------------------
+
+#: A supplement JOB id: ``persistence.new_job_id`` mints 12 lowercase hex, and the
+#: file route keys on it. Shape-checked before any lookup so a crafted job segment
+#: can never be anything but a miss (it is a lookup key, never a path).
+_SUPPLEMENT_JOB = re.compile(r"^[a-f0-9]{12}$")
+
+#: The file route's per-request byte cap (memo §2.7: "a 10 MB cap"), re-applied here
+#: rather than trusted from the decision, because the bytes on disk are what is read.
+SUPPLEMENT_FILE_MAX_BYTES = 10 * 1024 * 1024
+
+#: The SUFFIX -> Content-Type allowlist for the file route. Never ``text/html``,
+#: ``image/svg+xml``, ``application/xhtml+xml``, or any ``+xml`` (memo §2.7, S15):
+#: the served type is decided by this table alone, never by the bytes, so a ``.txt``
+#: whose body opens with ``<script>`` is still served as ``text/plain`` under
+#: ``nosniff`` and cannot execute. ``svg`` and ``xml`` are deliberately absent.
+_SUPPLEMENT_FILE_TYPES: dict[str, str] = {
+    ".txt": "text/plain",
+    ".log": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    ".json": "application/json",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".avif": "image/avif",
+}
+
+#: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
+#: EVERY response of both routes, errors included -- #2134 R4's lesson is that a policy
+#: attached only to the success path is silently absent where it matters. Stamped by
+#: ``_supplement_response`` at each return site below (the gate's refusals included).
+_SUPPLEMENT_POLICY: dict[str, str] = {
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+}
+
+
 def build_app(daemon: MobileDaemon):
     """The Starlette app. Imported inside the function so ``lop`` without the
     server extra never pays for starlette at startup."""
@@ -4239,7 +4519,7 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
+        return HTMLResponse(await asyncio.to_thread(_render_login_html))
 
     async def login_submit(request: Request) -> Response:
         denied = cross_origin_mutation(request)
@@ -4249,9 +4529,7 @@ def build_app(daemon: MobileDaemon):
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
             return HTMLResponse(
-                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
-                    "<!--ERROR-->", _LOGIN_ERROR
-                ),
+                await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
             )
         response = RedirectResponse("/", status_code=303)
@@ -4375,9 +4653,63 @@ def build_app(daemon: MobileDaemon):
             "unread": daemon.table.unread_block(),
             "capabilities": {
                 "features": _feature_flags(),
+                "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
             },
         }
+
+    async def api_i18n_catalogue(request: Request) -> Response:
+        """Public negotiation data, never session/user content or a core proxy.
+
+        The relay advertises this adapter separately from features.i18n: that
+        feature describes core's contract, not this app's routing table. Only
+        backend-owned wire namespaces may cross this seam; relay copy bundles
+        with its own client. Existing catalogue loaders own path validation.
+        """
+        from local_operator.i18n import catalogues, resolve
+        from local_operator.i18n.http import etag_matches
+
+        locale = request.path_params["locale"]
+        namespace = request.path_params["namespace"]
+        # Match core's public asset boundary, not language-preference inference:
+        # exact shipment and the operational switch precede hash/load/304, so
+        # held bytes cannot be activated by a conditional request either.
+        if (
+            not resolve.is_shipped(locale)
+            or resolve.eligible_locale(locale) != locale
+            or not namespace.startswith("wire.")
+        ):
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+
+        def load() -> tuple[str, dict[str, str]]:
+            return (
+                catalogues.catalogue_sha256(locale, namespace),
+                catalogues.load_catalogue(locale, namespace),
+            )
+
+        try:
+            sha, messages = await asyncio.to_thread(load)
+        except catalogues.CatalogueNotFound:
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+        except catalogues.CatalogueInvalid as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=500)
+        headers = {"ETag": f'"{sha}"', "Cache-Control": "no-cache"}
+        if etag_matches(request.headers.get("if-none-match", ""), sha):
+            return Response(status_code=304, headers=headers)
+        # Same three-field CRUD envelope as core, without importing its
+        # Pydantic/FastAPI models into the independent Starlette daemon.
+        return JSONResponse(
+            {
+                "status": 200,
+                "message": "Catalogue retrieved.",  # i18n: ignore protocol diagnostic
+                "result": {"messages": messages, "content_sha256": sha},
+            },
+            headers=headers,
+        )
 
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
@@ -4526,6 +4858,68 @@ def build_app(daemon: MobileDaemon):
                 # that turns buffering off at nginx-family proxies.
                 "X-Accel-Buffering": "no",
             },
+        )
+
+    async def api_config_events(request: Request) -> Response:
+        """SSE for the RESOLVED language: a settings change reaches the phone live.
+
+        Wave-5 slice D. The relay web (and, through it, the mobile app)
+        subscribe to the same ``config`` frame semantics the desktop feed
+        publishes — one shape, shared builder
+        (``i18n/frames.config_frame_payload``) — so a language write from any
+        origin (agent tool, TUI page, UI, a hand edit) lands here the same way:
+        the process watcher only fires when the file's VALUES moved.
+
+        THE FIRST FRAME IS THE BASELINE, matching the desktop feed's no-replay
+        discipline: on connect the stream sends the CURRENT resolved language
+        with ``changed_keys: []`` — nothing historical is ever announced — and
+        only real changes after that publish. An older daemon without this
+        route answers 404; clients treat that as the stream being absent, not
+        as a failure.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4)
+
+        async def stream():
+            # ATTACH ON FIRST PULL, not at route time (CI round 1, MINOR-1): a
+            # response nobody consumes — a client that vanishes between the
+            # call and the first read — must not leave its queue and fan-out
+            # behind, which a route-time attach did (one leaked subscriber,
+            # visible in ``config_subscribers``, per never-started stream).
+            # The sibling per-session stream carries the same lesson, and
+            # ``SessionEventResponse`` below closes this generator on the
+            # send-raise path too, so the finally's detach cannot be skipped.
+            daemon.attach_config_subscriber(queue)
+            try:
+                # ``to_thread``: the resolver falls back to constructing a
+                # ConfigManager (a YAML parse) when no watcher snapshot exists,
+                # and this daemon serves a 2 s SSE repaint loop (the module's
+                # own rule for anything heavier than a dict read).
+                yield _sse(
+                    "config",
+                    config_frame_payload((), await asyncio.to_thread(resolve_language)),
+                )
+                while True:
+                    try:
+                        change = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_S)
+                        yield _sse(
+                            "config",
+                            config_frame_payload(
+                                getattr(change, "changed_keys", ()) or (),
+                                await asyncio.to_thread(resolve_language),
+                            ),
+                        )
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                daemon.detach_config_subscriber(queue)
+
+        return SessionEventResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
     async def api_list_events(request: Request) -> Response:
@@ -5239,6 +5633,332 @@ def build_app(daemon: MobileDaemon):
             media_type=mime_type,
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
+
+    async def api_session_attachment(request: Request) -> Response:
+        """One attachment's bytes, with byte-Range (206) support.
+
+        The generalization of ``api_session_image`` the video player needs:
+        same on-disk transcript resolution, laziness and cache semantics,
+        but keyed by the artifact ``kind`` and answering HTTP Range
+        requests — phone Safari will not play a <video> that arrives as a
+        full-body 200, and a media element asking for a byte window is the
+        normal case, not an exotic one.
+
+        ``kind`` scopes the index: each family (image, video) counts only
+        its own blocks, exactly the walk its refs emitter writes, so a
+        request answers the bytes its ref meant or nothing (404). An
+        unknown kind is a 404 too — nothing of that family exists on this
+        surface.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        session_id = str(request.path_params["session_id"])
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None:
+            return JSONResponse({"error": "unknown session"}, status_code=404)
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id:
+            return JSONResponse({"error": "entry id is required"}, status_code=400)
+        kind = request.query_params.get("kind", "")
+        if kind not in ("image", "video"):
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        try:
+            index = int(request.query_params.get("i", "0"))
+        except ValueError:
+            return JSONResponse({"error": "bad attachment index"}, status_code=400)
+        found = await asyncio.to_thread(_attachment_bytes, entry.record, entry_id, index, kind)
+        if found is None:
+            return JSONResponse({"error": "no such attachment"}, status_code=404)
+        data, mime_type = found
+        cache = {"Cache-Control": "public, max-age=31536000, immutable"}
+        window = _range_window(request.headers.get("range", ""), len(data))
+        if isinstance(window, str):
+            # "unsatisfiable": the spec's own answer for a range set nothing
+            # can satisfy (a start at or past EOF).
+            return Response(
+                content=b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        if window is not None:
+            first, last = window
+            return Response(
+                content=data[first : last + 1],
+                status_code=206,
+                media_type=mime_type,
+                headers={
+                    "Content-Range": f"bytes {first}-{last}/{len(data)}",
+                    "Accept-Ranges": "bytes",
+                    **cache,
+                },
+            )
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={"Accept-Ranges": "bytes", **cache},
+        )
+
+    # -- the supplement read family (memo §2.7; RFC D5) ----------------------------------
+    #
+    # The response policy and the journal-reference check are shared by the two routes
+    # below, so they live beside them rather than inside each handler.
+
+    def _supplement_response(response: Response) -> Response:
+        """Stamp the family policy (``_SUPPLEMENT_POLICY``) on ``response``.
+
+        EVERY return of the two routes below goes through this, errors included
+        (#2134 R4: a policy attached only to the success path is silently absent
+        where it matters). Plain assignment, not ``setdefault``: the 200s set the
+        same pair, and one spelling keeps the family uniform.
+        """
+        for name, value in _SUPPLEMENT_POLICY.items():
+            response.headers[name] = value
+        return response
+
+    def _journal_references_digest(payload: bytes, digest: str) -> bool:
+        """Whether a ``supplement_v1`` row of this journal references ``digest``.
+
+        §2.7's letter for the document route: the reference is read per
+        ``supplement_v1`` row. Deliberately narrower than a raw session-wide scan
+        with sync's byte grammar -- the grammar also matches ``"attachment"``
+        references on other row types (message media carries the same key today),
+        and a future text-mime producer must not become servable through this door
+        without the authorisation being reconsidered (round-1 review R4). The cheap
+        pre-filter keeps JSON parsing to the lines that can be supplement rows.
+        """
+        from local_operator.network.sync import _ATTACHMENT_REF
+        from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+        marker = SUPPLEMENT_CUSTOM_TYPE.encode("ascii")
+        needle = digest.encode("ascii")
+        for line in payload.splitlines():
+            if marker not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_payload = row.get("payload")
+            if not isinstance(row_payload, dict):
+                continue
+            if row_payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                continue
+            if any(match == needle for match in _ATTACHMENT_REF.findall(line)):
+                return True
+        return False
+
+    async def api_session_supplement_document(request: Request) -> Response:
+        """One stored supplement component, assembled to a document, as ``{html}``.
+
+        THE EXECUTING-DOCUMENT FAMILY (file-serving RFC §2 D5). Component blobs are
+        agent-written documents that run script in an opaque-origin frame, so they are
+        served ONLY from this digest-addressed family -- never by path, never through
+        ``/v1/static/*`` -- and the reply is JSON (``{html}``), never ``text/html``:
+        nothing here may become a URL a browsing context is navigated to (memo §4.1).
+        The digest is the whole address; there is no caller-supplied path anywhere in
+        the request. Headers carry ``X-Content-Type-Options: nosniff`` and
+        ``Cache-Control: no-store``; the document's own CSP rides inside it as a
+        <meta>, because the tunnel forwards a fixed response-header set (memo §2.7).
+
+        AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
+        the session existing on disk as a local USER conversation, and the digest
+        The digest is the whole address; there is no caller-supplied path anywhere in
+        the request. Headers carry ``X-Content-Type-Options: nosniff`` and
+        ``Cache-Control: no-store`` -- on EVERY response of the route, refusals
+        included (``_supplement_response``) -- and the document's own CSP rides
+        inside it as a <meta>, because the tunnel forwards a fixed response-header
+        set (memo §2.7).
+
+        AUTHORISATION IS THREE FACTS, the memo's §2.7 (a)-(c): the cookie (``gate``),
+        the session existing on disk as a local USER conversation, and the digest
+        being REFERENCED by a ``supplement_v1`` row of that session's journal
+        (``_journal_references_digest``). The third is what makes the route safe to
+        key on a digest alone: a blob no row references is not servable here even
+        when the caller holds a digest from somewhere else. It is deliberately
+        scoped to supplement rows rather than sync's whole-journal byte grammar --
+        the grammar also matches media references on other row types, and those
+        must not become servable through this door without the authorisation being
+        reconsidered (round-1 review R4). It deliberately does NOT use
+        ``_entry_for_session`` -- that serves only live generations, and an ended
+        conversation's history must still show its components.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _supplement_response(denied)
+        session_id = str(request.path_params["session_id"])
+        digest = str(request.path_params["digest"])
+
+        def load() -> str | None:
+            import base64
+
+            from local_operator.session.attachments import AttachmentStore
+            from local_operator.supplements.contract import is_digest
+            from local_operator.supplements.document import assemble_stored_component
+
+            if not is_digest(digest):
+                return None
+            directory = _durable_user_session_dir(session_id)
+            if directory is None:
+                return None
+            try:
+                payload = (directory / "transcript.jsonl").read_bytes()
+            except OSError:
+                return None
+            if not _journal_references_digest(payload, digest):
+                return None
+            resolved = AttachmentStore().get(digest)
+            if resolved is None:
+                return None
+            data_b64, _mime_type = resolved
+            try:
+                return assemble_stored_component(base64.b64decode(data_b64).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return None
+
+        html = await asyncio.to_thread(load)
+        if html is None:
+            return _supplement_response(
+                JSONResponse({"error": "no such supplement"}, status_code=404)
+            )
+        return JSONResponse({"html": html}, headers=dict(_SUPPLEMENT_POLICY))
+
+    async def api_session_supplement_file(request: Request) -> Response:
+        """One file callout's bytes, addressed by the row's own index (memo §2.7).
+
+        THERE IS NO PATH PARAMETER AND THERE NEVER MAY BE. The only addressable file
+        is ``row["files"][i]`` -- the path the row itself recorded, which the
+        pre-filter admitted -- so a caller cannot ask for an arbitrary file however
+        the query is shaped, and out-of-range indices (``-1``, past the end, a
+        non-integer) resolve to nothing.
+
+        Four refusals beyond that, each re-applied here rather than trusted from the
+        decision (memo §4.3/S15): the resolved path must stay under the session's cwd
+        or ``~`` (a tampered row does not become a read primitive); the §4.3
+        sensitive-path denylist is re-applied; the file must be a regular file of at
+        most 10 MB; and the ``Content-Type`` comes from a SUFFIX ALLOWLIST --
+        text/markdown/CSV/TSV/JSON/image/PDF -- never ``text/html``, ``image/svg+xml``,
+        ``application/xhtml+xml`` or any ``+xml``. A ``.txt`` whose body begins
+        ``<script>`` therefore renders as text under ``nosniff``: content-type and
+        disposition are decided by the allowlist alone, never by the bytes.
+        ``Content-Disposition: attachment`` rides every non-image class, and nothing
+        navigates a browsing context to this route (S-R6; bytes are rendered in-app).
+
+        An ended session's cwd is NOT recorded durably (the daemon's own resume notes
+        this), so a cwd-relative path without a live record is refused rather than
+        resolved against a guess; ``~``-relative paths serve in either case. A
+        peer-hosted conversation has no local directory and is refused the same way.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _supplement_response(denied)
+        session_id = str(request.path_params["session_id"])
+        job = str(request.path_params["job"])
+        raw_index = request.query_params.get("i", "")
+        try:
+            index = int(raw_index)
+        except ValueError:
+            return _supplement_response(JSONResponse({"error": "bad file index"}, status_code=400))
+
+        def load() -> tuple[bytes, str] | str:
+            """``(bytes, mime)``, or a refusal token the route maps to a status."""
+            import os
+
+            from local_operator.session.transcript import Transcript
+            from local_operator.supplements import denylist
+
+            directory = _durable_user_session_dir(session_id)
+            if directory is None or not _SUPPLEMENT_JOB.fullmatch(job):
+                return "missing"
+            try:
+                entries = Transcript(directory).entries()
+            except Exception:  # noqa: BLE001 -- an odd transcript serves no file
+                return "missing"
+            newest: dict[str, Any] | None = None
+            for entry in entries:
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                details = payload.get("details")
+                if not isinstance(details, dict) or details.get("job") != job:
+                    continue
+                version = details.get("version")
+                if not isinstance(version, int) or isinstance(version, bool):
+                    continue
+                if newest is None or version >= int(newest.get("version", -1)):
+                    newest = details
+            if newest is None:
+                return "missing"
+            files = newest.get("files")
+            if not isinstance(files, list) or not 0 <= index < len(files):
+                return "missing"
+            recorded = files[index] if isinstance(files[index], dict) else {}
+            raw = recorded.get("path")
+            if not isinstance(raw, str) or not raw:
+                return "missing"
+
+            home = str(Path.home())
+            entry = _entry_for_session(daemon, session_id)
+            cwd = entry.record.cwd if entry is not None else ""
+            expanded = os.path.expanduser(raw)
+            if not os.path.isabs(expanded):
+                if not cwd:
+                    # No live record: a cwd-relative path has no root we can
+                    # vouch for, and resolving it against a guess is the class
+                    # of silent wrong-directory this codebase refuses.
+                    return "no-cwd"
+                expanded = os.path.join(cwd, expanded)
+            resolved_path = Path(os.path.realpath(expanded))
+            allowed_roots = [Path(os.path.realpath(root)) for root in (cwd, home) if root]
+            if not any(
+                resolved_path == root or resolved_path.is_relative_to(root)
+                for root in allowed_roots
+            ):
+                return "missing"
+            if denylist.is_sensitive(str(resolved_path), cwd=cwd or home):
+                logger.info("supplement file refused by the denylist for %s", session_id)
+                return "missing"
+            try:
+                if not resolved_path.is_file():
+                    return "missing"
+                size = resolved_path.stat().st_size
+                if size > SUPPLEMENT_FILE_MAX_BYTES:
+                    return "too-large"
+                data = resolved_path.read_bytes()
+            except OSError:
+                return "missing"
+            if len(data) > SUPPLEMENT_FILE_MAX_BYTES:
+                return "too-large"
+            mime = _SUPPLEMENT_FILE_TYPES.get(resolved_path.suffix.lower())
+            if mime is None:
+                return "missing"
+            return data, mime
+
+        outcome = await asyncio.to_thread(load)
+        if outcome == "missing":
+            return _supplement_response(JSONResponse({"error": "no such file"}, status_code=404))
+        if outcome == "no-cwd":
+            return _supplement_response(
+                JSONResponse(
+                    {"error": "file previews for an ended session need the session running"},
+                    status_code=409,
+                )
+            )
+        if outcome == "too-large":
+            return _supplement_response(
+                JSONResponse({"error": "file is larger than the preview limit"}, status_code=413)
+            )
+        data, mime = outcome
+        headers = dict(_SUPPLEMENT_POLICY)
+        if not mime.startswith("image/"):
+            headers["Content-Disposition"] = "attachment"
+        return Response(content=data, media_type=mime, headers=headers)
 
     async def api_command(request: Request) -> Response:
         """The one mutation endpoint: {op, ...} → control frame. Keeping
@@ -6056,6 +6776,19 @@ def build_app(daemon: MobileDaemon):
         # must not reach it as "there are none".
         return JSONResponse({"sessions": rows, "degraded": degraded})
 
+    async def api_usage(request: Request) -> Response:
+        # Pairing authorization precedes even the cached read. This endpoint
+        # exposes no account identities, vendor notes, ambient accounts or live
+        # provider probes; an empty cache is not a measured zero balance.
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            snapshot = await asyncio.to_thread(_cached_phone_usage)
+        except Exception:  # noqa: BLE001 — no raw store/vendor errors over the tunnel
+            return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
+        return JSONResponse(snapshot)
+
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
         their models, reusing the server's model listing so the phone and the
@@ -6217,7 +6950,12 @@ def build_app(daemon: MobileDaemon):
         try:
             payload = await asyncio.to_thread(fn, *args)
         except mobile_projects.ProjectRouteError as exc:
-            return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
+            # `extra` is empty for every refusal but `project_done_incomplete`
+            # (its `incomplete` names), so the common body stays {error, code}.
+            # `extra` is spread FIRST so it can never clobber `error`/`code`.
+            return JSONResponse(
+                {**exc.extra, "error": exc.message, "code": exc.code}, status_code=exc.status
+            )
         return JSONResponse(payload)
 
     async def api_projects(request: Request) -> Response:
@@ -6639,6 +7377,7 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        Route("/api/i18n/catalogues/{locale:str}/{namespace:str}", api_i18n_catalogue),
         # The badge read (push/ack-sync S1): the same aggregate the list payload
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
@@ -6694,6 +7433,15 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
+        Route("/api/sessions/{session_id:str}/attachment", api_session_attachment),
+        Route(
+            "/api/sessions/{session_id:str}/supplements/{digest:str}/document",
+            api_session_supplement_document,
+        ),
+        Route(
+            "/api/sessions/{session_id:str}/supplements/{job:str}/file",
+            api_session_supplement_file,
+        ),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
         Route(
             "/api/sessions/{session_id:str}/operator/challenge",
@@ -6711,6 +7459,8 @@ def build_app(daemon: MobileDaemon):
         Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/usage", api_usage),
+        Route("/api/config/events", api_config_events),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
@@ -6947,6 +7697,118 @@ def _default_start_cwd() -> str:
     return str(Path.home())
 
 
+def _cached_phone_usage() -> dict[str, Any]:
+    """Minimum paired-phone display payload, never credentials or live usage.
+
+    The existing controller owns cache keys and normalized eligibility. Filtering
+    by persisted providers follows the model sheet's remote boundary; unknown
+    admission fails closed rather than advertising ambient accounts.
+    """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+
+    # The factory opens only read-only metadata handles. None requests the
+    # persisted-only inventory, never environment/runtime/config accounts.
+    controller = ProviderController.read_only_for_persisted_usage()
+    try:
+        snapshot = controller.cached_persisted_usage_reports_read_only(None)
+    finally:
+        try:
+            controller.close()
+        finally:
+            # The facade types its store as the narrow ControllerAuthStore
+            # Protocol (no close); this factory always builds the concrete
+            # AuthStore.open_read_only handle, which owns the connection.
+            cast(AuthStore, controller.auth_store).close()
+    # Empty/absent is successful; unreadable is not. Preserve immutable-read
+    # freshness instead of guessing it from individual report timestamps.
+    if snapshot.unavailable:
+        raise RuntimeError("cached usage unavailable")
+    import math
+
+    def finite(value: Any) -> float | None:
+        # Invalid numeric data is unavailable, never a fake zero or JSON NaN.
+        return (
+            value
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            else None
+        )
+
+    result: list[dict[str, Any]] = []
+    for report in snapshot.reports:
+        provider = report.provider
+        limits = []
+        for limit in report.limits:
+            amount = limit.amount
+            # fraction() is Optional; bind once so the comparison narrows.
+            fraction = amount.fraction()
+            # Names/details/identity are not required for quota display.
+            # Permit only normalized units; arbitrary vendor strings
+            # must not become remote account/credential disclosures.
+            unit = (
+                amount.unit
+                if amount.unit in {"credits", "usd", "percent", "tokens", "requests", "unknown"}
+                else "unknown"
+            )
+            limits.append(
+                {
+                    "amount": {
+                        "used": finite(amount.used),
+                        "limit": finite(amount.limit),
+                        "remaining": finite(amount.remaining),
+                        "used_fraction": finite(amount.used_fraction),
+                        "unit": unit,
+                    },
+                    "paid_fallback": limit.paid_fallback,
+                    "available": limit.available,
+                    "unlimited": limit.unlimited,
+                    "supersedes_tiers": limit.supersedes_tiers,
+                    "family_cap": bool(limit.tier),
+                    "shared": bool(limit.shared) and not bool(limit.tier),
+                    # Only exact canonical metadata can name a phone row. Unknown
+                    # vendor strings stay unknown, never become remote account copy.
+                    "window": {
+                        "5 hour": "5h",
+                        "five_hour": "5h",
+                        "5h": "5h",
+                        "7 day": "7d",
+                        "7d": "7d",
+                        "weekly": "7d",
+                        "1 month": "1mo",
+                        "monthly": "1mo",
+                        "lifetime": "lifetime",
+                    }.get(limit.window, "unknown"),
+                    "family": (
+                        limit.tier
+                        if limit.tier in {"opus", "sonnet", "fable", "zread"}
+                        else "unknown"
+                    ),
+                    "resets_at_ms": finite(limit.resets_at_ms),
+                    # Python owns the exact fraction-first eligibility.
+                    "payable": limit.paid_usable(),
+                    "exhausted": fraction is not None and fraction >= 1,
+                }
+            )
+        result.append(
+            {
+                "provider": provider,
+                "limits": limits,
+                "unavailable": report.usage_unavailable,
+                "fetched_at": report.fetched_at,
+            }
+        )
+    return {
+        "reports": result,
+        "source": "cached",
+        "may_be_stale": snapshot.may_be_stale,
+        "cached_at": snapshot.cached_at,
+    }
+
+
 def _provider_display_name(provider_id: str) -> str:
     """The registry's human name for ``provider_id`` (the id when it has none).
 
@@ -7091,7 +7953,9 @@ class _UnreadableAuthStore:
     def active_local_credential(self, provider: str, endpoint: str) -> Any:
         raise self._unavailable("active_local_credential")
 
-    async def get_oauth_access(self, provider: str) -> Any:
+    async def get_oauth_access(self, provider: str, *, read_only: bool = False) -> Any:
+        # ``read_only`` is accepted only to match ``ControllerAuthStore`` (the
+        # authoring catalogue passes it); this stand-in raises either way.
         raise self._unavailable("get_oauth_access")
 
     async def list_oauth_accesses(self, provider: str) -> list[Any]:
@@ -7100,7 +7964,8 @@ class _UnreadableAuthStore:
     def list_oauth_identities(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_identities")
 
-    async def get_api_key(self, provider: str) -> str | None:
+    async def get_api_key(self, provider: str, *, read_only: bool = False) -> str | None:
+        # Intentionally ignored, as in ``get_oauth_access`` above.
         raise self._unavailable("get_api_key")
 
 
@@ -7288,16 +8153,60 @@ def _list_models() -> list[dict[str, Any]]:
 #: a bad POST re-renders this page with the field refocused and cleared, and
 #: without a live region a screen-reader user was told nothing about the
 #: failed attempt (measured: `role` null, parent `aria-live` null).
-_LOGIN_ERROR = '<p class="error" role="alert">Wrong password.</p>'
+def _render_login_html(*, error: bool = False) -> str:
+    """Resolve at the request boundary, not import time or browser preferences.
+
+    The gate precedes the SPA/bootstrap and must work without JavaScript.
+    Escape catalogue output even in text nodes: translator-supplied markup must
+    never execute on the authentication surface. One-pass substitution prevents
+    translated text resembling a token from being substituted twice.
+    """
+    locale = resolve_language()
+    messages: dict[str, Msg] = {
+        "TITLE": relay_login.page_title(),
+        "PASSWORD": relay_login.password_label(),
+        "SUBMIT": relay_login.submit_label(),
+        "ERROR": relay_login.error_password(),
+    }
+    # Language-of-page describes the copy actually rendered, not preference.
+    # A shipped locale may lack this newly extracted namespace; select its
+    # English fallback once so assistive pronunciation and direction agree
+    # with every message. Never probe any locale the backend did not resolve.
+    try:
+        source = catalogues.load_catalogue(locale, "relay.login")
+        # A valid map can still be empty/partial. Include the refusal even on
+        # GET so a failed attempt cannot switch languages or silently mix
+        # English per-key fallback under non-English page metadata.
+        if not {message.code for message in messages.values()}.issubset(source):
+            locale = "en"
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        locale = "en"
+
+    def text(message: Msg) -> str:
+        return html.escape(render(message.code, message.params, locale=locale))
+
+    values = {
+        "LANG": html.escape(locale, quote=True),
+        "DIR": "rtl" if locale == "ur" else "ltr",
+        "MARK_DATA_URI": html.escape(_mark_data_uri(), quote=True),
+        "TITLE": text(messages["TITLE"]),
+        "PASSWORD": text(messages["PASSWORD"]),
+        "SUBMIT": text(messages["SUBMIT"]),
+        "ERROR": (
+            '<p class="error" role="alert">' + text(messages["ERROR"]) + "</p>" if error else ""
+        ),
+    }
+    return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
+
 
 _LOGIN_HTML = """<!doctype html>
-<html lang="en">
+<html lang="__LANG__" dir="__DIR__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110c">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>local operator — sign in</title>
+<title>__TITLE__</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
      page is server-rendered so the auth gate has zero client-side surface,
@@ -7402,13 +8311,13 @@ _LOGIN_HTML = """<!doctype html>
     <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
-  <!--ERROR-->
+  __ERROR__
   <div class="field">
-    <label for="password">password</label>
+    <label for="password">__PASSWORD__</label>
     <input id="password" type="password" name="password"
            autocomplete="current-password" autofocus required>
   </div>
-  <button type="submit">sign in</button>
+  <button type="submit">__SUBMIT__</button>
 </form>
 <script>
   /* U2: clear private authenticated state (uncertain command envelopes and

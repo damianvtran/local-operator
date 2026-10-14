@@ -113,7 +113,7 @@ async def test_import_agent_missing_yml(test_app_client, dummy_registry: AgentRe
     # Check the response
     assert response.status_code == 400
     data = response.json()
-    assert "Missing agent.yml in ZIP file" in data["detail"]
+    assert "Missing agent.yml in ZIP file" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_import_agent_invalid_zip(test_app_client, dummy_registry: AgentRe
     # Check the response
     assert response.status_code == 400
     data = response.json()
-    assert "Invalid ZIP file" in data["detail"]
+    assert "Invalid ZIP file" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -205,7 +205,7 @@ async def test_export_agent_not_found(test_app_client, dummy_registry: AgentRegi
     # Check the response
     assert response.status_code == 404
     data = response.json()
-    assert "Agent with ID non-existent-id not found" in data["detail"]
+    assert "Agent with ID non-existent-id not found" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio

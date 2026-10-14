@@ -13,6 +13,7 @@ from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import (
+    QUIET_TURN_KEY,
     CustomMessage,
     Message,
     TextContent,
@@ -804,6 +805,55 @@ async def test_patience_tool_rows_are_stripped_from_audit_pages_too(tmp_path: Pa
     ids = {str(getattr(m, "id", "")) for m in rows}
     assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
     assert arm_call.id not in ids and arm_result.id not in ids, "the arm's rows painted"
+
+
+def _quiet_call_and_result() -> tuple[list[Message], Message, Message]:
+    """The pair a quiet turn persists (docs/design/quiet-turns.md §5, S1).
+
+    Product-shaped: the text-free assistant row carrying the one ``no_reply``
+    call, then its result with the marker S0a stamps in ``details`` — the same
+    two rows ``tests/e2e/test_quiet_turns_e2e.py`` finds on disk.
+    """
+    call = Message.assistant(
+        "", tool_calls=[ToolCall(id="call-quiet", name="no_reply", arguments={})]
+    )
+    result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-quiet",
+            tool_name="no_reply",
+            content=[TextContent(text="Quiet.")],
+            details={QUIET_TURN_KEY: True},
+        )
+    )
+    return [call, result], call, result
+
+
+@pytest.mark.asyncio
+async def test_the_quiet_pair_stays_in_the_display_window(tmp_path: Path) -> None:
+    """NOT subtracted like a hidden tool's pair: the dashboard needs it (§5).
+
+    The quiet-close rule reads the persisted call as the structural close of
+    its settled turn, so the pair must cross the owner→viewer window whole —
+    which is why ``no_reply`` is deliberately NOT in ``HIDDEN_TOOL_NAMES``,
+    and this is that exclusion's window-level pin. The patience arm appended
+    beside it is the control the other way round: the subtractive machinery IS
+    running over this transcript, and the quiet pair is deliberately not among
+    its inputs. A future change that adds the name to that set fails here.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    quiet_rows, quiet_call, quiet_result = _quiet_call_and_result()
+    arm_rows, arm_call, arm_result, _read_call, _read_result = _patience_arm_and_read_pairs()
+    await transcript.append_messages([Message.user("ask"), Message.assistant("answer")])
+    await transcript.append_messages(quiet_rows)
+    await transcript.append_messages(arm_rows[:2])
+
+    page = window(transcript)
+    ids = {str(getattr(m, "id", "")) for m in page.messages}
+    assert quiet_call.id in ids and quiet_result.id in ids, "the quiet pair was subtracted"
+    assert arm_call.id not in ids and arm_result.id not in ids, "the subtractor stopped running"
+    # Display-only machinery or not, the model's own replay keeps the pair too.
+    llm_ids = {str(getattr(m, "id", "")) for m in transcript.build_llm_history(through_id=None)}
+    assert quiet_call.id in llm_ids and quiet_result.id in llm_ids
 
 
 def _walk(transcript: Transcript, **kwargs):

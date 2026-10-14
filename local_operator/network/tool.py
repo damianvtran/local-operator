@@ -1349,6 +1349,11 @@ async def execute_network(
         # one rather than reported.
         argv = ["network", "join", token_arg, "--park", "--json"]
 
+    # Readiness must answer for the session's actual selection, not only the
+    # peer's default. Host context is refreshed per turn, so /model switches
+    # reach this read without adding a model override or changing tool defaults.
+    if params.action == "ready" and context is not None and context.session_model_label:
+        argv.extend(["--model", context.session_model_label, "--session", context.session_id])
     timeout = _timeout_for(params)
     try:
         if parked:

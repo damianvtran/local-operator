@@ -1736,7 +1736,7 @@ Properties this design must hold, each with the mechanism that holds it:
    peer-side relay from the local record (`SessionRecord.control_key`, `0600` under
    `0700`) and used only for its own loopback dial. A peer never receives one. Test:
    assert no frame on the peer link contains the owner's `control_key` string.
-3. **`locality` is [redacted]** (spine §5.8) — the peer-side relay stamps
+3. **`locality` is declared, not assumed** (spine §5.8) — the peer-side relay stamps
    `"remote"`; a forwarded frame claiming `"local"` is refused as a protocol error.
 4. **Least authority** (spine §5.3) — the auth frame's `grant` set gates the three
    `locality`-sensitive ops (§3.3) and nothing else; every relay op is authorised

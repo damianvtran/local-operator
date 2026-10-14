@@ -131,6 +131,170 @@ async def test_real_split_child_stderr_is_scrubbed(isolated, caplog):
     assert variables.redact(sentinel) == "[redacted]"
 
 
+def test_the_stderr_redactor_masks_a_word_like_value_on_word_boundaries() -> None:
+    """A letters-only credential in a child's stderr masks as a TOKEN, never inside a word.
+
+    The stderr redactor takes the shared value pass now (agent review round 1, R1), so a
+    word-like value behaves as it does on every other surface: the standalone token is
+    masked, and an ordinary word that merely CONTAINS it stays readable — the over-mask
+    this pass exists to remove, on the one sink that runs before a tool result exists.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "syn" + "thetic"
+    redactor = StderrRedactor([word])
+    out = redactor.feed(("un" + word + "ally and a " + word + " store\n").encode())
+    assert "un" + word + "ally" in out, "the embedded word must stay readable"
+    assert f"a {word} store" not in out, "the standalone token must stay masked"
+    assert "[redacted]" in out
+    # ...and a cut inside the line must not publish the standalone token either.
+    second = StderrRedactor([word])
+    payload = f"pre {word} post\n".encode()
+    joined = second.feed(payload[:8]) + second.feed(payload[8:]) + second.feed(b"", final=True)
+    assert word not in joined.replace("[redacted]", ""), joined
+
+
+def test_every_split_of_an_escape_before_a_word_keeps_it_masked() -> None:
+    """Every cut of a payload whose word follows a JSON escape must keep it masked.
+
+    Deferred QA Q-3 (#2140): a release cut that landed between the escape's ``\\``
+    and its letter published the letter+word into the NEXT release, where the
+    boundary rule read the escape's tail (``n``, ``t``, or up to four hex digits of
+    ``\\uXXXX``) as an ordinary letter run and left the standalone token — on the
+    one sink that runs before a tool result exists. Swept here over EVERY two-way
+    split, every three-way split and a one-byte feed for the escape shapes and the
+    two backslash-RUN shapes whose pairing decides the boundary (review round 1,
+    R-3 re-checked the run classes on the parity hold), plus a value-length sweep:
+    no arrangement may publish the word unmasked.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "qw" * 5
+
+    def joined(payload: str, cuts: tuple[int, ...]) -> str:
+        redactor = StderrRedactor([word])
+        out = ""
+        previous = 0
+        for cut in (*cuts, len(payload)):
+            out += redactor.feed(payload[previous:cut].encode())
+            previous = cut
+        return out + redactor.feed(b"", final=True)
+
+    for escape in (
+        "\\" + "n",
+        "\\" + "t",
+        "\\" + "u000a",
+        "\\" + "\\",
+        "\\" + "\\" + "\\",
+    ):
+        payload = '{"msg": "x' + escape + word + ' z"}\n'
+        for i in range(1, len(payload)):
+            out = joined(payload, (i,))
+            assert word not in out.replace("[redacted]", ""), (escape, "2-way", i, out)
+            for j in range(i, len(payload)):
+                out = joined(payload, (i, j))
+                assert word not in out.replace("[redacted]", ""), (escape, "3-way", i, j, out)
+        out = joined(payload, tuple(range(1, len(payload))))
+        assert word not in out.replace("[redacted]", ""), (escape, "1-byte", out)
+        assert "[redacted]" in out, (escape, "premise: the word was there to mask")
+    # The word's own length moves where the historical cut landed; every length
+    # 8..17 on the ``\\uXXXX`` shape must hold.
+    for length in range(8, 18):
+        word = ("qw" * 10)[:length]
+        payload = '{"msg": "x' + "\\" + "u000a" + word + ' z"}\n'
+        for i in range(1, len(payload)):
+            out = joined(payload, (i,))
+            assert word not in out.replace("[redacted]", ""), (length, i, out)
+
+
+def test_a_pure_backslash_stream_stays_bounded() -> None:
+    """A backslash run is counted in one step, never walked one hold at a time.
+
+    Review round 1, R-3: the hold re-entered its helper once per backslash, so a
+    child streaming backslashes with no newline pinned every byte in ``pending``
+    (three 4 KB feeds: released 0/0/0, pending 12288) instead of the class's own
+    bounded holdback (base: released 4088/4096/4096, pending 8). With the parity
+    hold an unpaired backslash still crosses feeds safely, at the documented cost
+    of ONE byte of delay per feed; the run's own length changes nothing else.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "syn" + "thetic"
+    redactor = StderrRedactor([word])
+    # One byte of delay per feed at most: every release is the chunk minus the
+    # class's holdback (longest value - 1) and the one withheld backslash.
+    assert [len(redactor.feed(b"\\" * 4096)) for _ in range(3)] == [4088, 4096, 4096]
+    assert len(redactor._pending) == 8, len(redactor._pending)
+    # ...and the final flush releases the held tail: the stream is byte-identical.
+    assert redactor.feed(b"", final=True) == "\\" * 8
+
+
+def test_an_oversized_unterminated_line_never_releases_an_escape_fragment(caplog) -> None:
+    """The real-pump shape: an unterminated line past ``STDERR_LINE_LIMIT``.
+
+    The stderr pump (``manager._stderr_pump``) flushes its buffer as a line once it
+    passes the limit, so two releases of ONE unterminated line land as SEPARATE
+    lines and no later whole-line scrub can re-join them: before the fix, a cut
+    landing right after the escape's ``\\`` released it in the first half and the
+    word arrived in the second half as ``n<word>`` — retained unmasked in the tail
+    and the log (the QA Q-3 real-child repro; word length 9 lands that cut exactly
+    there). Drives the real ``StderrRedactor`` and the real ``McpServerStderr``
+    through the pump's own six-line buffer/flush rule.
+    """
+    from local_operator.mcp.manager import STDERR_LINE_LIMIT, McpServerStderr
+    from local_operator.mcp.redaction import StderrRedactor
+
+    caplog.set_level(logging.INFO, logger="local_operator.mcp.server.canary")
+    word = "split" + "word"  # 9 letters: the historical cut lands on the backslash
+    first = ("A" * 2100) + "\\" + "n" + word[:7]
+    second = word[7:] + ' z"}\n'
+
+    sink = McpServerStderr("canary")
+    redactor = StderrRedactor([word])
+    emitted: list[str] = []
+    buffer = ""
+    for chunk in (first, second):
+        buffer += redactor.feed(chunk.encode())
+        lines = buffer.split("\n")
+        buffer = lines.pop()
+        if len(buffer) > STDERR_LINE_LIMIT:
+            lines.append(buffer)
+            buffer = ""
+        for line in lines:
+            emitted.append(line)
+            sink.feed(line)
+    buffer += redactor.feed(b"", final=True)
+    if buffer:
+        emitted.append(buffer)
+        sink.feed(buffer)
+
+    out = "\n".join(emitted)
+    assert len(out) > STDERR_LINE_LIMIT, "premise: the pump's flush path ran"
+    for surface in (out, sink.tail_text(), sink.quoted_tail(), caplog.text):
+        assert word not in surface, surface
+    assert "[redacted]" in out, "premise: the word was there to mask"
+
+
+def test_a_complete_line_still_releases_through_the_escape_hold() -> None:
+    """No regression on the normal line behaviour the holdback exists beside.
+
+    The hold only retimes a cut INSIDE an unterminated line; a complete line
+    releases as soon as it arrives (that is what lets a child print its startup
+    line and go quiet), a line ending right before its newline is not delayed, and
+    the value-prefix holdback still refuses to split a registered value.
+    """
+    from local_operator.mcp.redaction import StderrRedactor
+
+    word = "syn" + "thetic"
+    redactor = StderrRedactor([word])
+    assert redactor.feed((f"report {word} done\n").encode()) == "report [redacted] done\n"
+    assert redactor.feed(b"path C:\\\n") == "path C:\\\n"
+    split = StderrRedactor([word])
+    out = split.feed(("see " + word[:6]).encode())
+    out += split.feed((word[6:] + " here\n").encode())
+    assert word not in out.replace("[redacted]", ""), out
+
+
 def _chain_text(exc: BaseException) -> str:
     """``str()`` of an exception and everything it is chained to.
 

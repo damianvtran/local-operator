@@ -130,6 +130,35 @@ def real_home() -> Path | None:
     return Path(profile).resolve() if profile else None
 
 
+def home_is_the_users() -> bool | None:
+    """Whether ``$HOME`` is the REAL user's home — ``None`` when unknowable.
+
+    THE SHARED SPELLING of "a run, not a person" (``real_home``'s docstring is
+    the why): one comparison, so the toast gate
+    (``tui.notify.desktop_belongs_to_this_process``), the runtime's quiet arm
+    (``session.runtime.serving.ServingSessionHandle._announce_completion``),
+    the server boot hook (``aida.activation.home_is_the_users``) and the
+    migration's log level (``config_migrations.migrate_session_cleanup``)
+    cannot drift apart one call site at a time.
+
+    Return contract, chosen so every caller fails OPEN the same way:
+    ``None`` means the platform could not answer (no passwd database, or a
+    ``$HOME`` that will not resolve) and callers must behave as if this IS the
+    user's own session — refusing there would take a feature away on a
+    platform we merely cannot interrogate, while every platform that can reach
+    a toast has a passwd entry. Defects (``NameError``, ``TypeError``) are NOT
+    laundered into that direction and propagate; ``tests/unit/
+    test_notification_isolation.py`` pins both halves.
+    """
+    home = real_home()
+    if home is None:
+        return None
+    try:
+        return Path.home().resolve() == home
+    except (OSError, RuntimeError):
+        return None
+
+
 def config_lives_in_real_home(config_dir: Path) -> bool:
     """Whether a unit supervising ``config_dir`` would outlive this process.
 
@@ -307,6 +336,7 @@ def render_systemd_unit(
     post_lines: Sequence[str] = (),
     restart: str = "on-failure",
     restart_sec: int = 5,
+    kill_mode: str | None = None,
     separate_sections: bool = True,
     wanted_by: str = "default.target",
 ) -> str:
@@ -320,6 +350,11 @@ def render_systemd_unit(
     spinning against an empty index), ``WantedBy=default.target`` so
     ``enable`` gives start-at-login.
 
+    ``kill_mode`` is emitted only when a daemon names one, so every unit that
+    predates the parameter renders byte-identically; the relay is its one
+    caller today, and the reasoning for its value lives at the use site
+    (``network/relay.render_systemd``) and beside the emit below.
+
     ``separate_sections=False`` exists for the tunnel unit, whose layout
     predates this function; blank lines between sections are cosmetic to
     systemd, and rewriting a unit that is already correct is the thing worth
@@ -332,6 +367,29 @@ def render_systemd_unit(
         lines.append("")
     lines += ["[Service]", *pre_lines, f"ExecStart={exec_start}", f"Restart={restart}"]
     lines.append(f"RestartSec={restart_sec}")
+    if kill_mode is not None:
+        # RESTART-VS-STOP SEMANTICS, stated here so nobody "fixes" the line
+        # below into the defect it removes. ``KillMode=process`` kills only the
+        # unit's MAIN process; everything else left in its cgroup survives.
+        # The relay's children are the device's session runtimes, and
+        # systemd's default (``control-group``) made every relay restart kill
+        # them — sessions included the command that asked for the restart.
+        # Under ``process`` a survivor reparents to ``systemd --user`` and
+        # re-attaches at the relay's next start, and the same holds on macOS —
+        # because the relay's session-runtime children are spawned DETACHED
+        # (``start_new_session=True``/``setsid``), they leave the unit's process
+        # group and survive its restart on BOTH platforms. Survival rests on that
+        # DETACHMENT, not on launchd abandoning descendants: launchd's default
+        # would reap a same-process-group child, and these plists carry no
+        # ``AbandonProcessGroup``. That is the concrete meaning of the
+        # never-forced rule: the relay's lifecycle never owns session death.
+        #
+        # DELIBERATELY NO ExecStop/ExecStopPost REAPER, recorded so nobody adds
+        # one later: those hooks fire on RESTART too, so a reaper there would
+        # kill the runtimes on every refresh — recreating exactly the defect
+        # this line removes. A stop/kill leaves the runtimes alive by design;
+        # sessions are ended through their own verbs.
+        lines.append(f"KillMode={kill_mode}")
     lines += list(post_lines)
     if separate_sections:
         lines.append("")

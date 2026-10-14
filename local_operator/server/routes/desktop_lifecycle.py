@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr, StrictBool, model_validator
 
 from local_operator.harness.types import Message
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.mcp.catalog import public_server_config
 from local_operator.mcp.credentials import MCPCredentials
 from local_operator.mcp.desktop import MCPControl, refusal_detail
@@ -361,7 +362,7 @@ async def credential(session_id: str, body: Credential, request: Request):
             body.action, body.key, body.value.get_secret_value() if body.value else ""
         )
         if not result.get("ok"):
-            raise HTTPException(409, "The credential operation did not complete")
+            raise HTTPException(409, _wd.credential_operation_failed().envelope())
         return reply({"data": result})
 
 
@@ -548,9 +549,9 @@ async def stop(body: Stop, request: Request):
 async def aside(session_id: str, body: AsideInput, request: Request):
     values = asides(request)
     if body.request_id in values:
-        raise HTTPException(409, "This aside request was already used")
+        raise HTTPException(409, _wd.aside_request_reused().envelope())
     if len(values) >= 64:
-        raise HTTPException(409, "Close an aside or wait for it to expire")
+        raise HTTPException(409, _wd.aside_limit_reached().envelope())
     previous = values.get(body.aside_id or "")
     if body.aside_id and (
         previous is None
@@ -559,10 +560,10 @@ async def aside(session_id: str, body: AsideInput, request: Request):
         or previous.running
         or len(previous.turns) % 2
     ):
-        raise HTTPException(409, "This aside is no longer available")
+        raise HTTPException(409, _wd.aside_unavailable().envelope())
     turns = list(previous.turns) if previous else []
     if len(turns) >= 32:
-        raise HTTPException(422, "Start a new aside after 16 exchanges")
+        raise HTTPException(422, _wd.aside_max_turns().envelope())
     turns.append(Message.user(body.text))
     entry: Aside | None = None
     try:
@@ -655,7 +656,7 @@ async def aside(session_id: str, body: AsideInput, request: Request):
 async def get_aside(session_id: str, aside_id: str, request: Request):
     entry = asides(request).get(aside_id)
     if entry is None or entry.session_id != session_id:
-        raise HTTPException(404, "This aside is no longer available")
+        raise HTTPException(404, _wd.aside_unavailable().envelope())
     return reply(
         {
             "data": {
@@ -675,9 +676,9 @@ async def close_aside(session_id: str, aside_id: str, request: Request):
     values = asides(request)
     entry = values.get(aside_id)
     if entry is None or entry.session_id != session_id:
-        raise HTTPException(404, "This aside is no longer available")
+        raise HTTPException(404, _wd.aside_unavailable().envelope())
     if entry.running:
-        raise HTTPException(409, "Wait for the aside to finish before closing it")
+        raise HTTPException(409, _wd.aside_still_running().envelope())
     del values[aside_id]
     return reply({"data": {"aside_id": aside_id, "status": "closed"}})
 
@@ -687,14 +688,14 @@ async def close_aside(session_id: str, aside_id: str, request: Request):
 )
 async def adopt(session_id: str, aside_id: str, body: Adopt, request: Request):
     if not body.confirmed:
-        raise HTTPException(422, "Confirm adding this aside to the conversation")
+        raise HTTPException(422, _wd.aside_adopt_unconfirmed().envelope())
 
     async def execute():
         entry = asides(request).get(aside_id)
         if entry is None or entry.session_id != session_id:
-            raise HTTPException(404, "This aside is no longer available")
+            raise HTTPException(404, _wd.aside_unavailable().envelope())
         if entry.adopted or len(entry.turns) % 2:
-            raise HTTPException(409, "This aside cannot be adopted")
+            raise HTTPException(409, _wd.aside_not_adoptable().envelope())
         # Latch before the first await, including bridge acquisition: separate
         # request IDs can otherwise both pass the check and duplicate history.
         entry.adopted = True

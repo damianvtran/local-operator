@@ -300,11 +300,11 @@ async def test_an_unreachable_peer_refuses_in_the_tuis_own_words(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_is_remote"
-    assert detail["message"] == unreachable_peer_sentence(OTHER, row)
-    assert "build-box" in detail["message"]
-    assert "/network doctor" in detail["message"]
+    assert detail["text"] == unreachable_peer_sentence(OTHER, row)
+    assert "build-box" in detail["text"]
+    assert "/network doctor" in detail["text"]
     assert (
-        "connect_failed:ConnectionRefusedError" not in detail["message"]
+        "connect_failed:ConnectionRefusedError" not in detail["text"]
     ), "the raw transport token reached the user"
 
 
@@ -345,17 +345,17 @@ async def test_a_silent_device_makes_an_unknown_id_unresolved_not_missing(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "session_unresolved"
-    assert detail["message"] == unresolved_peer_sentence(
+    assert detail["text"] == unresolved_peer_sentence(
         unknown,
         (UnansweredPeer("d_silent", "build-box", "connect_failed:ConnectionRefusedError"),),
     )
-    assert "build-box" in detail["message"], "the silent device went unnamed"
-    assert "did not answer" in detail["message"], "silence was not named as silence"
-    assert "connect_failed:ConnectionRefusedError" not in detail["message"]
-    assert " is on " not in detail["message"], "silence was turned into an ownership claim"
-    assert "may be on that device" in detail["message"]
-    assert "no longer" not in detail["message"], "an unprovable absence was stated as a deletion"
-    assert "could not be resolved" not in detail["message"], "the miss was the headline"
+    assert "build-box" in detail["text"], "the silent device went unnamed"
+    assert "did not answer" in detail["text"], "silence was not named as silence"
+    assert "connect_failed:ConnectionRefusedError" not in detail["text"]
+    assert " is on " not in detail["text"], "silence was turned into an ownership claim"
+    assert "may be on that device" in detail["text"]
+    assert "no longer" not in detail["text"], "an unprovable absence was stated as a deletion"
+    assert "could not be resolved" not in detail["text"], "the miss was the headline"
     assert catalog.calls == 1, "the consult paid a SECOND listing read"
 
 
@@ -379,7 +379,7 @@ async def test_the_plural_route_answer_says_one_of_them(
     response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
 
     assert response.status_code == 409, response.text
-    message = response.json()["detail"]["message"]
+    message = response.json()["detail"]["text"]
     assert "build-box and radiant-m4 did not answer" in message
     assert "one of them" in message
     assert "that device" not in message
@@ -397,7 +397,7 @@ async def test_an_unnamed_silent_device_still_appears(
     response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
 
     assert response.status_code == 409, response.text
-    message = response.json()["detail"]["message"]
+    message = response.json()["detail"]["text"]
     assert "build-box and unnamed device did not answer" in message
     assert "  " not in message
 
@@ -476,7 +476,13 @@ async def test_every_device_answering_keeps_the_shared_404(
     response = await client.get(f"/v1/desktop/sessions/{'f' * 12}")
 
     assert response.status_code == 404, response.text
-    assert response.json()["detail"] == "Requested session, profile, team or subscription not found"
+    # E2a: a bare-string refusal is the message envelope now; `text` is the
+    # identical sentence.
+    assert response.json()["detail"] == {
+        "code": "wire.errors.desktop.requested_not_found",
+        "params": {},
+        "text": "Requested session, profile, team or subscription not found",
+    }
     assert catalog.calls == 1, "the miss itself still costs exactly ONE listing read"
 
 
@@ -757,7 +763,7 @@ async def test_a_peers_attachment_names_the_device_instead_of_500ing(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "attachment_on_peer"
-    assert "build-box" in detail["message"], detail
+    assert "build-box" in detail["text"], detail
 
     # AND THE ORDINARY CASES DO NOT MOVE: an unknown id is still the 404, and a
     # LOCAL conversation whose digest resolves nowhere is still the 404 the store's

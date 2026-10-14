@@ -8,8 +8,11 @@ missing-unit start that installs. ``sys.platform`` and ``shutil.which`` are
 patched to the Linux answer rather than stubbing ``is_supported`` itself, so
 the real expression runs (the same discipline ``test_purge`` documents).
 
-NO CELL HERE MAY REACH ``systemctl``: every one that could is either a dry run
-or has ``systemctl_user`` replaced by something that raises when called.
+NO CELL HERE MAY REACH ``systemctl``: every one that could is either a dry run,
+has ``systemctl_user`` replaced by something that raises when called, or — the
+``refresh_unit_if_stale`` cells, whose subject IS the manager conversation — by
+a scripted recorder whose calls the cell counts. No cell reaches a real
+manager.
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from typing import Any
 
 import pytest
 
-from local_operator import supervisors
+from local_operator import procname, supervisors
+from local_operator import update as update_mod
 from local_operator.network import relay
 
 # tmp_path fixtures -------------------------------------------------------
@@ -65,6 +69,41 @@ def test_render_systemd_has_the_contract_every_unit_shares(tmp_path: Path) -> No
     assert 'Environment="LOCAL_OPERATOR_CONFIG_DIR=' in text
     assert "Restart=on-failure" in text
     assert "WantedBy=default.target" in text
+    # THE SESSION-SAFETY FIX (2026-10-11, stale-relay memo): the relay's cgroup
+    # holds the device's session runtimes, so its unit must kill only the main
+    # process — the default killed every session on every restart. The decision
+    # pin beside it: NO ExecStop/ExecStopPost reaper, because those fire on
+    # RESTART too and would recreate exactly the defect this line removes.
+    assert "KillMode=process" in text
+    assert "ExecStop" not in text
+
+
+def test_no_other_daemons_unit_grows_the_relays_kill_mode(tmp_path: Path) -> None:
+    """``kill_mode`` is opt-in: the shared renderer and every sibling unit are
+    byte-unchanged, which is the other half of the KillMode pin.
+
+    The relay is deliberately the ONE unit that names a kill mode (see
+    ``supervisors.render_systemd_unit`` for why); a sibling that grew the line
+    would change what its own daemon's stop does, which no one asked for.
+    """
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.mobile import install as mobile_install
+    from local_operator.tunnels import install as tunnel_install
+    from local_operator.wakes import install as wakes_install
+
+    base = supervisors.render_systemd_unit(description="d", exec_start="/bin/true")
+    assert "KillMode" not in base
+    rendered = {
+        # The appended units' own renders, each called the way its installer
+        # calls it (browser's version probe is pinned, not detected).
+        "browser bridge": browser_install.render_systemd(4099, version=255),
+        "tunnel": tunnel_install.render_systemd(),
+        "wakes supervisor": wakes_install.render_systemd(tmp_path / "cfg"),
+        "mobile": mobile_install.render_systemd(4098),
+    }
+    for name, text in rendered.items():
+        assert "KillMode" not in text, name
+        assert "ExecStop" not in text, name
 
 
 def test_install_dry_run_names_the_unit_and_touches_nothing(
@@ -753,3 +792,398 @@ def test_status_installed_and_served_by_follow_the_facts(
     assert relay.status()["installed"] is True
     plist.unlink()
     assert relay.status()["installed"] is False
+
+
+# refresh_unit_if_stale: the daemon-refresh seam's Linux arm (2026-10-11) ------
+#
+# The stale-relay memo's T2 matrix, cell for cell. The discipline is the
+# sibling file's (tests/unit/test_daemon_plist_refresh.py): the guard cells arm
+# ``systemctl_user`` to RAISE and touch nothing; the manager cells script it and
+# COUNT — the recorder is what "exactly one restart" reads. Nothing here is
+# allowed to reach a real manager.
+
+
+_GEN = "20260921T125352Z-0.61.12"
+
+
+def _fake_shim(tmp_path: Path) -> Path:
+    return tmp_path / "lop" / "bin" / "python3"
+
+
+def _shim_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both sides of the image question, pointed at one fake shim.
+
+    ``render_systemd`` names it and ``_names_the_shim`` compares against it, so
+    a content compare in a cell is a statement about the unit and not about the
+    test venv's own interpreter.
+    """
+    shim = _fake_shim(tmp_path)
+    monkeypatch.setattr(procname, "supervised_image", lambda: shim)
+    monkeypatch.setattr(update_mod, "daemon_image_path", lambda: shim)
+
+
+def _manager_recorder(
+    *, returncode: int = 0, stderr: str = ""
+) -> tuple[list[tuple[str, ...]], Any]:
+    """A scripted ``systemctl_user``: records calls, answers with the given rc."""
+    calls: list[tuple[str, ...]] = []
+
+    def _record(*args: str, **kwargs: Any) -> Any:
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+    return calls, _record
+
+
+def _migratable_unit() -> str:
+    """A pre-KillMode relay unit — the shape the migration exists to move."""
+    return relay.render_systemd().replace("KillMode=process\n", "")
+
+
+def test_refresh_unit_missing_declines_before_any_manager_call(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No unit, no question: decline, and a manager is never touched."""
+    _no_systemctl(monkeypatch)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "not-installed", outcome
+    assert outcome.summary() == "" and outcome.warning() == ""
+
+
+def test_refresh_unit_it_cannot_address_leaves_the_file_alone(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A redirected HOME declines BEFORE anything is read, rewritten or run."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    before = unit.read_text(encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: False)
+    _no_systemctl(monkeypatch)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "not-addressable", outcome
+    assert unit.read_text(encoding="utf-8") == before
+
+
+def test_refresh_unit_with_a_foreign_image_is_not_addressable(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A unit that would restart through another tree is not this run's to move.
+
+    The image guard uses the REAL ``_names_the_shim`` — the unit's ``ExecStart``
+    names a foreign interpreter, so the shim comparison is what declines and the
+    file is never rewritten toward this run's tree.
+    """
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Unit]\n"
+        "Description=Local Operator network relay\n"
+        "\n"
+        "[Service]\n"
+        'ExecStart="/opt/other-tree/bin/python3" -m local_operator.network.relay --port 4097\n'
+        "Restart=on-failure\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n",
+        encoding="utf-8",
+    )
+    before = unit.read_text(encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    _no_systemctl(monkeypatch)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "not-addressable", outcome
+    assert unit.read_text(encoding="utf-8") == before
+
+
+def test_refresh_unit_is_unsupported_off_linux(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The darwin-here case: no Linux arm runs on a non-Linux host."""
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    _no_systemctl(monkeypatch)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "unsupported", outcome
+
+
+def test_refresh_unit_migrates_a_stale_unit_and_reloads_without_a_restart(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The migration half: rewrite + daemon-reload, and NOTHING restarts.
+
+    This is how an installed unit grows ``KillMode=process`` (the
+    session-safety fix), and it is also the first half's safety ORDER: the
+    rewrite lands BEFORE any restart the second half might perform. A rewrite
+    alone restarts nothing (``daemon-reload`` covers the next start), so the
+    summary stays silent — the launchd ``repaired`` sentence would claim a
+    restart that did not happen here.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    legacy = _migratable_unit()
+    assert "KillMode=process\n" not in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    written = unit.read_text(encoding="utf-8")
+    assert written == relay.render_systemd(), "the unit is now this build's render"
+    assert "KillMode=process\n" in written, "the migration is the point"
+    assert outcome.kind == "current", outcome
+    assert outcome.summary() == "" and outcome.warning() == ""
+
+
+def test_refresh_unit_restarts_exactly_once_on_a_proven_move(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fleet's first-fix shape: migrate, reload, THEN restart — one restart.
+
+    The proven move is the only thing that restarts (the second question's
+    contract), the reload must precede it (the session-safe kill semantics have
+    to be in force before the cgroup is touched), and the line the operator
+    reads is the macOS family's, byte-identical, one row at 80.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    generation = tmp_path / "lop" / "generations" / _GEN
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        lambda pid: generation if pid == 111 else None,
+    )
+
+    outcome = relay.refresh_unit_if_stale()
+
+    # The reload PRECEDES the restart: the order is the safety property.
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "restarted", outcome
+    assert outcome.detail == _GEN, outcome.detail
+    line = outcome.summary()
+    assert line == (
+        "network relay daemon: restarted onto the new build — expect a brief mesh blip"
+    ), line
+    assert len(line) <= 80, line
+    assert outcome.warning() == ""
+
+
+def test_refresh_unit_does_not_bounce_a_current_build(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """False/None declines: a current build is read and left alone.
+
+    ``systemctl_user`` is armed to RAISE here — the cell proves the reading
+    stops at the probes and no manager call happens on the no-move path.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    _no_systemctl(monkeypatch)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "current", outcome
+    assert outcome.summary() == "" and outcome.warning() == ""
+
+
+def test_refresh_unit_a_same_pid_restart_is_a_refusal_with_the_remedy(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drill's exact shape: the restart 'succeeded' and replaced nothing.
+
+    One restart is ATTEMPTED and exactly one manager restart call is made; the
+    honesty wrapper refuses it (same pid serving), and the outcome is the
+    failure family's sentence with the installer named — never a claim.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(333612),
+        record=_RelayRecordScript(333612),
+        holder_pids=(333612,),
+    )
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: tmp_path / _GEN)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "failed", outcome
+    assert outcome.detail == (
+        f"it was still on an older install ({_GEN}) and the restart it accepted "
+        "did not take — run `lop network install` to move it onto this build"
+    ), outcome.detail
+    assert outcome.summary() == ""
+    assert outcome.warning() == (
+        "warning: network relay daemon was not refreshed: " + outcome.detail
+    )
+
+
+def test_refresh_unit_reload_failure_stops_before_any_restart(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewritten-but-unread unit is a FAILURE and no restart follows.
+
+    The restart is refused at this point on purpose: the manager has not
+    re-read the definition, so the kill semantics that make a restart safe are
+    unproven — restarting here is the cgroup kill this slice removes.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder(returncode=1, stderr="Failed to connect to bus: boom")
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        lambda pid: tmp_path / _GEN,
+    )
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    assert outcome.kind == "failed", outcome
+    assert "could not re-read it" in outcome.detail, outcome.detail
+    assert "lop network install" in outcome.detail, outcome.detail
+    # The file WAS rewritten (the failure is post-write) and now carries the
+    # migration — the running relay is untouched, which the no-restart asserts.
+    assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("retry_succeeds", [False, True])
+def test_refresh_unit_retries_the_loaded_policy_after_a_failed_reload(
+    linux_host: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_succeeds: bool,
+) -> None:
+    """Disk-current after a failed reload is not manager-current (R1/Q1).
+
+    Model loaded policy separately from disk: only a successful reload changes
+    KillMode. The real restart wrapper must verify a new serving PID as well.
+    No real systemctl is reachable from this cell.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls: list[tuple[str, ...]] = []
+    loaded_mode = "control-group"
+    restart_modes: list[str] = []
+    reloads = 0
+
+    def _manager(*args: str, **kwargs: Any) -> Any:
+        nonlocal loaded_mode, reloads
+        calls.append(tuple(args))
+        if args == ("daemon-reload",):
+            reloads += 1
+            if reloads == 1 or not retry_succeeds:
+                return SimpleNamespace(returncode=1, stdout="", stderr="reload failed")
+            assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+            loaded_mode = "process"
+        elif args == ("restart", relay.SYSTEMD_UNIT):
+            restart_modes.append(loaded_mode)
+        else:
+            raise AssertionError(f"unexpected manager call: {args}")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _manager)
+    # First call must fail before the PID probe; the second call owns all three
+    # readings consumed by the refresh and the real restart verification.
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: tmp_path / _GEN)
+
+    first = relay.refresh_unit_if_stale()
+    assert first.kind == "failed", first
+    assert calls == [("daemon-reload",)], calls
+    assert "KillMode=process\n" in unit.read_text(encoding="utf-8")
+    assert loaded_mode == "control-group"
+
+    second = relay.refresh_unit_if_stale()
+    assert calls[:2] == [("daemon-reload",), ("daemon-reload",)], calls
+    if retry_succeeds:
+        assert calls == [
+            ("daemon-reload",),
+            ("daemon-reload",),
+            ("restart", relay.SYSTEMD_UNIT),
+        ], calls
+        assert restart_modes == ["process"], restart_modes
+        assert second.kind == "restarted", second
+        assert second.summary() == (
+            "network relay daemon: restarted onto the new build — expect a brief mesh blip"
+        )
+    else:
+        assert calls == [("daemon-reload",), ("daemon-reload",)], calls
+        assert restart_modes == []
+        assert loaded_mode == "control-group"
+        assert second.kind == "failed", second
+        assert "lop network install" in second.detail
+
+
+def test_refresh_unit_a_raising_probe_is_a_failure_never_an_escape(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected raise is reported — the upgrade already succeeded."""
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    _no_systemctl(monkeypatch)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+
+    def _boom(pid: int) -> Any:
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", _boom)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert outcome.kind == "failed", outcome
+    assert "probe exploded" in outcome.detail, outcome.detail
+    assert "lop network install" in outcome.detail, outcome.detail

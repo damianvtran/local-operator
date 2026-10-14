@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +22,7 @@ from local_operator import procname
 from local_operator import update as update_mod
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.mobile import install as install_mod
+from local_operator.network import types as mesh_types
 from local_operator.update import (
     TTL_S,
     InstallKind,
@@ -111,6 +114,36 @@ def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
+def _pypi_payload(version: str, files: list[dict[str, object]]) -> dict[str, object]:
+    return {"info": {"version": version}, "urls": files, "releases": {version: files}}
+
+
+def _wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "filename": f"local_operator-{version}-py3-none-any.whl",
+        "packagetype": "bdist_wheel",
+        "yanked": False,
+        "url": f"https://files.pythonhosted.org/packages/local_operator-{version}-py3-none-any.whl",
+        # The installer pins by digest, so a ready entry carries one.
+        "digests": {"sha256": "a" * 64},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _mac_wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry = _wheel(
+        version,
+        filename=f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl",
+        url=(
+            "https://files.pythonhosted.org/packages/"
+            f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl"
+        ),
+    )
+    entry.update(overrides)
+    return entry
+
+
 def _pypi_transport(
     status: int = 200, version: str = "0.28.0", delay: float = 0
 ) -> httpx.MockTransport:
@@ -119,9 +152,21 @@ def _pypi_transport(
             raise httpx.TimeoutException("timed out")
         if status != 200:
             return httpx.Response(status, text="nope")
-        return httpx.Response(status, json={"info": {"version": version}})
+        # A READY release by default: PyPI's document names a version long
+        # before its files land, so a stub without ``urls`` would model the
+        # race, not the normal case every caller below means to exercise.
+        # Both published wheels ride along, so the stub is ready on any host
+        # platform (macOS installs take the universal2 wheel, others the
+        # pure one — see test_check_latest_readiness_is_platform_aware).
+        return httpx.Response(
+            status, json=_pypi_payload(version, [_wheel(version), _mac_wheel(version)])
+        )
 
     return httpx.MockTransport(handler)
+
+
+def _transport_for(payload: dict[str, Any]) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
 
 
 def _client(transport: httpx.MockTransport) -> httpx.Client:
@@ -179,6 +224,178 @@ def test_check_latest_newer_same_older(tmp_path: Path) -> None:
         assert older.latest == "0.26.0"
 
 
+def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> None:
+    """The 2026-10-12 race: ``info.version`` moved, its files had not.
+
+    Each payload below is a shape PyPI really serves during/after an
+    upload; only the last may be advertised, because only it names an
+    artifact the installer can download.
+    """
+    not_ready = [
+        _pypi_payload("0.28.0", []),
+        _pypi_payload(
+            "0.28.0",
+            [
+                {
+                    "filename": "local_operator-0.28.0.tar.gz",
+                    "packagetype": "sdist",
+                    "yanked": False,
+                    "url": "https://files.pythonhosted.org/packages/local_operator-0.28.0.tar.gz",
+                }
+            ],
+        ),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", yanked=True), _mac_wheel("0.28.0", yanked=True)]),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", url=""), _mac_wheel("0.28.0", url="")]),
+        {"info": {"version": "0.28.0"}},
+    ]
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        for payload in not_ready:
+            result = check_latest(
+                force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+            )
+            assert result.latest is None, payload
+            assert result.behind is False, payload
+        ready = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(
+                _transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0"), _mac_wheel("0.28.0")]))
+            ),
+        )
+        assert ready.latest == "0.28.0"
+        assert ready.behind is True
+        # The not-ready answers above carry the distinction the front ends
+        # print (UX M1): PyPI answered, and this is the version publishing.
+        assert ready.pending_version is None
+
+
+def test_check_latest_readiness_is_platform_aware(tmp_path: Path) -> None:
+    """B1: ready means the wheel THIS host's installer would pin.
+
+    The publish pass uploads the pure and macOS wheels sequentially, so
+    the inter-wheel window is real in both directions: on macOS only the
+    universal2 wheel installs (the signed key agent rides in it), off
+    macOS a macOS-only list offers nothing a Linux/Windows installer can
+    take.
+    """
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        with patch.object(update_mod, "_HOST_IS_MACOS", True):
+            pure_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_only.latest is None
+            assert pure_only.pending_version == "0.28.0"
+            mac_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_mac_wheel("0.28.0")]))),
+            )
+            assert mac_ready.latest == "0.28.0"
+        with patch.object(update_mod, "_HOST_IS_MACOS", False):
+            pure_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_ready.latest == "0.28.0"
+            foreign_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(
+                    _transport_for(
+                        _pypi_payload(
+                            "0.28.0",
+                            [
+                                _wheel(
+                                    "0.28.0",
+                                    filename="local_operator-0.28.0-py3-none-win_amd64.whl",
+                                    url=(
+                                        "https://files.pythonhosted.org/packages/"
+                                        "local_operator-0.28.0-py3-none-win_amd64.whl"
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ),
+            )
+            # A Windows wheel's tags intersect this host's sys_tags only on
+            # Windows itself; everywhere else there is nothing to install.
+            import sys as _sys
+
+            assert (foreign_only.latest is None) == (_sys.platform != "win32")
+
+
+def test_check_latest_releases_fallback_advertises(tmp_path: Path) -> None:
+    """B4: a document without ``urls`` readies via ``releases[version]``."""
+    payload = {
+        "info": {"version": "0.28.0"},
+        "releases": {"0.28.0": [_wheel("0.28.0"), _mac_wheel("0.28.0")]},
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+        )
+    assert result.latest == "0.28.0"
+    assert result.behind is True
+
+
+def test_answered_not_ready_does_not_fall_back_to_stale_cache(tmp_path: Path) -> None:
+    """B3: an authoritative not-ready read retires the stale ready cache.
+
+    The release was cached ready, then its wheels were yanked: a fresh
+    read that finds nothing downloadable must not resurrect the cached
+    offer, and must drop the cache so a later TTL read cannot either.
+    The outage fallback (test_stale_cache_used_on_failure) is untouched:
+    it is the read that never got an answer which falls back.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(_transport_for(_pypi_payload("0.28.0", []))),
+        )
+    assert result.latest is None
+    assert result.behind is False
+    assert result.pending_version == "0.28.0"
+    assert not cache.exists()
+
+
+def test_cached_ready_version_ignores_unready_entries(tmp_path: Path) -> None:
+    """B2, at the layer QA round 3 proved correct: the diagnostic reader
+    (cached_latest, contract pinned in test_collect.py) still returns a
+    bare pre-gate entry — it is "the last answer known", not a claim —
+    while the ready-only reader a behind claim derives from refuses it.
+    """
+    from local_operator.update import cached_latest, cached_ready_version
+
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    version, _age = cached_latest(cache_dir=tmp_path)
+    assert version == "0.28.0"
+    assert cached_ready_version(cache_dir=tmp_path) is None
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
+        encoding="utf-8",
+    )
+    assert cached_ready_version(cache_dir=tmp_path) == "0.28.0"
+
+
 def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
         failed = check_latest(
@@ -206,7 +423,12 @@ def test_corrupt_cache_is_missing(tmp_path: Path) -> None:
 def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time() - TTL_S - 10, "payload": {"version": "0.28.0"}}),
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
         encoding="utf-8",
     )
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
@@ -218,7 +440,7 @@ def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
 def test_fresh_cache_skips_get(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
         encoding="utf-8",
     )
     hits = {"n": 0}
@@ -231,6 +453,31 @@ def test_fresh_cache_skips_get(tmp_path: Path) -> None:
         result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
     assert hits["n"] == 0
     assert result.latest == "0.28.0"
+
+
+def test_unready_cache_entry_does_not_skip_get(tmp_path: Path) -> None:
+    """A pre-gate cache entry names a version but proves no readiness.
+
+    Without this, an install that cached a just-published version minutes
+    before upgrading would keep advertising it for the rest of the TTL
+    even though its files may still not exist.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(200, json=_pypi_payload("0.28.0", []))
+
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
+    assert hits["n"] == 1
+    assert result.latest is None
+    assert result.behind is False
 
 
 def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
@@ -246,6 +493,9 @@ def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
     assert result.latest == "0.28.0"
     written = json.loads(cache.read_text(encoding="utf-8"))
     assert written["payload"]["version"] == "0.28.0"
+    # The readiness the fetch proved, so a later cached read may advertise
+    # without re-asking PyPI (see test_unready_cache_entry_does_not_skip_get).
+    assert written["payload"]["ready"] is True
 
 
 class _MetadataDist:
@@ -714,6 +964,23 @@ def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) 
     assert "could not reach PyPI" in capsys.readouterr().err
 
 
+def test_update_command_check_still_publishing(capsys: pytest.CaptureFixture[str]) -> None:
+    """UX M1: an answered-but-not-ready read names publishing, not a fault."""
+    pending = update_mod.VersionCheck(
+        installed="0.27.0", latest=None, behind=False, pending_version="0.28.0"
+    )
+    with (
+        patch.object(update_mod, "check_latest", return_value=pending),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
+        assert update_command(check=True) == 1
+        refresh.assert_not_called()
+    err = capsys.readouterr().err
+    assert "0.28.0" in err
+    assert "still publishing" in err
+    assert "could not reach PyPI" not in err
+
+
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
     """Nothing to INSTALL is not nothing to do.
 
@@ -775,6 +1042,8 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -791,6 +1060,8 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -814,6 +1085,8 @@ def test_main_dispatches_the_service_only_repair(monkeypatch: pytest.MonkeyPatch
             refresh_mobile=False,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -838,6 +1111,8 @@ def test_main_dispatches_the_mobile_repair(monkeypatch: pytest.MonkeyPatch) -> N
             refresh_mobile=True,
             from_snapshot=None,
             services=True,
+            allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -855,12 +1130,42 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot="main",
             services=True,
+            allow_downgrade=False,
+            roll=True,
         )
 
     monkeypatch.setattr("sys.argv", ["lop", "update", "--check", "--from-snapshot", "main"])
     with patch("local_operator.update.update_command", return_value=1) as refused:
         assert main() == 1
         refused.assert_called_once()
+
+
+def test_main_dispatches_allow_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--allow-downgrade`` reaches the installer as the deliberate rollback.
+
+    Parse → dispatch end to end: the flag is the only way past the
+    strictly-older refusal on the snapshot path
+    (update.classify_snapshot_downgrade), so a flag the parser accepts and the
+    dispatch drops would strand the override — the refusal would name a command
+    that does nothing.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr(
+        "sys.argv", ["lop", "update", "--from-snapshot", "v0.9.8", "--allow-downgrade"]
+    )
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            refresh_mobile=False,
+            from_snapshot="v0.9.8",
+            services=True,
+            allow_downgrade=True,
+            roll=True,
+        )
 
 
 def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -882,6 +1187,8 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
             refresh_mobile=False,
             from_snapshot=None,
             services=False,
+            allow_downgrade=False,
+            roll=True,
         )
 
 
@@ -1002,8 +1309,13 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
         "check_latest",
         _check_latest_double("0.2.0", "0.2.0", False),
     )
+    # A generation install now moves its serve daemons through the rolling
+    # reload request (its own no-kill contract), not the legacy restart_services
+    # path. The regression's INTENT is unchanged: the caller that performed the
+    # upgrade must not be refused, and the fleet must be asked to move.
     monkeypatch.setattr(
-        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+        "local_operator.services.reload_serve_daemons",
+        lambda **k: ran.append("ran") or [],
     )
     assert update.update_command() == 0
     assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
@@ -1399,6 +1711,61 @@ class TestServiceDaemonRefresh:
         # refresh prints nothing), so this sentence must not name a daemon.
         assert "mobile" not in refresh.lines[0]
 
+    def test_a_linux_relay_unit_reaches_the_new_wheel_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The relay unit is the daemon this stage may refresh on Linux (2026-10-11).
+
+        The drill's defect: on Linux the scan found nothing, the stage answered
+        the A24 sentence, and a node's relay kept advertising the previous build
+        while the install had moved. With the relay's unit installed the stage
+        must spawn the same new-wheel child the macOS scan spawns — the child's
+        own platform table (``_linux_refresh_steps``) then carries the relay's
+        step — and parse its ``daemon_report:`` lines like any other platform's.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        monkeypatch.setattr(update_mod, "_linux_relay_unit_installed", lambda: True)
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout='daemon_report: {"name":"network relay","status":"already"}\n',
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_called_once()
+        assert "--services-only" in run.call_args.args[0], run.call_args.args[0]
+        assert refresh.lines == ()
+        assert refresh.statuses == (update_mod.DaemonStatus("network relay", "already"),)
+
+    def test_a_linux_host_without_the_relay_unit_still_says_the_a24_sentence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Byte-identical to the shipped sentence — the pin is the whole point.
+
+        A host with no relay unit still has nothing this child may refresh, so
+        the honest A24 sentence must not be eaten by the Linux arm's arrival.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        monkeypatch.setattr(update_mod, "_linux_relay_unit_installed", lambda: False)
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_not_called()
+        assert refresh.lines == (
+            "service daemons: not refreshed — this step rewrites launchd "
+            f"agents, which only macOS has (this host is {update_mod.PLATFORM_LABEL}); "
+            "re-run each supervised daemon's own installer to move its "
+            "unit or task onto this build",
+        )
+        assert refresh.warnings == ()
+
     def test_an_installed_agent_is_repaired_whatever_the_platform_says(self, branded_image) -> None:
         """The platform branch decides the empty-scan answer, not whether to work.
 
@@ -1630,6 +1997,10 @@ class TestServiceDaemonRefresh:
             return repair
 
         monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        # THE PLATFORM TABLE'S macOS HALF (2026-10-11): the child now walks
+        # ``_linux_refresh_steps`` off darwin, and this cell is about the macOS
+        # rows — pinned rather than inferred from the runner (CI runs Linux).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         for module, name in (
             (browser_install, "browser bridge"),
             (tunnel_install, "tunnel"),
@@ -1856,6 +2227,9 @@ class TestServiceDaemonRefresh:
         from local_operator.wakes import install as wakes_install
 
         monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
+        # Pin the macOS half of the platform table: this cell is about the macOS
+        # plist walk (see the concurrency cell for the full reason).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
 
         plists = [
             Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist"),
@@ -1908,7 +2282,7 @@ class TestServiceDaemonRefresh:
         assert "mobile" not in captured.out
         assert captured.err == ""
 
-    def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
+    def test_the_child_repairs_every_daemon_and_reports_each(self, capsys, monkeypatch) -> None:
         """One line per daemon that CHANGED; silence for one already current.
 
         Each daemon is ANNOUNCED before it is repaired (the line the parent reads
@@ -1925,6 +2299,9 @@ class TestServiceDaemonRefresh:
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
+        # Pin the macOS half of the platform table: this cell is about the macOS
+        # rows this child walks (see the concurrency cell for the full reason).
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         outcomes = (
             (browser_install, launchd.PlistRefresh("browser bridge", "current")),
             (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
@@ -3881,12 +4258,16 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
         ),
         patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
         patch.object(install_mod, "snapshot_bundle") as bundle,
+        # The hook's ``before`` is captured from the pointer; pinned here so the
+        # tail assertion below is deterministic rather than a fact about the
+        # machine the suite runs on (S3b).
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="1.2.2")),
         patch.object(update_mod, "install_into_generation", side_effect=install),
         patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
 
-    assert calls == [(None, {"version": "1.2.3"})]
+    assert calls == [(None, {"version": "1.2.3", "note": ""})]
     bundle.assert_not_called()
     assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
     out = capsys.readouterr().out
@@ -3894,7 +4275,15 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     assert "installing the published macOS wheel" in out
     assert "carries the macOS key agent" in out
     assert "warning:" not in out, "the wheel route is progress, not a warning"
-    tail.assert_called_once_with(0, services=True, install_version="1.2.3", target="1.2.3")
+    tail.assert_called_once_with(
+        0,
+        services=True,
+        install_version="1.2.3",
+        target="1.2.3",
+        roll=True,
+        before_version="1.2.2",
+        via="snapshot",
+    )
 
 
 def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
@@ -3940,3 +4329,794 @@ def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
         "warning: this build does not carry the macOS key agent (lop-keyagent.app)" in captured.err
     )
     assert "building from source" not in captured.out, "the fallback is a warning, not progress"
+
+
+def test_from_snapshot_refuses_a_strictly_older_release_before_the_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE INCIDENT, pinned at the command that caused it (2026-10-10).
+
+    ``lop-update v0.68.23`` under a 0.68.24 install built generation
+    ``20261010T153510Z-0.68.23``, flipped ``current`` onto it and moved the
+    serve process and every daemon down — an innocent explicit-tag install
+    reached the installer without ever comparing its version against the
+    install the pointer named. This is the wheel route (the ref is exactly a
+    published release), and the refusal must land before any install work: no
+    route announcement, no PyPI consult, no installer call, extract reclaimed.
+    """
+    repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8", ref="v0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")) as pypi,
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("v0.9.8") == 1
+
+    assert calls == [], "a refused downgrade must not reach the installer"
+    assert not snapshot.exists(), "the refusal still reclaims the ref extract"
+    captured = capsys.readouterr()
+    assert (
+        "matches published release" not in captured.out
+    ), "the refusal lands before the route announcement"
+    assert (
+        "refusing to install an older build — 0.9.8 is older than this machine's "
+        "current install (0.9.9); nothing was installed." in captured.err
+    ), "the refusal names both versions and the state of the install"
+    assert (
+        "  To downgrade deliberately, re-run from the repository: "
+        "`lop update --from-snapshot v0.9.8 --allow-downgrade`" in captured.err
+    ), "the refusal names the explicit override, spelled as a runnable command"
+    # The classifier is what pays this consult for a release-tagged ref, so the
+    # pin is that the refusal lands BEFORE it — a gate moved after
+    # ``classify_snapshot_install`` consults PyPI here and fails this line
+    # (agent review round 1, F1).
+    pypi.assert_not_called()
+
+
+def test_from_snapshot_refuses_a_strictly_older_source_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other route: a plain older ref (no release tag) is refused too.
+
+    The wheel route is the incident's shape; the source route is the same
+    decision one ref over — a SHA, a branch tip, an unreleased tag. The tree's
+    own ``pyproject.toml`` names the version there, and it must not be able to
+    move the fleet down either. The refusal lands before the mobile-bundle
+    build, the installer, and the fallback notice — so it is never buried
+    under the notice that would otherwise announce a source build.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_release_versions_at") as tags,
+        patch.object(update_mod, "_pypi_release_document") as pypi,
+        patch.object(install_mod, "snapshot_bundle") as bundle,
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert calls == [], "a refused downgrade must not reach the installer"
+    bundle.assert_not_called()
+    tail.assert_not_called()
+    assert not snapshot.exists(), "the refusal still reclaims the ref extract"
+    captured = capsys.readouterr()
+    assert (
+        "building from source" not in captured.out + captured.err
+    ), "the refusal lands before the fallback notice"
+    assert (
+        "refusing to install an older build — 0.9.8 is older than this machine's "
+        "current install (0.9.9); nothing was installed." in captured.err
+    )
+    assert (
+        "`lop update --from-snapshot main --allow-downgrade`" in captured.err
+    ), "the remedy names the ref the caller actually passed"
+    # The ordering pin for THIS route: a gate moved after
+    # ``classify_snapshot_install`` would run the classifier's first read, the
+    # tags lookup; the PyPI mock is the same pin for the routes that consult
+    # (an untagged ref never reaches that consult, so it cannot bite here —
+    # agent review round 1, F1).
+    tags.assert_not_called()
+    pypi.assert_not_called()
+
+
+def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The override path on the wheel route: it installs, loudly, and the marker
+    note records the deliberate downgrade rather than the silent one."""
+    repo, commit = _release_repo(tmp_path, tag="v0.9.8", version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.8", _wheel_entry("local_operator-0.9.8-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8", ref="v0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0) as tail,
+    ):
+        assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
+
+    assert calls == [
+        (None, {"version": "0.9.8", "note": "downgrade-allowed"})
+    ], "the override installs the older wheel and the marker note records it"
+    tail.assert_called_once_with(
+        0,
+        services=True,
+        install_version="0.9.8",
+        target="0.9.8",
+        roll=True,
+        before_version="0.9.9",
+        via="snapshot",
+    )
+    captured = capsys.readouterr()
+    assert (
+        "warning: downgrading on purpose — current install 0.9.9, snapshot 0.9.8; "
+        "the install marker will record downgrade-allowed" in captured.err
+    ), "the override warns loudly, naming both versions"
+    assert "matches published release" in captured.out, "the install still runs its route"
+    assert not snapshot.exists(), "the override path reclaims the extract like any install"
+
+
+def test_from_snapshot_allow_downgrade_composes_the_note_with_the_fallback_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both facts ride the marker note: the fallback rationale, then the token."""
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main", allow_downgrade=True) == 0
+
+    assert len(calls) == 1
+    assert (
+        calls[0][1]["note"] == "unreleased-ref downgrade-allowed"
+    ), "the fallback reason and the downgrade record share the annotation slot"
+    assert "downgrading on purpose" in capsys.readouterr().err
+
+
+def test_from_snapshot_equal_version_still_rebuilds_the_stale_main_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stale local ``main`` is the SAME version — the case the gate must NOT block.
+
+    ``main``'s ``pyproject.toml`` names the last release until the next bump, so
+    a stale checkout and a fresh one carry equal versions; rebuilding for a
+    same-version snapshot is the documented reason ``lop-update`` may run
+    against a not-yet-advanced ``main``, and the gate must preserve it —
+    equality is not a downgrade.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.9")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.9"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert len(calls) == 1, "a same-version rebuild is a normal install"
+    assert calls[0][1]["note"] == "unreleased-ref"
+    captured = capsys.readouterr()
+    assert "refusing" not in captured.err
+    assert "downgrading on purpose" not in captured.err
+
+
+def test_from_snapshot_newer_version_installs_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A NEWER snapshot passes the gate and rides the wheel route unchanged."""
+    repo, commit = _release_repo(tmp_path, tag="v0.9.10", version="0.9.10")
+    snapshot = tmp_path / "extract"
+    snapshot.mkdir()
+    document = _release_document(
+        "0.9.10", _wheel_entry("local_operator-0.9.10-py3-none-macosx_11_0_universal2.whl")
+    )
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def install(source: Any, **kwargs: Any) -> None:
+        calls.append((source, kwargs))
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.10", ref="v0.9.10"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(update_mod, "_pypi_release_document", return_value=(document, "")),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("v0.9.10") == 0
+
+    assert calls == [(None, {"version": "0.9.10", "note": ""})]
+    captured = capsys.readouterr()
+    assert "refusing" not in captured.err
+    assert "downgrading on purpose" not in captured.err
+
+
+def test_from_snapshot_downgrade_gate_is_silent_without_two_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No positive evidence of an ordering, no refusal — the fail-open rule.
+
+    (a) a target version this module cannot order (an ``rc`` spelling): the
+    comparison is refused, not the install; (b) an install side it cannot read
+    (no pointer, no distribution): same. Both proceed exactly as they did
+    before the gate existed — a refusal that cannot be defended must not block
+    an install the caller asked for, the same rule :func:`is_behind` follows.
+    """
+    repo, commit = _release_repo(tmp_path, tag=None, version="0.9.8rc1")
+    snapshot = tmp_path / "extract-a"
+    snapshot.mkdir()
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    monkeypatch.chdir(repo)
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot, commit=commit, version="0.9.8rc1"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=update_mod.BuildStamp(version="0.9.9")),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0, "an unorderable target proceeds"
+        assert len(calls) == 1
+        assert "refusing" not in capsys.readouterr().err
+
+    calls.clear()
+    snapshot_b = tmp_path / "extract-b"
+    snapshot_b.mkdir()
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "_HOST_IS_MACOS", True),
+        patch.object(
+            update_mod,
+            "resolve_snapshot",
+            return_value=_ref_snapshot(snapshot_b, commit=commit, version="0.9.8"),
+        ),
+        patch.object(update_mod, "disk_build", return_value=None),
+        patch.object(install_mod, "snapshot_bundle", return_value="built"),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: calls.append((path, kwargs)),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0, "an unreadable install proceeds"
+        assert len(calls) == 1
+        assert "refusing" not in capsys.readouterr().err
+
+
+def test_update_command_refuses_allow_downgrade_without_from_snapshot(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The override answers nothing on the PyPI path, so it is refused there.
+
+    ``check_latest``'s ``behind`` gate only ever installs NEWER versions, so
+    ``--allow-downgrade`` alone is the same category error ``--check
+    --from-snapshot`` is, and takes the same refusal shape — and it must not
+    even consult the index on the way out.
+    """
+    with patch.object(update_mod, "check_latest") as latest:
+        assert update_mod.update_command(allow_downgrade=True) == 1
+    latest.assert_not_called()
+    assert "--allow-downgrade applies to --from-snapshot" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# S3b: the update exits drive the mesh-roll hook
+# ---------------------------------------------------------------------------
+
+
+def _seed_mesh(root: Path, members: list[tuple[str, mesh_types.MemberKind]] | None = None) -> None:
+    """One network record on disk, the shape the trigger's walk reads."""
+    from local_operator.network import store
+
+    record = mesh_types.NetworkRecord(
+        network_id="n_updtest00000000000000000000001",
+        name="home-net",
+        self_device_id="d_origin",
+        members=[
+            mesh_types.MemberRecord(device_id="d_origin", name="origin"),
+            *[
+                mesh_types.MemberRecord(device_id=device, name=device, kind=kind)
+                for device, kind in (members or [("d_a", "device")])
+            ],
+        ],
+    )
+    store.save(record, root)
+
+
+def _audit_rows(root: Path, event: str) -> list[dict[str, Any]]:
+    audit = root / "network" / "audit.jsonl"
+    if not audit.exists():
+        return []
+    lines = [json.loads(line) for line in audit.read_text().splitlines() if line.strip()]
+    return [row for row in lines if row.get("event") == event]
+
+
+def _upgrade_patches() -> Any:
+    """The seams every cell here drives the PyPI exit through.
+
+    ``_services_stage`` returns ``None``, which ``_run_services_tail``
+    documents as a tolerated stand-in — the daemon half is not what these cells
+    are about, and it keeps the run bounded.
+    """
+    return (
+        patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.28.0", True)),
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "is_git_snapshot", return_value=False),
+        patch.object(update_mod, "perform_upgrade", return_value="0.28.0"),
+        patch.object(update_mod, "_services_stage", return_value=None),
+    )
+
+
+def test_a_successful_update_queues_the_mesh_roll_before_the_report_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root, [("d_a", "device"), ("d_b", "device")])
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    # The summary precedes the frozen report line (note §3), and names the set.
+    assert "queued: d_a, d_b" in out[-2], out
+    report = json.loads(out[-1])["update_report"]
+    assert report["install_version"] == "0.28.0"
+
+    from local_operator.network import rollouts
+
+    record = rollouts.latest_active(root=root)
+    assert record is not None, "the exit opened no record"
+    assert record["target"]["version"] == "0.28.0"
+    assert record["authority"]["via"] == "update"
+    rows = _audit_rows(root, "update_rollout_started")
+    assert len(rows) == 1 and rows[0]["network_id"] == record["network"], rows
+
+
+def test_no_roll_queues_nothing_and_records_the_suppression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False, roll=False) == 0
+
+    from local_operator.network import rollouts
+
+    assert rollouts.latest_active(root=root) is None
+    rows = _audit_rows(root, "update_rollout_suppressed")
+    assert len(rows) == 1, rows
+    assert rows[0]["detail"] == {"via": "update", "policy": "auto", "flag": "--no-roll"}, rows[0]
+
+
+def test_a_failing_roll_hook_is_one_sentence_and_the_exit_code_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+
+    from local_operator.network import rollouts
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rollouts, "open_record", _boom)
+    with ExitStack() as stack:
+        for patcher in _upgrade_patches():
+            stack.enter_context(patcher)
+        assert update_command(check=False) == 0
+    captured = capsys.readouterr()
+    assert (
+        "updated, but the mesh roll could not be queued: boom — "
+        "run `lop network update` to roll by hand" in captured.err
+    ), captured.err
+    # The machine report line is still the last stdout line: a failed queue
+    # never un-says the install.
+    assert json.loads(captured.out.strip().splitlines()[-1])["update_report"]
+
+
+def test_the_nothing_to_install_exit_queues_no_roll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _seed_mesh(root)
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(update_mod, "check_latest", return_value=_check("0.27.0", "0.27.0", False))
+        )
+        stack.enter_context(patch.object(update_mod, "_services_stage", return_value=None))
+        mocked = stack.enter_context(patch("local_operator.network.rollouts.open_after_update"))
+        assert update_command(check=False) == 0
+    mocked.assert_not_called()
+    from local_operator.network import rollouts
+
+    assert rollouts.latest_active(root=root) is None
+
+
+def test_perform_upgrade_never_collects_previous_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PyPI tail, like the shared snapshot tail, must never collect A."""
+    collections: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    generation = tmp_path / "owned-generation"
+    generation.mkdir()
+    # Match the real positional-source call, while observing the tail's intent;
+    # this is not installer/publication/signature proof.
+    installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+
+    def install(source: str | Path | None, **kwargs: Any) -> Path:
+        installs.append((source, kwargs))
+        return generation
+
+    monkeypatch.setattr(update_mod, "install_into_generation", install)
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
+    assert (
+        update_mod.perform_upgrade(
+            target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
+        )
+        == "0.70.19"
+    )
+    assert installs == [
+        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+    ]
+    assert collections == [] and notices == []
+
+
+def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[Any] = []
+    monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
+    # Automatic collection is frozen: promotion does not retire loaded A roots.
+    # Recording calls (rather than raising in a best-effort prune) detects even
+    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    collections: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
+    monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: ())
+    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: [])
+    monkeypatch.setattr(
+        update_mod,
+        "_run_services_tail",
+        lambda services: order.append("services") or update_mod.StageReport(),
+    )
+    monkeypatch.setattr(
+        update_mod, "_roll_after_update", lambda **kwargs: order.append(("roll", kwargs))
+    )
+    monkeypatch.setattr(update_mod, "_emit_update_report", lambda **kwargs: order.append("report"))
+    assert (
+        update_mod._generation_upgrade(
+            0,
+            install_version="0.28.0",
+            target="0.28.0",
+            roll=False,
+            before_version="0.27.0",
+            via="snapshot",
+        )
+        == 0
+    )
+    assert not collections
+    assert [item if isinstance(item, str) else item[0] for item in order] == [
+        "services",
+        "roll",
+        "report",
+    ], order
+    assert order[1][1] == {
+        "before": "0.27.0",
+        "after": "0.28.0",
+        "via": "snapshot",
+        "roll": False,
+    }, order
+
+
+def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.cli import main
+
+    for argv, expected in ((["lop", "update"], True), (["lop", "update", "--no-roll"], False)):
+        monkeypatch.setattr("sys.argv", argv)
+        with patch("local_operator.update.update_command", return_value=0) as cmd:
+            assert main() == 0
+            assert cmd.call_args.kwargs["roll"] is expected, (argv, cmd.call_args)
+
+
+def test_a_generation_install_refreshes_the_supervised_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generation path no longer short-circuits the supervised repairs.
+
+    A generation install USED to return every unit `pending` here. It now runs the
+    same stage body the mutable path runs, because a supervisor bounce does not
+    kill session runtimes (they are separate child processes).
+    """
+    ran: list[str] = []
+    restored = update_mod.DaemonRefresh(
+        "service daemons", statuses=(update_mod.DaemonStatus("network relay", "refreshed"),)
+    )
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_service_daemons_after_upgrade",
+        lambda **k: ran.append("services") or restored,
+    )
+    monkeypatch.setattr(
+        update_mod, "refresh_mobile_after_upgrade", lambda **k: ran.append("mobile") or None
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_mobile_daemon_refresh",
+        lambda _result: update_mod.DaemonRefresh(
+            "mobile", statuses=(update_mod.DaemonStatus("mobile", "refreshed"),)
+        ),
+    )
+
+    out = update_mod.refresh_daemons_after_upgrade()
+    assert "services" in ran, "the supervised services unit did not run on a generation install"
+    statuses = {status.status for refresh in out for status in getattr(refresh, "statuses", ())}
+    assert "pending" not in statuses, "a generation install still reported a unit pending"
+    assert statuses == {"refreshed", "refreshed"} or statuses == {"refreshed"}
+
+
+def test_a_session_runtime_is_spawned_detached() -> None:
+    """Provenance anchor: a session runtime is spawned DETACHED — the real fact.
+
+    Survival across a supervisor bounce rests on the CHILD's own detachment, NOT
+    on launchd abandoning descendants (round-4 corrected exactly that claim: the
+    generated plists carry no ``AbandonProcessGroup``, so launchd's default would
+    reap a same-group descendant). This asserts the detachment itself — a phone
+    session's spawn calls ``detached_popen_kwargs()``, whose POSIX arm is
+    ``start_new_session=True`` (``setsid``) — so a future edit that drops the
+    detachment is caught here rather than silently making the continuity claim
+    false. The behaviour it implies is exercised by the synthetic group-signal
+    controls below; this cell is the SOURCE fact, not a bounce.
+    """
+    import inspect
+
+    from local_operator import procstate
+    from local_operator.mobile import daemon as daemon_mod
+
+    spawn = inspect.getsource(daemon_mod.MobileDaemon._spawn_session)
+    assert (
+        "detached_popen_kwargs()" in spawn
+    ), "the session spawn stopped detaching; the continuity claim is now false"
+    assert procstate.detached_popen_kwargs() == {"start_new_session": True}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_detached_child_survives_a_supervisor_bounce(tmp_path: Path) -> None:
+    """A DETACHED child (``setsid``) outlives a supervisor bounce.
+
+    WHAT THIS IS: a SYNTHETIC process-group proof. It models the killing
+    semantics the real bounce uses — ``bootout``+``bootstrap``
+    (``launchd.reload_job``) and ``kickstart -k`` (``restart_if_build_moved``) —
+    by signal-killing the supervisor's WHOLE PROCESS GROUP (``killpg`` on the
+    supervisor's pgid), which is the shape that reaches an undetached child. It
+    is NOT an actual launchd bounce and does not exercise ``launchctl``; that is
+    stated plainly rather than implied, and real launchd coverage is a QA item.
+
+    WHAT IT PROVES: with the group signalled, the child that called ``os.setsid()``
+    (its own session — the shape ``process._install_sighup_ignore`` gives a session
+    runtime) keeps working. Liveness is proven by WORK, not ``kill(pid, 0)`` (a
+    zombie still answers that): the heartbeat file must keep GROWING. The paired
+    :func:`test_a_nondetached_child_dies_with_the_supervisor_group` is the negative
+    control that makes this discriminating — without it, this would pass with or
+    without ``setsid``.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert (
+            beat.stat().st_size > grown_at
+        ), "the detached child stopped writing after the supervisor bounce"
+    finally:
+        # REAP THE DETACHED CHILD TOO: it survived the bounce on purpose, so
+        # nothing else will end it. Its own pid is the only handle — it is in its
+        # own session, so the supervisor's group never covered it.
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_nondetached_child_dies_with_the_supervisor_group(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL (synthetic): an UNDETACHED child does NOT survive.
+
+    Same shape as its sibling EXCEPT the child never calls ``os.setsid()``, so it
+    stays in the supervisor's process group. When that group is signal-killed (the
+    ``killpg`` shape of a real bounce), a child that did not detach is reaped —
+    which is exactly why survival rests on the child's OWN ``setsid`` and not on
+    any launchd courtesy. This is what makes the sibling test discriminating.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert beat.stat().st_size == grown_at, (
+            "the undetached child kept writing after a group kill — the control is not "
+            "discriminating, so the sibling test proves nothing"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+def _bounce_group(unit: subprocess.Popen[bytes]) -> None:
+    """Signal-kill the supervisor's WHOLE PROCESS GROUP, as a real bounce does.
+
+    ``unit`` is spawned ``start_new_session=True``, so its pgid IS its pid; this
+    reaches an undetached descendant (the detached one has left the group).
+    """
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(os.getpgid(unit.pid), signal.SIGTERM)
+    with contextlib.suppress(Exception):
+        unit.wait(timeout=10)

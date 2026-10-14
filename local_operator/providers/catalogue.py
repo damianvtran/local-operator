@@ -27,6 +27,36 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.providers.controller import CatalogueEntry
 
 
+def split_by_access(
+    entries: Iterable["CatalogueEntry"],
+    *,
+    usable: Collection[str] | None,
+    current: str | None = None,
+) -> tuple[list["CatalogueEntry"], int]:
+    """``(kept, hidden)`` — the access filter ALONE, with entries left untouched.
+
+    THE ONE PREDICATE for "may this user be offered this row", extracted so the
+    desktop route (``GET /v1/desktop/models?scope=usable``) and the TUI/phone
+    shaping in :func:`picker_rows` cannot drift apart on it. The desktop cannot
+    simply call :func:`picker_rows`: that function also re-ranks and rewrites an
+    OpenAI row's window to the default, which would make ``scope=usable`` return
+    different ORDER and different numbers for the same row than ``scope=all`` —
+    a client toggling between the two would watch rows move and change.
+
+    Semantics are exactly :func:`picker_rows`'s, restated here because they are
+    the contract: ``usable=None`` (credential store unreadable) keeps everything,
+    and the ``current`` selector is exempt from the filter and not counted as
+    hidden.
+    """
+    listed = list(entries)
+    kept = [
+        entry
+        for entry in listed
+        if usable is None or entry.provider in usable or entry.selector == current
+    ]
+    return kept, len(listed) - len(kept)
+
+
 def picker_rows(
     entries: Iterable["CatalogueEntry"],
     *,
@@ -61,13 +91,24 @@ def picker_rows(
     vanish from the footer, and flooring at zero hid the arithmetic rather than
     fixing it.
     """
-    listed = list(entries)
+    listed, hidden = split_by_access(entries, usable=usable, current=current)
     rows = [
         ModelRow(
             provider=entry.provider,
             model_id=entry.model_id,
             label=entry.label,
             listing_name=entry.listing_name,
+            max_output_tokens=entry.max_output_tokens,
+            supports_tools=entry.supports_tools,
+            supports_images=entry.supports_images,
+            supports_audio_input=entry.supports_audio_input,
+            reasoning=entry.reasoning,
+            reasoning_efforts=entry.reasoning_efforts,
+            reasoning_default_effort=entry.reasoning_default_effort,
+            family=entry.family,
+            release_date=entry.release_date,
+            modalities=entry.modalities,
+            variants=entry.variants,
             context_window=(
                 entry.default_context_window
                 if entry.provider == "openai"
@@ -85,7 +126,5 @@ def picker_rows(
             time_of_use=entry.time_of_use,
         )
         for entry in listed
-        if usable is None or entry.provider in usable or entry.selector == current
     ]
-    hidden = len(listed) - len(rows)
     return rank_rows(rows, query or ""), hidden

@@ -42,6 +42,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
+from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
+
 if TYPE_CHECKING:
     # The engage-and-dial seam takes ANY errand (a prompt, or a queued ask's cold
     # answer), so its parameter is the union rather than ``Any``: a caller that
@@ -80,6 +82,7 @@ from local_operator.session.runtime.types import (
     OPERATOR_SIGNATURE_CAPABILITY,
     drain_phrase_for_frame,
 )
+from local_operator.supplements.contract import SUPPLEMENTS_CAPABILITY
 
 try:
     # The carriage capability token (mobile STT). cf9f's PR adds it beside the
@@ -925,6 +928,7 @@ class AttachClient:
         on_event: Callable[[dict[str, Any]], None] | None = None,
         frontend_state: bool = False,
         display_window: bool = False,
+        supplements: bool = False,
         locality: str = "local",
         slash_consumers: Sequence[str] | None = None,
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
@@ -951,6 +955,14 @@ class AttachClient:
         self._on_event = on_event
         self._frontend_state = frontend_state
         self._display_window = display_window
+        #: This viewer renders turn supplements (memo §2.7). The declaration
+        #: is only half the gate: the owner must also advertise
+        #: ``supplements-v1``, resolved at ``connect`` from the record exactly
+        #: as :attr:`_input_mode_supported` is — so an older owner is simply
+        #: never sent the declaration's consequences and the frame stays
+        #: byte-identical for it.
+        self._supplements = bool(supplements)
+        self._supplements_supported = False
         # Which action-carrying slash receipts THIS client renders itself (see
         # ``SLASH_ACTION_RECEIPTS``). Declaring them is what stops the runtime
         # from also submitting the request: a client that says nothing is
@@ -1162,6 +1174,13 @@ class AttachClient:
         self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
             INPUT_MODE_CAPABILITY in record.capabilities
         )
+        # The supplements twin: this build renders the family, and only an
+        # owner that advertises ``supplements-v1`` (a handle that honours
+        # ``supplements_for``) is told so — the viewer's half of the two-half
+        # attach gate (``supplements.contract.negotiated``).
+        self._supplements_supported = bool(self._supplements) and (
+            SUPPLEMENTS_CAPABILITY in record.capabilities
+        )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
         # MAY THIS OWNER KEEP IMAGES ON A QUEUED-ASK ANSWER, resolved per dial like
         # its neighbours. Unlike ``_input_mode_supported`` this gates a REFUSAL, not
@@ -1191,6 +1210,18 @@ class AttachClient:
             # simply never sends event frames — the caller gates on
             # ``record.protocol >= 4`` before relying on the relay.
             auth["events"] = True
+            # THE VIEWER'S HALF of the supplements two-half gate (memo §2.7),
+            # declared only on an EVENT-CONSUMING client and only when the owner
+            # advertises the capability: without it the runtime still journals
+            # every row but fans no ``supplement_progress`` beat to this
+            # connection. Every core client in this build folds or renders the
+            # family (the desktop bridge gates it per subscriber; the mobile
+            # projection keeps it in a map old app builds ignore), so this is a
+            # declaration of what THIS build can receive, never a grant.
+            if SUPPLEMENTS_CAPABILITY in record.capabilities:
+                auth["supplements"] = True
+            if JOURNAL_ORDER_CAPABILITY in record.capabilities:
+                auth["journal_order"] = True
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in record.capabilities:
@@ -1211,6 +1242,11 @@ class AttachClient:
                 auth["display_history_entry_times"] = True
         if self._operator_nonce:
             auth["operator_nonce"] = self._operator_nonce
+        if self._supplements_supported:
+            # The viewer's own boolean of the two-half gate; the runtime ANDs
+            # it with the owner-record capability (``conn.supplements``), so a
+            # stray declaration against a non-advertising owner sends nothing.
+            auth["supplements"] = True
         if self._slash_consumers is not None:
             # Additive and advisory, exactly the shape ``events`` and
             # ``frontend_state`` are: an older owner ignores the unknown auth
@@ -2334,6 +2370,44 @@ class AttachClient:
         """Fork an aside exchange into the conversation on the authoritative owner."""
         return await self._request("adopt_aside", messages=messages)
 
+    # -- turn supplements (memo §2.7) ---------------------------------------
+    #
+    # Four additive, getattr-probed ops on the owner's dispatch, plus the
+    # lazy read. The read's answer rides the ack frame's ``supplements``
+    # field (the ``AckDetail`` extra slot), not a ``result`` payload, exactly
+    # as ``supplements_for`` is dispatched — while the four control ops
+    # answer with their receipt sentence like every other control op.
+
+    async def supplements_for(self, anchors: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """``{anchor: newest supplement row}`` for the anchors asked about.
+
+        The viewer's lazy read (memo §2.11): called when an answer row mounts
+        so a resumed or late-attached viewer paints the rows the journal
+        already holds. Returns ``{}`` for an owner that cannot answer — the
+        caller paints nothing, which is the same picture as "no rows" and the
+        honest one for a build without the feature.
+        """
+        reply = await self._request_frame(
+            "supplements_for", anchors=[str(anchor) for anchor in anchors]
+        )
+        self._raise_for_reply_error(reply)
+        rows = reply.get("supplements")
+        if not isinstance(rows, dict):
+            return {}
+        return {str(anchor): dict(row) for anchor, row in rows.items() if isinstance(row, dict)}
+
+    async def supplement_cancel(self, anchor: str, job: str) -> str:
+        """Cancel the running generator attempt; a settled job answers neutrally."""
+        return await self._request("supplement_cancel", anchor=anchor, job=job)
+
+    async def supplement_steer(self, anchor: str, job: str, text: str) -> str:
+        """Cut the in-flight attempt and start version + 1 with ``text``."""
+        return await self._request("supplement_steer", anchor=anchor, job=job, text=text)
+
+    async def supplement_restart(self, anchor: str, job: str) -> str:
+        """Start version + 1 with the previous instruction (the Retry)."""
+        return await self._request("supplement_restart", anchor=anchor, job=job)
+
     async def cancel_subagents(self) -> int:
         """Cancel every running subagent on the owner; return the REAL count."""
         value = await self._request_payload("cancel_subagents")
@@ -2393,6 +2467,22 @@ class AttachClient:
 
     async def set_effort(self, effort: str) -> str:
         return await self._request("set_effort", effort=effort)
+
+    async def rehome_if_current(self, expected: str, provider: str, model_id: str) -> str:
+        """Move the owner off ``expected`` only if it is STILL exactly ``expected``.
+
+        The sign-in re-home's client half: the desktop has already decided this
+        session is a candidate from its own mirror, and the owner re-checks every
+        term under its own state (``rehome_if_current`` beside ``set_model_effort``)
+        because the mirror is a snapshot and the user may have picked a model in
+        between. The answer is the owner's own word — ``rehomed: <old> → <new>``
+        or ``kept: <why>`` — and an owner too old to know the op answers the
+        standard unknown-op error, which the caller reports as "this session
+        cannot be re-homed" rather than as a failure.
+        """
+        return await self._request(
+            "rehome_if_current", expected=expected, provider=provider, model_id=model_id
+        )
 
     async def approval_answer(
         self, request_id: str, approved: bool, *, deadline_s: float = ACK_TIMEOUT_S

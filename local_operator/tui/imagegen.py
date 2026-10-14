@@ -4,12 +4,21 @@ The programme's frozen contract has exactly ONE image tool, ``generate_image``
 (image-to-image rides ``source_image_path`` on the same call, so there is no
 ``generate_altered_image``), and its live states move through one vocabulary:
 ``queued -> running -> done | failed | cancelled``, plus the interim
-``cancelling``. Everything in this module exists so that this surface has ONE
-place to change when the harness lane freezes the wire details:
+``cancelling``. The video lane's ``generate_video`` is NOT a second variant:
+its live states and wire fields are the same frozen six, so it joins
+:data:`IMAGE_GEN_TOOLS` and inherits the body, settle and failure arms — with
+ONE gate excluding it, the in-turn interrupt hint (a video job is not
+interruptible in-turn: its cancel rail is the post-turn job op, contract §4.2 /
+ruling R4), which reads :func:`is_video_gen_tool` beside the detection
+predicate rather than subtracting the name from the set. Everything in this
+module exists so that this surface has ONE place to change when the harness
+lane freezes the wire details:
 
 - :data:`IMAGE_GEN_TOOLS` / :func:`is_image_gen_tool` — the detection set. The
   card keys its whole variant off this predicate, so a rename reaches every
-  renderer by editing one line.
+  renderer by editing one line. :data:`VIDEO_GEN_TOOLS` / :func:`is_video_gen_tool`
+  read the video subset for the variant's ONE exclusion gate (the interrupt
+  hint — see the module header).
 - :func:`live_from_details` — the ADAPTER. The canonical live fields ride the
   existing tool-execution update events' ``details`` mapping, and their key
   names are FROZEN as of PR #2089 (``feat(media): emit the canonical progress
@@ -59,8 +68,10 @@ __all__ = [
     "PROGRESS_EMPTY",
     "PROGRESS_FILLED",
     "STATE_CANCELLING",
+    "VIDEO_GEN_TOOLS",
     "imagegen_state_word",
     "is_image_gen_tool",
+    "is_video_gen_tool",
     "live_from_details",
     "progress_graphic",
     "provider_error_note",
@@ -68,16 +79,51 @@ __all__ = [
 
 #: The detection set. ONE exported constant: a future alias, a rename, or a
 #: second call shape is a one-line edit here and no renderer changes.
-IMAGE_GEN_TOOLS: frozenset[str] = frozenset({"generate_image"})
+#:
+#: ``generate_video`` belongs here by design (surfaces programme, ruling R1 —
+#: "add ``generate_video`` there first, then emit"): the video job's live
+#: lifecycle and wire fields are the SAME frozen six, so sharing the set means
+#: the live body, the settle absorption and the failure body follow with zero
+#: edits. The one renderer that must NOT follow is the in-turn interrupt hint —
+#: a video job is registered detached and cancelled post-turn (``jobs
+#: op='cancel'``; contract §4.2, ruling R4) — and that gate reads
+#: :func:`is_video_gen_tool` rather than subtracting the name here, because the
+#: card must keep wearing the variant.
+IMAGE_GEN_TOOLS: frozenset[str] = frozenset({"generate_image", "generate_video"})
+
+#: The video member of the detection set, kept as its own constant so the ONE
+#: EXCLUSION gate (`tool_card`'s interrupt hint) has a named predicate to read
+#: and a future rename edits one line. A SUBSET of :data:`IMAGE_GEN_TOOLS` —
+#: pinned by a test, because a rename that edited one and not the other would
+#: silently re-arm the hint for video.
+VIDEO_GEN_TOOLS: frozenset[str] = frozenset({"generate_video"})
 
 
 def is_image_gen_tool(tool_name: str) -> bool:
-    """Whether ``tool_name`` names the image-generation tool.
+    """Whether ``tool_name`` names a tool that wears the imagegen live variant.
 
     Compared case-insensitively, the way the card's other name tests are
     (``send``), so a producer that shouts the name still reaches the variant.
+    ALSO TRUE for ``generate_video`` since the surfaces programme: that is the
+    point of the shared set — the card body is content-agnostic (state word,
+    graphic, queue line, logs), and the settle keeps the receipt. The question
+    "is this interruptible in-turn" belongs to :func:`is_video_gen_tool` and
+    is asked only by the hint gate.
     """
     return tool_name.strip().lower() in IMAGE_GEN_TOOLS
+
+
+def is_video_gen_tool(tool_name: str) -> bool:
+    """Whether ``tool_name`` names the detached video-generation tool.
+
+    Read by the ONE gate that must exclude video from its variant sibling's
+    affordance: the in-turn interrupt hint (``tool_card.IMAGE_INTERRUPT_HINT``).
+    A video job cannot be stopped by a turn interrupt — it is cancelled
+    post-turn via ``jobs op='cancel'`` (contract §4.2; ruling R4) — so the hint
+    would promise a stop the key does not perform. Same tolerance and the same
+    negative-control shape as :func:`is_image_gen_tool`.
+    """
+    return tool_name.strip().lower() in VIDEO_GEN_TOOLS
 
 
 # ---------------------------------------------------------------------------

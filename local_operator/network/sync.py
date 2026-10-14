@@ -186,6 +186,15 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # It is a fact about the SESSION, not a liveness claim about a source process, so
     # it is not on the ``.session.pid`` side of the argument.
     "eval-kernel.json",
+    # THE PENDING-VOICE MARKERS (``session.channel_spend.PENDING_SIDECAR_NAME``):
+    # one JSON line per voice call a route recorded against a conversation whose
+    # own process has not folded the record yet. It travels for the same reason
+    # ``asks.jsonl`` and ``goal.json`` do — a session forked or MOVED while a
+    # charge is still unfoled must arrive WITH the fact stated, or the
+    # destination reads as a conversation whose voice spend never existed while
+    # the record sits unjoined in analytics (design §4.2's fallback exists so
+    # the case is visible, and a move must not be the thing that hides it).
+    "channel_pending.jsonl",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own
@@ -306,6 +315,15 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    # The tail anchor (``session.tail_anchor``): a hint about the SOURCE's own
+    # journal bytes — an inode number and the offset of the end of its last
+    # complete row. In a copy both are wrong by construction (a replica is a
+    # different file), and the reader validates them before use, so the honest
+    # answer is that it is written by the destination's own pre-warm job or not at
+    # all. Copying it would only make every cold read on the peer fall back.
+    "tail-anchor.v1.json": (
+        "a hint about this device's own journal bytes; rewritten by the destination"
+    ),
     # The liveness marker: copied, the destination would report the SOURCE's pid
     # as the owner of its copy, which is how a viewer refuses to open a session
     # that is not running there.

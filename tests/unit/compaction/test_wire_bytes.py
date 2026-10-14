@@ -27,6 +27,7 @@ from PIL import Image
 from local_operator.compaction.pruning import (
     downscale_stale_frames,
     fit_frames_to_wire_budget,
+    partition_captures,
     shed_frames_to_wire_budget,
 )
 from local_operator.compaction.thresholds import (
@@ -43,7 +44,13 @@ from local_operator.compaction.tokens import (
     estimate_messages_tokens,
     estimate_wire_bytes,
 )
-from local_operator.harness.types import ImageContent, Message, TextContent, ToolCall
+from local_operator.harness.types import (
+    CapturedFrame,
+    ImageContent,
+    Message,
+    TextContent,
+    ToolCall,
+)
 from local_operator.imaging import _CONTEXT_FRAME_CACHE, IMAGE_CONTEXT_EDGES
 
 #: Median base64 length of the 42 frames in the wedged session (min 709,616 /
@@ -148,13 +155,13 @@ def test_byte_trigger_respects_disabled_and_off_exactly_like_the_token_trigger()
     "context_tokens,window,expected",
     [
         # The resolved trigger is min(threshold_percent * window,
-        # threshold_tokens), so 600k binds on a 1M window, not 80%.
+        # threshold_tokens), so 400k binds on a 1M window, not 80%.
         (0, 1_000_000, False),
         (100_000, 1_000_000, False),
-        (599_999, 1_000_000, False),
-        (600_000, 1_000_000, False),  # strictly greater-than
-        (600_001, 1_000_000, True),
-        (600_001, 10_000_000, True),
+        (399_999, 1_000_000, False),
+        (400_000, 1_000_000, False),  # strictly greater-than
+        (400_001, 1_000_000, True),
+        (400_001, 10_000_000, True),
         (79_999, 100_000, False),  # 80% binds on a small window
         (80_001, 100_000, True),
     ],
@@ -328,12 +335,28 @@ def _frame_png(width: int = 1280, height: int = 800, seed: int = 11) -> bytes:
 
 
 def _real_frame_messages(count: int) -> list[Message]:
-    """``count`` user messages each carrying a real PNG frame."""
+    """``count`` user messages each carrying a real PNG frame.
+
+    The frames are stamped as one stream's captures, which is what a
+    screenshot-driving session's history looks like: the render fallback may
+    degrade only SUPERSEDED captures, so an unstamped fixture would be
+    protected and prove nothing about the ladder.
+    """
     encoded = base64.b64encode(_frame_png()).decode("ascii")
     return [
         Message(
             role="user",
-            content=[TextContent(text=f"shot {index}"), ImageContent(data=encoded)],
+            content=[
+                TextContent(text=f"shot {index}"),
+                ImageContent(
+                    data=encoded,
+                    captured_frame=CapturedFrame(
+                        stream_id="screen",
+                        revision_id=f"rev-{index}",
+                        producer_scope="test:fit",
+                    ),
+                ),
+            ],
         )
         for index in range(count)
     ]
@@ -462,23 +485,188 @@ def test_fit_stops_at_the_first_rung_that_fits() -> None:
     ), "the walk did not stop at the first rung that fits"
 
 
-def test_fit_sheds_from_the_tightest_rung_when_no_rung_fits() -> None:
-    """The last resort: when even the tightest rung is over budget — the
-    unprotected walk included, so every frame is re-rendered first — the shed
-    replaces the oldest frames with notices, terminates, and no message is
-    removed."""
-    history, _frames = _real_history(6)
+def test_fit_holds_the_latest_capture_when_even_the_floor_cannot_fit() -> None:
+    """The protection boundary at the terminal rung.
+
+    Six frames against a budget nothing fits: the five SUPERSEDED captures
+    are dropped, but the newest capture is held -- descended (the retained
+    last resort; see the OPEN note in the ladder) yet never dropped -- and
+    the still-over return is the honest disposition. The guarantee is that
+    nothing protected disappears silently, not that the request always fits.
+    """
+    history, frames = _real_history(6)
     _CONTEXT_FRAME_CACHE.clear()
+    original = _image_blocks_of(frames)[-1].data
 
     out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=40_000)
 
-    assert dropped == 6, "every frame must go when even the floor cannot fit"
+    assert dropped == 5, "the superseded captures must go when even the floor cannot fit"
     assert downscaled == 6, "the rungs were not applied before the shed"
     assert rung == IMAGE_CONTEXT_EDGES[-1], "the shed reports the tightest rung"
-    assert _image_blocks_of(out) == [], "a frame survived a shed that cannot fit"
-    assert estimate_wire_bytes(out) <= 40_000
+    blocks = _image_blocks_of(out)
+    assert len(blocks) == 1, "the latest capture was dropped instead of held"
+    assert blocks[0].data != original, "the newest was not descended at the terminal rung"
+    assert (
+        estimate_wire_bytes(out) > 40_000
+    ), "the honest disposition is a still-over return, not a fabricated fit"
     assert len(out) == len(history)
     assert [m.id for m in out] == [m.id for m in history]
+
+
+def test_fit_never_drops_a_protected_image_under_any_budget() -> None:
+    """User uploads and unknown images are unreachable by the DROP path.
+
+    The same protection rules the epoch elision obeys: a pasted image and a
+    file-read image are not captures merely because they are images. Over
+    budget with nothing eligible, the ladder's shed drops nothing -- silent
+    loss is not a recovery. (The terminal descent may still re-render such a
+    block; that carve-out is the OPEN boundary the ladder documents, and it
+    never removes a block.)
+    """
+    encoded = base64.b64encode(_frame_png()).decode("ascii")
+    history = [
+        Message(
+            role="user",
+            content=[TextContent(text="pasted"), ImageContent(data=encoded)],
+        ),
+        Message.assistant("ok"),
+        Message(
+            role="tool",
+            content=[TextContent(text="read it"), ImageContent(data=encoded)],
+        ),
+        Message.assistant("ok"),
+    ]
+    assert partition_captures(history).reclaimable == ()
+
+    _CONTEXT_FRAME_CACHE.clear()
+    out, _downscaled, dropped, _rung = fit_frames_to_wire_budget(history, budget=40_000)
+
+    assert dropped == 0, "a protected image was dropped"
+    assert len(_image_blocks_of(out)) == 2, "a protected image vanished"
+    assert len(out) == len(history)
+    assert [m.id for m in out] == [m.id for m in history]
+
+
+def test_shed_with_reclaimable_never_replaces_a_protected_block() -> None:
+    """The shed's gate, exercised directly: only blocks the reclaimable set
+    admits become notices; the rest survives byte for byte, and the
+    loop terminates when no eligible block remains even though the payload is
+    still over."""
+    encoded = base64.b64encode(_frame_png()).decode("ascii")
+
+    def pair(stream: str, revision: str) -> list[Message]:
+        return [
+            Message(
+                role="user",
+                content=[
+                    TextContent(text=f"{stream} {revision}"),
+                    ImageContent(
+                        data=encoded,
+                        captured_frame=CapturedFrame(
+                            stream_id=stream,
+                            revision_id=revision,
+                            producer_scope="test:shed",
+                        ),
+                    ),
+                ],
+            ),
+            Message.assistant("ok"),
+        ]
+
+    history = [*pair("screen", "1"), *pair("camera", "9"), *pair("screen", "2")]
+    reclaimable = frozenset(
+        (capture.message_index, capture.content_index)
+        for capture in partition_captures(history).reclaimable
+    )
+    assert reclaimable == {(0, 1)}, "the fixture must expose exactly one superseded capture"
+
+    out, dropped = shed_frames_to_wire_budget(history, budget=1, reclaimable=reclaimable)
+
+    assert dropped == 1, "only the superseded capture may be shed"
+    blocks = _image_blocks_of(out)
+    assert len(blocks) == 2, "a protected frame was shed"
+    assert blocks[0].data == encoded, "the quiet stream's latest capture was touched"
+    assert blocks[1].data == encoded, "the latest capture was touched"
+    assert out[2] is history[2], "a protected message was rewritten"
+    assert out[4] is history[4], "the latest capture's message was rewritten"
+
+
+def test_downscale_with_reclaimable_only_re_renders_listed_blocks() -> None:
+    """Step 1's gate, exercised directly: a protected neighbour keeps its
+    exact bytes (and its message identity -- the copy/identity contract the
+    prompt cache rests on)."""
+    encoded = base64.b64encode(_frame_png()).decode("ascii")
+    history = [
+        Message(
+            role="user",
+            content=[
+                TextContent(text="captured"),
+                ImageContent(
+                    data=encoded,
+                    captured_frame=CapturedFrame(
+                        stream_id="screen", revision_id="1", producer_scope="test:ds"
+                    ),
+                ),
+            ],
+        ),
+        Message.assistant("ok"),
+        Message(role="user", content=[TextContent(text="later"), ImageContent(data=encoded)]),
+    ]
+    out, downscaled = downscale_stale_frames(
+        history,
+        keep_recent_frames=0,
+        max_edge=IMAGE_CONTEXT_EDGES[-1],
+        reclaimable=frozenset({(0, 1)}),
+    )
+
+    assert downscaled == 1
+    blocks = _image_blocks_of(out)
+    assert blocks[0].data != encoded, "the listed superseded capture must re-render"
+    assert blocks[1].data == encoded, "the unlisted pasted image must keep its bytes"
+    assert out[2] is history[2], "an untouched message must keep its identity"
+
+
+def test_fit_keeps_a_quiet_streams_latest_capture() -> None:
+    """Supersession is PER STREAM: a stream that is not being updated keeps
+    its latest capture -- it is still the current view of that surface --
+    while only a genuinely older frame of another stream is degraded."""
+    encoded = base64.b64encode(_frame_png()).decode("ascii")
+
+    def frame(stream: str, revision: str) -> Message:
+        return Message(
+            role="user",
+            content=[
+                TextContent(text=f"{stream} {revision}"),
+                ImageContent(
+                    data=encoded,
+                    captured_frame=CapturedFrame(
+                        stream_id=stream, revision_id=revision, producer_scope="test:fit"
+                    ),
+                ),
+            ],
+        )
+
+    history = [
+        frame("screen", "1"),
+        Message.assistant("ok"),
+        frame("camera", "9"),
+        Message.assistant("ok"),
+        frame("screen", "2"),
+        Message.assistant("ok"),
+    ]
+    reclaimable = partition_captures(history).reclaimable
+    assert [(c.stream_id, c.revision_id) for c in reclaimable] == [("screen", "1")]
+
+    total = estimate_wire_bytes(history)
+    _CONTEXT_FRAME_CACHE.clear()
+    out, downscaled, dropped, _rung = fit_frames_to_wire_budget(history, budget=total - 1)
+
+    assert dropped == 0
+    assert downscaled == 1, "exactly the superseded frame may descend"
+    blocks = _image_blocks_of(out)
+    assert blocks[0].data != encoded, "the superseded screen frame must be re-rendered"
+    assert blocks[1].data == encoded, "the quiet stream's latest capture was touched"
+    assert blocks[2].data == encoded, "the latest capture was touched"
 
 
 def test_fit_descends_the_newest_frame_when_no_protected_rung_fits() -> None:

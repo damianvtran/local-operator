@@ -17,6 +17,7 @@ and dispatching to the right wire client through
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
 import inspect
@@ -58,9 +59,14 @@ from local_operator.model.registry import (
     anthropic_default_model_info,
     anthropic_family_model_info,
     get_model_info,
+    meta_muse_family_model_info,
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
+from local_operator.session.request_observation import (
+    RequestSubscriberHolder,
+    build_request_final_observation,
+)
 
 logger = logging.getLogger("local_operator.model.configure")
 
@@ -120,6 +126,10 @@ UNKNOWN_MAX_OUTPUT = 8_192
 #: 160k compaction threshold on a model with 1M of room.
 _FAMILY_MODEL_RESOLVERS: dict[str, Callable[[str], ModelInfo | None]] = {
     "anthropic": anthropic_family_model_info,
+    # Muse ids reach here when discovery surfaces a tier this build's
+    # registry has not been taught (a new Spark point release, Wonder
+    # Full). Limits are inherited, prices are not — see the resolver.
+    "meta-muse": meta_muse_family_model_info,
 }
 
 #: Per-provider fallback templates for an id neither the registry nor a family
@@ -916,6 +926,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_responses_api = bool(getattr(info, "supports_responses_api", False))
 
     definition = get_provider_definition(canonical)
+    if canonical == "meta-muse":
+        # The subscription endpoint is Responses-only, including a newly
+        # discovered model with no bundled row (not a fabricated Full alias).
+        supports_responses_api = True
+        supports_cache = False
     if canonical == "openai" and _OPENAI_RESPONSES_API.search(model_name.lower()):
         supports_responses_api = True
         supports_cache = True
@@ -1886,10 +1901,12 @@ def _catalogue_credential(
     key = _catalogue_api_key(provider, base=base)
     if key:
         return key, _env_secret_is_oauth(key), None
-    return _oauth_listing_token(provider)
+    return _oauth_listing_token(provider, base=base)
 
 
-def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
+def _oauth_listing_token(
+    provider: str, *, base: Path | None = None
+) -> tuple[str, bool, str | None]:
     """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
@@ -1917,11 +1934,26 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
         from local_operator.providers.registry import credential_provider_id
 
         storage = credential_provider_id(provider)
-        rows = shared_auth_store().list_credentials(provider=storage)
+        store = (
+            shared_auth_store(
+                db_path=base / "auth.db" if base is not None else None, config_dir=base
+            )
+            if provider == "meta-muse"
+            else shared_auth_store()
+        )
+        rows = store.list_credentials(provider=storage)
         for row in reversed(rows):
-            token = str(row.data.get("access") or "")
+            if provider == "meta-muse":
+                extractor = store._oauth_key_fn(provider)
+                token = extractor(row.data) if extractor is not None else ""
+            else:
+                token = str(row.data.get("access") or "")
             if token:
-                account_id = row.data.get("account_id") or row.data.get("org_id")
+                account_id = (
+                    row.data.get("account_id")
+                    or row.data.get("org_id")
+                    or (row.data.get("email") if provider == "meta-muse" else None)
+                )
                 return (
                     token,
                     row.credential_type == "oauth",
@@ -2071,7 +2103,17 @@ def info_from_discovered_model(
         info.supports_tools = row.supports_tools
     if row.reasoning is not None:
         info.reasoning = row.reasoning
-    if provider == "deepseek" and row.reasoning_default_effort is not None:
+    if provider == "meta-muse":
+        # The ladder does NOT ride ModelInfo: a non-scalar field would make the
+        # paint path's shallow copy share state with its memo, and the
+        # second-hand price leg could then leak an aggregator's route answer
+        # onto a direct provider's model (pinned by
+        # ``tests/unit/model/test_registry.py`` and ``test_catalogue.py``).
+        # The listing read above has already warmed ``_listing_effort`` through
+        # :func:`_remember_listing_effort`, which is the channel
+        # ``build_model_spec`` and ``context_spec_for_access`` read.
+        info.reasoning_default_effort = row.reasoning_default_effort
+    elif provider == "deepseek" and row.reasoning_default_effort is not None:
         info.reasoning_default_effort = row.reasoning_default_effort
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
     # Presence survives the listing cache: zero-price/false flags and valid
@@ -2543,14 +2585,28 @@ def resolve_model_info(
         # cloud memo's provider/id pair. Paint from the endpoint-scoped cache.
         return local_model_info(provider, model_id)
     bucket = int(time.time() // DEFAULT_TTL_S)
-    if provider == "openai":
+    if provider in ("openai", "meta-muse"):
         from local_operator.model.discovery import _cache_key
 
         credential = (
             credential if credential is not None else _catalogue_credential(provider, base=base)
         )
-        scope = _cache_key("openai", account_scoped=credential[1], account_id=credential[2])
-        if credential[1] and not credential[2]:
+        # Meta metadata belongs to the selected subscription account, never
+        # the ambient account or Codex's scope/header convention.
+        account_id = credential[2]
+        if provider == "meta-muse" and not account_id and credential[0]:
+            import hashlib
+
+            account_id = "credential:" + hashlib.sha256(credential[0].encode()).hexdigest()
+        scope = _cache_key(provider, account_scoped=credential[1], account_id=account_id)
+        if provider == "meta-muse":
+            from local_operator.model.catalogue import _cache_path, _document_stamp
+
+            # Existing file identity changes on a refreshed account document.
+            # A daily memo bucket must not hide newly returned limits/efforts;
+            # this needs neither a global epoch nor paint-triggered network IO.
+            scope = f"{scope}:{_document_stamp(_cache_path(scope, None))}"
+        if provider == "openai" and credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
@@ -3046,14 +3102,16 @@ def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
 
 
 def context_spec_for_access(
-    spec: ModelSpec, access: Any, settings: Mapping[str, Any] | None
+    spec: ModelSpec, access: Any, settings: Mapping[str, Any] | None, *, base: Path | None = None
 ) -> ModelSpec:
     """Resolve limits for the credential actually selected by the dispatch path.
 
     No wire override exists: Codex's maximum is a local budgeting ceiling.
     Sampling, effort and public API routing stay on the caller's original spec.
     """
-    if spec.provider != "openai":
+    if spec.provider not in ("openai", "meta-muse"):
+        return spec
+    if access is None and spec.provider == "meta-muse":
         return spec
     if access is None:
         return spec.model_copy(
@@ -3069,15 +3127,53 @@ def context_spec_for_access(
     # the public limit rather than retaining that conservative unknown budget.
     # Codex dispatch's account header is org_id; older records may retain only
     # account_id, so use it only when the wire identity is absent.
-    credential = (access.access_token, access.kind == "oauth", access.org_id or access.account_id)
-    info = resolve_model_info(spec.provider, spec.model_id, credential=credential)
+    account = access.org_id or access.account_id
+    if spec.provider == "meta-muse":
+        account = account or access.email
+    credential = (access.access_token, access.kind == "oauth", account)
+    info = resolve_model_info(spec.provider, spec.model_id, credential=credential, base=base)
     window = (
         info.context_window
         if info.context_window and info.context_window > 0
         else UNKNOWN_CONTEXT_WINDOW
     )
-    if not _openai_use_max_context_window(settings) and info.default_context_window:
+    if (
+        spec.provider == "openai"
+        and not _openai_use_max_context_window(settings)
+        and info.default_context_window
+    ):
         window = info.default_context_window
+    if spec.provider == "meta-muse":
+        # Selected-account native limits/capabilities are authoritative. Do not
+        # apply Codex's optional max-budget setting or emit its identity headers.
+        update: dict[str, Any] = {
+            "context_window": window,
+            "context_metadata_resolved": True,
+            "max_output_tokens": info.max_tokens,
+        }
+        # The ladder comes from the LISTING MEMO, never from ModelInfo: a
+        # non-scalar field would break the paint path's shallow-copy isolation
+        # and could leak a second-hand route's answer onto a direct model (the
+        # guards in tests/unit/model/test_registry.py and test_catalogue.py).
+        # The resolve above has just read the same document, so the memo is
+        # warm wherever the document was.
+        ladder = _listing_effort(spec.provider, spec.model_id)
+        if ladder is not None:
+            update.update(
+                {
+                    "reasoning_efforts": list(ladder),
+                    "reasoning_default_effort": info.reasoning_default_effort,
+                }
+            )
+        # Silence from an unavailable catalogue must preserve the caller's
+        # existing ladder; an explicit empty native ladder means no effort.
+        if ladder is not None and spec.reasoning_effort not in ladder:
+            update["reasoning_effort"] = info.reasoning_default_effort
+        for field in ("supports_tools", "supports_images", "supports_audio_input", "reasoning"):
+            value = getattr(info, field, None)
+            if value is not None:
+                update[field] = value
+        return spec.model_copy(update=update)
     return spec.model_copy(
         update={
             "context_window": window,
@@ -3423,6 +3519,26 @@ class SessionStreamFn:
         self._settings = settings
         self._session_id = session_id
         self._parent_session_id: str | None = None
+        # -- Opt-in request observation (local_operator.session.request_observation).
+        #
+        # ``_observation_root`` is a reference to the ROOT stream of this fork
+        # tree; ``None`` means this stream IS the root. The reference (rather
+        # than a copied holder value) is what makes a child created BEFORE the
+        # parent subscribed still see the later install: it resolves the root
+        # holder once per request, at request start, never per delta. ``fork``
+        # carries it down, so grandchildren share the same root.
+        #
+        # ``_request_observers`` holds the subscriber set and is allocated
+        # ONLY when someone subscribes -- ``None`` on the root is the whole
+        # default fast path: no allocation, no callback, no per-delta check on
+        # the ordinary request. ``_request_job_id``/``_request_actor_role``
+        # carry the child Session's existing job/role metadata so observation
+        # rows can attribute a role without guessing from model names; bound
+        # by the subagent fork site, ``None`` for root-owned requests.
+        self._observation_root: SessionStreamFn | None = None
+        self._request_observers: RequestSubscriberHolder | None = None
+        self._request_job_id: str | None = None
+        self._request_actor_role: str | None = None
         # The identity this session's PROVIDER CACHE is keyed under, which is
         # the session id for an ordinary session and the PARENT's id for a fork.
         #
@@ -3865,6 +3981,17 @@ class SessionStreamFn:
         self._transport.owners += 1
         child._parent_session_id = self._session_id
         child._descendant_request_counter = self._descendant_request_counter
+        # The observation carrier is ROOT-scoped, so every fork in the tree
+        # resolves the same subscriber holder. This must be the root REFERENCE
+        # rather than a copied holder value: a child forked while the root had
+        # no subscribers must still be covered when the root subscribes later
+        # (the pre-existing-child case), and a literal ``None`` copy could
+        # never see the install. Ordinary routing callbacks, credential pins
+        # and cache identity stay child-local exactly as before -- only this
+        # carrier is shared. ``getattr`` because recorder-style doubles build
+        # streams via ``object.__new__`` and never ran ``__init__``; a stream
+        # with no carrier reads exactly like a root with no subscribers.
+        child._observation_root = getattr(self, "_observation_root", None) or self
         if cache_lineage_id:
             # A TRUE transcript fork replays a byte-identical prefix, so the
             # parent's host is genuinely warm for it — the same reasoning that
@@ -3884,6 +4011,117 @@ class SessionStreamFn:
                 model: set(hosts) for model, hosts in self._provider_retired.items()
             }
         return child
+
+    def subscribe_requests(self, handler: Callable[[Any], None]) -> Callable[[], None]:
+        """Opt this stream's TREE into request-final observation.
+
+        Effective for requests BEGUN while subscribed: the handler set is
+        snapshotted at each request's start, so a request already in flight
+        follows whatever the snapshot said, and requests that finished before
+        the call are never replayed (a caller must install before the work it
+        wants observed). Returns an idempotent unsubscribe.
+
+        Installs on the ROOT holder regardless of which stream in the tree is
+        asked, because the observed identity is root-tree scoped: a
+        subscription is one tree's, never a process-global hook.
+        """
+        root = getattr(self, "_observation_root", None) or self
+        holder = getattr(root, "_request_observers", None)
+        if holder is None:
+            # Lazily allocated on first install; fork's shared root reference
+            # is what lets a child forked earlier reach it.
+            holder = RequestSubscriberHolder()
+            root._request_observers = holder
+        return holder.subscribe(handler)
+
+    def bind_request_actor(self, *, job_id: str | None, actor_role: str | None) -> None:
+        """Attach the child Session's existing job/role identity to this stream.
+
+        Called by the subagent fork site with the values it already passes to
+        the child Session constructor (``job_id``, ``agent_type``) so an
+        observation can attribute a request to the delegated role that made
+        it without a new agent registry and without guessing from model names.
+        Display/attribution metadata only -- never an authorization identity.
+        """
+        self._request_job_id = job_id
+        self._request_actor_role = actor_role
+
+    def _request_observation_target(
+        self,
+    ) -> tuple[RequestSubscriberHolder, tuple[Callable[[Any], None], ...]] | None:
+        """Resolve the observation target ONCE, at request start.
+
+        The single resolution per request is the contract: no per-delta
+        observer check exists, and the ``None`` fast path is this method
+        returning ``None`` after two tolerant attribute reads (``getattr``:
+        recorder rigs build streams via ``object.__new__`` without
+        ``__init__``, and a stream with no carrier must read like a root with
+        no subscribers). The returned snapshot tuple is what the request's
+        final notifies, so subscribing or unsubscribing mid-request cannot
+        change which handlers a given request delivers to.
+        """
+        root = getattr(self, "_observation_root", None) or self
+        holder = getattr(root, "_request_observers", None)
+        if holder is None:
+            return None
+        return holder, holder.snapshot()
+
+    def _notify_request_final(
+        self,
+        target: tuple[RequestSubscriberHolder, tuple[Callable[[Any], None], ...]],
+        *,
+        request_id: str,
+        request: ChatRequest,
+        usage: Any,
+        upstream_host: str | None,
+        ok: bool,
+        outcome: str,
+        duration_ms: float,
+    ) -> None:
+        """Build and deliver one record; never raises into the request path.
+
+        The whole block is best-effort: an observation bug must not mask the
+        provider's outcome or fail a turn the analytics side already recorded
+        (the same contract ``_record_usage`` lives under). Handler failures
+        are counted on the holder and surfaced on the owning session's
+        shutdown receipt.
+        """
+        try:
+            holder, handlers = target
+            root = getattr(self, "_observation_root", None) or self
+            observation = build_request_final_observation(
+                request_id=request_id,
+                tree_id=root._session_id,
+                session_id=self._session_id,
+                parent_session_id=self._parent_session_id,
+                job_id=self._request_job_id,
+                actor_role=self._request_actor_role,
+                request=request,
+                usage=usage,
+                upstream_host=upstream_host,
+                ok=ok,
+                outcome=outcome,
+                duration_ms=duration_ms,
+            )
+            holder.notify(handlers, observation)
+        except asyncio.CancelledError:
+            # Belt for an OBSERVER-originated CancelledError escaping the
+            # build/delivery path (the per-handler loop in ``notify`` isolates
+            # its own): the block above is synchronous, so a CancelledError
+            # raised here came from observer code — an ambient cancellation of
+            # the request is delivered at awaits, and there is none. Counted
+            # like any callback failure and never allowed to mask the
+            # provider's successful result (review round 1, R5). The request's
+            # OWN cancellation accounting is untouched: that is ``ok`` /
+            # ``outcome`` on the record, set by the caller.
+            try:
+                holder, _handlers = target
+            except Exception:  # noqa: BLE001 -- counting must not become the failure
+                holder = None
+            if holder is not None:
+                holder.note_delivery_failure("CancelledError escaped the delivery block")
+        except Exception:  # noqa: BLE001 -- observation never breaks a turn
+            logger.warning("request observation delivery failed", exc_info=True)
 
     @property
     def routing_settings(self) -> Mapping[str, Any]:
@@ -4324,7 +4562,9 @@ class SessionStreamFn:
         """Whether ``provider`` still has spendable quota for ``model_id``.
 
         ``usable`` means at least one account still has remaining > 0
-        (healthy *or* reserve — reserve is still spendable). ``depleted``
+        (healthy *or* reserve — reserve is still spendable). Healthy also
+        includes explicitly payable balance-only credits: never require a
+        percentage to keep such an account on the route. ``depleted``
         means every account that answered is at 0%. ``unknown`` is fail-open:
         no endpoint, no report, or a fetch error, so the caller must not
         skip the target on a missing signal.
@@ -4682,7 +4922,7 @@ class SessionStreamFn:
 
     async def resolve_context_model(self, model: ModelSpec) -> ModelSpec:
         """Budget against the same selected credential as dispatch, before compaction."""
-        if model.provider != "openai":
+        if model.provider not in ("openai", "meta-muse"):
             return model
         import asyncio
 
@@ -4701,7 +4941,13 @@ class SessionStreamFn:
             model_id=model.model_id,
             scoped_blocks=True,
         )
-        return await asyncio.to_thread(context_spec_for_access, model, access, self._settings)
+        return await asyncio.to_thread(
+            context_spec_for_access,
+            model,
+            access,
+            self._settings,
+            base=getattr(self._auth_store, "_config_dir", None),
+        )
 
     async def preflight_usage(self, model: ModelSpec, *, consume_boundary: bool = True) -> None:
         """Check reliable OAuth quota once per user-message boundary.
@@ -5085,6 +5331,17 @@ class SessionStreamFn:
                     )
                     await self._route_state.clear_settled("primary model still has quota")
                     return
+                # The last account's family depletion is still a definite
+                # verdict even when no fallback exists. Persist only its binding
+                # families; an account-wide block would hide payable shared
+                # credits from otherwise runnable models on this same login.
+                self._write_quota_block(
+                    self._auth_store,
+                    access.credential_id,
+                    storage,
+                    health,
+                    max(60_000, health.reset_after_ms or self.DEFAULT_USAGE_BLOCK_MS),
+                )
                 fallback = await self._first_available_fallback(
                     model,
                     reserve_percent=retry.usage_reserve_percent,
@@ -5999,7 +6256,18 @@ class SessionStreamFn:
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message
         # boundary (which owns quota recovery and auto-effort classification).
-        if request.purpose == "turn":
+        #
+        # A recovery re-ask (``same_route_retry``) skips this preflight ON
+        # PURPOSE: its job here is to BLOCK a credential and activate a
+        # fallback route for the session, which is exactly the route REWRITE
+        # a recovery must never perform -- it goes back to the machine that
+        # served the failed turn. Nothing is bypassed by skipping it: the
+        # account's quota and auth constraints still land on the single wire
+        # attempt below (``stream_with_failover`` runs it with retry off, so
+        # no rotation, no chain), and an exhausted or disabled pinned route
+        # therefore stops the recovery with that failure as its reason
+        # instead of re-pointing the call at another credential or model.
+        if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
         # The binding boundary (``_note_serving_binding``): after the preflight
         # above has settled and pinned the session's credential, note it for the
@@ -6058,6 +6326,10 @@ class SessionStreamFn:
         """
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
+        # Resolved ONCE here, at request start (see
+        # ``_request_observation_target``): the ordinary path pays two
+        # attribute reads and a ``None`` check per REQUEST, never per delta.
+        observation_target = self._request_observation_target()
         first_token_at: float | None = None
         # Stream start to the model's first REASONING fragment. Recorded
         # alongside ``ttft_ms`` rather than folded into it: they are two
@@ -6099,6 +6371,7 @@ class SessionStreamFn:
             component_chars = {}
 
         final_usage: Usage | None = None
+        upstream_host: str | None = None
         ok = True
         counted_child_request = self._counts_as_child_request
         if counted_child_request:
@@ -6166,6 +6439,15 @@ class SessionStreamFn:
                 if stop_reason in ("error", "aborted") or getattr(event, "error", None):
                     ok = False
                 served = getattr(event, "served_provider", None)
+                if served:
+                    # The aggregator upstream HOST, kept for the observation
+                    # separately from the hosting provider: the two are
+                    # different facts (a host vs a route), and the failover
+                    # re-pin logic below reads the same frame for its own
+                    # purpose. One truthy check per event on a value already
+                    # read -- captured unconditionally so an aborted/errored
+                    # end frame still names the host that was contacted.
+                    upstream_host = str(served)
                 if served and stop_reason is not None and stop_reason not in ("error", "aborted"):
                     # Re-pin IMMEDIATELY when the served host differs from the
                     # current pin, with no hysteresis: that host is the one
@@ -6254,13 +6536,14 @@ class SessionStreamFn:
                     last_output_at=last_output_at,
                     output_deltas=output_deltas,
                 )
+            duration_ms = (time.monotonic() - started_at) * 1000
             self._record_usage(
                 request,
                 component_chars,
                 final_usage or Usage(),
                 ok and outcome != "incomplete",
                 request_id=request_id,
-                duration_ms=(time.monotonic() - started_at) * 1000,
+                duration_ms=duration_ms,
                 ttft_ms=(
                     (first_token_at - started_at) * 1000 if first_token_at is not None else -1
                 ),
@@ -6278,6 +6561,21 @@ class SessionStreamFn:
                 decode_us=ledger_window_us,
                 output_deltas=output_deltas,
             )
+            # The observation rides AFTER the analytics ledger, alongside it in
+            # the same ``finally``: same facts, ONE clock read (``duration_ms``
+            # above) shared so the two records cannot disagree, and the whole
+            # block skipped -- before any allocation -- when nobody subscribed.
+            if observation_target is not None:
+                self._notify_request_final(
+                    observation_target,
+                    request_id=request_id,
+                    request=request,
+                    usage=final_usage,
+                    upstream_host=upstream_host,
+                    ok=ok and outcome != "incomplete",
+                    outcome=outcome,
+                    duration_ms=duration_ms,
+                )
 
     def _record_usage(
         self,
@@ -6355,6 +6653,17 @@ class SessionStreamFn:
             serving_provider = getattr(usage, "provider", None) or request.model.provider
             serving_model = getattr(usage, "model_id", None) or request.model.model_id
             from local_operator.providers.registry import credential_provider_id
+            from local_operator.session.spend import inference_billing_labels
+
+            # The basis/source labels are decided from the RAW provider id and
+            # the receipt BEFORE the collapse below (PR-3, design §3.4): the
+            # raw stamp is the only place a subscription login flavour
+            # (``openai-device``) is distinguishable from the metered provider
+            # it stores under, and the receipt is a fact of this call alone.
+            # The background writer prices later and cannot recover either.
+            billing_basis, cost_source = inference_billing_labels(
+                str(serving_provider or ""), getattr(usage, "usd_cost", None)
+            )
 
             # Login flavours (``xai-oauth``, ``openai-device``) are the same
             # billable provider as their storage id. Canonicalize at record
@@ -6384,6 +6693,8 @@ class SessionStreamFn:
                     component_chars=component_chars,
                     ok=ok,
                     usd_cost=getattr(usage, "usd_cost", None),
+                    billing_basis=billing_basis,
+                    cost_source=cost_source,
                     request_id=request_id,
                     parent_session_id=getattr(self, "_parent_session_id", "") or "",
                     purpose=request.purpose,
@@ -6626,7 +6937,10 @@ def _usage_cost(usage: Any) -> float | None:
     value = (
         usage.get("usd_cost") if isinstance(usage, Mapping) else getattr(usage, "usd_cost", None)
     )
-    if value is None:
+    # bool is a Python number but not a provider dollar receipt. Reject it
+    # before float coercion, including on the catalogue fallback's second
+    # cost_for_usage call, or True/False can re-enter as a $1/$0 bill.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)

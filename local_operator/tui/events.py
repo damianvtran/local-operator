@@ -61,6 +61,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    SupplementProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -587,6 +588,67 @@ class SubagentEnded(SessionEvent):
         self.status = status
         self.result_text = result_text
         self.error_text = error_text
+
+
+class SupplementProgress(SessionEvent):
+    """One ``supplement_progress`` beat (turn supplements, memo §2.7).
+
+    Carries the row's own fields rather than a re-shaped view: the app places
+    the beat by ``anchor`` and hands ``details`` to the block, and the block
+    re-renders as a pure function of them — so a repeated or out-of-order
+    beat repaints identically instead of accumulating state. No generation
+    guard: a supplement job is not a turn boundary, and the beat's own
+    ``(anchor, job, version)`` is its identity.
+
+    ``files``/``components`` are the row's shapes (present on decided/done
+    only, empty otherwise); ``error``/``error_type`` mirror the row. The
+    mapping is assembled here, where the wire event is known, and NOT read
+    from the live payload by the app.
+    """
+
+    def __init__(
+        self,
+        anchor: str,
+        job: str,
+        version: int,
+        state: str,
+        stage: str = "",
+        elapsed_s: float = 0.0,
+        files: list[dict[str, object]] | None = None,
+        components: list[dict[str, object]] | None = None,
+        error: str = "",
+        error_type: str = "",
+    ) -> None:
+        super().__init__()
+        self.anchor = anchor
+        self.job = job
+        self.version = version
+        self.state = state
+        self.stage = stage
+        self.elapsed_s = elapsed_s
+        self.files = list(files or [])
+        self.components = list(components or [])
+        self.error = error
+        self.error_type = error_type
+
+    def details(self) -> dict[str, object]:
+        """The row-shaped mapping the block re-renders from.
+
+        The event IS a partial row: ``anchor``/``job``/``version``/``state``
+        are the row's own keys, and the two list fields are present exactly
+        when the row carries them (decided/done). Building the mapping here
+        keeps the app from re-deriving the wire in two places.
+        """
+        details: dict[str, object] = {
+            "anchor": self.anchor,
+            "job": self.job,
+            "version": self.version,
+            "state": self.state,
+            "files": list(self.files),
+            "components": list(self.components),
+            "error": self.error,
+        }
+        return details
 
 
 class EventController:
@@ -1200,6 +1262,30 @@ class EventController:
             )
         )
 
+    # Turn supplements ride the session's own stream, AFTER the turn's
+    # ``agent_end`` (memo §2.7): the beat is anchored by the answer's message
+    # id, so it needs no generation guard and may arrive while the next turn
+    # is already running — the app places it by anchor, never by position in
+    # the stream. No parked-source drop either: the family is not in
+    # ``EVENT_MUTE_DROP_TYPES`` and must not be, because the owner's
+    # ``live_events`` seed does NOT accumulate it — a parked viewer that never
+    # received the beats would lose the block's live states entirely.
+    def _handle_supplement_progress(self, event: SupplementProgressEvent) -> None:
+        self._post(
+            SupplementProgress(
+                event.anchor,
+                event.job,
+                event.version,
+                event.state,
+                event.stage,
+                event.elapsed_s,
+                list(event.files),
+                list(event.components),
+                event.error,
+                event.error_type,
+            )
+        )
+
     _HANDLERS = {
         "agent_start": _handle_agent_start,
         "agent_end": _handle_agent_end,
@@ -1227,6 +1313,7 @@ class EventController:
         "subagent_start": _handle_subagent_start,
         "subagent_progress": _handle_subagent_progress,
         "subagent_end": _handle_subagent_end,
+        "supplement_progress": _handle_supplement_progress,
     }
 
     #: Event types a PARKED source drops outright (see :meth:`set_parked`).

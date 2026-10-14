@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator import session_factory
-from local_operator.skills.api import default_skill_roots
+from local_operator.skills.api import PACKAGED_SKILL_ROOT, default_skill_roots
 from local_operator.skills.discovery import Skill, discover_skills
 from local_operator.skills.embeddings import LocalEmbedder
 from local_operator.skills.index import SkillIndex, _hybrid_scores
@@ -340,7 +340,12 @@ class TestEcosystemRootsAndCollision:
         extra.mkdir()
         monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(extra))
         skills, warnings = discover_skills(default_skill_roots(project))
-        assert [skill.name for skill in skills] == ["deploy"]
+        # The packaged builtin catalog rides in every discovery; this cell is
+        # about the USER roots surviving the env override.
+        user_skills = [
+            skill for skill in skills if not skill.file_path.is_relative_to(PACKAGED_SKILL_ROOT)
+        ]
+        assert [skill.name for skill in user_skills] == ["deploy"]
         assert deployed[0].description == "native deploy helper"
         assert not any("conflict" in warning for warning in warnings)
 

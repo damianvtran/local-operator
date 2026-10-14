@@ -13,16 +13,35 @@ import { Markdown } from "./markdown"
 import { AskRow } from "./ask-row";
 import { AttachmentImage } from "./attachment-image";
 import { ImageGenCard } from "./image-gen-card";
+import { SupplementBlock } from "./supplement-block";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
+import { Disclosure } from "./ui/disclosure";
 import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
+import { hubReceiptLabel, isHubReceipt, quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
+import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 
 const PAGE = 120;
+
+/* The daemon's ``PROJECTION_TRANSCRIPT_LIMIT`` (``local_operator/mobile/types.py``):
+   the projection is the pinned opener plus the newest 79 rows, so a transcript
+   this long is a CAPPED window whose head row is not the tail's chronological
+   neighbour. Mirrored rather than fetched because the rule is about the SHAPE of
+   what arrived, and ``agent-view.tsx`` mirrors the same number for the child
+   sheet. It was compared against ``PAGE`` (120) before — a number the daemon
+   never sends — so the pinned-opener branch never ran on a real projection and
+   the first cursor was the opener itself: the page came back as the opener's own
+   neighbour plus the journal BELOW the cut, and the turns in between were never
+   requested (measured with the S6 first-paint fixture: 22 user turns, 272 rows;
+   on S3, 28 turns and 839 rows). ``>=`` rather than ``===`` is safe because the
+   head row is already held either way — paging from the row after it cannot lose
+   it, only re-offer it to the merge's id de-dup. */
+const PROJECTION_ROWS = 80;
 
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
@@ -146,21 +165,28 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 				</div>
 			);
 		case "parent_message":
-			return (
-				<div className="flex min-w-0 justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5">
-						<span className="block text-meta text-ink-dim">Parent</span>
-						<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
-					</div>
-				</div>
+		case "subagent_message": {
+			// Media belongs to the entry, not its fold eligibility or group anchor.
+			const media = (entry.images ?? []).map(img => <AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />);
+			// The child launch/user task also uses this kind during loading/error.
+			// Without producer facts it is a visible request boundary, not hub traffic.
+			if (!isHubReceipt(entry)) return entry.kind === "parent_message" ? (
+				<div className="flex min-w-0 justify-end"><div className="max-w-[85%] rounded-md border border-hairline border-l-2 border-l-accent bg-surface px-3 py-1.5"><span className="block text-meta text-ink-dim">Parent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div></div>
+			) : (
+				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3"><span className="block text-meta text-ink-dim">Subagent</span><p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>{media}</div>
 			);
-		case "subagent_message":
-			return (
-				<div className="min-w-0 rounded-sm border-l-2 border-l-hairline pl-3">
-					<span className="block text-meta text-ink-dim">Subagent</span>
-					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{entry.text}</p>
+			// A receipt is internal traffic, not a right-aligned human turn. Reuse
+			// the existing disclosure so the full body remains reachable on demand.
+			const label = hubReceiptLabel(entry);
+			const intent = [entry.details?.expects_reply === true ? "Reply requested" : "", entry.details?.steer === true ? "Steered" : ""].filter(Boolean);
+			return <Disclosure header={<span className="text-meta text-ink-dim">Hub · From {label}{intent.length ? ` · ${intent.join(" · ")}` : ""}</span>}>
+				<div className="flex flex-col gap-2 pl-3">
+					<p className="text-meta text-ink-muted">{label}{entry.details?.direction ? ` · ${entry.details.direction}` : ""}{entry.details?.job_id && entry.details?.label ? ` · Job ${entry.details.job_id}` : ""}</p>
+					<p className="text-body-sm text-ink whitespace-pre-wrap break-words">{typeof entry.details?.body === "string" ? entry.details.body : entry.text}</p>
+					{media}
 				</div>
-			);
+			</Disclosure>;
+		}
 		case "peer_message": {
 			/* An inbound message from another local lop session (`lop send`).
 			   It must read as cross-session (not the user's own turn and not a
@@ -288,6 +314,56 @@ function PendingEchoRow({ echo, streaming }: { echo: PendingEcho; streaming: boo
 	);
 }
 
+/** The bar of ONE quiet group and, when opened, the receipts it holds
+ * (quiet-turn design §5, slice S4).
+ *
+ * A group is a client-derived fold of >= 2 delivery receipts — peer messages
+ * and wake receipts on this wire (`lib/quiet-groups`, where the definition
+ * lives). The bar states the family's word and the count; the press reveals
+ * the receipts with their tool rows, exactly as they paint at top level, and
+ * the expansion survives the open tail's appends because the group's key
+ * (`qg:<first row id>`) never moves. `partial` is a group the window's top
+ * edge cuts: its count is a minimum, so the line states `N+` and the "at
+ * least" claim rides the title — the desktop's own reading of the same fact.
+ *
+ * The bar deliberately carries NO `data-completion-anchor`: it is not a
+ * text-bearing row, so it stays out of the scroll-follow ledger. A reader
+ * whose nearest row folded into a collapsed bar falls to the nearest
+ * surviving row — the fallback the follow effect documents for every
+ * vanished row.
+ */
+function QuietGroupRow({
+	group,
+	partial,
+	children,
+}: {
+	group: QuietGroup;
+	partial: boolean;
+	children: ReactNode;
+}) {
+	const countTitle = partial
+		? `At least ${group.count} messages — earlier rows are not loaded`
+		: undefined;
+	return (
+		<Disclosure
+			header={
+				<span className="flex min-w-0 items-center gap-1 text-meta text-ink-dim">
+					<span className="shrink-0">{quietGroupLabel(group.family)}</span>
+					<span aria-hidden className="shrink-0">·</span>
+					<span className="shrink-0" title={countTitle} aria-label={countTitle}>
+						{partial ? `${group.count}+` : `${group.count}`}
+					</span>
+					{group.mixedActions ? <span>· {group.actions} actions</span> : null}
+					{group.replyRequested ? <span>· {group.replyRequested} reply requested</span> : null}
+					{group.steered ? <span>· {group.steered} steered</span> : null}
+				</span>
+			}
+		>
+			{children}
+		</Disclosure>
+	);
+}
+
 export function Transcript({
 	pid,
 	entries,
@@ -296,6 +372,8 @@ export function Transcript({
 	pending = [],
 	streaming = false,
 	topInset = 0,
+	supplements,
+	projectionPid = 0,
 	tailContent,
 	emptyContent,
 }: {
@@ -303,6 +381,17 @@ export function Transcript({
 	entries: TranscriptEntry[];
 	jobId?: string;
 	scrollKey?: string;
+	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
+	 *  sibling `{anchor: beat}` map. The block renders under the answer row
+	 *  whose `id` is the beat's anchor — outside the completion anchor div (the
+	 *  block is the answer's supplement, not part of the message the completion
+	 *  receipt samples), inside the same row boundary so one malformed beat
+	 *  cannot blank the screen. Absent map = no blocks, which is what every
+	 *  session without beats and every older daemon mean. */
+	supplements?: Record<string, SupplementBeat>;
+	/** The projection's own process identity, for the reader rule's `job_live`
+	 *  (`lib/supplement.ts`, `beatLive`): 0 is a disk rebuild. */
+	projectionPid?: number;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -384,13 +473,73 @@ export function Transcript({
 	/* Long projections pin the opening user row ahead of a disjoint tail. It is
 	   already retained, but it is not the tail's chronological history cursor;
 	   anchor at the next row so the API can return the missing middle. The
-	   merge's id de-dup keeps the opener exactly once when that page reaches it. */
+	   merge's id de-dup keeps the opener exactly once when that page reaches it.
+
+	   ONCE A PAGE HAS BEEN FETCHED THE CURSOR IS THE OLDEST ROW HELD, not the
+	   oldest row RENDERED. `visible[0]` is the oldest row inside the mounted
+	   window, and that window only grows when the reader taps `show N more
+	   loaded` — so while fetches outpace taps the cursor did not move and every
+	   request returned the SAME page. Measured on the S6 fixture after deep
+	   history became reachable: 40 taps produced 139 requests and 4,680 mounted
+	   rows holding 240 distinct ones, twenty copies of one page, which the
+	   reader then scrolls through as a conversation that repeats itself.
+	   `older[0]` is the oldest row this view actually holds, so the next page is
+	   the one immediately before it and paging is linear in the reader's taps. */
 	const oldestId =
-		older.length === 0 && entries.length === PAGE && entries[0]?.kind === "user"
-			? entries[1]?.id ?? entries[0]?.id ?? null
-			: visible.length > 0
-				? visible[0].id
-				: null;
+		older.length > 0
+			? older[0].id
+			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
+				? entries[1]?.id ?? entries[0]?.id ?? null
+				: visible.length > 0
+					? visible[0].id
+					: null;
+
+	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
+	   render — rows only append, so a closed group's facts cannot move and the
+	   open tail grows in place under its stable key. The definition lives once
+	   in `lib/quiet-groups` and is pinned across clients by the shared parity
+	   fixture. */
+	const groups = quietGroupsOf(visible);
+	const groupsByFirstId = new Map(groups.map((group) => [group.rowIds[0], group]));
+	const groupedIds = new Set(groups.flatMap((group) => group.rowIds));
+	const entriesById = new Map(visible.map((entry) => [entry.id, entry]));
+	/* A group whose first row IS the painted top edge may continue above: rows
+	   sit in `merged` but off-window (`hiddenCount`), and `hasMore` records that
+	   a page fetch has not yet proved there is nothing older. Its count is a
+	   minimum — the `N+` the bar states. */
+	const topGroup = visible.length > 0 ? groupsByFirstId.get(visible[0].id) : undefined;
+	const headCut = hiddenCount > 0 || hasMore;
+
+	/* One row's box + anchor attrs, shared by the plain rows and a group's
+	   receipts so the two can never disagree about the follow contract. A
+	   boundary per row: one malformed entry must not unmount the whole app
+	   (the "tap → blank screen" failure). The supplement seat rides HERE, at
+	   the row renderer, so a grouped row and a plain row carry it by
+	   construction — the fold (origin/main) and the quiet groups (S4) cannot
+	   drift on where a beat paints. */
+	const transcriptRow = (entry: TranscriptEntry) => (
+		<RowBoundary key={entry.id}>
+			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
+				<Entry entry={entry} pid={pid} />
+			</div>
+			{(() => {
+				/* The supplement block's seat: under the FINAL answer, outside
+				   the completion-anchor div, inside the row boundary. The anchor
+				   is the display entry id, so only the answer the beat names
+				   renders it; the beat's own `beatLive` decides the stale rule. */
+				const beat =
+					entry.kind === "assistant" ? supplements?.[entry.id] : undefined;
+				if (!beat) return null;
+				return (
+					<SupplementBlock
+						beat={beat}
+						sessionId={pid}
+						jobLive={beatLive(beat, projectionPid)}
+					/>
+				);
+			})()}
+		</RowBoundary>
+	);
 
 	/* Follow the tail on new content, but only when already at the bottom. */
 	useEffect(() => {
@@ -445,7 +594,17 @@ export function Transcript({
 			const { entries: page, has_more } = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
-			if (page.length > 0) prependPage(page);
+			if (page.length > 0) {
+				prependPage(page);
+				/* A page that lands while the reader is parked at the top has to MOUNT
+				   in the same commit, or they see the idle hairline and nothing else
+				   until they gesture again — one extra flick per page, and the page is
+				   already held (review round 2, R2-3). Growing by the page's own
+				   length keeps one mechanism per gesture: this adds exactly what just
+				   arrived, and `onScroll` still owns everything after that. */
+				const el = scrollRef.current;
+				if (el && el.scrollTop < 120) setWindowSize((n) => n + page.length);
+			}
 			setHasMore(has_more);
 		} catch {
 			/* A failed page is not fatal — leave hasMore so a retry can load it. */
@@ -461,10 +620,20 @@ export function Transcript({
 		pinnedRef.current =
 			el.scrollHeight - el.scrollTop - el.clientHeight < 48;
 		sessionStorage.setItem(`lo-mobile-scroll:${scrollKey}`, String(el.scrollTop));
-		/* Near the top with more history to fetch: auto-load so scrolling up
-		   just keeps going, no button needed. */
-		if (el.scrollTop < 120 && hasMore && !loadingRef.current) {
-			void loadOlder();
+		/* Near the top: reveal what is already held, then fetch what is not.
+		   ONE mechanism at a time, in that order, and no button.
+
+		   The order is the fix for two rounds of the same complaint. A page
+		   arriving while rows sat hidden behind `show N more loaded` fetched
+		   further pages nobody could see (13 pages, 2.24 MB), and the button's
+		   own label described a count it did not deliver (`show 1,425 more
+		   loaded` revealed 120, with the next tap about 18 screens above the
+		   reader). Growing first means the reader's upward gesture always moves
+		   the transcript, and a fetch only ever happens once there is nothing
+		   left held above them. */
+		if (el.scrollTop < 120 && !loadingRef.current) {
+			if (hiddenCount > 0) setWindowSize((n) => n + PAGE);
+			else if (hasMore) void loadOlder();
 		}
 	};
 
@@ -472,9 +641,9 @@ export function Transcript({
 	   reserve's own edges; round 4 extends the same hand to every other row
 	   change, because the opt-out means no other hand exists). The live window
 	   drops its oldest row on each append at the cap (U28 — native anchoring
-	   used to cover that removal silently), `show N more loaded` expands the
-	   window upward, a page of older rows can prepend, and the reserve grows or
-	   clears. So rather than compensating one cause, this measures its EFFECT:
+	   used to cover that removal silently), scrolling up expands the window
+	   upward (the tap target that used to do it is gone — review round 1, D2/D3),
+	   a page of older rows can prepend, and the reserve grows or clears. So rather than compensating one cause, this measures its EFFECT:
 	   EVERY rendered row is remembered with its viewport offset, and the next
 	   commit re-measures the row the reader was closest to — the first row at
 	   the viewport's top edge — and follows how far it moved.
@@ -599,36 +768,49 @@ export function Transcript({
 			{/* History loads automatically as the user scrolls up — no button. A
 			   subtle top indicator is the only chrome: a thin accent bar that
 			   fills while a page is in flight, plus a hairline when more history
-			   exists. Nothing tappable, nothing blocky. */}
+			   exists. Nothing tappable, nothing blocky.
+
+			   THE TWO STATES ARE THE SAME HEIGHT (2px), and that is load-bearing
+			   rather than tidy. The bar used to be 2px and the hairline 1px, so
+			   each swap moved the rows below it by a pixel — and the anchor-hold
+			   wrote `scrollTop` to compensate, which fired `scroll`, which saw
+			   `scrollTop < 120` and fetched again: measured on the S6 deep cell,
+			   23 of 27 transitions in one open were that 1px oscillation against
+			   a rig scrolling once every 300 ms, and the cascade pulled 13 pages
+			   (2.24 MB) into a window the reader could not see. */}
 			{loadingOlder ? (
-				<div className="flex justify-center py-1" aria-hidden>
-					<span className="lo-loadbar h-0.5 w-16 overflow-hidden rounded-full bg-sunken">
+				<div className="flex h-0.5 justify-center" aria-hidden>
+					<span className="lo-loadbar h-full w-16 overflow-hidden rounded-full bg-sunken">
 						<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
 					</span>
 				</div>
 			) : hasMore ? (
-				<div className="flex justify-center py-1" aria-hidden>
+				<div className="flex h-0.5 items-center justify-center" aria-hidden>
 					<span className="h-px w-10 bg-hairline" />
 				</div>
 			) : null}
-			{hiddenCount > 0 ? (
-				<button
-					type="button"
-					onClick={() => setWindowSize((n) => n + PAGE)}
-					className="mx-auto text-meta text-ink-dim underline-offset-2 active:underline"
-				>
-					show {hiddenCount} more loaded
-				</button>
-			) : null}
-			{visible.map((e) => (
-				/* A boundary per row: one malformed entry must not unmount the
-				   whole app (the "tap → blank screen" failure). */
-				<RowBoundary key={e.id}>
-					<div data-completion-anchor={e.id} data-completion-complete={e.final && e.text_complete === true}>
-						<Entry entry={e} pid={pid} />
-					</div>
-				</RowBoundary>
-			))}
+			{visible.flatMap((entry) => {
+				const group = groupsByFirstId.get(entry.id);
+				if (group !== undefined) {
+					return [
+						<RowBoundary key={group.key}>
+							<QuietGroupRow
+								group={group}
+								partial={headCut && group.key === topGroup?.key}
+							>
+								{group.rowIds.map((id) => {
+									const member = entriesById.get(id);
+									return member ? transcriptRow(member) : null;
+								})}
+							</QuietGroupRow>
+						</RowBoundary>,
+					];
+				}
+				/* A row inside a group paints through the group's bar (its
+				   children mount only while open) — never a second time here. */
+				if (groupedIds.has(entry.id)) return [];
+				return [transcriptRow(entry)];
+			})}
 			{visible.length === 0 && pending.length === 0 ? emptyContent : null}
 			{/* After the last projected row, because that is where the session will
 			    write them. */}

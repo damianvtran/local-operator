@@ -379,6 +379,11 @@ def test_the_repaint_signature_covers_every_field_the_rows_render() -> None:
     # this assertion that move (and its opposite) would be silent, which is the
     # escape the partition alone cannot catch.
     assert "degraded" in excluded
+    # And the send-clock exclusion, pinned on the same rule: `last_user_at`
+    # orders the SIDEBAR's RUNNING section, and nothing on THIS screen paints
+    # or orders by it — the results list reads `mtime` — so a row whose clock
+    # moved is the same row here.
+    assert "last_user_at" in excluded
 
 
 def test_a_draining_record_reaches_the_catalogue_row_and_its_words(

@@ -1,0 +1,7 @@
+{
+  "tui.usage.paid.continue": {"role": "shared included-quota continuation note", "tone": "Factual; lowercase matches the terminal panel.", "note": "Only explicit shared included exhaustion plus eligible paid headroom permits this claim. Family-only exhaustion does not."},
+  "tui.usage.paid.family_caps": {"role": "independent model-family restriction", "tone": "Factual, concise.", "note": "Shown independently from included-quota continuation, unless paid scope explicitly supersedes tiers."},
+  "tui.usage.paid.blocked": {"role": "paid spend eligibility qualifier", "tone": "Keep the actual funded balance visible.", "note": "The vendor explicitly says spending is unavailable; this is not a zero balance."},
+  "tui.usage.paid.eligibility_unknown": {"role": "unknown paid spend eligibility", "tone": "Do not imply enabled or disabled.", "note": "Vendor eligibility was not reported."},
+  "tui.usage.paid.unlimited": {"role": "explicit uncapped paid allowance", "tone": "No invented percentage or denominator.", "note": "Only explicit eligible unlimited metadata earns this qualifier."}
+}

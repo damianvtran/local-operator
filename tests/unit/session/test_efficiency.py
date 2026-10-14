@@ -95,7 +95,10 @@ async def test_live_state_changes_preserve_prefix_and_replay_at_same_request(tmp
 @pytest.mark.asyncio
 async def test_failed_state_journal_cannot_issue_request_with_old_goal(tmp_path, monkeypatch):
     state = {"date": "today", "goal": "original"}
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), and this cell counts the one
+    # request the second (failed) turn must not add to.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream, system_blocks_provider=state_provider(state))
     await session.prompt("first")
     state["goal"] = "stop all writes"
@@ -126,7 +129,10 @@ async def test_changed_standing_instructions_replace_the_durable_prefix(tmp_path
         return [state["instructions"], "tools", "environment", state["goal"]]
 
     setattr(provider, "append_only_state", True)
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]] * 4)
+    # Every prompt turn answers in prose: a wordless stop on a person-asked
+    # turn is re-asked once (wordless-stop recovery), shifting the history
+    # indices this cell reads.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]] * 4)
     session = make_session(tmp_path, stream, system_blocks_provider=provider)
     await session.prompt("start")
     state["goal"] = "intermediate target"
@@ -135,7 +141,9 @@ async def test_changed_standing_instructions_replace_the_durable_prefix(tmp_path
     assert old_prefix is not None
     if resume:
         await session.dispose()
-        stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]] * 2)
+        stream = ScriptedStream(
+            [[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]] * 2
+        )
         session = make_session(tmp_path, stream, system_blocks_provider=provider)
 
     state.update(instructions="NEW never touch production", goal="inspect new target")
@@ -171,7 +179,10 @@ async def test_failed_standing_instruction_epoch_stops_before_provider(tmp_path,
         return [state["head"], "tools", "environment", "goal"]
 
     setattr(provider, "append_only_state", True)
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), and this cell counts the one
+    # request the second (failed) turn must not add to.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream, system_blocks_provider=provider)
     await session.prompt("start")
     old_prefix = session._transcript.latest_custom_entry("system_prefix")

@@ -30,7 +30,7 @@ Global skill, available in every workspace:
 ~/.local-operator/skills/my-skill/SKILL.md
 ```
 
-Local Operator walks from the current directory toward the filesystem root for `.local-operator/skills`, then checks the global root. Earlier, more-local roots win name collisions.
+Local Operator walks from the current directory toward the filesystem root for `.local-operator/skills`, then checks the global root, then the skill roots other agent tools use (`~/.omp/agent/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`), and finally its packaged builtin catalog. Earlier, more-local roots win name collisions, so a copy in any earlier root overrides a same-named builtin. Builtins ship with each release — override or silence one by copying it out (`hide: true` on the copy silences it from semantic selection; an `enabled: false` copy is ignored), never by editing the packaged files. Full precedence table and the builtin list: `guide://skills`.
 
 Choose the root by who owns the practice: put it in `~/.local-operator/skills/<name>/SKILL.md` when it should follow the operator into every workspace, and in `<repo>/.local-operator/skills/<name>/SKILL.md` when it belongs to that repository and should be committed and shared with the team. The directory name is the `skill://` name unless frontmatter `name` overrides it — keep them the same and the URL is never a surprise.
 
@@ -58,7 +58,7 @@ Frontmatter fields:
 
 Keep `SKILL.md` procedural and small. Put large tables, examples, and narrow workflows under `references/`; the agent reads them only when the task reaches that branch. Dotfiles and paths escaping the skill directory are intentionally unreadable.
 
-A skill you create is readable immediately. The first `read skill://<name>` that misses re-scans the skill roots, so the new skill resolves in this session and in subagents already running — no restart. What does **not** update until the next session is *semantic selection*: the skill will not appear in the `<skills>` listing or be auto-suggested, because that listing is frozen for prompt-cache stability. Read it by name, and tell subagents its name. Editing an existing skill's **body** has always taken effect on the next read; editing its `name`, `description` or `enabled` affects selection only, and waits for the next session.
+A skill you create is readable immediately. The first `read skill://<name>` that misses re-scans the skill roots, so the new skill resolves in this session and in subagents already running — no restart. What waits for the next session is the semantic `<skills>` listing, which is frozen for prompt-cache stability. The recommendation roster refreshes sooner — a skill authored mid-session can be a candidate on the very next message. Read it by name, and tell subagents its name. Editing an existing skill's **body** has always taken effect on the next read; editing its `name`, `description` or `enabled` affects selection only, and waits for the next session.
 
 Only the skill name and description enter the system context; `SKILL.md` enters after `read skill://my-skill`, and reference files enter only after their own reads.
 

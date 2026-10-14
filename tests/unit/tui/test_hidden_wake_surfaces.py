@@ -21,6 +21,11 @@ import pytest
 from local_operator.harness.types import CustomMessage
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.tui.app import OperatorApp, _resume_tail_start
+from local_operator.tui.widgets.transcript import (
+    QuietGroupBlock,
+    TranscriptView,
+    WakeBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 from tests.unit.tui.test_wake_ui import _paint, _schedule
 
@@ -242,3 +247,233 @@ async def test_the_live_seams_mount_no_card_for_a_hidden_tool_call() -> None:
         )
         await pilot.pause()
         assert [card.tool_call_id for card in app.query(ToolCard)] == ["r1"]
+
+
+def quiet_pair(call_id: str = "q1"):
+    """The pair a quiet turn persists: the call row, then its marked result.
+
+    Product-shaped (``docs/design/quiet-turns.md`` §5, S1): a text-free
+    assistant row carrying the one ``no_reply`` call, and its tool result with
+    S0a's marker in ``details`` — the same two rows the e2e finds on disk.
+    """
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        Message,
+        TextContent,
+        ToolCall,
+        ToolResult,
+    )
+
+    return [
+        Message.assistant("", tool_calls=[ToolCall(id=call_id, name="no_reply", arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id=call_id,
+                tool_name="no_reply",
+                content=[TextContent(text="Quiet.")],
+                details={QUIET_TURN_KEY: True},
+            )
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_paints_no_ledger_row_for_the_quiet_call() -> None:
+    """The quiet call is the turn's door, not work (design §5, S1).
+
+    The replay is where a hidden row comes back on every reopen, and the
+    ``no_reply`` sentinel is the case the operator reported as filler — it
+    must never paint as a ledger row. The ordinary call beside it is the
+    control: an over-broad filter would take that row too.
+    """
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    session._history = [simple_user("ask"), *quiet_pair("q1"), *tool_pair("r1", "read")]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+        cards = [card for card in app.query(ToolCard)]
+
+    assert "read" in shown, "the visible control must keep its ledger row"
+    assert "no_reply" not in shown
+    assert [card.tool_call_id for card in cards] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_the_live_seams_mount_no_card_for_the_quiet_call() -> None:
+    """BOTH live frames are gated, not just one: they race, either first (S1).
+
+    ``tool_call_compose`` announces the row before the call exists and
+    ``tool_execution_start`` would mount one for a call with none — suppressing
+    only one seam leaves the other free to paint the ``no_reply`` row a moment
+    later, exactly as for a hidden tool.
+    """
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
+    from local_operator.tui.events import ToolComposing, ToolStarted
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="q1", tool_name="no_reply"))
+        )
+        app.on_tool_started(
+            ToolStarted(event=ToolExecutionStartEvent(tool_call_id="q1", tool_name="no_reply"))
+        )
+        await pilot.pause()
+        assert list(app.query(ToolCard)) == []
+
+        # The control: an ordinary tool frames normally.
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="r1", tool_name="read"))
+        )
+        await pilot.pause()
+        assert [card.tool_call_id for card in app.query(ToolCard)] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_result_settles_nothing_and_retires_a_stray_card() -> None:
+    """The marker-read half of the pair's contract (design §5, S1).
+
+    The composing and started gates are the first doors; the END frame reads
+    the marker itself, so a card a seam older than the gates could have
+    mounted is DROPPED rather than settled — the same settle-side shape the
+    ask gate's divert arm keeps beside it. The frame is consumed with nothing
+    painted either way.
+    """
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        TextContent,
+        ToolExecutionEndEvent,
+        ToolResult,
+    )
+    from local_operator.tui.events import ToolEnded
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Simulate the mixed-build residual the drop half exists for: a card
+        # for the call that this process's seams never mounted.
+        card = ToolCard("q1", "no_reply", {})
+        app._append_block(card)
+        await pilot.pause()
+        assert app._painted_tool_card("q1") is card
+
+        app.on_tool_ended(
+            ToolEnded(
+                event=ToolExecutionEndEvent(
+                    tool_call_id="q1",
+                    tool_name="no_reply",
+                    result=ToolResult(
+                        tool_call_id="q1",
+                        tool_name="no_reply",
+                        content=[TextContent(text="Quiet.")],
+                        details={QUIET_TURN_KEY: True},
+                    ),
+                )
+            )
+        )
+        await pilot.pause()
+        assert app._painted_tool_card("q1") is None
+        assert list(app.query(ToolCard)) == []
+
+
+# -- the quiet-group fold over wake receipts (design §5, slice S5) -----------
+
+
+def _distinct_visible_wake(text: str, wake_id: str) -> CustomMessage:
+    """A visible wake receipt with its own identity — ``visible_wake`` above
+    pins one wake for the hidden-delivery cells, and a run of two needs two
+    distinct deliveries (the live-receipt dedupe keys on id and occurrence)."""
+    return CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": f"(alarm) Scheduled wake {wake_id} — {text}",
+            "wake_id": wake_id,
+            "occurrence": 1,
+        },
+    )
+
+
+def _persisted_peer(body: str, entry_id: str):
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    return SimpleNamespace(
+        role=None,
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        id=entry_id,
+        text="",
+        tool_calls=None,
+        content=[],
+        details={"body": body, "sender": {"pid": 9, "conversation_name": "other"}},
+    )
+
+
+def _quiet_bars(app) -> list[QuietGroupBlock]:
+    view = app.query_one(TranscriptView)
+    return [b for b in view.blocks() if isinstance(b, QuietGroupBlock)]
+
+
+@pytest.mark.asyncio
+async def test_two_wake_receipts_replay_under_one_group_bar() -> None:
+    """A run of wake receipts folds like any other family (design §5, S5):
+    the bar states the family's word and the count, and the receipt rows are
+    its members — folded while collapsed, listed when opened."""
+    session = FakeSession()
+    session._history = [
+        simple_user("morning"),
+        _distinct_visible_wake("a", "w1"),
+        _distinct_visible_wake("b", "w2"),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if _quiet_bars(app):
+                break
+        (bar,) = _quiet_bars(app)
+        assert bar.group.family == "wake"
+        assert bar.group.count == 2
+        row = bar._build_row(100).plain
+        assert "wake" in row and "messages · 2" in row
+        wakes = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, WakeBlock)]
+        assert len(wakes) == 2
+        assert all(not wake.display for wake in wakes), "members fold while collapsed"
+        bar.toggle_expanded()
+        await pilot.pause()
+        assert all(wake.display for wake in wakes), "opening lists the receipts in place"
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_run_replays_as_one_bar_over_both_kinds() -> None:
+    """A peer receipt and a wake receipt in one run state ``mixed`` together:
+    the family is the run's composition, not the first row's kind."""
+    session = FakeSession()
+    session._history = [
+        simple_user("morning"),
+        _persisted_peer("note", "p1"),
+        _distinct_visible_wake("check the build", "w1"),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            await pilot.pause()
+            if _quiet_bars(app):
+                break
+        (bar,) = _quiet_bars(app)
+        assert bar.group.family == "mixed"
+        assert bar.group.count == 2
+        row = bar._build_row(100).plain
+        assert "mixed" in row and "messages · 2" in row

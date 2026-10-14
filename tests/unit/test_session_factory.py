@@ -653,6 +653,9 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
+            # Appended LAST by design (§E): a roster entry the classification
+            # block may advertise once this session's inventory holds the tool.
+            "code_requests",
         ]
         cached = session_factory._classification_roster(hooks)
         assert [row.name for row in cached if row.kind == "tool"] == [
@@ -662,6 +665,7 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
+            "code_requests",
         ]
         # A later inventory write rebuilds both the roster and its cache: the
         # cache key carries the tool term, so the change is visible on the
@@ -670,6 +674,58 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
         assert [row.name for row in hooks.tool_roster] == ["send"]
         rebuilt = session_factory._classification_roster(hooks)
         assert [row.name for row in rebuilt if row.kind == "tool"] == ["send"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_video_pair_reaches_a_real_factory_session(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-1 QA blocker Q1: both video builders are createIf-gated on a
+    credential AND on a session-owned field (``jobs``), so the factory's warm
+    pass refuses them and only the constructor's capability merge can mount
+    them on the real surface. Without the merge-set entry every live session
+    answered ``Tool not found: generate_video`` while the guide and the
+    context budget advertised the pair.
+
+    Both legs of the gate run on the REAL boot: no credential → no tools;
+    an exported ``FAL_API_KEY`` → both tools in the inventory.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    monkeypatch.delenv("FAL_API_KEY", raising=False)
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        names = {tool.name for tool in session._tools}
+        assert "generate_video" not in names, "the credential gate must hold without a key"
+        assert "video_status" not in names
+    finally:
+        await session.dispose()
+
+    monkeypatch.setenv("FAL_API_KEY", "test-key")
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        names = {tool.name for tool in session._tools}
+        assert {
+            "generate_video",
+            "video_status",
+        } <= names, "the constructor merge must mount the pair once the gate opens"
     finally:
         await session.dispose()
 
@@ -924,10 +980,10 @@ async def test_trigger_knobs_are_settable_in_config_yml(tmp_config_dir: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Path) -> None:
+async def test_default_config_compacts_at_400k_on_a_1m_model(tmp_config_dir: Path) -> None:
     """No ``compaction`` block at all: a 1M-context session must not compact
     at ~235k (23% of its window — three quarters of the usable context thrown
-    away per pass), it must wait for min(80% x 1M, 600k) = 600k."""
+    away per pass), it must wait for min(80% x 1M, 400k) = 400k."""
     (tmp_config_dir / "config.yml").write_text(
         "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: test-model\n",
         encoding="utf-8",
@@ -944,8 +1000,62 @@ async def test_default_config_compacts_at_600k_on_a_1m_model(tmp_config_dir: Pat
     # No block in the file: the session runs on the shipped defaults.
     settings = cast(Session, session)._compaction_settings or CompactionSettings()
     assert should_compact(234_800, 1_000_000, settings) is False
-    assert should_compact(600_001, 1_000_000, settings) is True
+    assert should_compact(400_000, 1_000_000, settings) is False  # on the line: stable
+    assert should_compact(400_001, 1_000_000, settings) is True
     await session.dispose()
+
+
+def test_coerce_compaction_settings_without_a_threshold_resolves_the_400k_default() -> None:
+    """``{}`` and a block that sets other keys both land on the 400k default:
+    the coercion adds nothing of its own to ``threshold_tokens``."""
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+
+    for raw in ({}, {"enabled": True}, {"strategy": "context-full", "keep_recent_tokens": 30_000}):
+        settings = coerce_compaction_settings(raw)
+        assert settings is not None
+        assert settings.threshold_tokens == 400_000
+        assert resolve_threshold_tokens(1_000_000, settings) == 400_000
+        assert resolve_threshold_tokens(200_000, settings) == 160_000
+
+
+def test_a_seeded_config_yml_gets_400k_and_an_explicit_600k_is_kept(tmp_path: Path) -> None:
+    """Through the REAL write path and the REAL load path, not a hand-built dict.
+
+    There is no migration for the 600k -> 400k change because nothing ever
+    seeds ``threshold_tokens`` into a user's file: ``compaction`` is not in
+    ``DEFAULT_CONFIG`` and ``write_setting`` merges exactly one leaf. So a file
+    that only turned compaction on falls through to the new default, while a
+    file that holds 600000 explicitly keeps it. Both halves are asserted
+    against a config.yml written by ``write_setting`` and re-read by a fresh
+    ``ConfigManager`` (the way a new session sees it).
+    """
+    import yaml
+
+    from local_operator import settings_io
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+    from local_operator.config import ConfigManager
+
+    config_dir = tmp_path / "seeded"
+    config_dir.mkdir()
+    manager = ConfigManager(config_dir)
+
+    def resolved(window: int) -> int:
+        settings = coerce_compaction_settings(
+            ConfigManager(config_dir).get_config_value("compaction", None)
+        )
+        assert settings is not None
+        return resolve_threshold_tokens(window, settings)
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["compaction.enabled"], True)
+    on_disk = yaml.safe_load((config_dir / "config.yml").read_text(encoding="utf-8"))
+    assert on_disk["values"]["compaction"] == {"enabled": True}  # no threshold seeded
+    assert resolved(1_000_000) == 400_000
+    assert resolved(400_000) == 320_000
+    assert resolved(200_000) == 160_000
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["compaction.threshold_tokens"], 600_000)
+    assert resolved(1_000_000) == 600_000
+    assert resolved(200_000) == 160_000
 
 
 def test_coerce_compaction_reads_legacy_max_threshold_tokens() -> None:
@@ -1221,7 +1331,7 @@ def test_mcp_names_are_seeded_before_deferred_connection(monkeypatch) -> None:
     hooks = session_factory._KnowledgeHooks()
     monkeypatch.setattr(
         "local_operator.mcp.config.load_all_mcp_configs",
-        lambda cwd: ({"slack": object()}, {"slack": "config"}),
+        lambda cwd, boundary=None: ({"slack": object()}, {"slack": "config"}),
     )
 
     session_factory._seed_mcp_routing(hooks, "/workspace")
@@ -2703,6 +2813,78 @@ async def test_a_subagent_inherits_the_operators_instructions(
 
     assert "- Never force-push without asking." in blocks[0]
     assert "<user_instructions>" in blocks[0]
+
+
+@pytest.mark.asyncio
+async def test_a_real_session_carries_the_language_line(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SYS1 wiring: the line the model reads is the one the resolver produced.
+
+    The unit tests for ``preferred_language_line`` and ``build_system_blocks``
+    both pass with the ``language_line=`` argument deleted from ``_prepare`` —
+    this drives the real composition root and reads the blocks the provider
+    actually returns. ``LOP_LANG`` stands in for the chain's winner (the same
+    chain incl. config and OS is covered in ``tests/unit/i18n/test_resolve``).
+    """
+    monkeypatch.setenv("LOP_LANG", "fr")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        produced = session._system_blocks_provider()
+        blocks = await produced if inspect.isawaitable(produced) else produced
+    finally:
+        await session.dispose()
+
+    assert len(blocks) == 4, "block arity is load-bearing for cache breakpoints"
+    assert "The user's preferred language is French (fr)." in blocks[0]
+    assert not any("preferred language" in block for block in blocks[1:])
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_carries_the_language_line(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Child half of the same wiring gap: deleting ``language_line=`` from the
+    subagent's ``build_system_blocks`` call also leaves the suite green."""
+    monkeypatch.setenv("LOP_LANG", "vi")
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+    assert "The user's preferred language is Vietnamese (vi)." in blocks[0]
 
 
 def _session_state_rows(session: Session) -> list[Any]:
@@ -6826,3 +7008,102 @@ async def test_the_runtime_child_of_a_run_boots_declared(
         assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
     finally:
         await handle._session.dispose()
+
+
+# -- delegated-session sweeps on the store-maintenance thread -----------------
+
+
+def _delegated_store(root: Path, count: int) -> None:
+    """``count`` marked, 100-hour-idle subagent sessions under ``root``."""
+    from local_operator.session.cleanup import mark_store
+
+    mark_store(root / "sessions")
+    stamp = time.time() - 100 * 3600
+    for index in range(count):
+        directory = root / "sessions" / f"kid{index:03d}"
+        directory.mkdir()
+        (directory / "origin.json").write_text('{"origin": "subagent"}')
+        (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+        os.utime(directory / "transcript.jsonl", (stamp, stamp))
+
+
+def test_the_maintenance_thread_drains_a_backlog_across_passes_then_waits_an_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget-limited pass hands the thread back and the drain CONTINUES.
+
+    The real thread body, the real delegated loop, a 12-session backlog drained 5
+    at a time with a zero budget: it only finishes if the loop re-enters after
+    each partial pass, and it ends parked on the HOURLY wait rather than exiting
+    (a 48-hour window needs steady-state sweeps in a runtime that lives for days).
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session import delegated_retention as dr
+
+    _delegated_store(tmp_path, 12)
+    monkeypatch.setattr(dr, "BATCH_SIZE", 5)
+    monkeypatch.setattr(dr, "PASS_BUDGET_S", 0.0)
+    monkeypatch.setattr(dr, "REMOVAL_PAUSE_S", 0)
+    monkeypatch.setattr(dr, "DRAIN_RESUME_S", 0.01)
+    waits: list[float] = []
+    stop = threading.Event()
+    real_wait = stop.wait
+
+    def recording_wait(seconds: float | None = None) -> bool:
+        waits.append(seconds or 0.0)
+        if seconds is not None and seconds >= dr.STEADY_SWEEP_S:
+            stop.set()
+        return real_wait(min(seconds or 0.0, 0.01))
+
+    monkeypatch.setattr(stop, "wait", recording_wait)
+    session_factory._run_delegated_sweeps(ConfigManager(tmp_path), tmp_path, None, stop)
+    assert not [p for p in (tmp_path / "sessions").iterdir() if p.name.startswith("kid")]
+    assert waits[-1] == dr.STEADY_SWEEP_S and waits.count(0.01) >= 2, waits
+
+
+def test_the_launch_pass_is_released_before_the_delegated_loop_parks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``done_event`` gates ``await_store_maintenance_for_tests`` and teardown; the
+    hourly loop runs for the life of the process, so it must start AFTER the event."""
+    seen: dict[str, bool] = {}
+    stop = threading.Event()
+    done = threading.Event()
+    monkeypatch.setattr(session_factory, "_STORE_MAINTENANCE_IDLE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(session_factory, "_run_store_maintenance", lambda *a, **k: True)
+
+    def sweeps(*_a: Any, **_k: Any) -> None:
+        seen["done_before_sweeps"] = done.is_set()
+        stop.set()
+
+    monkeypatch.setattr(session_factory, "_run_delegated_sweeps", sweeps)
+    session_factory._store_maintenance_thread_main(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop, done
+    )
+    assert seen == {"done_before_sweeps": True} and done.is_set()
+
+
+def test_a_sweep_that_raises_never_escapes_the_maintenance_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.session.delegated_retention as dr
+
+    monkeypatch.setattr(dr, "run_sweeps", lambda *a, **k: 1 / 0)
+    session_factory._run_delegated_sweeps(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, threading.Event()
+    )
+
+
+def test_a_stopped_thread_runs_no_delegated_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.session.delegated_retention as dr
+
+    called: list[int] = []
+    monkeypatch.setattr(dr, "run_sweeps", lambda *a, **k: called.append(1))
+    stop = threading.Event()
+    stop.set()
+    session_factory._run_delegated_sweeps(
+        cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop
+    )
+    assert called == []

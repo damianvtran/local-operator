@@ -218,6 +218,58 @@ def test_the_pane_paints_the_class_marker_one_rung_brighter() -> None:
     assert plain == [("    role · claude-opus-5", faint)]
 
 
+def test_the_facts_indent_is_paid_once_however_many_parts() -> None:
+    """R10: only the FIRST part carries the 4-cell indent.
+
+    The caller's budget reserves exactly ONE indent (``room - 4``), so an
+    indent repeated per part overruns it by 4*(parts-1) cells and the tail
+    drops whole: a populated 4-part line cost 57 instead of 45 cells and
+    clipped the final fact (QA round-2 measured +12). This pins the budget
+    arithmetic against the real helper, marker class intact.
+    """
+    from rich.cells import cell_len
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import _paint_facts
+
+    muted = Style(color="red")
+    faint = Style(color="blue")
+    for facts in (
+        "proactive · model · high",
+        "proactive · medium · 3 tools · model/name",
+    ):
+        line = _paint_facts(facts, 80, muted=muted, faint=faint)
+        plain = "".join(part for part, _style in line)
+        assert plain == "    " + facts
+        assert cell_len(plain) == cell_len(facts) + 4
+        marker = [part for part, style in line if style is muted]
+        assert marker == ["    proactive"]
+
+
+def test_a_budgeted_facts_line_drops_the_tail_whole_and_keeps_the_marker() -> None:
+    """R10 narrow case: at the caller's exact budget the MARKER survives and
+    the tail gives way inside the same contract (``room`` passed is the
+    caller's ``room - 4``; the indent rides on top, so the line may not
+    exceed ``room + 4`` cells and may not re-indent any later part)."""
+
+    from rich.cells import cell_len
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import _paint_facts, truncate_cells
+
+    muted = Style(color="red")
+    faint = Style(color="blue")
+    facts = "proactive · model · high"
+    room = 20  # the caller's own window at this point
+    line = _paint_facts(facts, room, muted=muted, faint=faint)
+    plain = "".join(part for part, _style in line)
+    assert plain.startswith("    proactive")
+    assert "high" not in plain
+    assert cell_len(plain) == cell_len(truncate_cells(facts, room)) + 4
+    assert line[0] == ("    proactive", muted)
+    assert all(style is faint for _text, style in line[1:])
+
+
 class _PickerEditor:
     """The slice ``slash_argument`` and the argument builder read."""
 

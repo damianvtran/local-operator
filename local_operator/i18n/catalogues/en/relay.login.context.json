@@ -1,0 +1,22 @@
+{
+  "relay.login.page.title": {
+    "role": "browser page title",
+    "tone": "Preserve current login copy and casing.",
+    "note": "Server-rendered authentication gate; no JavaScript translation bootstrap. Brand local operator stays untranslated."
+  },
+  "relay.login.password.label": {
+    "role": "password input label",
+    "tone": "Preserve current login copy and casing.",
+    "note": "Server-rendered authentication gate; no JavaScript translation bootstrap. Brand local operator stays untranslated."
+  },
+  "relay.login.submit.label": {
+    "role": "submit button",
+    "tone": "Preserve current login copy and casing.",
+    "note": "Server-rendered authentication gate; no JavaScript translation bootstrap. Brand local operator stays untranslated."
+  },
+  "relay.login.error.password": {
+    "role": "authentication error alert",
+    "tone": "Preserve current login copy and casing.",
+    "note": "Server-rendered authentication gate; no JavaScript translation bootstrap. Brand local operator stays untranslated."
+  }
+}

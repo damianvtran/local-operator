@@ -20,6 +20,7 @@ from local_operator.tui.session_presentation import DraftRecoveryNotice
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.editor import Attachment, PastedText
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_session_sidebar import _await_first_attach
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +70,7 @@ async def test_temporary_allow_all_does_not_follow_another_session():
     first, second = FakeSession(), FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test() as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         app._set_approve_all(True)
         first_source = app._interaction
         app._adopt_session(second)
@@ -127,7 +128,7 @@ async def test_recovery_restores_exact_markers_without_overwriting_newer_input()
         selection=Selection((2, 0), (2, 8)),
     )
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         source = app._interaction
         source.draft.text = "newer source A draft"
         app._adopt_session(second)
@@ -219,7 +220,7 @@ async def test_hidden_stopped_callback_cannot_answer_selected_sources_gate(gate_
     first, second = Watched(), FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test() as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         source_a = app._interaction
         source_a.turn.open = True
         stopped = first.stopped_callback
@@ -264,7 +265,7 @@ async def test_goal_loop_releases_one_worker_lease_on_every_exit(outcome, monkey
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test() as pilot:
-        await pilot.pause()
+        await _await_first_attach(app, pilot)
         source = app._interaction
         source.loop.running = True
 

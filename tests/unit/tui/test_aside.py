@@ -369,7 +369,7 @@ async def test_an_aside_over_a_live_turn_carries_the_sentence_on_screen() -> Non
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        app._ensure_streaming_block().update_text("Shifting the ingress weight to 25% now")
+        app._ensure_streaming_block("Shifting the ingress weight to 25% now")
         await pilot.pause()
 
         panel = await _open_with_question(pilot, app, "what are you doing right now?")

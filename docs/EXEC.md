@@ -16,6 +16,24 @@ lop exec --status JOB_ID
 lop --resume SESSION_ID
 ```
 
+## Localized help and startup copy — bounded coverage
+
+At source `641a392040bf4056361228cfc3d3ad978fced3e8`,
+[#2310](https://github.com/damianvtran/local-operator/pull/2310)
+(merge `84584151d45757e084349f99f2414e487f186eaa`) extracts exactly **20**
+`cli.exec_help` keys into [English source](../local_operator/i18n/catalogues/en/cli.exec_help.json),
+with a context sidecar and generated per-key Python functions. This is the bounded
+exec/help/startup-copy surface, **not translation of all CLI commands or help**.
+
+Argument-parser construction resolves help language lazily through the read-only
+config reader: config → `LOP_LANG` → OS → `en`, then shipped eligibility. Missing
+namespace/key copy falls back to English source and formatting; unavailable or
+undecodable config uses the default `auto` chain, not a config repair. For example,
+`LOP_LANG=fr lop exec --help` may still show English where that namespace is absent.
+Commands, flags, machine JSON keys, codes and event tokens keep their contracts;
+localized prose must not be parsed as a machine identifier. See [the i18n HOWTO](I18N.md)
+for source versus installed-version coverage, partial locales and release gates.
+
 ## Startup options and precedence
 
 | Option | Contract |
@@ -285,12 +303,25 @@ forgets.
   re-write the row, and a run with no readable scratchpad path records `null`
   members rather than a guess.
 * The guard lives at `cli.main`: a marked process that starts `lop serve`, or
-  engages a runtime, mints sessions through the server/runtime composition root
-  and is not refused there.
+  engages a runtime, is not refused there — **but the DAEMON it becomes drops the
+  markers before it serves** (`cli.serve_command` calls
+  `agent_shell.drop_agent_shell_marker_from_environ`), because a daemon is a
+  HOSTING PLANE, not a command an agent's tool call ran: it mints the sessions
+  for the operator's OWN front ends (the desktop app's backend, the phone relay's
+  child, a TUI server), and those are the operator's chats. Without the strip,
+every session such a daemon creates is stamped `agent-shell` and hidden from
+the sidebar, the phone list and the picker — the 2026-10-13 sidebar regression,
+where an app launched from an agent's shell hid the operator's New Chats. The
+SERVE strip is the only place that also drops the QA escape
+(`LOCAL_OPERATOR_ALLOW_NESTED_SESSION`), and deliberately: a daemon that
+inherited the escape would waive the refusal for the operator's own chats. A
+session the daemon then FRONTS for an agent's `lop exec` (the mobile relay's
+child, a runtime engaging for a marked command) is still stamped, because that
+child is started by the command, not by the daemon's own mint.
 * A session's own front end opening a conversation for its user is deliberately
-  exempt — the TUI restart, `/fork`'s new window and a notification click's
-  terminal all drop the marker before they re-exec
-  (`agent_shell.without_agent_shell_marker`), because those are the user's
+exempt — the TUI restart, `/fork`'s new window and a notification click's
+terminal all drop the marker before they re-exec
+(`agent_shell.without_agent_shell_marker`), because those are the user's
 gestures, not an agent's command. That helper drops BOTH markers: a restarted or
 forked window is a SESSION, so it must not be handed its parent's delegation
 allowance either.
@@ -387,17 +418,56 @@ received several signals, the **latest** one decides the classification (the
 others stay in the receipt's `signals` list with `count` giving the total): a
 later signal a covering deliberate marker explains is a stop somebody asked for.
 
+**Direction without a sender.** An unattributed signal still has one fact a
+target can honestly add: the spawn chain it was born into, recorded by
+`macos_disclaim` with each member's liveness as recorded at spawn
+(`alive_at_spawn`), and snapshotted with a second, arrival reading (`alive_now`)
+when the signal lands. When the app at the ROOT of that chain was RECORDED ALIVE
+and is GONE at arrival, the rendered reason names it — "…; the app this runtime
+descends from (Local Operator.app, pid N) was running when the runtime started
+and was no longer running when the signal arrived (when it exited is not recorded)". Both halves are probed, and
+the clause is silent unless both exist (a member already gone when the chain
+was recorded, or a probe that could not be made, renders nothing), so it says
+"this runtime outlived the app" — never "the app caused this signal", never
+"force-quit", and never a sender. It also cannot say when the app exited — the
+two readings are the limit, and the sentence says so in its last words, because
+an app that quit a second ago and one that quit a week ago render the same. On the 2026-10-09 incident's sweep (macOS killed 6
+exec workers 17 ms after a force-quit; the targets' receipts could name nobody)
+this is what would have shown the app the workers descended from alive at their
+start and gone at the signal. Chains are written for spawns made through
+`macos_disclaim`; where none was recorded, the sentence is unchanged.
+
+**The disclaim's cost, disclosed: TCC grants.** Detaching runtimes from the
+app's macOS responsibility chain also ends their inheritance of the app's TCC
+grants — a disclaimed runtime, and everything it spawns, no longer borrows the
+app's Files & Folders / Full Disk access (measured). Screen Recording and
+AppleEvents automation were not measured — a probe would prompt on the
+operator's screen — and may or may not behave the same. On a host where the
+operator granted Files & Folders / Full Disk to the app, an interpreter without
+its own grant can lose protected-folder access inside a disclaimed runtime: in
+the controlled A/B an unbranded interpreter was denied while the product's own
+branded interpreter binaries kept access, a per-binary property rather than a
+guarantee. The trade is deliberate: the requirement is that killing the UI
+never kills sessions, and a session swept with the UI is the worse failure; the
+grant is a one-time, per-host decision.
+
 **Artifacts** (all best-effort; a failed write never changes a stop):
 
 * `<session dir>/runtime-signal.json` — a *runtime's* receipt of a termination
   signal, written at arrival. v1 schema: `{"v":1,"kind":"runtime","session_id",
   "pid","started_at","signals":[{"name","number","at","in_flight","action":
   "drain"|"stop"|"repeat-absorbed","sender":{"state":"unavailable",...},
-  "stop_marker":null|{...},"sanction":"none"|"marker"}],"count","receiver":
+  "spawn_chain":[{"pid","argv0","alive_at_spawn","alive_now"}...],"stop_marker":null|{...},"sanction":
+  "none"|"marker"}],"count","receiver":
   {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sanction` is decided
   at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
   more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
-  arrived; otherwise `none` — nobody staged a stop. `receiver.ppid` is the
+  arrived; otherwise `none` — nobody staged a stop. `spawn_chain` is present only
+  when the runtime was spawned with a recorded chain (absent stays absent; old
+  receipts parse without it); each entry's `alive_at_spawn` is the liveness
+  recorded when the chain was written for this spawn, and `alive_now` the liveness
+  probed at arrival — `false` is proven gone, `true` is proven live, `null` a probe
+  that could not be made, and a reading absent from the entry was never recorded. `receiver.ppid` is the
   receiver's parent (lineage), not the sender. Never removed by a runtime; a new
   run (different pid/`started_at`) replaces it.
 * `<config>/logs/stop-sweeps.jsonl` — one `begin` and one `end` row per

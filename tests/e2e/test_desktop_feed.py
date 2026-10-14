@@ -34,6 +34,8 @@ import json
 import os
 import secrets
 import socket
+import sys
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -591,8 +593,253 @@ def test_a_stale_desktop_record_never_advertises_a_session_it_cannot_show():
     assert json.loads(json.dumps(windowless.to_json()))["has_window"] is False
 
 
+class _PresenceCacheClock:
+    """Logical time for ONLY this root's native presence-cache lookup.
+
+    Rebinding this module's time namespace must not mutate Python's shared
+    time module, asyncio's clock, or the presence lease's wall clock. The
+    native lookup does not pass its root to monotonic(), so inspect ONLY that
+    exact caller's root; every other caller/root keeps the real clock.
+    """
+
+    def __init__(self, root: Path, native: Any) -> None:
+        self.root = root
+        self.native_code = native.__code__
+        self.now = time.monotonic()
+
+    def monotonic(self) -> float:
+        frame = sys._getframe(1)
+        if frame.f_code is self.native_code:
+            from local_operator.session.runtime.presence import config_dir
+
+            if (frame.f_locals.get("root") or config_dir()) == self.root:
+                return self.now
+        return time.monotonic()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+class _BannerProcessingWitness:
+    """Observe real decisions and drain the persistent reader through their cursor."""
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from local_operator.server.utils.desktop_feed import DesktopFeed
+
+        self.decisions: dict[str, asyncio.Event] = {}
+        self.through: dict[str, tuple[str, int]] = {}
+        self.frames: list[dict[str, Any]] = []
+        self.changed = asyncio.Event()
+        original = DesktopFeed._emit_notifications
+
+        async def observe(feed, fresh, states):
+            await original(feed, fresh, states)
+            if feed.root == root:
+                # Attention was queued BEFORE this awaited operation. Only its
+                # return means a suppressing verdict is final, and draining the
+                # actual SSE reader through this cursor proves no banner hid
+                # behind an earlier attention frame in the client's queue.
+                for row in fresh:
+                    token = row["token"]
+                    self.through[token] = (feed.epoch, feed.sequence)
+                    self.decisions.setdefault(token, asyncio.Event()).set()
+
+        monkeypatch.setattr(DesktopFeed, "_emit_notifications", observe)
+
+    def received(self, frame: dict[str, Any]) -> None:
+        self.frames.append(frame)
+        self.changed.set()
+
+    async def wait(self, token: str) -> None:
+        # Reuse the file's existing bounded frame-wait budget; no elapsed-time
+        # retry or longer sleep can make an expired cache appear discriminating.
+        async with asyncio.timeout(5):
+            await self.decisions.setdefault(token, asyncio.Event()).wait()
+            epoch, sequence = self.through[token]
+            while not any(
+                frame.get("epoch") == epoch and frame.get("seq", -1) >= sequence
+                for frame in self.frames
+            ):
+                self.changed.clear()
+                await self.changed.wait()
+
+
+def test_the_presence_cache_clock_is_not_the_server_or_another_roots_clock(tmp_path, monkeypatch):
+    from local_operator.session.runtime import presence as presence_module
+
+    native = presence_module.desktop_presence
+    original_monotonic = time.monotonic
+    clock = _PresenceCacheClock(tmp_path, native)
+    clock.now += 100
+    monkeypatch.setattr(presence_module, "time", clock)
+    native(tmp_path, cached=True)
+    assert (
+        presence_module._CACHE[str(tmp_path)][0] == clock.now + presence_module.PRESENCE_CACHE_TTL_S
+    )
+    other = tmp_path / "other-root"
+    before = time.monotonic()
+    native(other, cached=True)
+    after = time.monotonic()
+    expiry = presence_module._CACHE[str(other)][0]
+    assert before <= expiry - presence_module.PRESENCE_CACHE_TTL_S <= after
+    assert time.monotonic is original_monotonic
+    assert clock.time is time.time
+
+
 @pytest.mark.asyncio
-async def test_the_window_state_decides_the_banner_over_real_http(desktop_server):
+@pytest.mark.parametrize("mode", ["held-poll", "held-decision", "native-stale-cache"])
+async def test_banner_witness_waits_for_processing_and_keeps_stale_cache_sensitive(
+    desktop_server, monkeypatch, mode
+):
+    from local_operator.server.utils import desktop_feed as feed_module
+    from local_operator.session.runtime import presence as presence_module
+
+    root, _ = desktop_server
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    waiting = asyncio.Event()
+    attention = asyncio.Event()
+    state = {"beats": 0, "waits": 0, "returned": False}
+    tick = feed_module.DesktopFeed._tick
+    notifications = feed_module.DesktopFeed._emit_notifications
+    post = httpx.AsyncClient.post
+    wait = _BannerProcessingWitness.wait
+    received = _BannerProcessingWitness.received
+    native_presence = presence_module.desktop_presence
+
+    async def gated_tick(feed):
+        if mode == "held-poll" and state["beats"] == 2 and not release.is_set():
+            entered.set()
+            await asyncio.wait_for(release.wait(), 5)
+        return await tick(feed)
+
+    async def gated_notifications(feed, fresh, states):
+        if mode == "held-decision" and fresh and not release.is_set():
+            state["token"] = fresh[0]["token"]
+            entered.set()
+            await asyncio.wait_for(release.wait(), 5)
+        return await notifications(feed, fresh, states)
+
+    async def observed_post(client, url, *args, **kwargs):
+        response = await post(client, url, *args, **kwargs)
+        if str(url).endswith("/presence"):
+            state["beats"] += 1
+            if mode == "held-poll" and state["beats"] == 2:
+                await asyncio.wait_for(entered.wait(), 5)
+        return response
+
+    async def observed_wait(witness, token):
+        state["waits"] += 1
+        wanted = 2 if mode == "held-poll" else 1
+        if state["waits"] == wanted:
+            state["witness"] = witness
+            state["token"] = token
+            waiting.set()
+            await wait(witness, token)
+            state["returned"] = True
+            return
+        return await wait(witness, token)
+
+    def observed_frame(witness, frame):
+        received(witness, frame)
+        if frame["type"] == "attention" and frame["payload"].get("completion_token") == state.get(
+            "token"
+        ):
+            attention.set()
+
+    async def controller():
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(waiting.wait(), 5)
+        witness = state["witness"]
+        token = state["token"]
+        if mode == "held-decision":
+            # Attention was actually delivered, yet the suppressing decision
+            # is still pending. An attention-only witness would falsely pass.
+            if not any(
+                frame["type"] == "attention" and frame["payload"].get("completion_token") == token
+                for frame in witness.frames
+            ):
+                await asyncio.wait_for(attention.wait(), 5)
+        assert not state["returned"] and not witness.decisions[token].is_set()
+        if mode == "held-poll":
+            # Execute the ORIGINAL one-second readiness assertion once, on the
+            # actual reader and durable publisher input. Its failure signals
+            # release; this is not an arbitrary >1s sleep or a new deadline.
+            store = AttentionStore(root / "attention.db")
+            rows = store.published_since(0)
+            row = next(row for row in rows if row["token"] == token)
+            target = row["conversation"].split("/", 1)[1]
+            legacy_checked = asyncio.get_running_loop().create_future()
+
+            def original_assertion():
+                try:
+                    with pytest.raises(AssertionError, match="focused-other: the tick never ran"):
+                        assert any(
+                            frame["type"] == "attention" and frame.get("session_id") == target
+                            for frame in witness.frames
+                        ), "focused-other: the tick never ran"
+                    legacy_checked.set_result(None)
+                except BaseException as error:
+                    legacy_checked.set_exception(error)
+
+            timer = asyncio.get_running_loop().call_later(1.0, original_assertion)
+            try:
+                await asyncio.wait_for(legacy_checked, 5)
+                assert not state["returned"] and not witness.decisions[token].is_set()
+                print(f"Original one-second assertion rejected durable token {token}; release now")
+            finally:
+                timer.cancel()
+        print(f"Banner control {mode}: real token {token} pending at witness")
+        release.set()
+
+    monkeypatch.setattr(feed_module.DesktopFeed, "_tick", gated_tick)
+    monkeypatch.setattr(feed_module.DesktopFeed, "_emit_notifications", gated_notifications)
+    monkeypatch.setattr(httpx.AsyncClient, "post", observed_post)
+    monkeypatch.setattr(_BannerProcessingWitness, "wait", observed_wait)
+    monkeypatch.setattr(_BannerProcessingWitness, "received", observed_frame)
+    task = None
+    if mode == "native-stale-cache":
+        # Reintroduce ONLY the original cached-read defect. Native cache,
+        # delivery, focus policy and notification emission all remain real.
+        monkeypatch.setattr(
+            feed_module,
+            "desktop_presence",
+            lambda root, *, cached=False: native_presence(root, cached=True),
+        )
+    else:
+        task = asyncio.create_task(controller())
+    try:
+        if mode == "native-stale-cache":
+            with pytest.raises(AssertionError, match="unfocused-same: banner verdict"):
+                await _assert_window_banner_matrix(desktop_server, monkeypatch, cell_limit=3)
+            print("Native unexpired cached presence suppresses the owed banner: negative caught")
+        else:
+            # Controls exercise only their direct cells; the public test above
+            # runs the unchanged full eight-window matrix once.
+            await _assert_window_banner_matrix(
+                desktop_server, monkeypatch, cell_limit=2 if mode == "held-poll" else 1
+            )
+            assert task is not None
+            await task
+            assert state["returned"]
+    finally:
+        release.set()
+        if task is not None:
+            task.cancel()
+            results = await asyncio.gather(task, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
+
+
+@pytest.mark.asyncio
+async def test_the_window_state_decides_the_banner_over_real_http(desktop_server, monkeypatch):
+    await _assert_window_banner_matrix(desktop_server, monkeypatch)
+
+
+async def _assert_window_banner_matrix(desktop_server, monkeypatch, *, cell_limit=None):
     """QA round 1's presence matrix, re-run at the layer it was measured on.
 
     QA reported ``presence-unfocused-same`` and ``presence-hidden-same`` as FAIL:
@@ -608,13 +855,19 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
     defers whenever a desktop is reachable — so for that turn no surface raised
     anything at all. Hence the uncached read, and hence this test, which is the
     whole matrix through the real route, the real feed and a real completion
-    written by another process.
+    written on another worker thread/SQLite connection in this same process.
 
     The ONE suppressing state is a focused window showing THIS conversation.
     ``reset_cache`` is deliberately NOT called between cells, because the stale
     answer is what is under test.
     """
+    from local_operator.session.runtime import presence as presence_module
+
     root, client = desktop_server
+    native_presence = presence_module.desktop_presence
+    clock = _PresenceCacheClock(root, native_presence)
+    monkeypatch.setattr(presence_module, "time", clock)
+    witness = _BannerProcessingWitness(root, monkeypatch)
     displayed = await _create(client, root, str(uuid.uuid4()))
     other = await _create(client, root, str(uuid.uuid4()))
     hidden = {"exists": True, "focused": False, "visible": False, "minimized": False}
@@ -644,7 +897,9 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
         async def pump() -> None:
             async for line in lines:
                 if line.startswith("data: "):
-                    streamed.append(json.loads(line[6:]))
+                    frame = json.loads(line[6:])
+                    streamed.append(frame)
+                    witness.received(frame)
 
         reader = asyncio.create_task(pump())
 
@@ -656,19 +911,8 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
                 and frame["payload"].get("completion_token") == token
             ]
 
-        async def settle() -> None:
-            # ONE SECOND, and the number is the test. The feed polls at 100 ms, so
-            # this is ten poll intervals — a banner that is coming has arrived,
-            # asserted by the check below rather than assumed. It is ALSO well
-            # inside ``PRESENCE_CACHE_TTL_S`` (2 s), which is what reproduces
-            # QA's probe: it changed the window state and read the answer within
-            # that window, which is the whole reason two of its rows failed. A
-            # longer wait here would expire the cache, the stale read would
-            # repair itself, and this test would pass against the unfixed code.
-            await asyncio.sleep(1.0)
-
         try:
-            for name, window, same, expected in cells:
+            for name, window, same, expected in cells[:cell_limit]:
                 streamed.clear()
                 beat = await client.post(
                     "/v1/desktop/presence",
@@ -681,18 +925,35 @@ async def test_the_window_state_decides_the_banner_over_real_http(desktop_server
                     },
                 )
                 assert beat.status_code == 200, f"{name}: {beat.text}"
+                if name == "focused-same":
+                    # ONE coherent native cache seed, never cleared/rewarmed as
+                    # the window changes. Logical cache time, not scheduler wall
+                    # time, keeps the original stale-focus bug observable.
+                    # Expire a bootstrap no-window answer ONCE by ordinary
+                    # cache time advancement, before the matrix's coherent seed.
+                    clock.now += presence_module.PRESENCE_CACHE_TTL_S + 1
+                    initial = native_presence(root, cached=True)
+                    assert initial.attended and initial.session_id == displayed
+                else:
+                    clock.now += presence_module.PRESENCE_CACHE_TTL_S / 16
+                expiry, _ = presence_module._CACHE[str(root)]
                 target = displayed if same else other
                 token = await asyncio.to_thread(_publish, root, target)
-                await settle()
+                await witness.wait(token)
+                age = clock.now - (expiry - presence_module.PRESENCE_CACHE_TTL_S)
+                assert 0 <= age < presence_module.PRESENCE_CACHE_TTL_S and clock.now < expiry
+                print(f"Banner witness: {name}, token {token}, logical cache age {age:.3f}s")
                 # The attention frame for this completion is published in the
                 # same tick as the banner and BEFORE it, so its arrival is what
                 # says the tick ran at all.
                 assert any(
-                    frame["type"] == "attention" and frame.get("session_id") == target
+                    frame["type"] == "attention"
+                    and frame.get("session_id") == target
+                    and frame["payload"].get("completion_token") == token
                     for frame in streamed
                 ), f"{name}: the tick never ran"
                 announced = announced_for(token)
-                assert bool(announced) is expected, f"{name}: {streamed}"
+                assert bool(announced) is expected, f"{name}: banner verdict {streamed}"
                 if expected:
                     assert announced[0]["session_id"] == target
                     assert announced[0]["payload"]["focus_policy"] == "always"

@@ -214,7 +214,7 @@ class ServeDaemonReport:
         return getattr(self.record, name)
 
 
-def probe_address(record: Any) -> AddressProbe:
+def probe_address(record: Any, *, require_rolling: bool = False) -> AddressProbe:
     """Ask the record's address who is serving it — ONE loopback round trip.
 
     Structured rather than sentence-shaped so the address axis can be composed
@@ -284,8 +284,14 @@ def probe_address(record: Any) -> AddressProbe:
             SQUATTED,
             f"{record.host}:{record.port} answered with something that is not a health report",
         )
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
-    served = result.get("instance_id") if isinstance(result, dict) else None
+    # Narrowed into annotated locals rather than an inline conditional: the
+    # conditional form leaves pyright reading ``result`` as optional, so the
+    # membership read below fails to type-check. The runtime rule is unchanged —
+    # a non-object ``result`` member is treated as absent, falling back to the
+    # whole body.
+    raw_result = payload.get("result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else payload
+    served = result.get("instance_id")
     if not served:
         return AddressProbe(
             SQUATTED,
@@ -298,6 +304,15 @@ def probe_address(record: Any) -> AddressProbe:
             f"not the {record.instance_id[:8]}… this record names",
             answered_as=str(served),
         )
+    if require_rolling:
+        from local_operator.server.reload import ROLLING_CONTRACT
+
+        if result.get("rolling_reload_contract") != ROLLING_CONTRACT:
+            # It IS serving, but handler presence/discovery metadata cannot
+            # authorize a local-work-cutting signal on an old/unverified API.
+            return AddressProbe(
+                SERVING, "serving API lacks verified local-work-safe reload capability"
+            )
     return AddressProbe(SERVING)
 
 
@@ -1178,6 +1193,7 @@ def reload_serve_daemons(
     probe: Callable[[Any], str | None] = _answers_as_record,
     monotonic: Callable[[], float] = time.monotonic,
     stuck: Callable[[], list[ServeDaemonReport]] = serve_daemon_reports,
+    rolling: bool = False,
 ) -> list[ServiceRefresh]:
     """Ask every stale ``serve`` daemon to move itself onto the current build.
 
@@ -1288,6 +1304,22 @@ def reload_serve_daemons(
         # sent a signal this platform does not have, with `None` reaching `os.kill`.
         # The per-daemon report R8-1 asked for is kept; the signal is decided here,
         # where it cannot be delegated to a field.
+        rolling_reload_missing = (
+            rolling
+            and getattr(record, "rolling_reload_contract", "") != serve_reload.ROLLING_CONTRACT
+        )
+        if rolling_reload_missing:
+            refreshes.append(
+                ServiceRefresh(
+                    name,
+                    warnings=(
+                        f"{name} is still serving {record.version or 'an older build'}; "
+                        "safe rolling reload is unsupported, so it remains pending "
+                        "(nothing signalled)",
+                    ),
+                )
+            )
+            continue
         unmovable = serve_reload.RELOAD_SIGNAL is None or not getattr(record, "reloadable", False)
         if unmovable:
             # The capability is absent for every daemon built before this
@@ -1317,7 +1349,11 @@ def reload_serve_daemons(
             # PROVE THE PROCESS BEFORE TOUCHING IT (serve-reload review round 1, R1-4). A pid
             # is not an identity, and the request is a signal whose default
             # disposition is death.
-            mismatch = probe(record)
+            mismatch = (
+                probe_address(record, require_rolling=True).detail or None
+                if rolling and probe is _answers_as_record
+                else probe(record)
+            )
             if mismatch is not None:
                 refreshes.append(
                     ServiceRefresh(
@@ -1558,9 +1594,21 @@ def status_lines() -> list[str]:
     supervised = _supervised_daemon_plists()
     for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
-    if supervised:
+    # THE LINUX ROW (2026-10-11, stale-relay memo — the optional one): on Linux
+    # there is no plist for the plist-shaped reader above to find, so without
+    # this row the operator who was just told "the relay is behind the install"
+    # by a desktop app has nothing here to find the relay with. Off Linux (or
+    # with no unit installed) this is None and the block below prints exactly
+    # what it always printed.
+    unit = _linux_supervised_unit()
+    if unit is not None:
+        lines.append(f"supervised daemon: {unit.name}")
+    if supervised or unit is not None:
         lines.append("note: a supervised daemon resolves the install when it starts,")
-        lines.append("      so its build is not in the plist.")
+        if supervised:
+            lines.append("      so its build is not in the plist.")
+        if unit is not None:
+            lines.append("      so its build is not in the unit file.")
         if _install_may_repoint_daemons():
             lines.append("      `lop services restart` puts them on the current build")
         else:
@@ -1707,6 +1755,25 @@ def _supervised_daemon_plists() -> list[Any]:
     from local_operator import update
 
     return list(update._installed_daemon_plists())
+
+
+def _linux_supervised_unit() -> Any:
+    """The relay's systemd user unit path when THIS host supervises it, else None.
+
+    The Linux half of the supervised-daemon listing above: asked of the relay's
+    own path reader (never a second spelling), and a pure filesystem probe so a
+    status command can never fail on it. On macOS this returns None and every
+    string the plist reader prints is untouched.
+    """
+    from local_operator.network import relay
+
+    try:
+        if not sys.platform.startswith("linux"):
+            return None
+        path = relay.systemd_path()
+        return path if path.exists() else None
+    except Exception:  # noqa: BLE001 — a status probe must never fail
+        return None
 
 
 def _serve_name(record: Any) -> str:

@@ -34,6 +34,7 @@ from local_operator.analytics.store import (
 )
 from local_operator.config import ConfigManager
 from local_operator.server.routes import capabilities, desktop_catalogues
+from tests.unit.analytics.test_channel_store import channel_row
 from tests.unit.analytics.test_store import _snap
 
 TOKEN = "desktop-diagnostics-test-token"
@@ -320,12 +321,74 @@ async def test_analytics_names_are_absent_rather_than_empty(desktop, tmp_path):
     assert data["session_names"] == {PARENT: "Named parent"}
     assert CHILD not in data["session_names"]
     # The complement pins every map-valued key on this payload, so a breakdown
-    # that arrives as an OBJECT fails here even though no list names it.
+    # that arrives as an OBJECT fails here even though no list names it. The
+    # ``channels`` section (PR-2) is one more such key; its inner shape is
+    # asserted where the section is built (``test_analytics_channels_*``), and
+    # it is pinned here so a future RENAME of the envelope key cannot slip
+    # through this test as silently as the two side attributes could have.
     assert {key for key, value in data.items() if isinstance(value, dict)} == {
         "aggregate",
+        "channels",
         "session_names",
         "session_parents",
     }
+    assert data["channels"]["scope"] == "ledger"
+    assert data["channels"]["rows"] == []  # no channel rows written in this test
+
+
+@pytest.mark.asyncio
+async def test_analytics_channels_carry_windowed_rows_and_rollup_series(desktop, tmp_path):
+    """PR-2: the ``channels`` section — its rows, its series, its two scopes.
+
+    Rows come from the raw channel ledger and honour the window and the session
+    filter; the daily/monthly series come from the channel rollups, which have
+    no session dimension at all and therefore keep ``series_scope`` even when a
+    ``session_id`` narrows the rows — the payload names each source rather than
+    pretending one filter moved both. The known/unstated pair rides the wire
+    untouched: 53_000 known beside one amount-unknown call on the same channel,
+    which a client must be able to tell from 53_000 over zero calls.
+    """
+    client, _ = desktop
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    day = 1_760_000_000_000
+    assert (
+        store.record_channel_batch(
+            [
+                channel_row("image:c1", ts_ms=day, session_id=PARENT, amount_micro=53_000),
+                channel_row("image:c2", ts_ms=day + 1, session_id=PARENT, amount_micro=None),
+                channel_row(
+                    "tts:c1",
+                    ts_ms=day + 2,
+                    session_id=CHILD,
+                    channel="tts",
+                    provider="elevenlabs",
+                    basis="billed",
+                    amount_micro=1_200,
+                ),
+            ]
+        )
+        == 3
+    )
+    store.close()
+
+    data = (await client.get("/v1/desktop/analytics", params={"days": 7})).json()["result"]["data"]
+    channels = data["channels"]
+    assert channels["scope"] == "ledger"
+    assert channels["series_scope"] == "all_sessions"
+    image = next(row for row in channels["rows"] if row["channel"] == "image")
+    assert (image["amount_micro"], image["calls"], image["known_calls"]) == (53_000, 2, 1)
+    assert image["billing_basis"] == "estimated"
+    assert {row["channel"] for row in channels["daily"]} == {"image", "tts"}
+    assert {row["channel"] for row in channels["monthly"]} == {"image", "tts"}
+
+    filtered = (
+        await client.get("/v1/desktop/analytics", params={"days": 7, "session_id": PARENT})
+    ).json()["result"]["data"]["channels"]
+    assert {row["channel"] for row in filtered["rows"]} == {"image"}
+    assert filtered["daily"] == channels["daily"], (
+        "the rollup series have no session dimension: the filter must narrow the "
+        "rows only, and the two scopes on the wire are what say so"
+    )
 
 
 @pytest.mark.asyncio
@@ -714,6 +777,75 @@ async def test_report_distinguishes_unknown_from_zero(desktop, tmp_path):
     assert data["aggregate"]["cost_known_calls"] == 0
     # An old ledger's absent labels are labelled, not invented.
     assert data["by_purpose_outcome"] == [{"purpose": "unknown", "outcome": "unknown", "calls": 1}]
+
+
+@pytest.mark.asyncio
+async def test_report_channels_are_scoped_to_the_exact_session(desktop, tmp_path):
+    """PR-2: ``/sessions/{id}/report`` gains ``channels``, exact-scope like the rest.
+
+    Grouped from the session's own channel rows — a CHILD's row must not appear,
+    the same own-scope rule the diagnostic breakdowns keep (the tree exception
+    is the Totals block only). Values ride as raw integers: micro-USD amounts
+    with ``calls``/``known_calls`` separable, so an unstated amount never
+    renders as a zero. The child's own report carries its own row in turn,
+    which is what makes the scoping an assertion about rows rather than about
+    an empty section.
+    """
+    client, _ = desktop
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    base = replace(_snap(session_id=PARENT), request_id="r1")
+    assert (
+        store.record_batch(
+            [base, replace(base, session_id=CHILD, parent_session_id=PARENT, request_id="r2")]
+        )
+        == 2
+    )
+    day = 1_760_000_000_000
+    assert (
+        store.record_channel_batch(
+            [
+                channel_row(
+                    "tts:p1",
+                    ts_ms=day,
+                    session_id=PARENT,
+                    channel="tts",
+                    provider="elevenlabs",
+                    basis="billed",
+                    amount_micro=4_000,
+                ),
+                channel_row(
+                    "search:p1",
+                    ts_ms=day,
+                    session_id=PARENT,
+                    channel="search",
+                    provider="tavily",
+                    amount_micro=250,
+                ),
+                channel_row(
+                    "tts:k1",
+                    ts_ms=day,
+                    session_id=CHILD,
+                    channel="tts",
+                    provider="elevenlabs",
+                    basis="billed",
+                    amount_micro=9_999,
+                ),
+            ]
+        )
+        == 3
+    )
+    store.close()
+
+    data = (await client.get(f"/v1/desktop/sessions/{PARENT}/report")).json()["result"]["data"]
+    channels = data["channels"]
+    assert {row["channel"] for row in channels} == {"tts", "search"}
+    tts = next(row for row in channels if row["channel"] == "tts")
+    assert (tts["amount_micro"], tts["calls"], tts["known_calls"]) == (4_000, 1, 1)
+    assert tts["billing_basis"] == "billed"
+
+    child = (await client.get(f"/v1/desktop/sessions/{CHILD}/report")).json()["result"]["data"]
+    assert {row["channel"] for row in child["channels"]} == {"tts"}
+    assert child["channels"][0]["amount_micro"] == 9_999
 
 
 @pytest.mark.asyncio

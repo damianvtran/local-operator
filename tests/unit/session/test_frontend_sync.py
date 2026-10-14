@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -286,7 +288,10 @@ async def test_headless_turn_preserves_a_rich_frontend_checkpoint(tmp_path: Path
     assert isinstance(restored, dict)
     state = FrontendSessionState.model_validate(restored["state"])
     assert state.cumulative_parent_cost == 12.34
-    assert state.active_duration_s == 300.0
+    # Not EXACTLY 300.0 any more (review round 2, F8): the merge takes the larger
+    # of the two figures, so the headless runtime's own turn time adds to the
+    # TUI's. The invariant is that the durable figure is never lowered.
+    assert 300.0 <= state.active_duration_s < 301.0
     assert state.conversation_title == "Real title"
 
 
@@ -435,3 +440,75 @@ async def test_real_session_streams_through_registrant_to_two_followers(
             await second.dispose()
         registrant.close()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_delta_heals_by_rebinding_to_a_fresh_snapshot(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The sequence-refusal's recovery path, pinned end to end.
+
+    ``frontend update is not the next state sequence`` is recurring in the
+    desktop daemon's logs (7 hits in one day's log, 8 in the previous): the
+    follower's store had drifted from the owner's clock, the pump tore the
+    connection down with that exact sentence, and the open question is whether
+    a viewer can be left SERVING the drifted state — the freeze shape of the
+    2026-10-10 incident's stale claim — or whether the disconnect routes into
+    recovery and a fresh snapshot re-seats it.
+
+    It recovers: the refusal is carried as the disconnect reason, the facade's
+    ordinary recovery loop redials the same record, and ``_install_frontend``
+    REPLACES the store with the owner's current snapshot (it never patches by
+    sequence), so the drift cannot survive a healthy owner. Pinned here so a
+    future edit to either the reason vocabulary or the recovery loop cannot
+    silently turn the refusal into a one-way door.
+    """
+    from local_operator.session.runtime import launch as launch_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # ``_recover_runtime`` resolves the record through the session marker.
+    (session_dir / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        await _record(tmp_path)
+
+        async def _no_engage(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            """A record already exists; engaging must not spawn a second runtime."""
+            return None
+
+        monkeypatch.setattr(launch_mod, "engage_runtime", _no_engage)
+        remote = await AttachedSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        await remote._ensure_bound()
+        store = remote._frontend_store
+        assert store is not None
+        owner_epoch = handle._frontend.state.epoch
+        assert store.state.epoch == owner_epoch
+
+        # Drift the follower's clock the way a lost or duplicated frame does.
+        store.replace(store.state.model_copy(update={"epoch": "a-different-epoch"}))
+        caplog.set_level(logging.WARNING, logger="local_operator.mobile.attach_client")
+        handle._frontend.mutate(goal="publish one delta the drifted store must refuse")
+
+        deadline = asyncio.get_running_loop().time() + 10
+        while asyncio.get_running_loop().time() < deadline and (
+            remote.is_cold or remote.frontend_state.epoch != owner_epoch
+        ):
+            await asyncio.sleep(0.02)
+
+        assert any(
+            "not the next state sequence" in record.getMessage() for record in caplog.records
+        ), "the refusal never fired; the drift was never exercised"
+        assert remote.frontend_state.epoch == handle._frontend.state.epoch
+        assert remote.frontend_state.sequence == handle._frontend.state.sequence
+        assert not remote.is_cold, "the refusal left the viewer cold with no repair"
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()

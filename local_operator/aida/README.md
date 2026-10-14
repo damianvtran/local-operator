@@ -74,12 +74,81 @@ bound is enforced, not merely advised.
 
 ## The proactive cadence
 
-Once a day, at `aida.cadence.at` (default `08:30`, your local time), a wake
-fires in her conversation: she reviews sessions, projects, scheduled wakes and
+At her configured cadence, a wake fires in her conversation: she reviews sessions, projects, scheduled wakes and
 usage signals, and reports only what you must act on. If there is nothing
 actionable she stays quiet in substance (her instructions say so explicitly).
-The wake row is re-armed for the next day by her own runtime; the cadence works
-with every terminal closed because arming also installs the wake supervisor.
+Her own runtime re-arms the one-shot; the cadence works with every terminal
+closed because arming also installs the wake supervisor.
+
+**Daily default or elapsed interval.** `aida.cadence.interval_hours` is a whole
+number from **0 through 168**. Zero (or unset) preserves the daily local
+`aida.cadence.at` time, default `08:30`; a positive value ignores `.at` and uses
+elapsed hours. Set **4** for an intrinsic check-in every four hours. Whole hours
+avoid accidentally scheduling provider-backed turns every few seconds; one week
+is a bounded upper limit for a useful check-in, not a change to any other user's
+default.
+
+The first interval arm anchors a grid at enable time: first due = anchor +
+interval. Restarts, incoming events, greetings and escalation extras do not
+reset it. If the machine misses several ticks, the existing generic catch-up
+owes **one check-in**, not a burst; after acceptance and one-shot retirement,
+the next due is the first grid point strictly after now. DST/timezone changes
+therefore do not change the elapsed interval. Pause/reactive mode suppresses
+check-ins; resume retains the anchor and chooses the next future grid point,
+without replaying ticks suppressed by the hold. Daily pause/resume is unchanged.
+
+Switching interval/daily modes (or changing a positive interval) replaces a
+future cadence with a newly anchored mode. An already-owed occurrence, including
+one shifted into load grace or accepted into a busy session, remains owned by
+its original arm until it is accepted and retired; the new mode starts after
+that occurrence. Changing `.at` during interval mode has no timing effect.
+
+**Durability and authority.** Interval rows carry a reserved arm origin,
+`aida-cadence:v1:<interval-hours>:<anchor-ms>:<due-ms>`, in `request_id`. The generic
+writer treats it as opaque retry identity: due is included so different
+occurrences cannot falsely settle each other's arms. Origin and due commit
+atomically in the authoritative `wake_schedules` transcript snapshot. Unknown
+versions/malformed origins preserve present rows. Load grace can change the
+scheduler's working due, but not this original owed instant.
+
+The Aida state file mirrors `cadence_phase` after a row commits and prepares
+`cadence_pending` before an arm attempt. If an initial arm fails/crashes, its
+pending due remains owed. If a crash happens after the transcript commit but
+before the mirror, the existing row wins and repairs the mirror. Only an
+accepted **matching cadence origin** at the Session persist boundary can advance
+the grid; row/index disappearance or wall time alone cannot consume a tick.
+A failed persist retains the accepted receipt for retry. State writes are skipped
+when unchanged. Independent `wN`, project-trigger, greeting and extra rows keep
+their existing ownership and scheduling paths.
+
+**Notifications.** Her check-ins reach you with NO surface attached: the
+cadence row and the escalation extras declare `notify=True`, so a check-in that
+found something actionable raises an OS banner through the completion ladder
+(the desktop app, a TUI or a watching surface takes over when one is running),
+and clicking the banner opens the conversation. Whether a banner is actually
+raised is decided at settle time from her ACTUAL REPLY — a quiet day does not
+notify, because a daily "nothing needs your attention" banner is how a chief of
+staff gets muted, taking the actionable ones with it:
+
+- a reply of exactly `Nothing needs your attention today.` is silent (case,
+  padding, quotes, backticks and a trailing period are tolerated; the legacy
+  `(no action needed)` spelling is still recognised; a paraphrase is not);
+- a quiet-day TIP is a silent row by decision: it lands unread in her
+  conversation and shows on any surface you open, but does not interrupt. The
+  one-line switch is `TIP_REPLY_NOTIFIES` in `aida/proactive.py`;
+- a check-in on an install whose greeting ledger is not yet `delivered`/
+  `skipped` never banners — she does not ping someone she has not met;
+- at most `MAX_BANNERS_PER_DAY` (3, a constant — no config key) banners are
+  raised in a rolling 24 h, counted in `aida/onboarding.json` under `banners`;
+- trigger check-ins stay quiet — they ask her to ACT (message the linked
+  sessions), not to report, so the sentinel rule does not describe them;
+- a turn that ends with `no_reply` publishes nothing: no banner, no unread
+  mark;
+- `display.notifications` and `LOCAL_OPERATOR_NO_NOTIFICATIONS` apply exactly
+  as for every other banner, and per-run/automation homes (a `lop exec` run,
+  agent-runtime-svc's per-run `HOME`) never raise one at all.
+
+An ERRORED check-in turn always notifies, whatever the reply reads like.
 
 **Escalation (bounded).** During a turn she can ask for an extra proactive
 check-in by writing `<config>/aida/escalate.json`:
@@ -209,7 +278,8 @@ settings a user authors.
 |---|---|---|
 | `aida.enabled` | `true` | master switch (read at boot and by `/aida`) |
 | `aida.name` | `"Aida"` | her display name on every surface (see Renaming her) |
-| `aida.cadence.at` | `"08:30"` | daily cadence time, `HH:MM` local |
+| `aida.cadence.at` | `"08:30"` | daily cadence time, `HH:MM` local; ignored for positive intervals |
+| `aida.cadence.interval_hours` | `0` | `0` = local daily mode; `1–168` = elapsed whole hours |
 | `aida.cadence.paused` | `false` | the pause flag (written by `/aida pause|resume`) |
 | `aida.cadence.max_extra_per_day` | `2` | escalation budget (`0` disables escalation) |
 | `aida.cadence.min_gap_minutes` | `90` | minimum spacing between Aida wakes |

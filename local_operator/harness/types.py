@@ -89,6 +89,7 @@ from local_operator.harness.wake_types import WakeSchedule
 # loop on this module's path for every entry point — the same mistake the
 # ``wake_types`` split above records.
 from local_operator.monitors.spec import MonitorSpec
+from local_operator.supplements.contract import SupplementState
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -158,6 +159,14 @@ OUTPUT_LIMIT_ARGUMENTS = "arguments"
 #: did not have while the identical arguments executed fine on the next turn
 #: (review F1 == QA Q1).
 OUTPUT_LIMIT_TURN = "turn"
+
+#: THE QUIET-TURN MARKER (``docs/design/quiet-turns.md`` §4): stamped on the
+#: ``no_reply`` tool's successful result's ``details``, and the single fact the
+#: loop's batch-end check (``_batch_ends_quiet``) and the session's quiet
+#: predicate (``Session._run_ended_quiet``) read. A consumer keys on the
+#: MARKER, never on the result's "Quiet." wording, so a later reword of the
+#: model-facing text cannot change what a reader decides.
+QUIET_TURN_KEY = "__quiet_turn"
 
 
 class InvalidToolArgumentsError(ValueError):
@@ -284,6 +293,38 @@ class TextContent(BaseModel):
     text: str = ""
 
 
+class CapturedFrame(BaseModel):
+    """Harness-stamped provenance for one producer-owned capture.
+
+    WHY THIS EXISTS. Compaction pressure must be able to reclaim SUPERSEDED
+    captures without ever risking a user upload, an unknown image, or the
+    newest frame of any stream — but today every image block is
+    indistinguishable, so no selection is possible at all. This value is the
+    minimal discriminator: which producing stream and revision a capture
+    belongs to, and which producer scope may supersede it.
+
+    WHAT IT IS NOT. Not authority, and never trusted as one: these fields are
+    stamped by the HARNESS at the actual producer seam, scoped to the real
+    producer identity — a server's own stream/revision claim rides inside
+    that scope, and a producer-supplied copy of either identity is ignored.
+    A malicious producer can therefore only supersede its OWN earlier
+    captures; it can never label a user, unknown, or other-producer image
+    disposable. Absence is not an error either — absent or malformed
+    metadata means PROTECTED, so a bad claim degrades to retention, not to
+    lost content.
+
+    Shape: bounded opaque IDs only (no vocabulary that could drift), compared
+    by exact string. Frozen: a capture identity is a fact about the past, and
+    in-place mutation is how two readers would disagree about it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stream_id: str = Field(min_length=1, max_length=256)
+    revision_id: str = Field(min_length=1, max_length=256)
+    producer_scope: str = Field(min_length=1, max_length=256)
+
+
 class ImageContent(BaseModel):
     """An image block. ``data`` is base64-encoded bytes of ``mime_type``.
 
@@ -308,6 +349,37 @@ class ImageContent(BaseModel):
     data: str = ""
     mime_type: str = "image/png"
     marker: int | None = Field(default=None, exclude=True)
+    #: Harness-stamped capture provenance (see :class:`CapturedFrame`).
+    #: ``None`` for every image without producer-stamped identity — user
+    #: uploads, unknown images, legacy rows — which is exactly the set
+    #: compaction must treat as PROTECTED.
+    #:
+    #: Serialization contract: while unset, EVERY dump omits the key entirely
+    #: (``_omit_absent_capture``, below), so absent metadata leaves wire,
+    #: transcript and context-hash bytes exactly as they were — not a new
+    #: null field. When present, the value travels on durable rows so replay
+    #: can reproduce the same projection. Provider encoders build their
+    #: image parts from ``data``/``mime_type`` explicitly and therefore
+    #: never emit this bookkeeping object, exactly as they never emit
+    #: ``marker``.
+    captured_frame: CapturedFrame | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_capture(self, handler: Any, info: Any) -> Any:
+        """Omit ``captured_frame`` from every dump while it is unset.
+
+        Mirrors the ``_omit_absent_core_source``/``_omit_disabled_drag``
+        pattern rather than a field-level ``exclude_if`` so the guarantee
+        holds at EVERY dump site (plain dumps included, not only the
+        ``exclude_defaults`` ones), which is what the byte-identical
+        absent-metadata contract needs. Only THIS key's unset is dropped;
+        ``marker`` keeps its own ``exclude=True`` rule.
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("captured_frame") is None:
+            data.pop("captured_frame", None)
+        return data
 
 
 class AudioContent(BaseModel):
@@ -896,13 +968,35 @@ class AgentToolUpdate(BaseModel):
 class WakeSchedulerProtocol(Protocol):
     """The slice of a wake scheduler the ``wake`` tool drives.
 
-    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The
-    tool only ever reads the current list and writes a replacement, so the
+    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The tool
+    only ever reads the current list and writes a replacement, so the
     arming/timer half of the scheduler stays out of the contract.
     """
 
     @property
-    def schedules(self) -> Sequence[WakeSchedule]: ...
+    def schedules(self) -> Sequence[WakeSchedule]:
+        """The complete OWNED view: runnable rows plus held (pending) ones.
+
+        A held handle is a schedule this runtime still owns — its successor
+        one-shot has not been handed over yet — so its id is taken. Every
+        caller that asks "which ids exist / are free?" (the tool's
+        create/cancel/edit, the cap count, the desktop owner helpers, the video
+        check-wake) must read THIS, never a runnable-only list, or a create can
+        allocate a handle a draining fire already reserved and be discarded when
+        the handover lands. What the timer may actually run is the scheduler's
+        own affair (:attr:`armed_schedules` on the concrete class); a reader that
+        wants "what can fire here" rather than "what exists" must ask for it.
+        """
+        ...
+
+    #: OPTIONAL capability, deliberately NOT a member of this protocol: a host
+    #: that cannot report a live reservation (a read-only snapshot facade, a
+    #: reduced test host) must stay a valid ``WakeSchedulerProtocol`` rather than
+    #: fail ``isinstance``. ``tools.builtin`` probes it with ``getattr`` and reads
+    #: the empty set when it is absent — the honest "no live phase known" answer,
+    #: never a fabricated ``pending`` flag. The concrete ``WakeScheduler`` and any
+    #: cross-process view that mirrors it implement it as
+    #: ``()->frozenset[str]`` returning the ids held for the successor.
 
     async def update(self, schedules: list[WakeSchedule]) -> None: ...
 
@@ -1123,7 +1217,9 @@ class SubagentLauncher(Protocol):
     read-only research child (its tool inventory is filtered to retrieval that
     changes nothing — local lookups plus web search/fetch — never to edits or
     execution). ``effort`` routes to a configured model tier (``lo``/``med``/
-    ``hi`` in ``values.subagents.models``); None keeps the parent's model.
+    ``hi`` in ``values.subagents.models``); omission keeps role pins, otherwise
+    the parent's model. ``model="inherit"`` bypasses role pins; an exact
+    ``provider/id`` pins this run. Model and effort are mutually exclusive.
     """
 
     def __call__(
@@ -1133,6 +1229,7 @@ class SubagentLauncher(Protocol):
         *,
         agent: str = "task",
         effort: str | None = None,
+        model: str | None = None,
     ) -> str: ...
 
 
@@ -1288,6 +1385,16 @@ class ToolContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     cwd: str = "."
+    #: Explicit host-owned attention-turn identity. No value means the host has
+    #: not opted into confirmed send reuse; never infer a turn from a call id
+    #: or the session's lifetime. Hosts create a fresh context/scope per turn.
+    send_turn_id: str | None = Field(default=None, frozen=True)
+    #: Only confirmed local deliveries live here, never in process-global or
+    #: persistent storage. Off wire and isolated from another attention turn.
+    #: Key: turn, sender SID, resolved target SID, exact body, mode, wake, patience.
+    confirmed_send_receipts: dict[tuple[str, str, str, str, str, bool, int | None], ToolResult] = (
+        Field(default_factory=dict, exclude=True, repr=False)
+    )
     #: This session's own ``scratchpad://`` root (``<session dir>/scratchpad``),
     #: absolute, or ``None`` on a host with no session directory. The scratchpad
     #: is scratch the AGENT owns: ``read``/``write``/``edit`` take
@@ -1358,6 +1465,23 @@ class ToolContext(BaseModel):
     record_resolved_path: Callable[[str, bool], None] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # The channel-spend ingest seam (``docs/design/spend-channels.md``): a tool
+    # that spends money OUTSIDE the token path (image, web search, voice)
+    # builds a frozen ``session.channel_spend.ChannelSpendRecord`` and hands it
+    # here; the session folds it, journals it and publishes it. Declared rather
+    # than probed because every capability a built-in tool looks for is
+    # declared (see the class docstring). ``None`` is the documented "this host
+    # does not track channels" value — an emission site must skip QUIETLY then,
+    # never fail the call; a record it never records is money nobody can see,
+    # which is today's behaviour and strictly better than a broken turn.
+    #
+    # The parameter is typed ``Any`` because ``harness`` must not import the
+    # session package: ``session`` imports ``harness``, and a module-level
+    # import here would close that cycle. The record's OWN module is a leaf
+    # precisely so the tools can import it directly.
+    record_channel_spend: Callable[[Any], None] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     session_id: str = ""
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
@@ -1394,19 +1518,6 @@ class ToolContext(BaseModel):
     # rather than probed off the launcher's bound session — a tool that has to
     # read a session off a bound method is a coupling nobody declared.
     session_model_label: str = ""
-    # How many delegation hops sit between this session and the top-level one:
-    # 0 for the session an operator talks to, 1 for a subagent it launched, 2
-    # for that subagent's own subagent, and so on. A snapshot taken when this
-    # context is built (``Session._build_tool_context`` re-reads it per turn).
-    #
-    # Its consumer is the ``task``/``agent`` effort policy: a model-chosen
-    # tier is the TOP-LEVEL session's to make and nobody else's (see
-    # ``harness.subagent.model_may_choose_tier`` and the incident recorded at
-    # ``tools.builtin._nested_task_rejection``), so the tool builders and the
-    # tool-argument gate need to know whether the caller is itself a child.
-    # Declared rather than probed off the launcher's bound session, for the
-    # reason ``session_model_label`` above is.
-    delegation_depth: int = 0
     # The DELEGATED-WORK label, set only on a subagent's context: the short
     # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
     #
@@ -1552,6 +1663,23 @@ class ToolContext(BaseModel):
     # advertised at all (createIf) rather than advertised and always
     # failing.
     jobs: JobManagerProtocol | None = None
+    #: True on a call the harness runs as a MONITOR CHECK (one tick of an
+    #: armed watch): unattended — no turn, no user waiting, nothing that
+    #: could carry a rehomed call forward. A cancellation of such a call is
+    #: teardown or the scheduler's own deadline, never a steering redirect,
+    #: so a tool that would otherwise convert the cancel into a background
+    #: job must stop the call instead. Read by bash's cancel handler; set
+    #: by ``Session._run_monitor_check``.
+    monitor_check: bool = False
+    # The video lane's durable-record writer (``Session.journal_video_job``):
+    # appends one ``video_job_v1`` transcript row. Declared rather than probed
+    # for, per this class's contract; ``None`` on a host that cannot journal
+    # (a reduced host or a test) — the video runner then logs and continues,
+    # losing restart durability for that transition but never the generation.
+    # Typed as a plain callable: the payload is the record mapping
+    # ``local_operator.video.records.build_record`` returns, and this module
+    # must not import that module's way up the graph.
+    journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     # Set by the session on each inbound ``lop send`` delivery so a blocking
     # ``wait`` can return early and let the model read its mailbox. Declared
     # rather than probed for, per this class's contract above. ``None`` means
@@ -1611,6 +1739,28 @@ class ToolContext(BaseModel):
     #: tool-side guard around the await is the last line so even a contract
     #: breach cannot lose the ask (design §2.2's failure-semantics table).
     gate_ask: Callable[..., Awaitable[Mapping[str, Any] | None]] | None = None
+    #: THE QUIET-END DOOR (docs/design/quiet-turns.md §4). Async, mirroring
+    #: :attr:`gate_ask`: the ``no_reply`` tool awaits it for the run's refusal
+    #: decision, and its presence IS the fact that this session may end a turn
+    #: quietly — ``build_no_reply_tool`` returns ``None`` without it
+    #: (footprint ladder rung 3: the tool is absent, not inert, where a quiet
+    #: end cannot be honoured). The session binds it per turn; ``None`` for a
+    #: subagent child (a parent's ``wait`` reads the child's final text as the
+    #: report), a one-shot/headless host (the final text is the product), a
+    #: session with an output contract (the gate reads a textless end as a
+    #: missing final response), and under the ``LOP_NO_REPLY`` kill switch.
+    #:
+    #: TWO OF THOSE ARE ONLY KNOWABLE AFTER CONSTRUCTION (the contract, the
+    #: one-shot declaration), so those setters also re-filter the MOUNTED
+    #: inventory through ``refresh_tools`` — a door that turns ``None`` under an
+    #: already-advertised tool would fire a refusal once per attempt. Door and
+    #: inventory agree in both directions; see
+    #: ``Session._quiet_end_callable`` and ``Session.set_output_contract``.
+    #:
+    #: TOTAL by contract, like the door pair above: it returns either a refusal
+    #: SENTENCE the model must act on (write text instead) or ``None`` when the
+    #: quiet end is allowed. A refusal is never coerced into a message.
+    quiet_end: Callable[[], Awaitable[str | None]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -2554,6 +2704,56 @@ class OutputValidationEvent(AgentEvent[Literal["output_validation"]]):
     payload_text: str = ""
 
 
+class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
+    """One beat of a turn supplement's ("Highlights") life, AFTER the turn's ``agent_end``.
+
+    Contract frozen by lane C0 of ``docs/design/turn-supplements.md`` (§2.7); nothing
+    emits it yet (the runner is lane C1). A NEW event family rather than a synthetic tool
+    call on purpose: a tool row after the answer would break the UI fold and native
+    condensing, risk ``lop exec --json`` consumers reading it as part of the turn, and
+    inherit turn-interrupt cancel, which is precisely wrong for a background errand.
+
+    ``anchor`` is the final assistant message id the supplement attaches to, so a late
+    event (the next turn already started) still lands on the right answer. ``state`` is
+    the image-gen vocabulary plus ``decided`` ("files known, graphics queued", painted as
+    ``queued``); ``running``/``cancelling`` are LIVE-ONLY and never journaled (see
+    :mod:`local_operator.supplements.contract`). ``files`` rides only ``decided``/``done``
+    and ``components`` only ``done``, in the row's own shapes.
+
+    Additive on a tolerant frame (``AgentEvent`` is ``extra="allow"``), the
+    ``AgentEndEvent.cut_off`` precedent: no ``PROTOCOL_VERSION`` bump. The runtime sends it
+    only to viewers that negotiated ``supplements-v1``.
+    """
+
+    type: Literal["supplement_progress"] = "supplement_progress"
+    anchor: str
+    job: str
+    version: int
+    state: SupplementState
+    #: "deciding" | "generating" | "validating" | "repairing"; "" outside ``running``.
+    stage: str = ""
+    elapsed_s: float = 0.0
+    files: list[dict[str, Any]] = Field(default_factory=list)
+    components: list[dict[str, Any]] = Field(default_factory=list)
+    model: str = ""
+    model_source: str = ""
+    attempts: list[str] = Field(default_factory=list)
+    detail: list[str] = Field(default_factory=list)
+    error: str = ""
+    error_type: str = ""
+
+    @model_serializer(mode="wrap")
+    def _serialize_optional_diagnostics(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Old event fixtures remain byte-identical when no new facts were observed."""
+        value = handler(self)
+        for key in ("model", "model_source", "attempts", "detail"):
+            if not value.get(key):
+                value.pop(key, None)
+        return value
+
+
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 
 
@@ -2723,6 +2923,7 @@ class LoopConfig(BaseModel):
     #: ``put_nowait`` at ~0.0018 ms/call, which is the budget an implementer
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
+    capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )
@@ -2745,6 +2946,18 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
     has_steering_messages: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Run-scoped opt-in: drain the steering queue ONCE before this run's first
+    #: event/request, instead of only from the second inner iteration onward.
+    #: Set by a host whose run exists BECAUSE of the queue — a session opening
+    #: a turn for an idle-admitted steer — so the run's first call carries the
+    #: queued message rather than spending an empty warm-up call and delivering
+    #: it on a continuation. A run whose opening drain finds the queue already
+    #: emptied retires BEFORE its first event: no ``agent_start``/``agent_end``
+    #: pair, no provider call (the session documents the same silent settle for
+    #: a dropped turn in ``_drop_pre_aborted_turn``). Off by default, so every
+    #: ordinary turn keeps the historical shape where a steer can never appear
+    #: in its first request (the loop comment carries the full rationale).
+    drain_steering_on_open: bool = False
     #: Asks the host whether a boundary-respecting cancel is pending. Consulted
     #: at the post-tool boundary, where every call in the batch has produced a
     #: paired result and the next model request has not yet been spent — so a
@@ -2752,6 +2965,17 @@ class LoopConfig(BaseModel):
     #: effects (a push, an MR write) mid-flight. ``None`` leaves the behaviour
     #: exactly as it was: only the abort signal ends a turn early.
     graceful_cancel_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Whether THIS run's ending on a WORDLESS stop -- a ``stop`` whose message
+    #: carried no text and no tool calls -- is a failure the loop must recover
+    #: with one bounded re-ask (``MAX_WORDLESS_STOP_RECOVERIES``). The session
+    #: computes it from the quiet-end rule, INVERTED
+    #: (``Session._silent_end_is_a_failure``): a run whose words someone is
+    #: waiting on (a person asked or awaits, a notify wake) must not end in
+    #: silence, while every internal arrival -- peer, hub_message, job_result,
+    #: session_state, catch-up, a non-notify wake -- may end quietly, and for
+    #: those the bare stop stays its legitimate ending. Off by default: a
+    #: direct embedder keeps today's ending exactly.
+    recover_wordless_stop: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
@@ -3367,6 +3591,20 @@ class ChatRequest(BaseModel):
     #: was meant to shrink keeps growing. Auto-naming is the opposite case and
     #: sets ``isolated`` instead — see below.
     replayable: bool = False
+    #: This call is a recovery re-ask for a turn an interrupted stream aborted,
+    #: and it must go out on the SAME provider/model that actually served the
+    #: attempt it continues.
+    #:
+    #: Transport policy like ``replayable`` above. It makes ``SessionStreamFn``
+    #: skip the route-REWRITING machinery (quota-preflight activation, sticky
+    #: and fallback routing) so nothing re-points the call, while every HARD
+    #: constraint still applies: an exhausted quota, a disabled route or an
+    #: auth failure stops the recovery with its own reason instead of moving
+    #: the call to another credential or model. ``stream_with_failover`` reads
+    #: it as single-attempt/no-fallback. It is deliberately NOT ``isolated``:
+    #: errand cache/quota/account semantics stay intact -- see that field's
+    #: six-point list for why the two must not be conflated.
+    same_route_retry: bool = False
     #: This call is DECORATION running alongside a user turn, and it must not be
     #: able to change anything the turn depends on.
     #:
@@ -3644,6 +3882,25 @@ class StreamEndEvent(BaseModel):
     #: marker (``content_filter``, ``refusal``, ``SAFETY``…) is still visible,
     #: so they must put it here; downstream only ever sees the normalized stop.
     error: str | None = None
+    #: A bare ``error`` finish with no refusal prose and no hard error object --
+    #: the provider ended the stream mid-answer without saying why. Set ONLY on
+    #: the shape ``providers/clients.py`` classifies there. It is a bounded
+    #: ELIGIBILITY for the loop's interruption continuation (see
+    #: ``MAX_CONNECTIVITY_CONTINUATIONS``), NOT a claim that the cause was the
+    #: network nor that the failure is transient -- neither is knowable from
+    #: the wire. Defaults False, so every other end shape keeps the existing
+    #: terminal behaviour byte-for-byte until the loop decides otherwise.
+    retryable_interruption: bool = False
+    #: Effective API selector of the attempt that produced a MARKED end.
+    #: FAULT-ONLY: stamped by ``providers/failover.py`` on the forwarded end
+    #: (the frame that already holds the per-attempt ``spec``) and the value
+    #: the interrupted-turn recovery pins its re-ask to. It names the
+    #: ATTEMPTED API route -- never a claim about the underlying provider,
+    #: quantization or checkpoint behind it -- and ``None`` means UNKNOWN, in
+    #: which case the recovery REFUSES rather than guessing the route from the
+    #: request's model (after a sticky handoff or driver fallback the request
+    #: can name A while B served the failure).
+    attempted_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):

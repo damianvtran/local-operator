@@ -210,7 +210,10 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
 
     manual_input = on_manual_code_input if definition.accepts_paste_prompt else None
     return LoginCallbacks(
-        on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
+        on_auth_url=on_auth_url,
+        on_progress=on_progress,
+        on_manual_code_input=manual_input,
+        displays_warnings=True,
     )
 
 
@@ -619,13 +622,28 @@ def _apply_login_defaults(provider_id: str, *, oauth: bool | None = None) -> Non
             apply_login_defaults,
             plan_login_defaults,
         )
+        from local_operator.providers.model_access import (
+            credentialed_chat_providers_here,
+        )
 
         manager = ConfigManager(config_dir())
+        # The accessibility predicate the planner needs to see a STRANDED default
+        # (a config hosting whose provider has no credential any more). Read
+        # AFTER the credential write, and best effort: an unreadable store means
+        # ``None``, which disables only that repair. There are no live sessions
+        # on this path — the CLI has none — so nothing is re-homed here.
+        try:
+            accessible = credentialed_chat_providers_here(
+                config_dir=config_dir(), config_values=manager.get_config().values
+            )
+        except Exception:  # noqa: BLE001 — the repair degrades, the login does not
+            accessible = None
         plan = plan_login_defaults(
             provider_id,
             manager.get_config_value("hosting"),
             manager.get_config_value("model_name"),
             oauth=oauth,
+            accessible=accessible,
         )
         # The write is shared too (``apply_login_defaults``): a plan may set only
         # the model, which a hosting-gated write here used to drop.

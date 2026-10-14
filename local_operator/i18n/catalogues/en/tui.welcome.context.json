@@ -1,0 +1,110 @@
+{
+  "tui.welcome.tip.approvals": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.classification_login": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.classification_off": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.cmux": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.esc": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.fork": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.fork_placement": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.hotkeys": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.key_new_session": {
+    "maxCells": 32,
+    "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.key_resume": {
+    "maxCells": 32,
+    "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.mesh": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.model": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.paste": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.resume": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.setup": {
+    "maxCells": 57,
+    "note": "first-run opening frame, in place of TIPS[0]: same 59-cell painted budget as the pool (TIP_MIN_WIDTH measures it)",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.shell": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.subagents": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  },
+  "tui.welcome.tip.team": {
+    "maxCells": 57,
+    "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+    "role": "splash tip",
+    "tone": "plain, one clause"
+  }
+}

@@ -141,6 +141,13 @@ async def _fake_ask_for_blocks(questions: list[Any]) -> dict[str, list[str]] | N
     return None
 
 
+async def _quiet_door_for_blocks() -> None:
+    """Minimal quiet-end door so create_tools includes no_reply for ordering
+    checks (docs/design/quiet-turns.md §4; presence-only, like the ask hook
+    above — the ordering assertion spans the FULL surface)."""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # render_string / render_template engine
 # ---------------------------------------------------------------------------
@@ -654,17 +661,25 @@ def test_env_and_date_never_in_the_stable_head() -> None:
         assert "Darwin" not in block
 
 
-def test_inventory_block_matches_default_tool_order() -> None:
+def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPatch) -> None:
     # RT-33: block-1 ordering follows DEFAULT_TOOL_NAMES, which keeps the
     # inventory byte-stable against provider tool-array ordering.
+    from local_operator.tools import video_tool
     from local_operator.tools.registry import DEFAULT_TOOL_NAMES, create_tools
+
+    # The video pair is createIf-gated on a provider credential the way every
+    # other tool here is gated on a stub-able door — and a bare CI host holds
+    # none, so without this stub the pair is missing from a context that is
+    # otherwise fully capable and the ORDER assertion below reds (round-2
+    # review V8). Presence-only, same rule as the gates charted above.
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
 
     tools = create_tools(
         ToolContext(
             cwd=".",
             wake_scheduler=_FakeSchedulerForBlocks(),
             monitor_scheduler=_FakeMonitorSchedulerForBlocks(),
-            subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+            subagent_launcher=lambda label, prompt, *, agent="task", **kwargs: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
             # `ask` is createIf-gated on the HOOK that answers it, and on that
@@ -689,6 +704,16 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # Presence-only, same rule as the two above: `project`/
             # `project_delete` are createIf-gated on a store being attached.
             project_registry=object(),
+            # `code_requests` is createIf-gated on the session's own DIRECTORY
+            # (its derived index lives beside the transcript) — context DATA,
+            # presence-only here like the registries above, and never read
+            # because the tool is not called by an ordering test.
+            session_dir="/stub-session",
+            # ``no_reply`` (docs/design/quiet-turns.md §4) is createIf-gated on
+            # the quiet-end door a real session binds per turn — presence-only
+            # here, same rule as the gates above, so the assertion below sees
+            # the fully-capable inventory DEFAULT_TOOL_NAMES describes.
+            quiet_end=_quiet_door_for_blocks,
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
@@ -713,7 +738,7 @@ def test_inventory_names_monitor_only_when_a_scheduler_is_attached() -> None:
 
     base: dict[str, Any] = {
         "cwd": ".",
-        "subagent_launcher": lambda label, prompt, *, agent="task", effort=None: "job-x",
+        "subagent_launcher": lambda label, prompt, *, agent="task", **kwargs: "job-x",
         "jobs": _FakeJobsForBlocks(),
         "subagent_comms": _FakeCommsForBlocks(),
     }
@@ -735,7 +760,7 @@ def test_system_md_teaches_wake_vs_monitor_and_the_no_action_norm() -> None:
     flat = " ".join(text.split())
     assert "`monitor` watches a read-only call for changes" in flat
     assert "reports only deltas" in flat
-    assert "finds nothing needing action is complete" in flat
+    assert "needing no reply or action: call `no_reply` and write nothing" in flat
 
 
 def test_system_md_cues_on_demand_tool_references() -> None:
@@ -1068,6 +1093,75 @@ def test_user_instructions_keep_the_head_stable_across_turns() -> None:
     )[0]
 
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# the language line (SYS1)
+# ---------------------------------------------------------------------------
+
+_LANGUAGE_LINE = (
+    "The user's preferred language is French (fr). Reply in that language by "
+    "default; if the conversation context clearly establishes another language, "
+    "follow that instead."
+)
+
+
+def test_language_line_rides_the_stable_head_block() -> None:
+    """The model is told the user's language in the cache-anchored head.
+
+    Model-facing English, parameterised by the one backend language setting —
+    it belongs with the persona, not the tail, where it would be re-sent ahead
+    of every volatile change and could drift mid-session.
+    """
+    blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE, language_line=_LANGUAGE_LINE)
+
+    assert len(blocks) == 4
+    assert _LANGUAGE_LINE in blocks[0]
+    for block in blocks[1:]:
+        assert "preferred language" not in block
+
+
+def test_absent_language_line_leaves_the_head_byte_identical() -> None:
+    # A caller that renders no session-shaped prompt (the context-budget
+    # benchmark) pays nothing for the feature.
+    baseline = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[0]
+
+    assert build_system_blocks(TOOLS, SKILLS, ENV, DATE, language_line="")[0] == baseline
+    assert build_system_blocks(TOOLS, SKILLS, ENV, DATE, language_line="   \n ")[0] == baseline
+
+
+def test_language_line_is_the_only_delta_in_the_head() -> None:
+    # "No other prompt content changes": removing the line and its separator
+    # from the composed head reproduces the head built without one, exactly.
+    without = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[0]
+    with_line = build_system_blocks(TOOLS, SKILLS, ENV, DATE, language_line=_LANGUAGE_LINE)[0]
+
+    assert with_line.replace("\n\n" + _LANGUAGE_LINE, "") == without
+
+
+def test_language_line_precedes_custom_instructions() -> None:
+    # A hand-written "always answer in X" preference must be able to override
+    # the default; later text wins, and the custom-instructions section is the
+    # LAST thing in the head.
+    head = build_system_blocks(
+        TOOLS,
+        SKILLS,
+        ENV,
+        DATE,
+        language_line=_LANGUAGE_LINE,
+        user_instructions="- Always answer in German.",
+    )[0]
+
+    assert head.index(_LANGUAGE_LINE) < head.index("<user_instructions>")
+
+
+def test_language_line_keeps_the_head_stable_across_turns() -> None:
+    line = build_system_blocks(TOOLS, SKILLS, ENV, DATE, language_line=_LANGUAGE_LINE)[0]
+    again = build_system_blocks(
+        TOOLS, "other skills", "other env", "2027-01-01", language_line=_LANGUAGE_LINE
+    )[0]
+
+    assert line == again
 
 
 def test_credentials_ride_the_volatile_tail_as_names_only() -> None:

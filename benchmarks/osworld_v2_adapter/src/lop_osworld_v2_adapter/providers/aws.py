@@ -72,6 +72,7 @@ from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers.base import (
     DEFAULT_ACTION_DELAY_S,
     GUEST_COMMAND_TIMEOUT_S,
+    InstructionUnavailable,
     bounded_observation_cause,
     guest_deadline_for,
 )
@@ -572,6 +573,52 @@ def _since_ms(earlier: float, later: float) -> int:
     return max(0, int((later - earlier) * 1000))
 
 
+def _read_reset_instruction(env: Any) -> str:
+    """Read the task instruction ONCE, post-reset, via the official accessor.
+
+    ``DesktopEnv._task_get(task_config, key)`` (desktop_env.py:222-231 on the
+    pinned v2.1 source; the same shape on the 2.0 checkout) is the accessor
+    upstream's own ``_set_task_info`` reads the instruction through, for both
+    mapping and attribute ``task_config`` shapes -- so this calls the SAME
+    function the environment itself trusts, never a re-implementation and
+    never a second parser. It is deliberately NOT a mirror of the caching
+    code: the point is to ask the live object again AFTER setup, because the
+    cached value is the pre-setup one.
+
+    Every failure is a refusal (``InstructionUnavailable``), never a value:
+    an absent accessor, a getter exception, a non-string value, or text that
+    is empty or whitespace-only. Carrying on would either run the model
+    against a stale or fabricated instruction, or let the episode die later
+    somewhere less attributable -- both make the episode's record dishonest
+    about which task was actually run. The original exception is chained,
+    never swallowed, and the VALUE is never echoed (only its type): the
+    instruction is task content and this message may travel further than the
+    observation does.
+    """
+
+    getter = getattr(env, "_task_get", None)
+    if not callable(getter):
+        raise InstructionUnavailable(
+            "the pinned DesktopEnv exposes no _task_get accessor, so the task "
+            "instruction cannot be read from the official runtime; refusing "
+            "before any model request"
+        )
+    try:
+        value = getter(getattr(env, "task_config", None), "instruction")
+    except Exception as error:
+        raise InstructionUnavailable(
+            "reading the task instruction from the environment failed: "
+            f"{type(error).__name__}: {error}"
+        ) from error
+    if not isinstance(value, str) or not value.strip():
+        raise InstructionUnavailable(
+            "the environment served no usable task instruction "
+            f"(got {type(value).__name__}): the reset observation would carry "
+            "no task text; refusing before any model request"
+        )
+    return value
+
+
 class AwsProvider:
     """Satisfies ``EnvironmentProvider`` against a real EC2 guest."""
 
@@ -609,6 +656,11 @@ class AwsProvider:
         self._instance_id: str | None = None
         self._public_ip: str | None = None
         self._env: Any = None
+        # The authoritative task instruction, read ONCE at the reset seam
+        # through the official accessor (see ``_read_reset_instruction``) and
+        # then served on every observation. None until allocate succeeds; a
+        # teardown-only provider never allocates and never needs it.
+        self._runtime_instruction: str | None = None
         # The episode-scoped, absolute, workspace-external cache root the
         # adapter mints in reset_start. None until allocate; a rescue
         # (teardown-only) provider never allocates and never needs one.
@@ -1048,6 +1100,24 @@ class AwsProvider:
             self._reset_completed = True
         finally:
             self._reset_in_flight = False
+        # THE POST-RESET INSTRUCTION READ (why it is here and must not move).
+        # Upstream's ``_set_task_info`` (called before the setup step this
+        # call just drove -- :370 vs :375 on the v2.1 pin, :364 vs :368 on the
+        # 2.0 checkout) caches the mapping instruction into ``self.instruction``,
+        # and ``_get_obs`` (:455-460) returns that cache -- so for a task whose
+        # instruction is computed from setup/profile state, the reset frame
+        # would carry the STALE pre-setup value. The published hybrid baselines
+        # read the task mapping AFTER setup for exactly this reason. One read,
+        # once, at the one seam where "setup has just succeeded" is a fact; the
+        # value is cached for the observations and re-read NEVER (a per-frame
+        # getter would re-invoke task code and could disagree with itself).
+        # Because this runs inside ``allocate``, a missing/blank/unreadable
+        # instruction refuses BEFORE any observation exists, therefore before
+        # any model request: this must not be softened into a fallback, and a
+        # future edit that moves it before ``env.reset`` reads the stale
+        # cache, while one that drops it silently reverts the model to that
+        # same stale value.
+        self._runtime_instruction = _read_reset_instruction(env)
         self._env = env
 
     def _install_default_session(self, region: str) -> None:
@@ -1295,6 +1365,13 @@ class AwsProvider:
         finally:
             screenshot_logger.removeHandler(capture)
         observation = dict(raw)
+        if self._runtime_instruction is not None:
+            # The environment's own post-setup read is the instruction the
+            # model must see (see ``_read_reset_instruction``): override
+            # whatever ``_get_obs`` cached at ``_set_task_info`` time. This
+            # copies the value read ONCE at the reset seam -- the accessor is
+            # never called per frame, and never from here.
+            observation["instruction"] = self._runtime_instruction
         if observation.get("screenshot") is None:
             # A frameless read with no captured record adds NOTHING: an absent
             # cause must stay absent rather than be invented, and the builder

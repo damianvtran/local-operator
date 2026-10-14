@@ -373,8 +373,11 @@ async def test_complete_clearance_request_shape(tmp_path) -> None:
     # drives that layer on the real ``SessionStreamFn`` so the pair is pinned.
     assert request.prompt_cache_key is None
     assert request.tool_choice == "none"
-    # Tools mirror the live set — the front of the cached prefix (never []).
-    assert request.tools == session._context.tools
+    # Tools mirror the array the turn publishes — the front of the cached
+    # prefix (never []). That is the PUBLISHABLE inventory, not ``context.tools``:
+    # the latter keeps the deferred schemas (``no_reply`` among them) so
+    # resolution can call them first try; the wire array withholds them.
+    assert request.tools == session._publishable(session._tools)
     assert [m.text for m in request.messages] == ["port it", "gate message"]
     await session.dispose()
 
@@ -515,7 +518,9 @@ async def test_complete_clearance_retries_a_bare_tool_call_without_tools(tmp_pat
     assert answer == "VERDICT: clear\nREASON: fine."
     assert len(stream.requests) == 2
     first, retry = stream.requests
-    assert first.tools == session._context.tools
+    # Same shape as the cell above: the wire array is the publishable
+    # inventory (deferred schemas withheld), not ``context.tools``.
+    assert first.tools == session._publishable(session._tools)
     assert retry.tools == []
     call, refusal = retry.messages[-2:]
     assert call.role == "assistant" and [(c.id, c.name) for c in call.tool_calls] == [

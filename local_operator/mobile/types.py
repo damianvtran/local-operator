@@ -451,6 +451,25 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         sender = frame.get("sender", {})
         if not isinstance(sender, dict):
             raise ValueError("sender must be an object")
+    elif op == "rehome_if_current":
+        # A sign-in moving THIS session off an unreachable model, compare-and-set
+        # style: ``expected`` is the selector the caller believes is selected, and
+        # the owner refuses unless it still is (see
+        # ``ServingSessionHandle.rehome_if_current``). SHAPE only here: whether
+        # the pair is servable, whether the old provider is still stranded and
+        # whether the conversation is idle are all the receiving handle's
+        # questions, because only it can see its own store and its own work.
+        #
+        # A NEW op rather than a ``set_model`` with extra fields, for the reason
+        # ``peer_set_model`` gives above: every runtime already knows ``set_model``
+        # and would apply it unguarded and uninspected, while an unknown op fails
+        # closed — an older runtime answers `unknown op`, which the caller reads
+        # as "this session cannot be re-homed" and reports as zero moved
+        # sessions. Additive; no PROTOCOL_VERSION bump.
+        for name in ("expected", "provider", "model_id"):
+            value = frame.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
     elif op == "peer_set_model":
         # Another local lop session switching THIS one's model (`send model=` /
         # `lop model`). SHAPE only: whether the pair is servable is the
@@ -467,6 +486,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         sender = frame.get("sender", {})
         if not isinstance(sender, dict):
             raise ValueError("sender must be an object")
+    elif op == "job_cancel":
+        # The background-job rail's control (video programme §2.2): cancel ONE
+        # job by its own id — the one `jobs` prints. SHAPE only here: whether
+        # the id names anything, and whether the job has already settled, are
+        # the receiving runtime's questions (it holds the job table). Typed
+        # here so an empty or non-string id is refused at the wire rather
+        # than forwarded to a lookup for "".
+        if not isinstance(frame.get("job_id"), str) or not frame["job_id"]:
+            raise ValueError("job_id must be a non-empty string")
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +521,11 @@ ControlOp = Literal[
     "cancel",  # {mode?: graceful|immediate}
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
+    # A sign-in moving a session off a model whose provider has no credential:
+    # {expected, provider, model_id}, applied only if the selection has not moved
+    # and the session is idle. Additive like `peer_set_model` — an old runtime
+    # answers unknown-op and the caller reports zero re-homed sessions.
+    "rehome_if_current",
     "slash",  # {command, args} — execute a TUI slash command
     "complete_aside",  # {turns, aside_instruction?: false} — off-record request
     "new_conversation",  # {} — the TUI's /new
@@ -563,6 +596,15 @@ ControlOp = Literal[
     # op`, which the viewer reports to the panel as `unsupported` — its own
     # sentence, distinct from "this chat has no code memory yet".
     "variables",  # {action: list|set|update|delete, key, value, type}
+    # The background-job rail's ONE mechanism: cancel ONE background job by
+    # id (the video programme's post-turn rail; design §2.2, contract §4.1).
+    # It lands on the SAME engine call `jobs op='cancel'` makes
+    # (``AsyncJobManager.cancel``) rather than a second cancel mechanism —
+    # the relay mounts no rendered control in v1, and the op exists so the
+    # first phone carrier and delegated surfaces can ride it. Additive like
+    # the ask ops: an OLD registrant answers `unknown op` gracefully — no
+    # ``PROTOCOL_VERSION`` bump.
+    "job_cancel",  # {job_id}
 ]
 
 # Events the registrant streams to the daemon.
@@ -669,6 +711,17 @@ class TranscriptEntry:
     # of base64 re-sent per token would swamp the SSE. ``id`` is the message
     # id the endpoint resolves against.
     images: list[dict[str, Any]] = field(default_factory=list)
+    # Video attachments, as lightweight REFERENCES not bytes — the parallel
+    # family to ``images`` with its OWN index space (a video artifact never
+    # shifts an image index and vice versa; each family's walk is the whole
+    # contract with its endpoint). Each is ``{"index": int, "mime_type":
+    # str, "duration_s": float | None}``; the bytes are fetched lazily from
+    # ``/api/sessions/{pid}/attachment?entry=<id>&i=<index>&kind=video`` —
+    # which is the one Range-capable route, because phone Safari will not
+    # play a <video> served as a full-body 200. ``duration_s`` rides only
+    # when the artifact carried one (absence renders reduced, never a
+    # synthesized zero).
+    videos: list[dict[str, Any]] = field(default_factory=list)
     # assistant rows stream: ``final`` flips true on message_end
     final: bool = True
     # Settled streaming is not the same as complete representation: transport
@@ -1080,8 +1133,30 @@ class SessionProjection:
     context_tokens: int | None = None
     context_window: int | None = None
     context_is_estimate: bool | None = None
+    #: The PUBLISHED per-channel spend object (PR-2, design §5.1/§6), already
+    #: serialised by the runtime's store (``FrontendStateStore.spend_channels_copy``)
+    #: and bounded by the same row cap the desktop frame applies. Raw INTEGER
+    #: micro-USD throughout — the phone spells it with its own port of the
+    #: money ladder and never re-sums: ``total_micro`` already spans this
+    #: session's inference, its channels and its children, and its
+    #: ``knowledge``/``by_basis``/``rows`` are the backend's own readings.
+    #: ABSENT (``None``, popped by ``to_json``) means "this runtime publishes
+    #: no channel ledger" — the desktop frame's own absent-key rule — so an
+    #: older daemon or a pre-upgrade reader renders the legacy reading above
+    #: unchanged rather than an empty breakdown.
+    spend_channels: dict[str, Any] | None = None
     version: int = 0  # projection epoch; the phone drops stale repaints
     attention: dict[str, Any] = field(default_factory=dict)
+    #: Turn supplements (memo §2.7/§3.1 row 18; probe P5's fallback): the newest
+    #: beat per anchor, as a SIBLING MAP rather than a new ``kind`` in
+    #: ``transcript``. A projection is ONE snapshot fanned to every subscriber, so
+    #: a per-viewer ``kind`` is not expressible here; an unknown entry kind is
+    #: rendered visibly by older app builds, while an unknown sibling key is
+    #: ignored by them (loose JSON, tolerantly rebuilt). New clients render the
+    #: blocks from this map; the wire name matches the journal's anchor key.
+    #: Emitted only when non-empty (see ``to_json``): an empty map is absence,
+    #: and the frame pin holds a supplement-free frame to the parent's bytes.
+    supplements: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -1096,6 +1171,22 @@ class SessionProjection:
             data.pop("asks", None)
         if self.asks_open is None:
             data.pop("asks_open", None)
+        # The per-channel spend object follows the same absence rule as
+        # ``asks`` above: a None field is POPPED rather than sent as null, so
+        # the key's presence is the capability proxy — an old runtime never
+        # emits it, and a null would read as "this runtime has a channel
+        # ledger and it is empty", which is a different fact.
+        if self.spend_channels is None:
+            data.pop("spend_channels", None)
+        # An EMPTY supplement map is absence, not information: the map exists
+        # only to carry beats, and the reader rebuilds a payload without the key
+        # to the empty default (``_projection_from_json``; pinned by the
+        # loose-wire test). Shipping ``{}`` on every frame grew the wire for
+        # every session without beats — exactly the cost-only inflation the
+        # offloop frame pin (a digest of the emitted frame) exists to catch —
+        # so the key goes out only when it carries beats.
+        if not self.supplements:
+            data.pop("supplements", None)
         return data
 
     def __post_init__(self) -> None:

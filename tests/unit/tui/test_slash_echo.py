@@ -107,6 +107,9 @@ ECHO_POLICY = {
     # A setting, not words the model is told: the receipt names the theme now
     # in force, and the screen itself is wearing the change.
     "theme": False,
+    # A setting, `/theme`'s shape one noun over: the receipt names the language
+    # now in force, and the screen itself is wearing the change.
+    "language": False,
     "provider": False,
     # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
     # replaces the transcript region, so a user row printed behind it would
@@ -133,6 +136,9 @@ ECHO_POLICY = {
     "compact": False,
     # The stop receipt names what was stopped; nothing reaches the model.
     "stop": False,
+    # The `/highlights` receipt names the effect and the job it landed on —
+    # nothing here reaches the model (`/stop`'s rule one noun over).
+    "highlights": False,
     "context": False,
     "approvals": False,
     "skills": False,
@@ -212,6 +218,10 @@ PROMPT_POLICY = {
     "effort": False,
     "fast": False,
     "theme": False,
+    # A VALUE (`auto` or a shipped locale), not a prompt: the handler reads it
+    # or refuses it with the option list, so an inline engage splices-and-runs
+    # rather than reassembling the draft into it.
+    "language": False,
     "provider": False,
     # The PAGE is the receipt (same rule as `/usage` and `/analytics`): it
     # replaces the transcript region, so a user row printed behind it would
@@ -236,6 +246,9 @@ PROMPT_POLICY = {
     "btw": True,
     "compact": False,
     "stop": False,
+    # The `/highlights` argument is the job's control vocabulary, not a prompt
+    # THIS conversation is given (it reaches the supplement generator).
+    "highlights": False,
     "context": False,
     "approvals": False,
     "skills": False,
@@ -850,6 +863,8 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 "designer",
                 "hollow-role",
                 "manager",
+                # Packaged QA is now addressable just like the other starters.
+                "qa-tester",
                 "reviewer",
                 "scout",
                 "tui-designer",

@@ -1,0 +1,19 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (tên khóa)",
+  "tui.transcript.ask.not_answered": "không trả lời",
+  "tui.transcript.ask.not_provided": "không cung cấp",
+  "tui.transcript.attach.receipt": "↑ {count, plural, other {# ảnh đã đính kèm}}",
+  "tui.transcript.catchup.headline": "bắt kịp — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, other {# lần thức dậy bị lỡ}}",
+  "tui.transcript.queued.newest": "· trong hàng đợi cho runtime tiếp theo — esc lấy lại",
+  "tui.transcript.queued.older": "· trong hàng đợi cho runtime tiếp theo",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "phiên khác",
+  "tui.transcript.group.messages": "tin nhắn · {count}",
+  "tui.transcript.group.actions": "{count, plural, other {{label} thao tác}}",
+  "tui.transcript.group.reply_requested": "{count, plural, other {{label} yêu cầu trả lời}}",
+  "tui.transcript.group.steered": "{count, plural, other {{label} lần đổi chỉ dẫn}}",
+  "tui.transcript.hub.reply_requested": "Đã yêu cầu trả lời",
+  "tui.transcript.hub.steered": "Đã đổi chỉ dẫn",
+  "tui.transcript.hub.from": "Từ {identity}"
+}

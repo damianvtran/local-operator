@@ -54,6 +54,7 @@ from local_operator.harness.types import (
 )
 from local_operator.model.effort import (
     EFFORT_ORDER,
+    FALLBACK_EFFORTS,
     SUPPORTED_EFFORTS,
     resolve_effort_in,
 )
@@ -93,6 +94,18 @@ _KIND_LABELS: dict[str, str] = {
     "aborted": "aborted",
     "unknown": "provider error",
 }
+
+#: The label an HTTP 402 renders under INSTEAD of ``_KIND_LABELS["quota"]``.
+#:
+#: A 402 is classified ``kind="quota"`` on purpose (see :func:`_classify_fields`:
+#: rotation and the direct-credential refresh skip key off it), but the WORDS the
+#: user reads must not follow that kind. "rate limit or quota exceeded" tells a
+#: signed-in user with a zero balance to wait out a window that never reopens,
+#: and the downstream incident classifier (``incidents.classify_incident``) read
+#: the same words and filed the failure as ``rate-limit`` rather than
+#: ``billing``. The label is chosen at render time from the STATUS, so the kind,
+#: and everything that dispatches on it, is untouched.
+_OUT_OF_CREDITS_LABEL = "out of credits"
 
 #: Substrings that mean "you have run out" UNAMBIGUOUSLY, wherever the provider
 #: chose to put them. Matched against the provider's own message because the
@@ -814,8 +827,10 @@ class ProviderError(RenderedStreamError):
         retry_after_ms: int | None = None,
         auth_error: bool = False,
         kind: ProviderErrorKind | None = None,
+        request_sent: bool = True,
         transport: bool = False,
         transport_cause: BaseException | None = None,
+        fail_closed: bool = False,
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -830,8 +845,15 @@ class ProviderError(RenderedStreamError):
         text = provider_text or _describe_bare_status(status)
         super().__init__(text)
         self.status = status
+        # Only pre-dispatch constructors may state False; absent usage elsewhere
+        # is unknown spend, never proof that the request was free.
+        self.request_sent = request_sent
         self.message = text
         self.retryable = retryable
+        # Non-retryable normally still permits another fallback target. Local
+        # resource refusals must stop the entire attempt chain, even before any
+        # delta was forwarded (or when a host buffers the whole response).
+        self.fail_closed = fail_closed
         self.retry_after_ms = retry_after_ms
         self.auth_error = auth_error
         #: PROVENANCE, not classification: this error was built from a transport
@@ -929,7 +951,14 @@ class ProviderError(RenderedStreamError):
             facts.append(f"HTTP {self.status}")
         if self.retry_after_ms:
             facts.append(f"retry in {_format_retry_delay(self.retry_after_ms)}")
-        label = _KIND_LABELS.get(self.kind, _KIND_LABELS["unknown"])
+        # Chosen from the status, not the kind: see ``_OUT_OF_CREDITS_LABEL``.
+        # 402 is the only status this applies to, and it is always ``quota``-kind
+        # unless a caller stated a kind outright (an abort is handled above).
+        label = (
+            _OUT_OF_CREDITS_LABEL
+            if self.status == 402 and self.kind == "quota"
+            else _KIND_LABELS.get(self.kind, _KIND_LABELS["unknown"])
+        )
         detail = f" ({', '.join(facts)})" if facts else ""
         return f"{label}{detail}: {self.message}"
 
@@ -1574,22 +1603,26 @@ def is_rendered_auth_error(rendered_error: str) -> bool:
     return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["auth"])
 
 
-def is_rendered_usage_limit_error(rendered_error: str) -> bool:
-    """Whether a RENDERED error string is the usage-limit (quota) kind.
+def is_rendered_out_of_credits_error(rendered_error: str) -> bool:
+    """Whether a RENDERED error string is the out-of-credits (HTTP 402) refusal.
 
-    The string-form sibling of :func:`is_rendered_auth_error`, with the same
-    contract: the failover module itself put ``_KIND_LABELS["quota"]`` at the
-    front of every quota-kind error it rendered, so the prefix is its own
-    statement rather than a guess about a provider's wording. The display
-    sites hold the rendered string rather than the original exception, which
-    is why the kind is read back out of text here too.
+    The sibling of :func:`is_rendered_auth_error`, for the same reason: the
+    display layers hold the rendered text, not the exception, and this module is
+    the only writer of the label, so the prefix is its own statement rather than
+    a guess about a provider's wording.
 
-    402 is INCLUDED by construction even though :func:`_is_usage_limit` keeps
-    it out for the sticky-credential reason documented there:
-    :func:`_classify_fields` names 402 as quota and both routes render through
-    this same label, which is the fact a display gate can act on.
+    The LEGACY rendering of the same failure also counts: before the 402 got
+    its own label it read ``rate limit or quota exceeded (HTTP 402): ...``, and
+    a runtime older than this one can still hand its rendered error to a newer
+    display layer (a follower attached to an older owner). The quota label is
+    only accepted together with the ``(HTTP 402`` fact, so a 429 never matches.
     """
-    return bool(rendered_error) and rendered_error.lower().startswith(_KIND_LABELS["quota"])
+    if not rendered_error:
+        return False
+    lowered = rendered_error.lower()
+    return lowered.startswith(_OUT_OF_CREDITS_LABEL) or lowered.startswith(
+        f"{_KIND_LABELS['quota']} (http 402"
+    )
 
 
 def is_usage_limit_error(error: BaseException) -> bool:
@@ -2314,9 +2347,11 @@ DEFAULT_CHAIN_KEY = "default"
 #: ``settings_io`` validates a chain hop's effort at config-write time and
 #: must not pull this module's module-level ``httpx`` import onto the TUI
 #: startup path to do it (F9 — ``test_import_graph.py`` pins that path).
-#: Every caller in THIS module still reads it as ``SUPPORTED_EFFORTS``.
+#: Fixed depths use ``SUPPORTED_EFFORTS``; chain parsers/validators instead
+#: use ``FALLBACK_EFFORTS`` so explicit reset sentinels stay distinct.
 
-#: The same vocabulary as an ordinal ladder, for anything a person READS.
+#: The fixed depth vocabulary as an ordinal ladder, for anything a person READS.
+#: ``auto`` is appended separately in chain diagnostics, never ranked here.
 #: ``sorted()`` puts ``max`` between ``low`` and ``medium`` and sits ``minimal``
 #: next to it - the two opposite ends of the scale, adjacent - which reads as
 #: noise to someone who already knows the ladder from ``/effort`` (design round
@@ -2345,9 +2380,10 @@ class FallbackTarget:
     """One resolved cascade entry.
 
     ``selector`` keeps routing compatible with the existing
-    ``provider/model`` chain format. ``effort`` is optional because many
-    providers either do not expose reasoning levels or should use their model
-    default.
+    ``provider/model`` chain format. An absent ``effort`` carries/clamps the
+    primary's choice; explicit ``auto`` instead resets it to the target's own
+    default. Preserve the sentinel on the route, even when that default is a
+    fixed level, so display, snapshots and subsequent turns retain the intent.
     """
 
     selector: str
@@ -2417,7 +2453,7 @@ def _fallback_target(entry: Any) -> FallbackTarget | None:
         raw_effort = entry.get("effort")
         if raw_effort is not None:
             effort = str(raw_effort).strip().lower()
-            if effort not in SUPPORTED_EFFORTS:
+            if effort not in FALLBACK_EFFORTS:
                 return None
     else:
         return None
@@ -2763,7 +2799,7 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
             raw_effort = entry.get("effort")
             if raw_effort is None:
                 return f"{provider}/{model}"
-            if str(raw_effort).strip().lower() not in SUPPORTED_EFFORTS:
+            if str(raw_effort).strip().lower() not in FALLBACK_EFFORTS:
                 logger.warning(
                     "retry.fallbackChains[%s]: dropping entry %s/%s - %r is not accepted in"
                     " a fallback chain hop; expected one of %s",
@@ -2771,7 +2807,7 @@ def _normalize_chain_entry(entry: Any, chain_key: str) -> Any:
                     provider,
                     model,
                     raw_effort,
-                    ", ".join(CHAIN_EFFORT_LADDER),
+                    ", ".join((*CHAIN_EFFORT_LADDER, "auto")),
                 )
             return {"provider": provider, "model": model, "effort": raw_effort}
     return None
@@ -3509,7 +3545,8 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
     a 400 on the request that was supposed to rescue the turn. But dropping it
     is not right either: a cascade entry that names no effort should not cost
     the user the level they asked for wherever the fallback accepts it. So an
-    explicit ``target.effort`` wins, and otherwise :func:`resolve_effort_in`
+    explicit ``target.effort`` wins (``auto`` means the TARGET's own default,
+    not an inherited primary override), and otherwise :func:`resolve_effort_in`
     keeps the chosen level when the fallback accepts it and falls back to that
     model's own default when it does not — clamped against the target spec's
     OWN ladder, which is what keeps this from disagreeing with the model the
@@ -3549,6 +3586,10 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
 
     provider, model_id = parse_selector(target.selector)
     target_spec = build_model_spec(provider, model_id)
+    # Resolve the reset before wire validation: direct providers may not accept
+    # literal "auto", while routers may default to it. Keep the route sentinel
+    # for identity/snapshot/display; only the request spec gets the resolved dial.
+    explicit_effort = target_spec.reasoning_effort if target.effort == "auto" else target.effort
     # `target_spec` already carries its own family's policy from
     # `build_model_spec`, so the sampling knobs are simply left alone here --
     # they are named explicitly rather than omitted so the next reader sees the
@@ -3558,7 +3599,7 @@ def spec_for_target(base: ModelSpec, target: FallbackTarget) -> ModelSpec:
             "temperature": target_spec.temperature,
             "top_p": target_spec.top_p,
             "reasoning_effort": (
-                target.effort
+                explicit_effort
                 if target.effort is not None
                 # Clamped to the nearest rung rather than dropped or defaulted: see
                 # `resolve_effort` for why "the model's default" silently inverts
@@ -3804,6 +3845,26 @@ def _stamp_input_refusal_recovery(event: StreamEvent, degradations: Sequence[str
     return event.model_copy(update={"provider_payload": payload})
 
 
+def _stamp_attempted_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Carry the effective API selector on a MARKED wordless end.
+
+    WHY. The interrupted-turn recovery re-asks the route that actually served
+    the failure, and on these turns no ``StreamModelEvent`` exists to name it
+    (measured: the OpenRouter route ends wordlessly without one), while the
+    REQUEST's model can name a different route than the one that served -- a
+    sticky handoff or a driver fallback makes exactly that split. This frame
+    is the only place that holds the truth (``spec`` -- the per-attempt
+    selector, already consumed by the sibling stampers), so the end itself
+    carries it forward and the loop never guesses. FAULT-ONLY: an unmarked
+    end is returned unchanged, so every ordinary turn's events stay
+    byte-for-byte what they were. The selector is the ATTEMPTED API route,
+    not proof of the underlying provider/quantization.
+    """
+    if not isinstance(event, StreamEndEvent) or not event.retryable_interruption:
+        return event
+    return event.model_copy(update={"attempted_selector": spec})
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -3854,6 +3915,27 @@ async def stream_with_failover(
         # relying on. The fifth is not expressible here — the credential
         # cascade takes routing decisions of its own on a read — so the resolve
         # below is asked for read-only (`read_only=request.isolated`).
+        retry = dataclasses.replace(retry, enabled=False)
+        route_state = None
+
+    if request.same_route_retry:
+        # SINGLE ATTEMPT on the SAME machine: a recovery re-ask for an
+        # interrupted turn goes back to the provider/model that actually
+        # served the failed attempt, so the three denials ``isolated``
+        # expresses by retry-off apply here too -- no fallback chain (the
+        # chain gate below reads ``retry.enabled``), no transport-retry
+        # budget, no credential rotation (every rotation ``continue`` sits
+        # behind a ``retry.enabled`` raise) -- plus dropping route state so
+        # the recovery neither reads nor rewrites the session's fallback pin.
+        #
+        # It is NOT isolated: the resolve below stays a normal WRITE (a
+        # recovery re-ask is a real turn on the real cascade, subject to every
+        # account/quota constraint of the credential it lands on), the request
+        # keeps its ordinary errand/cache/account semantics, and it earns no
+        # special auth re-resolve -- a recovery whose credential fails STOPS
+        # with that failure as its reason rather than walking the pool. With
+        # retries disabled globally this copy changes nothing, which is the
+        # point: the recovery was never a retry budget, it is one re-ask.
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
@@ -4326,6 +4408,7 @@ async def stream_with_failover(
                 async for event in client.stream(current_request, key, oauth_access=access):
                     stamped = _stamp_serving_spec(event, spec)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
+                    stamped = _stamp_attempted_selector(stamped, spec)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
@@ -4372,6 +4455,12 @@ async def stream_with_failover(
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
+                if exc.fail_closed:
+                    # A local generated-output envelope is not bad credentials
+                    # or provider weather: replaying it on another account/route
+                    # repeats the resource failure and hides the original cause.
+                    record(exc, primary=is_primary)
+                    raise
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
                     # cannot be retried HERE — replaying it would stream deltas
@@ -5043,6 +5132,9 @@ async def _recover_quota_blocked(
         if report is None:
             continue
         health = usage_health(report, model_id, reserve_percent=reserve_percent)
+        # The normalized verdict includes eligible paid credits even when their
+        # endpoint provides no percentage. Do not require remaining_fraction:
+        # that would leave a credits-only account behind yesterday's quota block.
         if health.state not in ("healthy", "reserve"):
             continue  # genuinely spent for this family: the block stands
         _clear_blocks_for_model(auth, row.id, provider, model_id)
@@ -5467,6 +5559,7 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         ),
         retryable=True,
         kind="quota",
+        request_sent=False,
     )
 
 

@@ -106,6 +106,20 @@ def test_peer_message_rejects_non_bool_wake() -> None:
         validate_control_frame({"op": "peer_message", "text": "hi", "wake": "yes"})
 
 
+def test_job_cancel_accepts_the_job_id_and_rejects_malformed_ones() -> None:
+    """The job rail's control (video programme §2.2, contract §4.1): the job's
+    own id is the whole body, typed at the wire so an empty or non-string id
+    is refused before any lookup for "" happens on the far side."""
+    validate_control_frame({"op": "job_cancel", "req": 3, "job_id": "job-abc123"})
+    for bad in (
+        {"op": "job_cancel"},
+        {"op": "job_cancel", "job_id": ""},
+        {"op": "job_cancel", "job_id": 7},
+    ):
+        with pytest.raises(ValueError, match="job_id must be a non-empty string"):
+            validate_control_frame(bad)
+
+
 def test_complete_aside_rejects_a_non_bool_instruction_flag() -> None:
     """The flag is TYPED, because a coerced value flips the wrap silently.
 
@@ -550,10 +564,35 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     projection.context_tokens = 12_400
     projection.context_window = 200_000
     projection.context_is_estimate = True
+    # The published per-channel object (PR-2): a plain dict on the wire, carried
+    # as-is — the runtime store serialised it already, so the projection must
+    # not re-shape it. Integer micro-USD and the backend's own knowledge rung.
+    projection.spend_channels = {
+        "version": 1,
+        "tracked": True,
+        "total_micro": 961_000,
+        "knowledge": "partial",
+        "by_basis": {"billed": 900_000, "estimated": 61_000},
+        "rows": [
+            {
+                "channel": "inference",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5-5",
+                "label": "anthropic/claude-sonnet-5-5",
+                "units": 10.0,
+                "unit": "calls",
+                "amount_micro": 900_000,
+                "knowledge": "exact",
+                "basis": ["billed"],
+            }
+        ],
+        "pending": {"voice": "pending_owner_append", "calls": 2},
+    }
 
     wire = projection.to_json()
     for name in _SPEND_CONTEXT_FIELDS:
         assert name in wire, name
+    assert wire["spend_channels"] == projection.spend_channels
 
     rebuilt = _projection_from_json(wire, _record())
     assert rebuilt.cumulative_parent_cost == 1.25
@@ -564,8 +603,13 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     assert rebuilt.context_tokens == 12_400
     assert rebuilt.context_window == 200_000
     assert rebuilt.context_is_estimate is True
+    assert rebuilt.spend_channels == projection.spend_channels
 
-    absent = {key: value for key, value in wire.items() if key not in _SPEND_CONTEXT_FIELDS}
+    absent = {
+        key: value
+        for key, value in wire.items()
+        if key not in _SPEND_CONTEXT_FIELDS and key != "spend_channels"
+    }
     default = _projection_from_json(absent, _record())
     assert default.cumulative_parent_cost is None
     assert default.child_costs == {}
@@ -575,6 +619,11 @@ def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -
     assert default.context_tokens is None
     assert default.context_window is None
     assert default.context_is_estimate is None
+    assert default.spend_channels is None
+    # And the None form is POPPED rather than sent as null: absence is the
+    # capability proxy (an old daemon never emits the key), so a null would be
+    # the false claim that the runtime has a channel ledger and it is empty.
+    assert "spend_channels" not in SessionProjection(session_id="s1", pid=1).to_json()
 
 
 # --- images on an ask answer (ask-attachments-v1) ---------------------------
@@ -623,3 +672,39 @@ def test_only_a_first_answer_may_carry_images(op: str) -> None:
     with pytest.raises(ValueError, match="does not carry images"):
         validate_control_frame(_ask_frame(op, images=[_img()]))
     validate_control_frame(_ask_frame(op, images=[]))
+
+
+def test_a_valid_rehome_frame_passes_and_every_field_is_required() -> None:
+    """``rehome_if_current`` shape: three non-empty strings, nothing else.
+
+    SHAPE only — whether the pair is servable, whether the old provider is still
+    stranded and whether the session is idle are the receiving handle's questions
+    (it is the only party that can see its own store and its own work). An empty
+    ``expected`` is refused here specifically because it would read as "the
+    selection is nothing", which the owner must never be asked to act on.
+    """
+    validate_control_frame(
+        {
+            "op": "rehome_if_current",
+            "req": 1,
+            "expected": "radient/auto",
+            "provider": "deepseek",
+            "model_id": "deepseek-flash",
+        }
+    )
+    for missing in ("expected", "provider", "model_id"):
+        frame: dict[str, Any] = {
+            "op": "rehome_if_current",
+            "expected": "radient/auto",
+            "provider": "deepseek",
+            "model_id": "deepseek-flash",
+        }
+        frame.pop(missing)
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)
+        frame[missing] = "   "
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)
+        frame[missing] = 3
+        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
+            validate_control_frame(frame)

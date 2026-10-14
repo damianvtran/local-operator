@@ -23,7 +23,10 @@ defect too (the reason is stale), and so is an allow-list entry nothing reads.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -375,6 +378,85 @@ def test_every_environment_variable_read_is_scrubbed_or_explained() -> None:
             *(f"  {name}: {', '.join(sorted(reads[name]))}" for name in unaccounted),
         ]
     )
+
+
+@pytest.mark.parametrize("collect_only", [True, False])
+def test_inherited_trace_destination_is_untouched_by_real_collection(
+    tmp_path: Path, collect_only: bool
+) -> None:
+    """A fresh pytest must scrub before relay captures open_trace's destination.
+
+    Importing trace only inside a test body misses this defect: the ordinary
+    network test imports relay during collection, before autouse fixtures run.
+    Execute that actual trace-producing memo test in a fresh interpreter, not a
+    stub writer or a reload of an already-scrubbed module. The sentinel is our
+    own file, never an operator trace. Collection-only and execution both must
+    leave its bytes identical; the latter failed with 23 appended rows before
+    the precollection scrub, even though the memo test itself passed.
+    """
+    repo = ROOT
+    sentinel = tmp_path / "inherited.jsonl"
+    original = b"synthetic operator trace sentinel\n"
+    sentinel.write_bytes(original)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator"),
+        "PATH": os.environ.get("PATH", ""),
+        "TERM": "xterm-256color",
+        "LOP_OPEN_TRACE": str(sentinel),
+    }
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "tests/unit/network/test_session_plane.py::"
+        "test_the_owner_open_frame_memo_serves_a_settled_repeat_without_touching_the_journal",
+        "-q",
+        "-n0",
+        "--basetemp",
+        str(tmp_path / "child-pytest"),
+    ]
+    if collect_only:
+        command.append("--collect-only")
+    result = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "run_bounded.py"), "--timeout", "120", "--"]
+        + command,
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=150,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert ("1 test collected" if collect_only else "1 passed") in output, output
+    assert sentinel.read_bytes() == original, "collection captured the inherited trace destination"
+
+    # Positive control: the writer is live. An explicit isolated opt-in after
+    # pytest's startup still works in a production subprocess, so the safety
+    # assertion above cannot pass because tracing was disabled in production.
+    owned = tmp_path / "explicit.jsonl"
+    opted_in = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from local_operator.session import open_trace; "
+            "assert open_trace.enabled(); open_trace.mark('explicit', session='synthetic')",
+        ],
+        cwd=repo,
+        env={**env, "LOP_OPEN_TRACE": str(owned)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert opted_in.returncode == 0, opted_in.stdout + opted_in.stderr
+    assert '"stage":"explicit"' in owned.read_text(), "explicit trace writer was not exercised"
+    assert sentinel.read_bytes() == original
 
 
 def test_cmux_identity_is_scrubbed() -> None:

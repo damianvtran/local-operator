@@ -19,7 +19,8 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Iterator
-from unittest.mock import patch
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -211,21 +212,66 @@ def test_a_reload_probe_that_cannot_bind_is_refused_like_the_listener(
 ) -> None:
     """The ``--reload`` probe reports a bind failure the way the listener does.
 
-    An unbindable host (``--host 10.1.2.3``: not an address on this machine, and
-    the reachable input the reviewer named) used to escape ``serve_command`` as
-    an uncaught traceback on this branch while the non-reload branch printed a
-    named refusal — the same operator mistake, two different reports. uvicorn
-    must never be reached in that case.
+    A loopback host whose bind fails for a machine reason (the probe raises, the
+    reachable input the reviewer named) must leave ``serve_command`` as a NAMED
+    refusal, while the non-reload branch prints the same shape -- the same
+    operator mistake, one report. uvicorn must never be reached in that case.
+    (A NON-loopback host no longer gets this far: the bind policy refuses it
+    before any probe -- see the policy tests below.)
     """
 
     def refuse(host: str, port: int) -> socket.socket:
         raise OSError(49, "Can't assign requested address")
 
     with patch.object(cli, "_bind_serve_socket", refuse), patch("uvicorn.run") as mock_run:
-        assert serve_command("10.1.2.3", 0, True) == 1
+        assert serve_command("127.0.0.1", 0, True) == 1
 
     mock_run.assert_not_called()
-    assert "cannot bind http://10.1.2.3:0" in capsys.readouterr().err
+    assert "cannot bind http://127.0.0.1:0" in capsys.readouterr().err
+
+
+# ------------------------------------------------------- the bind policy (RFC §3.1)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1", "localhost"])
+def test_every_loopback_spelling_is_accepted(host: str) -> None:
+    assert cli._serve_bind_is_loopback_only(host) is True
+
+
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "::", "192.0.2.1", "192.168.0.155", "nonexistent.invalid", ""]
+)
+def test_a_non_loopback_bind_is_refused(host: str) -> None:
+    assert cli._serve_bind_is_loopback_only(host) is False
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.1", "nonexistent.invalid"])
+def test_the_policy_refusal_happens_before_anything_binds(
+    host: str, captured_server: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RFC §3.1: strict, no override -- exit 1, no listener, nothing reaches uvicorn."""
+    with patch.object(cli, "_bind_serve_socket") as mock_bind:
+        assert serve_command(host, 1111, False) == 1
+    mock_bind.assert_not_called()
+    assert captured_server == {}
+    assert "loopback-only by policy" in capsys.readouterr().err
+
+
+def test_an_adopted_listener_bound_wide_is_refused_and_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RFC §3.1: the adopt path checks the socket's REAL bound address, not the
+    ``--host`` argument (which passed the policy above). A descriptor bound by
+    an older build while waiting must not be served on wide, and an unadopted
+    wide listener must not sit open either.
+    """
+    fake = MagicMock()
+    fake.getsockname.return_value = ("0.0.0.0", 41234)
+    with patch.object(cli, "adopt_serve_socket", return_value=fake) as mock_adopt:
+        assert serve_command("127.0.0.1", 0, False, listener_fd=999) == 1
+    mock_adopt.assert_called_once_with(999, "127.0.0.1")
+    fake.close.assert_called_once()
+    assert "cannot adopt a listener bound to 0.0.0.0" in capsys.readouterr().err
 
 
 def _recorded_bind_options(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
@@ -297,3 +343,94 @@ def test_posix_binds_with_so_reuseaddr_as_before(monkeypatch: pytest.MonkeyPatch
         pytest.skip("this host is Windows, where the exclusive option is the correct one")
     calls = _recorded_bind_options(monkeypatch)
     assert ("setsockopt", socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in calls
+
+
+def test_serve_drops_the_agent_shell_markers_before_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DAEMON IS A HOSTING PLANE, not a chat the agent that started it opened.
+
+    The regression this pins (operator, 2026-10-13): the desktop app's own
+    backend inherits the ``bash`` tool's markers from whichever agent shell
+    launched the app, and ``lop serve`` then stamped every session it minted —
+    the operator's New Chat included — ``origin.json = {"origin": "agent-shell"}``,
+    so the sidebar, the phone list and the picker dropped them. The guard
+    (``agent_shell.agent_shell_opened_run``) reads ``os.environ`` at session-build
+    time, so the daemon's own environment has to be free of the markers BEFORE
+    it serves — a returned copy would leave the leak exactly where it was.
+
+    TIMING IS THE SUBJECT, so the environment is captured from INSIDE the fake
+    server body rather than read after ``serve_command`` returns (review round 1,
+    F1). A strip that lands AFTER uvicorn would have started serving leaves the
+    window during which the daemon mints sessions marked, and an assertion made
+    after the call would never see it — the mutation would still pass. Reading
+    the captured snapshot at the moment the server is invoked, and requiring the
+    marker to be gone THERE, is what makes a late strip fail.
+
+    All THREE names go for the SERVE path, and the escape hatch is the
+    difference from the child-facing helper rather than an oversight: a daemon
+    that inherited the QA escape would waive the refusal for the operator's own
+    chats. The unrelated variable is asserted present, because a strip that also
+    dropped the environment would break every spawn the daemon makes, in a way
+    no "marker absent" assertion would notice.
+    """
+    import uvicorn
+
+    from local_operator.agent_shell import (
+        AGENT_SHELL_ENV,
+        ALLOW_NESTED_SESSION_ENV,
+        MAY_DELEGATE_ENV,
+        agent_shell_opened_run,
+    )
+
+    monkeypatch.setenv(AGENT_SHELL_ENV, "1")
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
+    monkeypatch.setenv(ALLOW_NESTED_SESSION_ENV, "1")
+    monkeypatch.setenv("SERVE_KEEP_THIS", "yes")
+
+    # The state of the daemon's OWN environment at the instant it would have
+    # started serving. Replaces the `captured_server` fixture's stub so this is
+    # the thing the serve call reaches, and so the snapshot is taken before the
+    # call can return.
+    at_serve: dict[str, object] = {}
+
+    def fake_run(server: object, sockets: list[socket.socket] | None = None) -> None:
+        at_serve["env"] = dict(os.environ)
+        at_serve["opened_run"] = agent_shell_opened_run()
+
+    monkeypatch.setattr(uvicorn.Server, "run", fake_run)
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    assert at_serve, "the fake uvicorn run must have been reached"
+
+    env_at_serve = cast(dict[str, str], at_serve["env"])
+    assert AGENT_SHELL_ENV not in env_at_serve
+    assert MAY_DELEGATE_ENV not in env_at_serve
+    assert ALLOW_NESTED_SESSION_ENV not in env_at_serve
+    assert env_at_serve["SERVE_KEEP_THIS"] == "yes"
+    # The predicate the factory consults at session-build time, evaluated against
+    # the SAME live mapping the daemon will read, AT THE MOMENT IT SERVES: with
+    # the markers gone it is False, so a session this server mints is NOT stamped
+    # ``agent-shell``. A strip placed after this point leaves it True here and
+    # fails the test.
+    assert at_serve["opened_run"] is False
+
+
+def test_a_serve_started_without_the_markers_is_unchanged(
+    captured_server: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's own terminal opens the daemon with nothing to strip.
+
+    A same-code control for the test above: the strip must be a no-op on an
+    ordinary environment, not a rewrite of it. Asserts a plain variable AND that
+    the escape hatch a harness would set is still removed (the daemon's rule is
+    unconditional), which is the half a "nothing to strip" reading would miss.
+    """
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    monkeypatch.setenv("SERVE_ORDINARY", "1")
+
+    assert serve_command("127.0.0.1", 0, False) == 0
+    assert os.environ.get("SERVE_ORDINARY") == "1"
+    assert AGENT_SHELL_ENV not in os.environ

@@ -100,6 +100,12 @@ class JudgeStream:
                     await self.judge_gate.wait()
                 if answer:
                     yield StreamTextDelta(delta=answer)
+            else:
+                # An ordinary turn answers in prose: a wordless stop on a
+                # person-asked run is re-asked once (wordless-stop recovery),
+                # which would add a request and a persisted row these cells
+                # count (``turn_calls``, ``_user_messages``).
+                yield StreamTextDelta(delta="done")
             yield StreamEndEvent(stop_reason="stop")
 
         return gen()
@@ -201,6 +207,64 @@ async def test_an_agent_end_admits_a_continuation_through_the_prompt_queue(tmp_p
         # to the prompt call that needs it.
         assert not hasattr(handle, "_goal_judge_command_id")
     finally:
+        await handle.dispose()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [JUDGE_ACHIEVED, JUDGE_CONTINUE])
+async def test_a_real_loop_taking_over_a_held_judge_leaves_the_goal_waiting(tmp_path, verdict):
+    # Hold the LOOP's real provider turn, not an ownership callback: the runtime
+    # must observe the live task while the standing goal's aside answer arrives.
+    class HeldLoopStream(JudgeStream):
+        def __init__(self):
+            super().__init__([verdict])
+            self.loop_started = asyncio.Event()
+            self.loop_gate = asyncio.Event()
+
+        def __call__(self, request, signal=None):
+            events = super().__call__(request, signal)
+            is_loop_turn = request.purpose != "aside" and self.turn_calls == 2
+
+            async def gen():
+                if is_loop_turn:
+                    self.loop_started.set()
+                    await self.loop_gate.wait()
+                async for event in events:
+                    yield event
+
+            return gen()
+
+    stream = HeldLoopStream()
+    stream.judge_gate = asyncio.Event()
+    session = make_owner_session(tmp_path / "sess", stream)
+    session.arm_goal("Ship it")
+    handle = make_handle(session)
+    try:
+        await handle.prompt("Ship it", command_id="synthetic-user-turn", wait_complete=True)
+        await asyncio.wait_for(stream.judge_started.wait(), 2)
+        loop = handle._loop_driver()
+        loop.start("1", session.goal)
+        await asyncio.wait_for(stream.loop_started.wait(), 2)
+        assert loop.running and handle._loop_owns_the_verdict()
+        stream.judge_gate.set()
+        driver = handle._goal_judge_driver()
+        assert driver is not None
+        await driver.settle(timeout=2)
+
+        assert len(stream.judge_calls) == 1
+        assert stream.turn_calls == 2
+        assert session.goal_status == "active"
+        assert session.goal_judge is not None
+        assert session.goal_judge["state"] == "waiting"
+        assert session.goal_judge["verdict"] == ""
+        assert session.history_view() == []
+        assert goal_continuation_prompt("Ship it") not in _user_rows(session)
+        assert not driver.in_flight
+        assert loop.running
+    finally:
+        stream.judge_gate.set()
+        stream.loop_gate.set()
         await handle.dispose()
         await session.dispose()
 

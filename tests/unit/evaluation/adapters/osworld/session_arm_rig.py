@@ -41,6 +41,7 @@ environment, and never edits the repo.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -102,11 +103,16 @@ class ScriptedClient:
         child_acts: str | None,
         challenge_reply: str = "refinish",
         ending: str = "finish",
+        ask_first: bool = False,
     ) -> None:
         self.log_path = Path(log_path)
         self.calls = 0
         self.child_acts = child_acts
         self.ending = ending
+        #: The R4 ask fixture: the script opens with an ask_user action, then
+        #: LOGS the next actual request's tool text before finishing -- the
+        #: assertion surface for "the receipt reached the next ChatRequest".
+        self.ask_first = ask_first
         #: How the script answers the completion challenge that the first
         #: ``done`` claim earns (the session-path gate): ``refinish`` re-sends
         #: the SAME finish declaration (one of the two replies the challenge
@@ -201,6 +207,81 @@ class ScriptedClient:
     # -- the two scripts ---------------------------------------------------
 
     def _episode_call(self, messages: list[Any], tool_rows: list[Any]) -> list[Any]:
+        if self.ending == "budget-failed-finish":
+            # R3: a terminal failed finish at the budget. Without the paired-
+            # result stop the model spends one more root request (the shape
+            # review round 1 measured); with it the turn ends at the Nth
+            # result and this script's later stages never run.
+            if not tool_rows:
+                return self._tool_call(
+                    1,
+                    ACTION_TOOL,
+                    {
+                        "actions": [
+                            {
+                                "kind": "finish",
+                                "status": "failed",
+                                "reason": "synthetic explicit finish, no completion challenge",
+                            }
+                        ]
+                    },
+                )
+            return self._text_stop("unneeded root request after terminal finish")
+        if self.ending == "budget-done-finish":
+            # R3: the challenged-then-accepted finish. The first claim earns
+            # the challenge at epoch 1; the re-declaration is accepted at
+            # epoch 2, the budget, and the stop must fire there.
+            if len(tool_rows) < 2:
+                return self._tool_call(
+                    1,
+                    ACTION_TOOL,
+                    {
+                        "actions": [
+                            {
+                                "kind": "finish",
+                                "status": "done",
+                                "reason": "synthetic explicit finish, no completion challenge",
+                            }
+                        ]
+                    },
+                )
+            return self._text_stop("unneeded root request after accepted finish")
+        if self.ask_first:
+            if not tool_rows:
+                return self._tool_call(
+                    1,
+                    ACTION_TOOL,
+                    {
+                        "actions": [
+                            {
+                                "kind": "ask_user",
+                                "request_id": "ask-rig-1",
+                                "question": "Synthetic fixture question",
+                            }
+                        ]
+                    },
+                )
+            if len(tool_rows) == 1:
+                self._log(
+                    {
+                        "emit": "next-request-tool-text",
+                        "tool_text": [getattr(row, "text", "") for row in tool_rows],
+                    }
+                )
+                return self._tool_call(
+                    2,
+                    ACTION_TOOL,
+                    {
+                        "actions": [
+                            {
+                                "kind": "finish",
+                                "status": "failed",
+                                "reason": "ask fixture terminal",
+                            }
+                        ]
+                    },
+                )
+            return self._text_stop("done")
         if self.ending != "finish":
             return self._terminal_prose_call(messages, tool_rows)
         stage = len(tool_rows)
@@ -362,6 +443,7 @@ def patch_clients(
     child_acts: str | None,
     challenge_reply: str = "refinish",
     ending: str = "finish",
+    ask_first: bool = False,
 ) -> None:
     import local_operator.providers.clients as clients_mod
 
@@ -375,10 +457,63 @@ def patch_clients(
                 child_acts=child_acts,
                 challenge_reply=challenge_reply,
                 ending=ending,
+                ask_first=ask_first,
             )
         return client
 
     clients_mod.client_for_spec = patched
+
+
+def install_cleanup_fault(log_path: Path) -> None:
+    """The R2 fault injection: a raising public dispose hook + an RPC trace.
+
+    Composed exactly as the reviewer's round-1 rig did (their cleanup_rig):
+    patch ``sdk.open_session`` to attach a public dispose hook that raises
+    ``CancelledError`` -- the canonical cleanup then ends CANCELLED, and the
+    owning receipt is honestly incomplete -- and trace every adapter cleanup
+    RPC into the rig log so the TEST can assert the release never ran on the
+    retained disposition. The trace wrapper only LOGS and delegates; it
+    never substitutes a result.
+    """
+
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    import local_operator.sdk as sdk_mod
+
+    original = sdk_mod.open_session
+
+    @asynccontextmanager
+    async def instrumented(spec: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        async with original(spec, **kwargs) as session:
+
+            async def public_resource_cleanup() -> None:
+                raise asyncio.CancelledError("synthetic public resource cleanup remains unverified")
+
+            session.add_dispose_hook(public_resource_cleanup, last=True)
+            yield session
+
+    sdk_mod.open_session = instrumented
+
+    from local_operator.evaluation.adapters.supervisor import VerifiedAdapterSession
+
+    cleanup_original = VerifiedAdapterSession.cleanup
+
+    async def traced_cleanup(self: Any, params: Any, *, timeout: float) -> Any:
+        result = await cleanup_original(self, params, timeout=timeout)
+        row = {
+            "emit": "cleanup-rpc",
+            "requested_action_kinds": [action.kind for action in params.cleanup_plan.actions],
+            "receipts": [
+                receipt.model_dump(mode="json") if hasattr(receipt, "model_dump") else receipt
+                for receipt in result
+            ],
+        }
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=str) + "\n")
+        return result
+
+    VerifiedAdapterSession.cleanup = traced_cleanup
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -394,19 +529,53 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--ending",
-        choices=("finish", "prose-claim", "narration"),
+        choices=(
+            "finish",
+            "prose-claim",
+            "narration",
+            "budget-failed-finish",
+            "budget-done-finish",
+        ),
         default="finish",
         help=(
             "how the episode ends: the tool-mediated finish (default), a terminal PROSE "
-            "'Done' with no tool call (the gate's prose-arm case), or a mid-work "
-            "narration message (the discriminating negative)"
+            "'Done' with no tool call (the gate's prose-arm case), a mid-work "
+            "narration message (the discriminating negative), or the R3 budget variants "
+            "(a terminal failed finish / a challenged-then-accepted done finish)"
+        ),
+    )
+    parser.add_argument(
+        "--task-id",
+        default="task_plain",
+        help="the workspace task the episode runs (the ask fixture uses its simulator task)",
+    )
+    parser.add_argument(
+        "--ask-first",
+        action="store_true",
+        help="open the script with an ask_user action (the R4 receipt fixture)",
+    )
+    parser.add_argument(
+        "--cleanup-hook",
+        choices=("cancelled",),
+        default=None,
+        help="inject the R2 fault: a public dispose hook that raises CancelledError",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help=(
+            "the episode's admitted-output-epoch budget (blueprint §3; the default 6 "
+            "leaves headroom over the committed script's three epochs)"
         ),
     )
     args = parser.parse_args(argv)
 
     worktree = args.worktree.resolve()
     _bootstrap(worktree)
-    patch_clients(args.log, args.child_acts, args.challenge_reply, args.ending)
+    patch_clients(args.log, args.child_acts, args.challenge_reply, args.ending, args.ask_first)
+    if args.cleanup_hook == "cancelled":
+        install_cleanup_fault(args.log)
 
     import scripts.run_episode as run_episode
 
@@ -414,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         "--selector",
         str(args.selector),
         "--task-id",
-        "task_plain",
+        args.task_id,
         "--route",
         "test/fake/model:free",
         "--run-root",
@@ -424,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         "--secret-env",
         "AWS_SECRET_ACCESS_KEY",
         "--max-steps",
-        "6",
+        str(args.max_steps),
         "--max-usd",
         "0.01",
         "--infra",
@@ -448,8 +617,17 @@ def main(argv: list[str] | None = None) -> int:
         "--session-route",
         "test/mock",
         "--no-store",
+        # THIS rig is the offline in-process host: its scripted wire client is
+        # in-process state a spawned owner could never inherit, and the test
+        # owns the process lifetime. Without it the entry is the managed
+        # frontend and would launch a real owner instead of running here.
+        "--in-process-host",
     ]
-    rc = run_episode.main(cli)
+    # INTERNAL TEST SUPPORT (R3-S2): the rig reaches the unmanaged composition
+    # through the injected kwarg -- the standalone script accepts no such flag
+    # at all now, and the owner relaunch it performs still goes through the
+    # production parser.
+    rc = run_episode.main(cli, internal_test_support=True)
     print(f"[rig] exit code: {rc}", file=sys.stderr, flush=True)
     return rc
 

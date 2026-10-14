@@ -156,7 +156,7 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 # Capabilities and roles
 # ---------------------------------------------------------------------------
 
-#: The ONE capability vocabulary (convergence round, authoritative): twelve
+#: The ONE capability vocabulary (convergence round, authoritative): thirteen
 #: names, no synonyms. ``broker:request``, ``broker:grant`` and ``member:admin``
 #: were draft names and are not implemented.
 #:
@@ -168,6 +168,18 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: ``admin`` member holds the full vocabulary (``ROLE_CAPABILITIES``), so a
 #: consumer reads the member row rather than a role name — and both are in
 #: :data:`GRANTABLE_CAPABILITIES`.
+#:
+#: ``update`` joined in S1 of the mesh rolling updates
+#: (``mesh-rolling-updates.md`` §2): the right for a granted peer to ask THIS
+#: device to install a strictly newer published build. It names the BOUND, not
+#: just the act — the peer never delivers code, never names a ref and never runs
+#: a command; it names a version this device resolves through its OWN channel.
+#: Like the two onboarding scopes it is granted PER MEMBER — no NON-ADMIN role
+#: carries it (the blanket ``admin`` role holds the full vocabulary by
+#: construction, for every capability), so adding it to ``read``/``drive``
+#: cannot silently widen every existing member of those roles — and it is
+#: a :data:`SELF_DECIDED_SCOPES` member, because the decision governs this
+#: device's own install.
 CAPABILITIES: frozenset[str] = frozenset(
     {
         "list",
@@ -181,6 +193,7 @@ CAPABILITIES: frozenset[str] = frozenset(
         "broker_credential",
         "approve",
         "unattended",
+        "update",
         "admin",
     }
 )
@@ -375,6 +388,15 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    # MESH ROLLING UPDATES (mesh-update-propagation.md §3; mesh-rolling-
+    # updates.md §2). One peer-scope op, apply-or-answer: the origin names ONLY a
+    # target identity — the version it just moved to, plus its own build ref as
+    # identity (never fetched) — and the member validates, probes its own idle
+    # state and may install from ITS OWN channel. It is the one op in this table
+    # whose capability (``update``) is refused by THIS device's own row for the
+    # requester, which is why the origin learns the grant from the answer rather
+    # than by reading a table it cannot see.
+    "net_update",
     "net_bye",
     "ping",
 )
@@ -475,6 +497,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # A local op for the same reason ``definitions_sync`` is one — this device's
     # own relay being told to talk outward.
     "mcp_defs_sync",
+    # The single-peer update's client half (meshupdate.py): a viewer asking ITS
+    # OWN relay to ask a peer to move to this device's build. A local act by the
+    # ``peer_*`` boundary rule — the peer-scope half is ``net_update``.
+    "peer_update",
 )
 
 #: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
@@ -522,6 +548,11 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
         "broker_credential",
         "approve",
         "unattended",
+        # Per member, and no NON-ADMIN role carries it: adding ``update`` to
+        # ``read`` or ``drive`` would widen every existing member of that role
+        # the day this table changed. The blanket ``admin`` role holds the full
+        # vocabulary by construction, as it does for every capability.
+        "update",
     }
 )
 
@@ -540,7 +571,7 @@ GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
 #: record a decision it had already made with its operator (§3.3 step 9 runs the
 #: grant on the node). Every capability outside this set keeps the admin-only
 #: write rule; ``broker_credential`` and the role caps explicitly.
-SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended"})
+SELF_DECIDED_SCOPES: frozenset[str] = frozenset({"approve", "unattended", "update"})
 
 #: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
 #: human output. A capability name alone ("broker_credential") does not tell the
@@ -557,6 +588,14 @@ CAPABILITY_WORDS: dict[str, str] = {
     "broker_credential": "borrow this device's logins",
     "approve": "answer approval prompts for sessions here",
     "unattended": "start sessions here without approval prompts",
+    # The words name the BOUND, not just the act (mesh-rolling-updates.md §2): a
+    # capability row that only said "update this device" would read as an open
+    # authority over the install, and the whole reason a standing grant is
+    # defensible here is the narrowness below.
+    "update": (
+        "install a newer build here when this peer asks, and only from "
+        "this device's own update channel"
+    ),
     "admin": "administer the network",
 }
 
@@ -637,6 +676,14 @@ OP_CAPABILITY: dict[str, str | None] = {
     # conversation. A ``drive`` peer is told, in words, that the row could not
     # be sent and why — never silently dropped.
     "net_mcp_defs": "admin",
+    # ``update`` — the receiver-side grant (mesh-rolling-updates.md §2). NOT
+    # ``admin``: the grant is per member and governs THIS device's own install,
+    # which is the same class as the two onboarding scopes, not a change to the
+    # network. It is the only capability in this table whose holder is decided
+    # by the RECEIVING device's own member row — a refusal is how the origin
+    # learns the grant is absent (``not_authorised``), quoted by name into the
+    # ``no_grant`` skip.
+    "net_update": "update",
     "net_bye": None,
     "ping": "list",
 }
@@ -690,6 +737,13 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "ask_dismiss": "prompt",
     "set_model": "prompt",
     "set_effort": "prompt",
+    # A sign-in moving a session off a model it can no longer run. It lands on the
+    # SAME capability as ``set_model``, the local verb with the identical effect:
+    # anyone who may choose this session's model may also repair it onto the
+    # default the user just made reachable, and the owner re-checks every term
+    # (selection unchanged, idle, old provider still stranded, new one accessible)
+    # before applying anything.
+    "rehome_if_current": "prompt",
     "new_conversation": "prompt",
     "complete_aside": "prompt",
     "peer_message": "prompt",
@@ -708,6 +762,17 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # stop — "abort, cancel, stop (the kill switch), retire_if_pristine"
     "abort": "stop",
     "cancel": "stop",
+    # The post-turn job rail's ONE mechanism (video programme §2.2, contract
+    # §4.1): cancel ONE background job by id, landing on the same engine call
+    # ``jobs op='cancel'`` makes. ``stop`` — the same family as ``cancel``
+    # directly above: stopping a job this session started is a stop of its
+    # work, not a change to the install (``admin``) nor a driver's choice of
+    # what it runs (``prompt``); a member that may stop the session may stop
+    # one of its jobs. Load-bearing even though the v1 relay mounts no
+    # rendered control: the design's delegated-surface carrier rides the
+    # mesh, and without a row ``net_forward`` refused the op closed (review
+    # round 1, R1-1).
+    "job_cancel": "stop",
     "stop": "stop",
     "retire_if_pristine": "stop",
     "resume_session": "stop",
@@ -885,6 +950,31 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # re-delivery after a runtime restart — the one property (idempotent
     # re-arm) the queue exists for.
     "queue_move": "stop",
+    # TURN SUPPLEMENTS ("Highlights", memo §2.7): the lazy read and the three
+    # controls an ``AttachedSession`` facade sends once the two-half
+    # ``supplements-v1`` gate admitted it. All four need rows or a real
+    # viewer's stream dies on them: ``_forward_stream_frame`` refuses an op
+    # with no decision AND CLOSES the stream, and the READ rides the mount
+    # path (``_request_supplement_reads``), so a missing row would kill a
+    # viewer's whole session stream over a cosmetic read.
+    #
+    # Each value is the narrowest capability already covering its effect, the
+    # row-per-effect rule this table states above. ``supplements_for`` is
+    # ``view`` — it reads the session's own journal rows (the
+    # ``history_page``/``job_trajectory`` class). ``supplement_cancel`` is
+    # ``stop``: "cancel" is listed in that capability's own words, and
+    # ``cancel_subagents`` is the same verb one family over — cancelling this
+    # session's own background work. ``supplement_steer`` is ``steer`` (it
+    # injects the instruction the next attempt runs with).
+    # ``supplement_restart`` rides ``steer`` too: a steer already cuts the
+    # in-flight attempt and starts version + 1, so a surface that may perform
+    # the stronger act cannot be refused the retry with the previous
+    # instruction — the ``queue_move`` rule ("the actor that may retire NOW
+    # may certainly schedule the same retirement for later").
+    "supplements_for": "view",
+    "supplement_cancel": "stop",
+    "supplement_steer": "steer",
+    "supplement_restart": "steer",
     # AN OP WITH NO ROW IS REFUSED WHEN FORWARDED, and that is the
     # deliberate-absence mechanism this table used for ``operator_challenge``
     # until slice (a): "it produces material a surface uses to SIGN as the

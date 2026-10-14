@@ -54,6 +54,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("LOP_INSTALL_ROOT", raising=False)
+    # These legacy layout fixtures synthesize dist-info, not published signed
+    # wheels. Keep publication/signing explicit test seams; the positive and
+    # negative mutation-evidence contract lives in test_install_transaction.
+    monkeypatch.setattr(update_mod, "_fresh_publication", lambda _target, _mode: None)
+    monkeypatch.setattr(update_mod, "_verify_signed_candidate", lambda _generation, _mode: None)
     return tmp_path
 
 
@@ -524,6 +529,36 @@ class TestInstallIntoGeneration:
         marker = language / "tools" / "local-operator" / ".lop-source"
         assert marker.read_text(encoding="utf-8") == f"{'c' * 40} main\n"
         assert update_mod.current_generation() == language.resolve()
+
+    def test_a_deliberate_downgrade_composes_into_the_marker_note(self, home: Path) -> None:
+        """The audit trail the override promises: the note rides in ``.lop-source``.
+
+        A rollback must stay legible after the fact — that is what distinguishes
+        it from the silent downgrade ``classify_snapshot_downgrade`` refuses —
+        and the annotation slot composes: when the route also fell back (a
+        source build for an unreleased ref), its reason stays first and the
+        downgrade token follows, so neither fact is lost.
+        """
+        generation = update_mod.install_into_generation(
+            runner=FakeUv(version="0.63.2"),
+            version="0.63.2",
+            commit="d" * 40,
+            ref="v0.63.2",
+            origin=update_mod.SNAPSHOT_SOURCE_TOKEN,
+            note="unreleased-ref downgrade-allowed",
+        )
+        marker = generation / "tools" / "local-operator" / ".lop-source"
+        assert (
+            marker.read_text(encoding="utf-8")
+            == f"{'d' * 40} v0.63.2 unreleased-ref downgrade-allowed\n"
+        )
+        # The wheel shape records the same token after ``pypi <version>``, which
+        # is the shape the incident's downgrade would have carried.
+        pypi = update_mod.install_into_generation(
+            runner=FakeUv(version="0.63.1"), version="0.63.1", note="downgrade-allowed"
+        )
+        marker = pypi / "tools" / "local-operator" / ".lop-source"
+        assert marker.read_text(encoding="utf-8") == "pypi 0.63.1 downgrade-allowed\n"
 
     def test_a_failed_install_leaves_nothing_behind_and_no_flip(self, home: Path) -> None:
         good = _install("0.51.9")
@@ -1293,6 +1328,97 @@ class TestPruning:
         assert oldest in plan.removed
         assert middle not in plan.removed, "the margin must protect a FINISHED build"
         assert in_flight.is_dir()
+
+    def test_a_bumped_directory_mtime_cannot_evict_the_running_tree(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """QA round 1 on #2173, T7: the evicted generation was the updater's own.
+
+        The harness had ``rm``'d a stray file inside a stale generation, which moves
+        that DIRECTORY's mtime; the prune picked its victim by mtime, so the touched
+        tree jumped AHEAD of the one the updater was RUNNING from — unreferenced at
+        that instant, because the install had already flipped ``current`` onto the
+        new build. The victim was the running tree, and the command then died on a
+        lazy ``local_operator.services`` import AFTER its install had landed
+        (``ModuleNotFoundError``, rc=1; the #2173 QA matrix, T7).
+
+        BOTH halves are pinned on the one state, because either alone leaves the
+        shape reachable: the tree this process runs from is kept by IDENTITY, and
+        the eviction order is the name (creation order) rather than the touchable
+        mtime — so the bump neither saves the oldest generation nor moves the
+        eviction onto its neighbour.
+        """
+        generations = [_install(f"0.52.{index}") for index in range(5)]
+        running = generations[1]
+        # The process this prune runs in imports from ``running``; the string is
+        # the shape a record names, and this seam is the one the record readers
+        # are exercised through.
+        monkeypatch.setattr(
+            update_mod,
+            "process_install_root",
+            lambda: str(running / "tools" / "local-operator"),
+        )
+        # THE HARNESS'S ACT, exactly: removing a file inside the oldest
+        # generation's directory, which is what moves that directory's mtime to
+        # now (the shape recorded in the #2173 QA matrix, incident 2).
+        stray = generations[0] / "stray-file.txt"
+        stray.write_text("x", encoding="utf-8")
+        stray.unlink()
+
+        plan = update_mod.prune_generations()
+
+        assert running.is_dir(), "the tree this process is running from must never be evicted"
+        assert running not in plan.removed
+        assert plan.removed == (generations[0],), [path.name for path in plan.removed]
+        assert generations[2].is_dir() and generations[3].is_dir()
+
+    def test_the_tree_this_process_runs_from_is_never_a_candidate(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Order alone cannot close the class: the running tree can be the OLDEST.
+
+        An update run from an old tree after two later generations were installed
+        leaves a running generation that creation order would pick first, so the
+        protection has to be the identity a record carries as ``install_root`` —
+        never a sort position. The margin then counts the running tree like any
+        other reference, so this prune reclaims what it safely can: nothing, here,
+        because the two remaining unreferenced generations fill ``keep``.
+        """
+        generations = [_install(f"0.53.{index}") for index in range(4)]
+        running = generations[0]
+        monkeypatch.setattr(
+            update_mod,
+            "process_install_root",
+            lambda: str(running / "tools" / "local-operator"),
+        )
+
+        plan = update_mod.prune_generations()
+
+        assert running.is_dir()
+        assert plan.removed == (), [path.name for path in plan.removed]
+        assert "the tree this process is running from" in {
+            decision.reason for decision in plan.decisions
+        }, plan.decisions
+
+    def test_an_mtime_bump_cannot_reorder_which_dead_generation_is_evicted(
+        self, home: Path
+    ) -> None:
+        """With no running-tree protection in play, the order must still be the name.
+
+        This process runs from a checkout's venv, not a generation, so the only
+        property exercised is the eviction order: the oldest by NAME goes, the mtime
+        bump on it changes nothing, and — the direction that picked the QA victim —
+        the bump cannot divert the eviction onto its NEWER neighbour.
+        """
+        generations = [_install(f"0.54.{index}") for index in range(4)]
+        stray = generations[0] / "stray-file.txt"
+        stray.write_text("x", encoding="utf-8")
+        stray.unlink()
+
+        plan = update_mod.prune_generations()
+
+        assert plan.removed == (generations[0],), [path.name for path in plan.removed]
+        assert generations[1].is_dir(), "the bump must not move the eviction onto its neighbour"
 
     def test_a_generation_named_only_by_a_boot_record_is_kept(self, home: Path) -> None:
         """I1a: the ~1.2 s before the first heartbeat is a boot record's window.

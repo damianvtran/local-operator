@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "चेतावनी: यह रन स्वीकृति नहीं माँग सकता (कोई टर्मिनल जुड़ा नहीं है), इसलिए स्वीकृति माँगने वाला हर टूल कॉल अस्वीकार कर दिया जाएगा।\n  उपाय: --control पर्यवेक्षक के लिए कार्ड रोककर रखता है; --yolo हर स्तर पर अपने-आप स्वीकृति देता है; --tools NAME[,NAME] सूची के टूल को पहले से स्वीकृति देता है और इस रन की पहुँच उन्हीं तक सीमित रखता है; कॉन्फ़िग में tool_approval_mode: auto हर रन में हर कॉल का एक ही जवाब देता है।",
+  "wire.exec.clear_goal_needs_start": "--clear-goal रन में बदलाव करता है, उसे शुरू नहीं करता। इसे --resume SESSION_ID के साथ इस्तेमाल करें और प्रॉम्प्ट या --loop भी दें।",
+  "wire.exec.error_line": "त्रुटि: {error}",
+  "wire.exec.error_preflight": "त्रुटि: शुरुआती जाँच विफल हुई: {error}",
+  "wire.exec.exec_epilog": "उदाहरण:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nफिर से शुरू करने पर पहले ट्रांसक्रिप्ट, टीम, प्रोफ़ाइल, लक्ष्य और नाम बहाल होते हैं;\nशुरू करते समय स्पष्ट रूप से दिए गए फ़्लैग अपनी-अपनी सहेजी हुई सेटिंग बदल देते हैं।\nटीम और प्रोफ़ाइल दोनों साथ रह सकते हैं। लूप वैकल्पिक शुरुआती प्रॉम्प्ट के बाद\nचलता है; --loop N सिर्फ़ उसके बाद जारी रखने की गिनती करता है।\nफिर से शुरू करने पर लूप की सहेजी हुई प्रगति दिखती है, लेकिन उसके चक्र अपने-आप दोबारा नहीं चलते।\nसिर्फ़ लक्ष्य देने से मॉडल नहीं चलता। प्रॉम्प्ट का पाठ जैसा दिया है वैसा ही लिया जाता है, स्लैश कमांड की तरह नहीं।\n--goal सिर्फ़ लक्ष्य तय करता है; TUI के /goal की तरह वह उस पाठ को\nसंदेश के रूप में नहीं भेजता, क्योंकि exec में संदेश प्रॉम्प्ट से जाता है।\n--agent/--agent-id पुराने एजेंट डेटा का चयन करते हैं और एक साथ नहीं दिए जा सकते।\nडिफ़ॉल्ट रूप से non-TTY में स्वीकृति अस्वीकार होती है। --control पर्यवेक्षक का इंतज़ार कर सकता है;\n--yolo यह नियम बदलने का स्पष्ट विकल्प है, जो --background या --team से कभी अपने-आप लागू नहीं होता।\n--tools रन की पहुँच सीमित करता है: सूची से बाहर के टूल तक पहुँच नहीं होती।\nफ़ोरग्राउंड में इवेंट और पाठ stdout पर जाते हैं; रसीदें stderr पर। अलग होकर चलने वाले रन\nदोनों स्ट्रीम का लॉग रखते हैं और अलग-अलग जॉब और सत्र ID दिखाते हैं। चालू रन देखने या\nसमाप्त रन फिर से शुरू करने के लिए lop --resume SESSION_ID इस्तेमाल करें; exec उस सत्र को नहीं लेता जिसे कोई सक्रिय प्रक्रिया चला रही हो।",
+  "wire.exec.exec_help": "TUI शुरू किए बिना सहेजे गए सत्र में कार्य या लक्ष्य वाला लूप चलाएँ",
+  "wire.exec.goal_only_sets_objective": "--goal लक्ष्य तय करता है, लेकिन काम शुरू नहीं करता (TUI के /goal से अलग)। प्रॉम्प्ट दें, stdin पर पाइप से भेजें (या '-' दें), या --loop N से लूप चलाएँ।",
+  "wire.exec.log_pointer": "लॉग: {log_path}",
+  "wire.exec.no_exec_job": "exec जॉब {job_id} नहीं मिला; जॉब ID --background दिखाता है और वे {jobs_path} में दर्ज होते हैं",
+  "wire.exec.no_prompt": "प्रॉम्प्ट नहीं दिया गया। उसे आर्ग्युमेंट के रूप में दें, stdin पर पाइप से भेजें (या '-' दें), या --loop/--loop-goal से लूप चलाएँ",
+  "wire.exec.receipt_failure_suffix": " (निष्पादन की रसीद) — {failure}",
+  "wire.exec.receipt_suffix": " (निष्पादन की रसीद)",
+  "wire.exec.session_pointer": "सत्र: {session_id} (बातचीत) — जुड़ें या फिर से शुरू करें: lop --resume {session_id}",
+  "wire.exec.status_pointer": "स्थिति: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "चेतावनी: --tools में ऐसा कोई टूल नहीं है जिस तक इस रन की पहुँच हो सकती है: {names}। सत्र की पहुँच में {count} टूल थे।",
+  "wire.exec.turn_did_not_complete": "टर्न पूरा नहीं हुआ",
+  "wire.exec.waiting_on_you": "रन आपके इंतज़ार में है? lop sessions दिखाता है कि उसे क्या चाहिए"
+}

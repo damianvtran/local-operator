@@ -82,6 +82,12 @@ _ACTIONS = (
     # Peer READINESS (readiness.py): can the peers COMPLETE work offloaded to
     # them — the install question, where `doctor` is the link question. A read.
     "ready",
+    # THE SINGLE-PEER UPDATE (meshupdate.py; S1 of mesh-rolling-updates.md §8.2):
+    # ask ONE named peer to move to this device's build. It is deliberately not
+    # `lop update`, which stays "this device only" — the two must not be confused
+    # in help text or sentences. The rolling orchestration (`--all`, `--status`,
+    # `--resume`) is S3's and is absent here on purpose.
+    "update",
     "identity",
     "uninstall",
     # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
@@ -449,10 +455,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         action="store_true",
         help="with --delete: actually delete it (without this the owner only rehearses)",
     )
+    # THE HELP SAYS ``stop``, NOT "signal": an already-leaving target is ended
+    # through its own socket — it answers by design, which is why its skip sits
+    # ahead of the socket rung — while only the mid-turn, socket-silent half is
+    # actually signalled (agent review round 4 on #2099, R4-1).
     net_sessions.add_argument(
         "--force",
         action="store_true",
-        help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+        help=(
+            "with --stop: stop a target the plain stop skipped — one already "
+            "leaving, or mid-turn with a socket that will not answer "
+            "(as `lop stop --force`)"
+        ),
     )
     # THE THREE PILOT ACTS. `--engage` warms a session elsewhere and `--stop`
     # kills one, but nothing in this family could put a TURN to a conversation
@@ -708,7 +722,61 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         help="Can peers complete offloaded work? Readiness with remedies",
     )
     ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
+    ready.add_argument("--model", default="", help="Also check this selected provider/model")
+    ready.add_argument("--session", default="", help="Session context for the selected model")
     ready.add_argument("--json", action="store_true")
+
+    # `lop network update <peer>`: the single-peer half of mesh rolling updates
+    # (mesh-rolling-updates.md §7.4). It asks ONE named peer to move to THIS
+    # device's build — the direction is authority the MEMBER holds (its `update`
+    # grant), so the ask is refused by name when that grant is absent, and a
+    # member with a turn running answers `busy` until it is idle. Nothing is
+    # ever forced: there is no `--force` here by construction.
+    update_peer_parser = actions.add_parser(
+        "update",
+        help="Ask one peer to move to this device's build",
+        description=(
+            "Ask a paired device to install the build THIS device is on. The device on "
+            "the other end decides: it needs your device's `update` grant (`lop network "
+            "member grant <network> <device-id> update` on THAT device), it must run a "
+            "build that supports rolling updates, it installs only a strictly newer "
+            "version and only from its own update channel, and it waits — a device with "
+            "a turn in flight answers `busy` and nothing is touched. This is not `lop "
+            "update`, which updates THIS device only."
+        ),
+    )
+    update_peer_parser.add_argument(
+        "peer", nargs="?", default="", help="the device to update (a name or a device id)"
+    )
+    update_peer_parser.add_argument("--json", action="store_true")
+    # S3a: the two rollouts verbs that live on this command because they act on
+    # the same machine-side orchestration the ask feeds. Both are LOCAL file
+    # mutations on the rollout record (no relay hop): `--resume` clears the
+    # retry floors, `--cancel` abandons the running rollout (an apply already
+    # in flight finishes — an install cannot be recalled — and is recorded).
+    update_peer_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        # DEST DIFFERS ON PURPOSE (round 2, Q-R2-1): ``cli.main`` resolves a
+        # TOP-LEVEL ``--resume`` (the session resume) BEFORE subcommand
+        # dispatch, so a verb that lands its flag in ``args.resume`` has it
+        # eaten ("no session '<id>' to resume"). The verb owns its flag
+        # through its own dest; the command-line SPELLING is the design's
+        # ``--resume``, unchanged.
+        dest="rollout_resume",
+        help="clear a rollout's retry floors (default: the newest active one)",
+    )
+    update_peer_parser.add_argument(
+        "--cancel",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ID",
+        help="abandon a rollout (default: the newest active one)",
+    )
 
     identity = actions.add_parser("identity", help="This device's key")
     identity_actions = identity.add_subparsers(dest="identity_command")
@@ -766,6 +834,17 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # like ``invite``/``log``; with several, ``_resolve`` asks for the name.
     cred_share.add_argument(
         "--network", default="", help="Network name or id (default: the only one)"
+    )
+    finite_action = cred_share.add_mutually_exclusive_group()
+    finite_action.add_argument(
+        "--request-approval",
+        action="store_true",
+        help="Request signed recovery of this exact finite share; does not grant",
+    )
+    finite_action.add_argument(
+        "--approval",
+        default="",
+        help="Apply signed finite-share recovery; never future inheritance",
     )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
@@ -2069,32 +2148,109 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     if verb == "share" and not scope:
         scope = "device" if github_mod.is_github_key(key) else "session"
 
-    with placement_mod.mutate(record.network_id, self_device=identity.device_id) as document:
-        entry = document.entry(key)
-        if verb == "share":
-            if entry is None:
-                # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
-                # runs where the credential is. ``declare`` refuses on behalf of another
-                # device, so a share can never move ownership by accident.
-                entry = document.declare(
-                    key,
-                    owner_device=identity.device_id,
-                    owner_device_name=identity.name,
-                    provider=provider,
-                    kind=kind,
-                    identity_label=label,
-                    by=identity.device_id,
-                )
-            entry = document.grant(key, device, scope=scope, by=identity.device_id)
-            action = "sharing"
-        else:
-            entry = document.revoke(key, device, by=identity.device_id)
-            action = "revoked"
-        entry_json = entry.to_json()
+    # Consent is authority; placement is only its mergeable projection. Revoke
+    # persists its tombstone first, and legacy share cannot clear that tombstone.
+    from local_operator.network.credentials import consent
+
+    finite_result = None
+    if verb == "share" and (
+        getattr(args, "request_approval", False) or getattr(args, "approval", "")
+    ):
+        from local_operator.network.credentials import finite_share
+
+        if getattr(args, "request_approval", False):
+            requested = finite_share.request(
+                record.network_id, identity.device_id, device, key, scope
+            )
+            return _emit(
+                args,
+                {
+                    "ok": True,
+                    "approval_id": requested["approval_id"],
+                    "state": requested["state"],
+                    "summary": finite_share.summary(requested),
+                },
+                [
+                    *finite_share.details(requested),
+                    "Request only; nothing shared.",
+                    f"Approve: lop network approvals approve {requested['approval_id']}",
+                    f"Apply: lop network credential share {key} --with {device} "
+                    f"--network {record.network_id} --scope {scope} "
+                    f"--approval {requested['approval_id']}",
+                ],
+            )
+        finite_result = finite_share.apply(
+            str(getattr(args, "approval", "")),
+            {
+                "owner_device": identity.device_id,
+                "network_id": record.network_id,
+                "recipient_device": device,
+                "key": key,
+                "scope": scope,
+            },
+        )
+    if verb == "revoke":
+        import time as _clock
+
+        reduced = consent.restrict_and_revoke(
+            record.network_id,
+            identity.device_id,
+            device,
+            {"credential_key": key},
+            "owner-revoke:" + str(_clock.time_ns()),
+        )
+        entry_json = reduced["entry"] or {}
+        action = "revoked"
+    elif finite_result is not None:
+        entry_json = finite_result
+        action = "sharing"
+    else:
+        authority = consent.ConsentDocument(record.network_id, identity.device_id)
+        with authority.locked():
+            try:
+                consent.check_borrow(record.network_id, identity.device_id, device, key, {})
+            except MeshRefusal as exc:
+                if exc.code in {"not_a_holder", "scope_unknown"}:
+                    raise MeshRefusal(
+                        "supersede_required",
+                        "This finite share was explicitly withdrawn; a bare share cannot clear it. "
+                        f"Request exact signed recovery: lop network credential share {key} "
+                        f"--with {device} --network {record.network_id} --scope {scope} "
+                        "--request-approval. No automatic future-sign-in inheritance "
+                        "enabled by this operation.",
+                    ) from exc
+                raise
+            with placement_mod.mutate(
+                record.network_id, self_device=identity.device_id
+            ) as document:
+                entry = document.entry(key)
+                if entry is None:
+                    # DECLARED BY THE DEVICE THAT HOLDS IT, which is why this verb only
+                    # runs where the credential is. ``declare`` refuses on behalf of another
+                    # device, so a share can never move ownership by accident.
+                    entry = document.declare(
+                        key,
+                        owner_device=identity.device_id,
+                        owner_device_name=identity.name,
+                        provider=provider,
+                        kind=kind,
+                        identity_label=label,
+                        by=identity.device_id,
+                    )
+                entry = document.grant(key, device, scope=scope, by=identity.device_id)
+                action = "sharing"
+                entry_json = entry.to_json()
 
     capability = ""
     if verb == "share":
-        _change, capability = _apply_capability_change(record, device, grant=["broker_credential"])
+        if finite_result is not None:
+            # Capability already read back LOCALLY before the journal cleared:
+            # no fallible relay/native work follows committed finite completion.
+            capability = "locally (signed finite recovery)"
+        else:
+            _change, capability = _apply_capability_change(
+                record, device, grant=["broker_credential"]
+            )
     else:
         # The capability goes with the share. Leaving ``broker_credential`` on a device
         # that no longer holds anything is a grant that can only ever be refused, and
@@ -7286,7 +7442,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     from local_operator.network import readiness as readiness_mod
 
     live = _relay_call(
-        "peer_readiness", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
+        "peer_readiness",
+        peer=args.peer,
+        selector=getattr(args, "model", ""),
+        session_id=getattr(args, "session", ""),
+        timeout=_listing_timeout(),
+        allow_no_answer=True,
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])
@@ -7595,6 +7756,20 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     capabilities=(readiness_mod.CAPABILITY_BUILD, *readiness_mod.PEER_SIDE_CHECKS),
                 )
             )
+            selector = str(getattr(args, "model", "") or "")
+            if selector:
+                # The local fallback cannot observe the peer's selected access.
+                # Preserve the requested context, not the viewer's login/default.
+                checks.append(
+                    readiness_mod.selected_model_row(
+                        member,
+                        {"state": "pending"},
+                        selector=selector,
+                        session_id=str(getattr(args, "session", "") or ""),
+                        peer_label=member.name or member.device_id,
+                        source=readiness_mod.SOURCE_UNKNOWN,
+                    )
+                )
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -7602,6 +7777,115 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         "relay": relay_line,
         "probed": False,
     }
+
+
+def _cmd_update(args: argparse.Namespace) -> int:
+    """``lop network update <peer>``: ask ONE peer to move to this device's build.
+
+    The direction of authority is the member's: this device only ASKS, and the
+    grant that permits the ask lives in the member's own record (its row for
+    THIS device) — which is why the refusal for a missing grant arrives from the
+    far side rather than being pre-checked here (see ``meshupdate``'s module
+    note; the pre-check that IS here is the negotiated feature string, so a peer
+    that predates rolling updates is skipped without being asked at all).
+
+    The relay is given the update hop's own budget (the peer's 900 s install
+    deadline plus its reply margin, plus the control socket's slack), never the
+    5 s default: a busy member answers in milliseconds, an idle one may be
+    installing when this call's answer arrives.
+    """
+    from local_operator.network import meshupdate
+    from local_operator.network.types import MeshRefusal
+
+    # ``--resume``/``--cancel`` FIRST: they are local record mutations, and a
+    # plain ask (peer named or not) is the only path that needs the relay hop.
+    if getattr(args, "rollout_resume", None) is not None:
+        return _cmd_rollout_resume(args)
+    if getattr(args, "cancel", None) is not None:
+        return _cmd_rollout_cancel(args)
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        raise MeshRefusal(
+            "peer_required",
+            "name a device: `lop network update <peer>` (a name or a device id)",
+        )
+    payload = _relay_answer("peer_update", peer=peer, timeout=meshupdate.UPDATE_CONTROL_TIMEOUT_S)
+    label = str(payload.get("name") or peer)
+    state = str(payload.get("state") or "")
+    message = str(payload.get("message") or "")
+    version = str(payload.get("version") or "")
+    method = str(payload.get("method") or "")
+    lines: list[str] = []
+    if state == "done":
+        lines.append(f"{label} updated to {version}" + (f" (via {method})" if method else ""))
+        lines.append("the device installs it in its own tree and switches over atomically")
+    elif state == "already_on_target":
+        lines.append(f"{label} is already on {version or 'the target build'}; nothing to do")
+    elif state == "ahead_of_target":
+        lines.append(
+            message or f"{label} is ahead of this device — an update never moves backwards"
+        )
+    elif state == "busy":
+        lines.append(message or f"{label} has sessions busy; nothing has been touched")
+        lines.append(f"re-run `lop network update {peer}` when the work finishes")
+    else:
+        lines.append(f"{label}: {message or payload.get('code') or 'no answer'}")
+    return _emit(args, payload, lines)
+
+
+def _pick_rollout(args: argparse.Namespace, ident: str) -> Any:
+    """The record ``--resume``/``--cancel`` names: an id, or the newest active."""
+    from local_operator.network import rollouts
+    from local_operator.network.types import MeshRefusal
+
+    record = rollouts.read_record(ident) if ident else rollouts.latest_active()
+    if record is None:
+        raise MeshRefusal(
+            "rollout_not_found",
+            (
+                f"no rollout record {ident!r} on this device"
+                if ident
+                else "no active rollout on this device — `lop update` opens one after an "
+                "update settles, or ask one peer directly with `lop network update <peer>`"
+            ),
+        )
+    return record
+
+
+def _cmd_rollout_resume(args: argparse.Namespace) -> int:
+    """``lop network update --resume [<id>]``: clear floors; the scan is the wake."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "rollout_resume", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.resume_record(str(record["id"])) or record
+    # ``member_terminal``, NOT bare set membership (round 3, R3-3): a codeless-
+    # refused member is non-terminal and WILL be re-asked, so counting it as
+    # "not re-asked" undercounted the receipt (the reviewer's probe: "0
+    # member(s) will be re-asked" while the cleared member was asked).
+    waiting = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
+    lines = [
+        f"resumed {record['id']}: {len(waiting)} member(s) will be re-asked on the driver's "
+        f"next scan (≤{int(rollouts.SCAN_INTERVAL_S)} s); it does not drive"
+    ]
+    return _emit(args, record, lines)
+
+
+def _cmd_rollout_cancel(args: argparse.Namespace) -> int:
+    """``lop network update --cancel [<id>]``: abandon the rollout, closing row included."""
+    from local_operator.network import rollouts
+
+    ident = str(getattr(args, "cancel", "") or "")
+    record = _pick_rollout(args, ident)
+    record = rollouts.cancel_record(str(record["id"])) or record
+    # Same decider as the resume receipt (round 3, R3-3): a codeless refusal
+    # is not terminal, so it counts as "remained".
+    left = [m for m in record.get("members", []) if not rollouts.member_terminal(m)]
+    lines = [
+        f"abandoned {record['id']}: {len(left)} member(s) remained; an apply already in "
+        "flight finishes and is recorded by the driver"
+    ]
+    return _emit(args, record, lines)
 
 
 def _cmd_identity_show(args: argparse.Namespace) -> int:
@@ -7844,6 +8128,15 @@ _CARD_LABEL_WIDTH = len("withdrawn by")
 
 def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     """The human half of the same read, in the card's own order: what / where / who."""
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(dict(record))
+    if finite_summary is not None:
+        return [
+            *finite_share.details(dict(record)),
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            "This operation restores only the signed finite share; nothing is installed or joined.",
+        ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
     state = str(record.get("state") or "")
@@ -8077,6 +8370,13 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     from local_operator.network import approvals as approval_store
 
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(record)
+    if finite_summary is not None:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        for disclosure_line in finite_share.details(record):
+            print(disclosure_line, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8174,8 +8474,18 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         return _emit(args, payload, _approval_lines(decided))
     if verb == "withdraw":
         return _cmd_approvals_withdraw(args)
+    # Operation dispatch precedes every generic runner: a finite recovery is
+    # never an SSH/setup/join request just because it reuses the normal envelope.
     # verb == "run" — the agent's execution path.
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    if finite_share.intent(record) is not None:
+        raise MeshRefusal(
+            "finite_apply_required",
+            "This is finite-share recovery, not onboarding. Use the exact "
+            "credential share --approval command shown on its request; no setup ran.",
+        )
     state = str(record.get("state") or "")
     if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
         # A ``connecting`` record has TWO answers (drill finding, 2026-10-04):
@@ -8494,6 +8804,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "doctor": _cmd_doctor,
     # The readiness report: `doctor`'s sibling, one question further out.
     "ready": _cmd_ready,
+    # The single-peer update: the asking half only (meshupdate.py).
+    "update": _cmd_update,
     "identity": _guard_identity_subcommand,
     "uninstall": _cmd_uninstall,
     # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"

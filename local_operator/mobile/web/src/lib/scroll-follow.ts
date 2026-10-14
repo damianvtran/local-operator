@@ -8,7 +8,7 @@
  * to answer for EVERY change above the reader, not just the reserve — the
  * live window drops its oldest row from the top on each append at the cap
  * (round 4, U28: the platform used to cover that removal silently), a page of
- * older rows can prepend, `show N more loaded` can expand the window, and the
+ * older rows can prepend, reaching the top expands the mounted window, and the
  * reserve itself can grow or clear. The caller measures what the DOM did
  * above the reader, with the user's own scrolling divided out, and hands the
  * numbers here.

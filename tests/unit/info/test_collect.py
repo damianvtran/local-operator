@@ -162,6 +162,30 @@ def test_stale_cache_is_returned_and_its_age_exceeds_the_ttl(tmp_path: Path) -> 
     assert age is not None and age > update.TTL_S
 
 
+def test_behind_claim_derives_only_from_a_ready_cache_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q3-1/B2: latest_known is diagnostic; the behind claim is not.
+
+    A bare pre-gate cache entry still renders as the last version known
+    (the three cache tests above pin that contract), but it must not make
+    /info claim the install is behind: its wheels may never have landed.
+    Only a readiness-stamped entry earns the claim.
+    """
+    path = tmp_path / "pypi-local-operator.json"
+    monkeypatch.setattr(update, "default_cache_dir", lambda: tmp_path)
+    path.write_text(json.dumps({"payload": {"version": "9.9.9"}, "fetched_at": time.time()}))
+    bare = collect_install([])
+    assert bare.latest_known == "9.9.9"
+    assert bare.behind is False
+    path.write_text(
+        json.dumps({"payload": {"version": "9.9.9", "ready": True}, "fetched_at": time.time()})
+    )
+    ready = collect_install([])
+    assert ready.latest_known == "9.9.9"
+    assert ready.behind is True
+
+
 def test_corrupt_cache_is_unknown_rather_than_an_exception(tmp_path: Path) -> None:
     (tmp_path / "pypi-local-operator.json").write_text("{not json")
     assert update.cached_latest(tmp_path) == (None, None)

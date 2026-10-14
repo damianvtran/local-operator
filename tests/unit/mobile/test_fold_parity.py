@@ -63,9 +63,11 @@ from local_operator.harness.comms import (
 from local_operator.harness.loop import (
     LENGTH_ENDED_CALL_RESULT_TEXT,
     TRUNCATED_RESULT_TEXT,
+    WORDLESS_STOP_RECOVERY_PROMPT,
 )
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import (
+    QUIET_TURN_TOOL,
     assistant_row_text,
     assistant_stop_notice,
     harness_chrome_prompts,
@@ -77,6 +79,7 @@ from local_operator.harness.types import (
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
+    QUIET_TURN_KEY,
     AgentMessage,
     CustomMessage,
     Message,
@@ -570,7 +573,12 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     list, which is the drift signature itself. All of them now come from one
     shared list."""
     prompts = harness_chrome_prompts()
-    assert len(prompts) == 4
+    # The count is a drift tripwire: a new chrome prompt must be added HERE on
+    # purpose, not slip into the shared tuple unnoticed. The membership line
+    # names which prompt took it to five (the wordless-stop re-ask), so the pin
+    # says what grew it rather than only how many there are.
+    assert len(prompts) == 5
+    assert WORDLESS_STOP_RECOVERY_PROMPT in prompts
 
     assert _page_rows([Message.user(p) for p in prompts]) == []
 
@@ -1199,3 +1207,57 @@ def test_a_block_followed_by_non_whitespace_does_not_fuse_two_words(
     # The ordinary shape is untouched: the tail's own whitespace is enough, and
     # no second separator is inserted on top of it.
     assert user_row_text(expanded + "\n\nand next") == "first @a.txt\n\nand next"
+
+
+# --- the quiet pair (docs/design/quiet-turns.md §5, slice S1) -----------------
+
+
+def _quiet_turn_pair(call_id: str = "call-quiet") -> list[AgentMessage]:
+    """The pair a quiet turn persists (docs/design/quiet-turns.md §5, S1).
+
+    Product-shaped: the text-free assistant row carrying the one ``no_reply``
+    call, then its result with S0a's marker in ``details`` — the same two rows
+    ``tests/e2e/test_quiet_turns_e2e.py`` finds on disk.
+    """
+    return [
+        _assistant("", calls=[ToolCall(id=call_id, name=QUIET_TURN_TOOL, arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id=call_id,
+                tool_name=QUIET_TURN_TOOL,
+                content=[TextContent(text="Quiet.")],
+                details={QUIET_TURN_KEY: True},
+            )
+        ),
+    ]
+
+
+def _read_pair(call_id: str = "call-read") -> list[AgentMessage]:
+    """The control: an ordinary call/result that must keep its row."""
+    return [
+        _assistant("", calls=[ToolCall(id=call_id, name="read", arguments={"path": "f"})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id=call_id,
+                tool_name="read",
+                content=[TextContent(text="file body")],
+            )
+        ),
+    ]
+
+
+def test_the_quiet_pair_paints_no_row_on_either_phone_fold() -> None:
+    """S1: the folds skip the pair's call; its result settles into nothing.
+
+    Asserted on BOTH folds over one history — the divergence class this file
+    exists for — with the ordinary call beside it as the discriminator: an
+    over-broad skip that took the ``read`` row too fails here. The pair itself
+    stays in the model's history (a fold is a renderer, never a filter of the
+    transcript; the display-window pin for that consequence lives in
+    ``tests/unit/session/test_history_window.py``).
+    """
+    history = [Message.user("morning"), *_quiet_turn_pair(), *_read_pair()]
+    for name, rows in (("pages", _page_rows(history)), ("attach", _attach_rows(history))):
+        assert [row.kind for row in rows] == ["user", "tool"], name
+        assert rows[1].tool_name == "read", name
+        assert all(row.tool_name != QUIET_TURN_TOOL for row in rows), name

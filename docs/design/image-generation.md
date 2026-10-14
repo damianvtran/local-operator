@@ -8,6 +8,12 @@ the result rides `AttachmentContent` and registers bytes through
 `session.attachments.cache_media`; that contract is frozen, this feature adds
 no second transport.
 
+**Superseded in part (media wave-2, 2026-10-09):** the kind-neutral interface
+the image lane now rides — the walk, the rung seam, provider breadth — is
+designed in `docs/design/artifact-generation.md`; read that for the current
+shape of the cascade and rungs. This document remains the frozen image v1
+design (D1–D12), and its behaviour is still the contract.
+
 ## 0. Problem
 
 `local_operator/clients/fal.py` and `local_operator/clients/radient.py` carry
@@ -121,3 +127,46 @@ shape), the scoped gate (`make check-changed`), CI, and the real-run evidence
 (a pinned-seed Radient generation with its attachment artifact, a
 cancel-mid-generation run with the provider cancel verified, a restart run,
 and an honest failure path).
+
+## 8. Amendment — the multi-source edit lane (2026-10-11)
+
+Additive on top of §5's contract; nothing above changes for one-source calls
+(N==1 stays byte-identical per rung and in the tool result/caption).
+
+- **Fields**: `source_image_paths` / `source_attachments` (lists) join the
+  singular fields. One form per KIND (`source_image_path` XOR
+  `source_image_paths`; `source_attachment` XOR `source_attachments`); kinds
+  mix, and the fused order is paths then attachments, each list in order, no
+  dedupe, at most 16 combined. `details` gains `source_image_paths` /
+  `source_attachments` only when the plural field was used (each source
+  represented once, in the field that introduced it).
+- **Caps**: the tool refuses >16 with a model-correctable sentence (16 = the
+  hub's highest per-pin ceiling). The cascade filter and the approval
+  describer's route label gate on `capable = sources != NONE and
+  max_sources >= n`; available rungs under the count are pre-recorded skips
+  naming the ceiling. Radient additionally reads the selected pin's live
+  ceiling pre-send and skips above it; an unreadable cap still sends — the
+  hub is the fail-closed authority and its refusal is pre-vendor and free
+  (D2). FAL: N>1 with no pin resolves to `blackforestlabs/flux-3/edit-image`
+  (`image_urls`, 1..10); a pinned single-reference app SKIPS, never a silent
+  model swap (D3/D4; the two drift tests keep the declaration and the wire
+  joined).
+- **Skip semantics**: unchanged in class — skipped/unsupported pre-records,
+  failover across the rest. The sentences now name the count and ceiling for
+  rungs that can edit but not with N (`X cannot edit with N sources
+  (supports C).`); the zero-capable refusal lists only routes whose ceiling
+  covers N.
+- **`details.reason` consumption**: the hub's media-rejection change adds an
+  additive, optional `details.reason` on refusals; the Radient rung appends
+  it to the refusal message (`_hub_reason_error`) when present and behaves
+  identically without it. The sentence-only channel is unchanged.
+- **Retry posture (D9)**: one bounded retry on idempotent GETs only
+  (Radient models/status/result, FAL status/result; `timeout`/`network`
+  codes, 429/500/502/503/504). Submits are never retried — a blind re-POST
+  can double-queue and double-bill; failover is their remedy.
+- **Cost posture**: unchanged; FAL and Google success captions now state
+  "No per-call cost was reported (this provider bills at its published
+  rates).", and so does an OpenAI edit when the response carries no usable
+  usage to price — with usable usage the existing estimate prints instead;
+  the ledger keeps `amount=None`/`not_tracked` with that sentence as the
+  row detail (no new basis value — the UI vocabulary stays as it is).

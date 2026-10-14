@@ -103,6 +103,30 @@ export function getSessions(): Promise<{
 	return request("/api/sessions");
 }
 
+export type PhoneUsageLimit = {
+	amount: { used: number | null; limit: number | null; remaining: number | null;
+		used_fraction: number | null; unit: string };
+	paid_fallback: boolean;
+	available: boolean | null;
+	unlimited: boolean;
+	supersedes_tiers: boolean;
+	family_cap: boolean;
+	shared: boolean;
+	window: "5h" | "7d" | "1mo" | "lifetime" | "unknown";
+	family: "opus" | "sonnet" | "fable" | "zread" | "unknown";
+	resets_at_ms: number | null;
+	payable: boolean;
+	exhausted: boolean;
+};
+export type PhoneUsageReport = {
+	provider: string; limits: PhoneUsageLimit[]; unavailable: boolean; fetched_at: number;
+};
+/** The paired gate and persisted-account admission remain server-owned. */
+export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cached";
+	may_be_stale?: boolean; cached_at?: number | null }> {
+	return request("/api/usage");
+}
+
 export function getCommands(): Promise<{ commands: SlashCommand[] }> {
 	return request("/api/commands");
 }
@@ -458,6 +482,113 @@ export function pairingStatus(deviceId: string): Promise<{
 export function imageUrl(sessionId: string, entryId: string, index: number): string {
 	const q = new URLSearchParams({ entry: entryId, i: String(index) });
 	return `/api/sessions/${encodeURIComponent(sessionId)}/image?${q}`;
+}
+
+/** One attachment artifact's bytes, keyed by the entry id plus the
+    kind-scoped index the ref emitted. The one RANGE-CAPABLE data route:
+    phone Safari will not play a <video> that arrives as a full-body 200, so
+    the server answers byte-Range requests with 206 + Content-Range. Same
+    content key as `imageUrl` (a message uuid plus the family index), so the
+    same immutable caching applies. */
+export function attachmentUrl(
+	sessionId: string,
+	entryId: string,
+	index: number,
+	kind: "image" | "video",
+): string {
+	const q = new URLSearchParams({ entry: entryId, i: String(index), kind });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/attachment?${q}`;
+}
+
+/* ---- turn supplements ("Highlights", memo §2.7) --------------------------- */
+
+/** The component document route: `{html}` assembled server-side; the bytes
+    NEVER load as a document from this URL — the block mounts them as a
+    sandboxed `data:` frame instead, so nothing navigates a browsing context
+    to the relay route (memo §4.1's relay row). */
+export function getSupplementDocument(
+	sessionId: string,
+	digest: string,
+): Promise<{ html: string }> {
+	return request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/supplements/${encodeURIComponent(digest)}/document`,
+	);
+}
+
+/** The file-callout route, addressed by the ROW'S OWN index — there is no
+    path parameter by design, so this can only ask for a file the row already
+    recorded. Bytes are fetched (never navigated to): the caller renders them
+    in-app, and `Content-Disposition: attachment` on every non-image class
+    means a navigation would download, not display, anyway. */
+export function supplementFileUrl(sessionId: string, job: string, index: number): string {
+	const q = new URLSearchParams({ i: String(index) });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/supplements/${encodeURIComponent(job)}/file?${q}`;
+}
+
+/** Fetch one callout's bytes. NOT the JSON helper: the success body is the
+    file itself and the type is the response header's. The failure contract is
+    the same one every transport in this module keeps — the 401 rule, and the
+    daemon's own `error` sentence as the `HttpError` message (404 "no such
+    file" covers a denylisted path and an out-of-range index alike by design;
+    409 names a cold session's cwd-relative file; 413 a file over the preview
+    cap). */
+export function getSupplementFile(
+	sessionId: string,
+	job: string,
+	index: number,
+): Promise<{ blob: Blob; mime: string }> {
+	return fetch(supplementFileUrl(sessionId, job, index), {
+		credentials: "same-origin",
+	}).then(async (res) => {
+		if (res.status === 401) {
+			handleUnauthorized();
+			throw new Error("unauthorized");
+		}
+		if (!res.ok) {
+			let detail = `${res.status}`;
+			let code = "";
+			try {
+				const body = (await res.json()) as { error?: string; code?: string };
+				if (body.error) detail = body.error;
+				if (typeof body.code === "string") code = body.code;
+			} catch {
+				/* A non-JSON error body carries no more than the status did. */
+			}
+			throw new HttpError(res.status, detail, code);
+		}
+		return {
+			blob: await res.blob(),
+			mime: res.headers.get("content-type") ?? "",
+		};
+	});
+}
+
+/** The three supplement control ops, over the session command route the whole
+    surface already mutates through (see `CommandOp`'s supplement family). The
+    runtime's receipt travels in the answer's `detail` verbatim. */
+export function supplementCancel(
+	sessionId: string,
+	anchor: string,
+	job: string,
+): Promise<CommandReceipt> {
+	return sendCommand(sessionId, { op: "supplement_cancel", anchor, job });
+}
+
+export function supplementSteer(
+	sessionId: string,
+	anchor: string,
+	job: string,
+	text: string,
+): Promise<CommandReceipt> {
+	return sendCommand(sessionId, { op: "supplement_steer", anchor, job, text });
+}
+
+export function supplementRestart(
+	sessionId: string,
+	anchor: string,
+	job: string,
+): Promise<CommandReceipt> {
+	return sendCommand(sessionId, { op: "supplement_restart", anchor, job });
 }
 
 /** Older transcript entries for lazy loading. ``before`` is the id of the

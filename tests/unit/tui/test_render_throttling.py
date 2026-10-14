@@ -750,29 +750,51 @@ def test_focus_flag_defaults_focused_and_reports_only_real_changes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_panel_repaints_in_full_on_refocus() -> None:
-    """The dock's numbers must be current the moment the window is looked at.
-
-    The panel has ONE repaint point (``_tick``), so refocus marks it dirty
-    rather than painting from a second path; the next tick is then a full
-    repaint including the re-read stats.
-    """
+async def test_panel_repaints_in_full_on_refocus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refocus owes a full stats repaint on the next tick of a running dock."""
     app = _running_app()
     async with app.run_test(size=(100, 30)) as pilot:
         for _ in range(80):
             await pilot.pause()
             if app._session is not None:
                 break
-        panel = app.query_one(SubagentPanel)
-        panel._start_spinner()
+        # A session can be ready before its first band refresh. Starting a
+        # timer on that empty dock let its first tick legitimately stop it,
+        # leaving no animated surface for the focus fan-out to invalidate.
+        # Seed the roster through the app, as the other running-surface tests
+        # do, rather than betting on the periodic refresh reaching it first.
+        app._append_block(UserBlock("audit the ingest path"))
+        app._refresh_band()
         await pilot.pause()
-        panel._dirty = False
+        panel = app.query_one(SubagentPanel)
+        assert panel._rows and any(row.running for row in panel._rows.values())
+        assert panel._spinner_timer is not None
+        panel._tick()
+        assert panel._dirty is False
 
         app._set_animation_focused(False)
-        await pilot.pause()
-        app._set_animation_focused(True)
+        # Consume the BLUR invalidation explicitly. Otherwise the assertion
+        # could pass on blur's leftover dirty bit even if refocus did nothing.
+        panel._tick()
+        assert panel._dirty is False
+        panel._tick_count = 0
+        paints: list[bool] = []
+        original = panel._paint_all
 
+        def paint_all(*, reread_stats: bool = True) -> None:
+            original(reread_stats=reread_stats)
+            paints.append(reread_stats)
+
+        monkeypatch.setattr(panel, "_paint_all", paint_all)
+        app._set_animation_focused(True)
         assert panel._dirty is True
+        # No await separates refocus from its first tick: observe the actual
+        # completed full paint, not a flag a scheduled tick is free to consume.
+        # Count 1 is off the periodic stats cadence, so it cannot mask a
+        # missing refocus invalidation with an unrelated full repaint.
+        panel._tick()
+        assert paints == [True], "refocus did not complete a full stats repaint"
+        assert panel._dirty is False
 
 
 def test_the_band_rerenders_on_refocus() -> None:

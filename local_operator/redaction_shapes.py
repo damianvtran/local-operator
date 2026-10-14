@@ -40,6 +40,16 @@ store registered, is contained for the rest of the session). There is
 deliberately no "looks random" / entropy rule: see the note on
 :data:`CREDENTIAL_SHAPES`.
 
+**A plain-word secret is masked as a WORD, not as a substring.** A registered value
+made only of ASCII letters is matched on letter-run boundaries (see
+:func:`_is_word_like`): it is masked wherever it stands alone or beside a digit,
+symbol or backslash escape (a ``\\n`` before a value at the start of a raw-JSON line
+is a boundary too — :func:`_word_pattern` carries the why), and it is NOT masked
+inside a longer run of letters. The residual, accepted
+on purpose: a password that is an ordinary word and appears embedded in a longer
+word (``unsynthetically`` for the password ``synthetic``) is shown. Masking it
+rewrote vocabulary in tool output the model copies back into source files.
+
 **Two model-visible surfaces this pass does not reach, named rather than
 implied.** The composed scrubber is the tool/result seam and everything the
 session hands to the loop, which is where the audit that produced this module
@@ -106,6 +116,7 @@ from __future__ import annotations
 
 import base64
 import codecs
+import functools
 import json
 import re
 import urllib.parse
@@ -1941,6 +1952,65 @@ def _base64_value_guard(match: Match[str]) -> bool:
 #: closed.
 _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 
+#: A SINGLE lowercase word of 8-15 letters is a NAME too. Sixteen or more letters is outside
+#: this form and keeps its mask: the corpus pins an ``pk-`` prefix plus sixteen letters,
+#: ``whsec_``/``shpat_`` plus sixteen, and ``npm_``/``sk-`` plus twenty-six.
+#:
+#: **Why the form exists (2026-10-09, session ``565245718d90``).** ``xai_`` plus nine
+#: lowercase letters is an ordinary snake_case identifier (a boolean probe, a
+#: ``def`` name), and ``_VENDOR_TAIL_IS_A_NAME`` only releases tails of TWO or more
+#: words, so a one-word identifier was masked whole. The mask is not cosmetic: a
+#: ``read``/``grep``/``bash`` result shows the model the redaction marker where the
+#: symbol is, and so does the model's own earlier tool call (history is stored and
+#: replayed scrubbed, deliberately), so a model that copies what it saw writes the
+#: MARKER into source and ``edit`` writes exactly the bytes it is handed. The writers
+#: are not at fault; the rule manufactured the text the model then reproduced. #1911
+#: settled the principle (a NAME is not a credential, only a value is); this is the
+#: same principle applied to the one-word spelling.
+#:
+#: **Why a length ceiling, and why it is a probability argument rather than a taste.**
+#: Issuer tails are random base62 (or hex) and every one in the corpus is 20+ characters
+#: (Stripe 24+, GitLab 20, Tavily 32, Hugging Face 34, npm 36, Groq 52, Anthropic 95).
+#: The chance that a random base62 run is lowercase LETTERS ONLY is ``(26/62)**n``:
+#: about 4e-4 at 9 characters, 5e-7 at 16, 1e-8 at 20+. A real credential is therefore
+#: essentially never a short all-lowercase single word, while an English word is exactly
+#: that. 16 is the corpus's own smallest letters-only POSITIVE (the round-1 ``pk-``
+#: repro), so the ceiling releases nothing the corpus asserts is a credential; it is a
+#: data-fit at the margin and is stated as such (a row on each side pins it).
+#:
+#: **Name-agnostic by construction.** Nothing here consults the prefix: the judgement is
+#: on the tail's SHAPE after the prefix is stripped, for both prefix tables. A real
+#: ``xai-``/``sk-``/``gsk_`` key (mixed case, a digit, or 16+ characters) is untouched.
+#:
+#: **The BARE word only, deliberately NOT the ``=value`` spelling (agent review R1).** The
+#: two-word form above carries an ``(?:=\S*)?`` arm because an environment variable in
+#: prose arrives with its assignment. Mirroring it here would release the VALUE of a
+#: ``<prefix>_<word>=<secret>`` pair (``\S*`` takes anything), and unlike the two-word form
+#: there is no measured false-positive class to pay for it: the matched tail swallows the
+#: ``=`` and the value, so a one-word name followed by ``=`` fails this fullmatch and is
+#: masked whole, exactly as it was before this form existed. Cost, recorded: a keyword
+#: argument or assignment written WITHOUT spaces (``f(<prefix>_<word>=True)``) is still
+#: masked and so still carries the copy-the-mask risk; the spaced spelling
+#: (``<prefix>_<word> = True``) and every other position are released.
+#:
+#: **One exception to "masked whole", measured (QA round 2, Q-5).** When the glued VALUE
+#: contains a dot (``1.2.3``, ``a.b.c``, ``host.example.com``), the vendor pattern's
+#: ``(?![A-Za-z0-9.])`` lookahead makes the match BACKTRACK to just the bare word, which
+#: this form then releases: the NAME half is readable and ``f(<prefix>_<word>=1.5)`` is
+#: released. No exposure is added: such a value is never part of the match and is
+#: visible on ``origin/main`` too (there the NAME half was the part masked).
+#:
+#: **Accepted residuals, recorded rather than closed.** (1) A real credential that is
+#: genuinely 8-15 lowercase letters (``sk-`` plus a short English word) is now readable by
+#: this rule. Every such string in this repo and in the sibling checkouts surveyed
+#: (``~/minervaai``, ``~/pergamon-labs``, the omp fork) is a synthetic fixture, and a value
+#: that was REGISTERED (stored secret, env credential, typed into ``secret``) is scrubbed
+#: by value regardless of this shape. (2) An identifier that is one word of 16+ letters,
+#: carries a digit, or is camelCase is still masked: the same "case or a digit makes it a
+#: token" bet #1399 took, with the same feedback-loop risk, now covered by the
+#: marker-introduction note in ``edit``/``write``.
+_VENDOR_TAIL_IS_ONE_WORD = re.compile(r"[a-z]{8,15}")
+
 
 def _vendor_tail_guard(match: Match[str]) -> bool:
     """Reject an issuer-looking prefix followed by an ordinary NAME.
@@ -1969,7 +2039,8 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
             if tail.lower().startswith(prefix.lower()):
                 tail = tail[len(prefix) :]
                 break
-    return not _VENDOR_TAIL_IS_A_NAME.fullmatch(tail.lstrip("_-"))
+    tail = tail.lstrip("_-")
+    return not (_VENDOR_TAIL_IS_A_NAME.fullmatch(tail) or _VENDOR_TAIL_IS_ONE_WORD.fullmatch(tail))
 
 
 #: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
@@ -3982,9 +4053,13 @@ def is_registerable_component(value: str) -> bool:
     Registration is a PROMOTION: the value is masked in every later result for
     the rest of the session, so a false positive here outlives the line that
     caused it (``Basic authentication`` was registered as a credential once, and
-    the word was then masked in every subsequent result). The floor is well
-    floor is the masking floor and the discriminator is the SHAPE: a value that
-    is a plain word is never registered, whatever its length.
+    the word was then masked in every subsequent result). What remains is the
+    LENGTH floor (:data:`DETECTED_COMPONENT_FLOOR`) plus the two refusals below —
+    a placeholder, a store-grammar name. The word-shape refusal this rule once
+    carried was removed deliberately: it left a word-shaped credential that a real
+    rule had masked free to reappear in the next result (the body comment records
+    the measurement), and such a value is now masked as a WORD rather than a
+    substring (see :func:`_word_pattern`).
 
     **Only genuine secret VALUES can enter a redaction set** (operator directive): a
     token spelled the way a stored secret's NAME is spelled
@@ -5168,9 +5243,11 @@ def scrub_secrets_with_hits(
 # not a decoder. A value put through a transform the list does not enumerate
 # (rot13, a double base64, a byte-wise Caesar shift, an escape form nobody
 # prints) still passes, and a value SHORTER than the floor below gets its
-# permutations skipped entirely. Both residuals have the same shape as the shape
-# table's own (see the module docstring): the pass narrows the gap, it does not
-# close it.
+# permutations skipped entirely (its JSON escaping is still enumerated, under
+# the second and separate SPELLING-length bound — see
+# :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN`). Both residuals have the same shape as
+# the shape table's own (see the module docstring): the pass narrows the gap, it
+# does not close it.
 
 #: The shortest value whose TRANSFORMED spellings are masked at all.
 #:
@@ -5188,8 +5265,45 @@ def scrub_secrets_with_hits(
 #: worth registering is far longer. What the floor costs is bounded and
 #: understood — a six-character registered value still has its verbatim spelling
 #: masked by the pre-existing rule, unchanged; only its permutations are
-#: skipped, so a value under the floor keeps exactly the coverage it has today.
+#: skipped, so a value under the floor keeps its permutations unenumerated. One
+#: family is NOT a permutation and is enumerated for it anyway, under a separate
+#: bound: the JSON escaping of the value — see
+#: :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` for that bound and for why the two
+#: cannot be one number.
 _TRANSFORM_MIN_VALUE_LEN = 12
+
+#: The shortest JSON-ESCAPED spelling a value BELOW the floor above may contribute.
+#:
+#: A second bound rather than a lowering of the first, because it answers a
+#: different question. ``_TRANSFORM_MIN_VALUE_LEN`` is about a PERMUTATION of the
+#: value colliding with ordinary output; this one is about how much escaped text a
+#: collision would have to be before it is a plausible run in someone else's
+#: document. One escape is a plausible run inside any JSON body (``\\u00e9`` is six
+#: characters), so it never qualifies on its own; twelve characters is two escapes
+#: at minimum, which is the shortest and weakest spelling this admits.
+#:
+#: **A bound is not a guarantee, and the risk it leaves is real rather than a
+#: rounding-off.** These are VALUE-SPECIFIC sequences, so a collision means
+#: ordinary output that happens to carry THIS value's escaping. Whether that
+#: happens is a property of the corpus being read and of how short the needle is,
+#: so no zero-collision claim is made at any length, and the shortest spelling this
+#: bound admits is the one most likely to collide by construction. It is reachable
+#: on the real path — a two-character registered value masked an unrelated escaped
+#: document, one marker where the unpatched base produced none. The consequence is
+#: OVER-masking, never a release, and it is strictly narrower than what the same
+#: value already had: its verbatim spelling has no floor at all, so two adjacent
+#: characters of ordinary text were already being rewritten before this family
+#: existed. The sampled rates behind that reading are review evidence on the pull
+#: request, deliberately not restated here — a product comment quoting a
+#: simulation figure invites it to be read as a probability guarantee.
+#:
+#: The bound is on the SPELLING, not on the value, and the two are far apart: an
+#: eight-character CJK value escapes to forty-eight characters. The COVERAGE
+#: residual it leaves is stated rather than implied: a value whose escaping is
+#: shorter than this keeps its verbatim spelling alone, so a one-character CJK
+#: value (``\\u79d8``, six characters) is still unclosed here. The OVER-MASKING
+#: residual is the at-the-bound collision above.
+_SHORT_ESCAPE_MIN_SPELLING_LEN = 12
 
 #: The separators a "characters spread out" spelling may be built from.
 #:
@@ -5208,6 +5322,12 @@ _SEPARATOR_RUN_SEPARATORS = (" ", "-", ".", ":", "\n")
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9A-Fa-f]{4}")
 
+#: The same escape with its introducer and its four hex digits in separate groups,
+#: for the one rewrite that has to touch the digits and leave the ``\u`` alone —
+#: see :func:`_uppercased_json_escape_digits` for what uppercasing the whole match
+#: produces (it is not a JSON escape).
+_UNICODE_ESCAPE_DIGITS_RE = re.compile(r"(\\u)([0-9A-Fa-f]{4})")
+
 
 def _lowered_escape_digits(text: str) -> str:
     """``text`` with every escape's HEX DIGITS lowercased, and nothing else.
@@ -5221,14 +5341,124 @@ def _lowered_escape_digits(text: str) -> str:
 
 
 def _uppered_unicode_digits(text: str) -> str:
-    """``text`` with every ``\\uXXXX`` escape's hex digits uppercased.
+    """``text`` with every ``\\uXXXX`` escape uppercased, introducer included.
 
     The same discipline as :func:`_lowered_escape_digits` and for the same
     reason: ``json.dumps`` writes ``\\n``, ``\\"`` and ``\\\\`` with lowercase
     letters that are part of the escape's SPELLING, and uppercasing those would
     yield a string no encoder emits.
+
+    **It uppercases the ``\\u`` as well as the digits, so what it returns is not a
+    JSON escape** (``\\u00e9`` becomes ``\\U00E9``, which a decoder refuses). The
+    family list below carries that string as a needle and is deliberately left as
+    it is — those spellings are the floor's own and must not move — while the
+    below-floor family, whose candidates have to decode back to their value, uses
+    :func:`_uppercased_json_escape_digits` instead.
+
+    **A TEXTUAL rule, so it is correct only where the ``\\u`` introducers it sees
+    are real escapes.** A value carrying a LITERAL backslash-u sequence is escaped
+    by ``json.dumps`` to ``\\\\uXXXX``, and the introducer this regex then finds is
+    the SECOND backslash — the rewrite yields the escape of a different scalar.
     """
     return _UNICODE_ESCAPE_RE.sub(lambda match: match.group(0).upper(), text)
+
+
+def _uppercased_json_escape_digits(text: str) -> str:
+    """``text`` with every ``\\uXXXX`` escape's HEX DIGITS uppercased, ``\\u`` intact.
+
+    The sibling of :func:`_uppered_unicode_digits`, and the reason it exists
+    rather than that one being reused: that helper uppercases the whole match, so
+    it rewrites the introducer too and emits ``\\U00E9`` — which is not a JSON
+    escape, so no decoder accepts it and it is not a spelling of the value it was
+    derived from. No encoder in this tree produces that form either, so where it
+    is already used it is a needle that can only match text already carrying it;
+    the floor's family list keeps it, because those spellings must not move, while
+    the below-floor family — whose candidates have to decode back to their value —
+    uses this function instead.
+    """
+    return _UNICODE_ESCAPE_DIGITS_RE.sub(
+        lambda match: match.group(1) + match.group(2).upper(), text
+    )
+
+
+def _decodes_to_value(candidate: str, value: str) -> bool:
+    """Whether ``candidate`` is a JSON string BODY that decodes to ``value``.
+
+    The guard that stops a TEXTUAL rewrite being trusted as a spelling:
+    ``json.loads`` is the decoder a reader of that output would use, so asking it
+    is the same question the mask is answering. A candidate it refuses (a form no
+    encoder produces) is not a spelling, and neither is one that decodes to a
+    different string — masking that would rewrite text no session registered.
+    """
+    try:
+        return json.loads('"' + candidate + '"') == value
+    except ValueError:  # a candidate the decoder refuses is not a spelling
+        return False
+
+
+def _json_escape_spellings(value: str) -> list[str]:
+    """The JSON-string spellings of ``value``, each verified to decode back to it.
+
+    Both spellings an encoder emits for one scalar: the default ASCII-escaped
+    interior (``json.dumps`` writes everything outside ASCII as ``\\uXXXX``) and
+    the same with every escape's hex digits uppercased, which is what a
+    hand-rolled encoder or an upper-casing tool leaves behind and is the same
+    scalar either way (``\\u00E9`` and ``\\u00e9`` decode identically).
+
+    The uppercased candidate is offered only when it SURVIVES the round trip.
+    Two ways it can fail, both textual-rule failures rather than decoder ones:
+    :func:`_uppercased_json_escape_digits` only ever rewrites digits, but a value
+    carrying a LITERAL backslash-u sequence has that sequence rewritten instead of
+    an escape (``json.dumps`` escapes the value's own backslash first, so the
+    ``\\u`` the regex finds is content, not an introducer), which yields the
+    escape of a DIFFERENT scalar; and the decoder refuses anything that is not an
+    escape at all. Either would be a needle for text this session never
+    registered — masking it is the over-masking defect — so a candidate that does
+    not decode to ``value`` is dropped.
+
+    Deliberately narrower than the family list at or over the floor: the
+    ``ensure_ascii=False`` interior is not here (for a value needing no escaping
+    it IS the value, and for one that does it is a spelling no producer in this
+    tree emits), nor are the reversal, base64, hex, percent or separator-spread
+    families, whose PERMUTATIONS stay behind the value floor.
+    """
+    escaped = json.dumps(value)[1:-1]
+    candidates = [escaped, _uppercased_json_escape_digits(escaped)]
+    return [candidate for candidate in candidates if _decodes_to_value(candidate, value)]
+
+
+def _below_floor_forms(value: str) -> tuple[str, ...]:
+    """The spellings a value BELOW the transform floor gets, longest first.
+
+    Every family behind the floor stays skipped — a short value's reversal,
+    base64, hex, percent and spread spellings are strings ordinary output already
+    contains, which is the whole reason the floor exists. ONE family is a
+    different kind of thing and is enumerated anyway: the JSON ESCAPING of the
+    value, which is not a permutation but the value's own bytes written the way
+    every JSON producer writes them. It is the case the floor left open where a
+    short value still travels — a multi-byte value (CJK, Cyrillic, Devanagari), a
+    newline, a quote — arriving in a tool result as a ``\\uXXXX`` run while the
+    session holds only the verbatim bytes.
+
+    Two bounds hold that widening back, neither of them a guarantee: only a
+    spelling of at least :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters is
+    offered, and each one must decode back to the value
+    (:func:`_json_escape_spellings`). What the spelling bound still admits — an
+    unrelated document carrying this value's escaping — is measured beside that
+    constant rather than claimed away. The verbatim spelling is always masked,
+    unchanged.
+    """
+    forms = [value]
+    forms += [
+        spelling
+        for spelling in _json_escape_spellings(value)
+        if len(spelling) >= _SHORT_ESCAPE_MIN_SPELLING_LEN
+    ]
+    # The same de-duplication and longest-first rule as the full family list
+    # below, for the same reasons (a shorter spelling that is a prefix of a longer
+    # one must not run first and leave the longer one's tail on screen).
+    unique = dict.fromkeys(form for form in forms if form)
+    return tuple(sorted(unique, key=len, reverse=True))
 
 
 def credential_forms(value: str) -> tuple[str, ...]:
@@ -5262,10 +5492,15 @@ def credential_forms(value: str) -> tuple[str, ...]:
       choice: ``urllib`` uses upper, hand-rolled encoders use lower);
     * JSON string escaping, both the ASCII-escaped form (``\\u00e9``) and the
       raw-Unicode form, the first also with its digits uppercased;
-    * the characters of the value spread by one uniform separator.
+    * the characters of the value spread by one uniform separator;
+    * **below the floor, only the JSON ESCAPING of the value** — the families
+      above stay behind the floor, and that one is enumerated under the separate
+      SPELLING-length bound (:data:`_SHORT_ESCAPE_MIN_SPELLING_LEN`).
 
-    A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets the verbatim
-    spelling only — see that constant for why.
+    A value shorter than :data:`_TRANSFORM_MIN_VALUE_LEN` gets its verbatim
+    spelling, plus its JSON escaping when that escaping is at least
+    :data:`_SHORT_ESCAPE_MIN_SPELLING_LEN` characters and decodes back to the
+    value — see both constants for why the two bounds are separate numbers.
 
     **What the families still do not reach, stated rather than implied.** A hex
     dump of a value longer than one ``xxd`` line (16 bytes) is broken by the
@@ -5280,7 +5515,7 @@ def credential_forms(value: str) -> tuple[str, ...]:
         # direct caller put the marker between every character of every text.
         return ()
     if len(value) < _TRANSFORM_MIN_VALUE_LEN:
-        return (value,)
+        return _below_floor_forms(value)
     raw = value.encode("utf-8")
     forms = [value, value[::-1]]
     standard = base64.b64encode(raw).decode("ascii")
@@ -5543,6 +5778,103 @@ class StreamMasker:
         return len(self._pending)
 
 
+#: The letters a word-like value is delimited by. ASCII only, on purpose, on BOTH
+#: sides of the decision (see :func:`_is_word_like`).
+_ASCII_LETTER_CLASS = "A-Za-z"
+
+
+def _is_word_like(value: str) -> bool:
+    """Whether ``value`` is a plain ASCII word: letters only, no digit, symbol or space.
+
+    **Why the exact-value pass distinguishes these at all (2026-10-09, the display
+    half of the edit-corruption loop).** A registered value is matched as a
+    SUBSTRING, which is right for anything with a digit, a symbol or mixed shape:
+    such a string is a credential wherever it appears, including glued into a
+    longer token. A plain word is the opposite case. ``PASSWORD=synthetic`` is
+    registered (:func:`is_registerable_component` needs only length), and a
+    substring match then rewrote ordinary prose — ``a synthetic store`` became
+    ``a [mask] store`` and ``unsynthetically`` became ``un[mask]ally`` — in tool
+    output the model reads and copies back into source files, which is how a
+    mask ends up on disk. Matching a word-like value on WORD BOUNDARIES
+    (:func:`_word_pattern`) keeps it masked wherever it stands alone and stops it
+    mangling larger words.
+
+    **The accepted residual, stated here and pinned in the tests:** a plain-word
+    secret embedded INSIDE a longer run of letters is no longer masked
+    (``unsynthetically`` keeps the word). Such a string is indistinguishable from
+    ordinary vocabulary, and mangling vocabulary is the worse failure — it blinds
+    the model and corrupts files. A word glued to a digit, an underscore or any
+    symbol is NOT a longer run of letters and is still masked
+    (``synthetic1``, ``my_synthetic``, ``synthetic.``). A backslash ESCAPE is a
+    boundary too, not its last letter: in raw provider JSON a value at the start of a
+    line sits after ``\\n`` (or after a ``\\uXXXX`` whose last hex digit is a letter),
+    and the token must stay masked there — :func:`_word_pattern` carries the why and
+    the regression it fixes.
+
+    ASCII only, deliberately: a boundary is the edge of a run of letters, and
+    scripts that are written without spaces (CJK) have no such edge, so a
+    boundary rule over them would leave a secret unmasked beside any neighbouring
+    character. Those values keep the substring match, which fails toward masking.
+
+    Applied to the two spellings of a word-like value that are themselves a run of
+    letters a reader can meet in prose: the verbatim value and its reversal — a
+    letters-only value reverses to letters-only, so the reversal is the same case
+    whenever it exists. It exists only at or over ``_TRANSFORM_MIN_VALUE_LEN``:
+    a letters-only value's JSON escaping IS the value (``json.dumps`` escapes no
+    ASCII letter) and every other family stays behind the floor, so below it
+    ``credential_forms`` offers no spelling beside the verbatim one and the stock
+    pair (``stressed``/``desserts``, 8 letters each) illustrates the shape without
+    being reachable. Every ENCODED spelling (base64, hex, percent, escaped,
+    separator-spread) keeps the substring match even when it happens to be all
+    letters: it is an opaque string that is not ordinary vocabulary, and a base64
+    spelling glued into a longer base64 blob is a leak, so that side fails toward
+    masking.
+
+    **Chunked surfaces over-mask, never under-mask, at a cut.** A stream cut can
+    leave the word at the very edge of a chunk, where the missing neighbour reads as
+    a boundary: ``synthetic`` | ``ally`` published as two chunks masks the first
+    half. That errs toward masking, and only at a chunk edge; the cut rules in
+    :class:`StreamMasker` and the bash pipe filter are unchanged and still never
+    publish a spelling in two halves.
+    """
+    return value.isascii() and value.isalpha()
+
+
+@functools.lru_cache(maxsize=2048)
+def _word_pattern(form: str) -> Pattern[str]:
+    """``form`` as a pattern that refuses to match inside a longer run of letters.
+
+    Lookarounds, not ``\\b``: ``\\b`` treats an underscore and a digit as part of a
+    word, so ``my_synthetic`` and ``synthetic1`` would escape the mask, and those
+    are exactly the spellings a credential is glued into. Cached because the pass
+    runs over every settled tool result; the key set is bounded by the session's
+    registration cap times the (closed) spelling list.
+
+    **A backslash escape is the boundary, not its last letter** (QA round 1, Q-1).
+    The pass runs over RAW provider JSON as well as prose: ``raw_arguments`` is what
+    the transcript persists and the wire replays, and there a value at the start of
+    a line or after a tab sits immediately after ``\\n``, ``\\t`` ... — whose last
+    character is a letter — or after the fourth hex digit of a ``\\uXXXX`` when that
+    digit is ``a``-``f``. Reading that character as an ordinary letter released the
+    token on this surface while the parsed ``arguments`` stayed masked: a leak, not
+    prose protection, and one ``origin/main`` did not have (its substring match
+    masked there). So ``\\`` + letter and ``\\uXXXX`` count as separators; a letter
+    run that is NOT an escape still suppresses the match, so ``un<word>ally`` stays
+    readable. The extra alternatives are fixed-width, which bounds the KIND of the
+    cost and not its magnitude: the three-branch scan measures ~3x the
+    one-lookbehind pattern it replaced (agent review round 2, R6 — best of seven:
+    22.6 vs 7.6 ms per 1 MB here, 37.3 vs 12.4 ms on the review host; the ratio is
+    the claim, the absolute figure tracks the host). It is the same class of cost
+    the ``guard`` field comment records for a fixed-width assertion at every
+    character position.
+    """
+    letters = _ASCII_LETTER_CLASS
+    return re.compile(
+        f"(?:(?<![{letters}])|(?<=\\\\[{letters}])|(?<=\\\\u[0-9A-Fa-f]{{4}}))"
+        f"{re.escape(form)}(?![{letters}])"
+    )
+
+
 def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     """Mask every known value in ``text``, in every spelling it may be printed in.
 
@@ -5570,6 +5902,19 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
     of magnitude cheaper than the table it sits beside. The dominant new term is
     the spelling count, not the value count, which is why the count is what the
     policy bounds and what a test pins.
+
+    **One term is NOT cheap, and it is the feature's own case: a PRESENT word form.**
+    A letters-only value's form is matched with the boundary regex
+    (:func:`_word_pattern`), which scans the whole text, so the numbers above hold
+    while no registered word form occurs in it. One present form costs ~3x the
+    round-1 single-lookbehind pattern after the escape alternatives were added:
+    ~37 ms per present word form per 1 MB on the review host, ~23 ms here, linear in
+    the text, against ~0.4-0.9 ms for the substring pass it replaced (agent review
+    rounds 1-2, R2/R6 — best of five/seven; the RATIO is the claim, the absolute
+    figure tracks the host). Absent forms add nothing: the ``str.find`` gate skips
+    the scan entirely (measured 0.23 vs 0.00 ms per 1 MB here). A typical tool
+    result is a few hundred KB and presents a form once at most, so the added cost
+    is ≲ 15 ms there; the term to watch is linear, not quadratic.
     """
     result = text
     # The `str` filter is in the GENERATOR, not a guard inside the loop: `key=len`
@@ -5583,8 +5928,13 @@ def scrub_values(text: str, values: Iterable[Optional[str]]) -> str:
         reverse=True,
     )
     for value in ordered:
+        word_like = _is_word_like(value)
         for form in credential_forms(value):
-            if form in result:
+            if form not in result:
+                continue
+            if word_like and (form == value or form == value[::-1]):
+                result = _word_pattern(form).sub(REDACTION_MARKER, result)
+            else:
                 result = result.replace(form, REDACTION_MARKER)
     return result
 

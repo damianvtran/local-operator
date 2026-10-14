@@ -337,8 +337,8 @@ async def test_delete_is_refused_for_a_live_session_with_the_guard_sentence(arch
     assert response.status_code == 409
     detail = response.json()["detail"]
     assert detail["code"] == "session_delete_refused"
-    assert "running session" in detail["message"]
-    assert "Stop it" in detail["message"], "the remedy is what a client renders"
+    assert "running session" in detail["text"]
+    assert "Stop it" in detail["text"], "the remedy is what a client renders"
     assert session.is_dir()
 
 

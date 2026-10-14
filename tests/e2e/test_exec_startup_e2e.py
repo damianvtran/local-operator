@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from local_operator.config import ConfigManager
+from local_operator.session.goal_judge import MAX_GOAL_REJUDGES
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from tests.e2e.harness import NO_NOTIFY_ENV, provider_call_kinds, user_turns
 
@@ -265,9 +266,33 @@ def test_exec_team_count_loop_and_resume(exec_server):
     # iterations. A bare ``== 3`` was written before the judge existed and cannot
     # tell this from a command that re-submitted its argument, which is what the
     # census below is for (see ``provider_call_kinds``).
+    #
+    # THE JUDGE'S ENTRY IS A RUN'S CEILING, NOT ONE CALL, and that is the flake
+    # this cell was reporting (CI run 38102577848, macos shard 1): a run asks its
+    # aside once and RE-ASKS it — the same question, against the context that
+    # moved — while a foreign turn ends under the verdict it is about to read
+    # (``goal_judge._run``'s ``rearms`` loop, bounded by ``MAX_GOAL_REJUDGES``;
+    # its unit pin is
+    # ``test_a_verdict_whose_context_moved_is_dropped_and_the_judge_retries``).
+    # The count loop's own iterations end exactly there, so ONE run legitimately
+    # reaches the provider twice and ``== 1`` on the CALL count is a race rather
+    # than a rule.
+    #
+    # The ceiling is all the wire can state, and it is enough: an aside carries
+    # no run identity (a re-ask and the first ask of a second arming are the same
+    # question over an extended context), so one run's spend — 1 ask plus up to
+    # ``MAX_GOAL_REJUDGES`` re-asks — is the unit this cell can hold to. Calls
+    # past that ceiling cannot be one run's: they are a second run, or a re-ask
+    # that has left its documented bound.
     kinds = provider_call_kinds(requests, goal="Ship safely")
     assert user_turns(kinds) == 1, "one user-authored turn, submitted once"
-    assert kinds.count("judge") == 1, "the goal judge's forked aside, exactly once"
+    judge_calls = kinds.count("judge")
+    assert 1 <= judge_calls <= 1 + MAX_GOAL_REJUDGES, (
+        "ONE judge run: its aside is asked once and re-asked at most "
+        f"MAX_GOAL_REJUDGES={MAX_GOAL_REJUDGES} times while a turn lands under "
+        f"its verdict, so {judge_calls} judge call(s) in {kinds} is past one "
+        "run's ceiling"
+    )
     assert kinds.count("loop") == 2, "the count loop's own two iterations"
     wire = json.dumps(requests[0])
     for expected in ("COLLABORATION_SENTINEL", "PROJECT_SENTINEL", "manager", "coder", "reviewer"):
@@ -282,11 +307,13 @@ def test_exec_team_count_loop_and_resume(exec_server):
     )
     assert resumed.returncode == 0
     # One more user turn and NOTHING else: ``--clear-goal`` is what stops a
-    # judge riding this turn end, so the goal's aside is still the single call
-    # the first command made.
+    # judge riding this turn end, so the comparison is against the calls the
+    # first command's run already spent, NOT against 1 — a cleared goal adds no
+    # judge call, and pinning the delta keeps this half of the cell out of the
+    # re-ask race above (the run's ceiling is the other half's job).
     kinds = provider_call_kinds(requests, goal="Ship safely")
     assert user_turns(kinds) == 2, "the exec turn and the resume's own turn"
-    assert kinds.count("judge") == 1, "a cleared goal is not judged"
+    assert kinds.count("judge") == judge_calls, "a cleared goal is not judged"
     assert kinds.count("loop") == 2
     before = len(requests)
     missing_goal = run("exec", "--resume", session_id, "--loop", "1", stdin="")

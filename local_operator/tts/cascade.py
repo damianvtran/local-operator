@@ -113,6 +113,29 @@ HUB_SPEECH_HEADERS = (
     "X-Radient-Speech-Degraded",
 )
 
+#: The hub's CHARGE headers (``X-Radient-Cost-*``) — the speech surface's cost
+#: object, rendered as headers because the body is the audio
+#: (docs.radienthq.com, speech-api "What you were charged"). Read here, by
+#: NAME like the family above, and carried on :class:`TtsOutcome` so the
+#: emitting route can parse them with the ONE adapter that knows the field
+#: names (``clients/radient_cost.py``) — NOT relayed onto this daemon's own
+#: response: the charge is published to surfaces through ``spend_channels``
+#: (and mirrored to analytics), and a browser-readable copy would be a second
+#: distribution channel nobody reads. Omitted headers are simply absent: the
+#: docs say Provider/Model/Price-Version are left out when they do not apply,
+#: and an absent amount must read as unknown, never as zero.
+HUB_COST_HEADERS = (
+    "X-Radient-Cost-Version",
+    "X-Radient-Cost-Amount-Usd",
+    "X-Radient-Cost-Basis",
+    "X-Radient-Cost-Unit",
+    "X-Radient-Cost-Units",
+    "X-Radient-Cost-Usage-Record-Id",
+    "X-Radient-Cost-Provider",
+    "X-Radient-Cost-Model",
+    "X-Radient-Cost-Price-Version",
+)
+
 #: The credential namespace rung 3 reads: the ``openai-key`` login's own,
 #: holding a platform API key. NOT ``openai`` — that provider's only logins are
 #: ChatGPT OAuth grants, and a ChatGPT token is not valid at the audio endpoint.
@@ -316,12 +339,14 @@ async def _run_radient_rung(
     descriptor: Optional[VoiceDescriptor],
     legacy: adapters.Legacy,
     response_format: str,
+    session_id: Optional[str] = None,
+    client_request_id: Optional[str] = None,
     client: Optional[RadientClient] = None,
-) -> tuple[bytes, str, list[tuple[str, str]]]:
+) -> tuple[bytes, str, list[tuple[str, str]], list[tuple[str, str]]]:
     """Rung 1: the hub, off the event loop.
 
-    Returns ``(audio, serving provider, relayed headers)``. The client is sync
-    ``requests``; ``asyncio.to_thread`` keeps it off the loop.
+    Returns ``(audio, serving provider, relayed headers, cost headers)``. The
+    client is sync ``requests``; ``asyncio.to_thread`` keeps it off the loop.
     ``X-Radient-Speech-Provider`` is the hub's own receipt for which leg
     actually served: a descriptor-bearing call names no leg, so the hub's header
     is the only place that fact exists — and the rest of the family (the map
@@ -331,6 +356,11 @@ async def _run_radient_rung(
     admit whatever the hub adds later into a browser-readable response with no
     change on this side and no test able to notice (voicing S2 security round 1,
     S-3).
+
+    :data:`HUB_COST_HEADERS` rides INSIDE the outcome and never onto the
+    response: the route emitting the spend record reads the charge there, and
+    ``session_id``/``client_request_id`` go OUT as the client correlation
+    headers so the hub's usage row can be joined back to this session (PR-3).
 
     THIS RUNG REQUIRES A HUB THAT UNDERSTANDS ``voice_descriptor`` (agent-server
     PR #84, merged to main as ``c817d5b``). No pre-#84 fallback is implemented,
@@ -360,15 +390,24 @@ async def _run_radient_rung(
         provider=None,  # the hub's cascade and leg choice stay server-owned
         language_code=legacy.language_code or None,
         voice_descriptor=payload,
+        session_id=session_id,
+        client_request_id=client_request_id,
     )
-    serving = headers.get("X-Radient-Speech-Provider") or headers.get("x-radient-speech-provider")
     by_lower_name = {name.lower(): value for name, value in headers.items()}
+    serving = headers.get("X-Radient-Speech-Provider") or by_lower_name.get(
+        "x-radient-speech-provider"
+    )
     relayed = [
         (name, by_lower_name[name.lower()])
         for name in HUB_SPEECH_HEADERS
         if name.lower() in by_lower_name
     ]
-    return audio, (serving or "radient"), relayed
+    cost_headers = [
+        (name, by_lower_name[name.lower()])
+        for name in HUB_COST_HEADERS
+        if name.lower() in by_lower_name
+    ]
+    return audio, (serving or "radient"), relayed, cost_headers
 
 
 async def _run_elevenlabs_rung(
@@ -381,7 +420,7 @@ async def _run_elevenlabs_rung(
     response_format: str,
     timeout_s: float,
     client: Optional[Any] = None,
-) -> tuple[bytes, str, list[tuple[str, str]]]:
+) -> tuple[bytes, str, list[tuple[str, str]], list[tuple[str, str]]]:
     """Rung 2: the user's own ElevenLabs key, mapped by the vendored map.
 
     The call-time key fetch keeps the FULL credential cascade (an operator's
@@ -394,7 +433,10 @@ async def _run_elevenlabs_rung(
     attempt = adapters.resolve("elevenlabs", tts_clients.ELEVENLABS_TTS_MODEL, descriptor, legacy)
     elevenlabs = client or tts_clients.ElevenLabsTtsClient(key)
     result = await elevenlabs.synthesize(text, params=attempt.params, timeout_s=timeout_s)
-    return result.audio, result.provider, _mapping_headers(attempt)
+    # No cost headers on a BYO leg: the vendor is not the hub and reports no
+    # charge in this family, so the route records the call with an UNSTATED
+    # amount rather than a zero (PR-3).
+    return result.audio, result.provider, _mapping_headers(attempt), []
 
 
 async def _run_openai_rung(
@@ -407,7 +449,7 @@ async def _run_openai_rung(
     response_format: str,
     timeout_s: float,
     client: Optional[Any] = None,
-) -> tuple[bytes, str, list[tuple[str, str]]]:
+) -> tuple[bytes, str, list[tuple[str, str]], list[tuple[str, str]]]:
     """Rung 3: the user's own OpenAI API key, mapped by the vendored map."""
     key = await _openai_tts_key(store, session_id)
     if not key:
@@ -420,7 +462,8 @@ async def _run_openai_rung(
         response_format=response_format,
         timeout_s=timeout_s,
     )
-    return result.audio, result.provider, _mapping_headers(attempt)
+    # See the ElevenLabs rung: no cost headers for a BYO leg.
+    return result.audio, result.provider, _mapping_headers(attempt), []
 
 
 def _mapping_headers(attempt: adapters.Attempt) -> list[tuple[str, str]]:
@@ -460,6 +503,8 @@ async def synthesize_speech(
     elevenlabs_client: Optional[Any] = None,
     openai_client: Optional[Any] = None,
     timeout_s: float = TTS_OVERALL_TIMEOUT_S,
+    correlation_session_id: str | None = None,
+    client_request_id: str | None = None,
 ) -> TtsOutcome:
     """Synthesize ``text`` down the cascade. See the module docstring.
 
@@ -467,6 +512,13 @@ async def synthesize_speech(
     failure. Rungs with no credential are never attempted at all — that is the
     resolver's answer, and attempting one would spend a round trip to learn
     what the store already said.
+
+    ``correlation_session_id``/``client_request_id`` (PR-3) are the hub's
+    client correlation headers for the RADIENT rung and are deliberately NOT
+    the ``session_id`` above: that one scopes credential lookup (a different
+    question, answered by the store), while these are per-call attribution
+    (answered by the route). A BYO rung reads neither — the vendors do not
+    have this header family.
     """
     radient_base = resolve_radient_api_base_url(base_url)
     store, owned = _ensure_store(config_dir, store)
@@ -508,6 +560,8 @@ async def synthesize_speech(
                         descriptor=descriptor,
                         legacy=legacy,
                         response_format=response_format,
+                        session_id=correlation_session_id,
+                        client_request_id=client_request_id,
                         client=radient_client,
                     )
                 elif descriptor is None:
@@ -547,7 +601,7 @@ async def synthesize_speech(
                     )
                 # ONE bound for every rung, whatever the rung does with its own
                 # timeouts: the deadline is the executor's promise.
-                audio, provider, mapped_headers = await asyncio.wait_for(
+                audio, provider, mapped_headers, cost_headers = await asyncio.wait_for(
                     call, timeout=attempt_timeout
                 )
             except asyncio.TimeoutError:
@@ -577,6 +631,7 @@ async def synthesize_speech(
                 path=path,
                 attempts=tuple(attempts),
                 provider=provider,
+                cost_headers=tuple(cost_headers),
                 speech_headers=(
                     *mapped_headers,
                     # The daemon's own receipt, ALWAYS last and always present.

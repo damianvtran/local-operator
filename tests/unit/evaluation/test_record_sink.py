@@ -46,10 +46,14 @@ from local_operator.evaluation.record_sink import (
     RecordSink,
     RecordSinkError,
 )
-from local_operator.evaluation.session_arm import run_session_episode
+from local_operator.evaluation.session_arm import (
+    EPISODE_TOOL_SURFACE,
+    run_session_episode,
+)
 from local_operator.harness.types import ReasoningDeltaEvent
 from local_operator.mcp.tool_bridge import create_mcp_tool_name
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from local_operator.session.tool_readiness import ToolReadiness
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
     build_config,
@@ -421,8 +425,47 @@ class _RecordingSession:
         self._sinks.append(sink)
         return lambda: None
 
+    def subscribe_requests(self, handler: Any) -> Any:
+        # The owning contract's observer surface; this double drives no
+        # provider requests, so the registration is inert.
+        del handler
+        return lambda: None
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        # The owning contract's explicit join: no child work exists here, so
+        # the receipt is honestly complete (the score gate requires it).
+        del timeout_s
+        return SimpleNamespace(
+            complete=True,
+            reason=reason,
+            elapsed_ms=0.0,
+            pending_job_ids=(),
+            errors=(),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
+
     def set_tool_confinement(self, root: Any) -> None:
         del root
+
+    async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
+        # The arm's first-request gate now calls the typed owning API
+        # (``Session.wait_for_tools``). This double drives no discovery
+        # manager, so it spells the same no-manager semantics: names already
+        # in the live inventory read ready; anything else reads missing.
+        # Nothing here waits, so the bound is unused.
+        del timeout_s
+        names = {tool.name for tool in self._tools}
+        required_names = tuple(required)
+        present = tuple(n for n in required_names if n in names)
+        missing = tuple(n for n in required_names if n not in names)
+        return ToolReadiness(
+            status="ready" if not missing else "missing",
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=None,
+        )
 
     async def prompt(self, text: str, *, images: Any = None) -> None:
         del text, images
@@ -491,7 +534,14 @@ def _runner(
     )
     session = _RecordingSession(events)
     session_spec = SessionSpec(
-        hosting="test", model="mock", approvals=ApprovalPolicy.auto(), name="arm-record"
+        hosting="test",
+        model="mock",
+        # The episode posture: an explicit world boundary plus the pinned
+        # surface declared as its own approval (EPISODE_TOOL_SURFACE).
+        world_root=scratch_root / "world",
+        tools=EPISODE_TOOL_SURFACE,
+        approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+        name="arm-record",
     )
 
     async def rescue(descriptor: Any, **kwargs: Any) -> Any:

@@ -787,12 +787,12 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
     ]
     for error in leaky:
         detail = await relay(error)
-        assert detail["message"] == generic, detail
+        assert detail["text"] == generic, detail
         # The specific values from the reproduction must be absent, not merely
         # reworded: these are an internal port and another session's identifier.
-        assert "54321" not in detail["message"]
-        assert "abc123secretsession" not in detail["message"]
-        assert "127.0.0.1" not in detail["message"]
+        assert "54321" not in detail["text"]
+        assert "abc123secretsession" not in detail["text"]
+        assert "127.0.0.1" not in detail["text"]
 
     # The vetted sentence still survives -- suppressing it would re-break the
     # "no model provider configured" case this relay exists to report (QA Q1).
@@ -800,7 +800,7 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
         "No model provider is configured yet. Connect one in Settings > Providers, "
         "then send the message again."
     )
-    assert (await relay(ActionableConnectionError(vetted)))["message"] == vetted
+    assert (await relay(ActionableConnectionError(vetted)))["text"] == vetted
 
 
 @pytest.mark.asyncio
@@ -1220,7 +1220,7 @@ async def test_attachment_bytes_are_not_cached_by_any_shared_cache(tmp_path, mon
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}",
             headers={"Authorization": "Bearer token"},
@@ -1344,7 +1344,7 @@ async def test_search_finds_a_session_by_what_was_said_in_it(tmp_path, monkeypat
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         denied = client.get("/v1/desktop/sessions/search?q=retention")
         assert denied.status_code in (401, 403)
         response = client.get(
@@ -1387,7 +1387,7 @@ async def test_search_is_declared_before_the_session_id_route(tmp_path, monkeypa
     monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
     app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
     app.state.desktop_sessions = DesktopSessions(tmp_path)
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/sessions/search?q=", headers={"Authorization": "Bearer token"}
         )
@@ -1410,7 +1410,7 @@ async def test_an_oversized_or_invalid_query_is_refused_without_echoing_it(tmp_p
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     secret_looking = "x" * 300
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         too_long = client.get(
             f"/v1/desktop/sessions/search?q={secret_looking}",
             headers={"Authorization": "Bearer token"},
@@ -1746,7 +1746,7 @@ async def test_a_live_turn_behind_a_recovering_dial_is_not_idle(tmp_path, monkey
             assert response.status_code == 503, response.text
             detail = response.json()["detail"]
             assert detail["code"] == "runtime_unreachable", detail
-            assert detail["message"] == (
+            assert detail["text"] == (
                 "Session owner is unavailable. Reconnect and reconcile before retrying."
             ), detail
             assert owner.ops == [], "the dead dial was asked for a receipt it cannot serve"
@@ -2234,11 +2234,11 @@ async def test_an_unreachable_owner_is_a_503_and_not_a_leak(tmp_path, monkeypatc
             assert response.status_code == 503, response.text
             detail = response.json()["detail"]
             assert detail["code"] == "runtime_unreachable"
-            assert detail["message"] == (
+            assert detail["text"] == (
                 "Session owner is unavailable. Reconnect and reconcile before retrying."
             ), detail
             for leaked in ("54321", "127.0.0.1"):
-                assert leaked not in detail["message"], detail
+                assert leaked not in detail["text"], detail
             assert owner.ops == ["abort"], "the route never actually asked the owner"
             # The claim was left PENDING rather than recorded, so the SAME id can
             # be retried — which is the remedy the sentence above promises
@@ -3810,7 +3810,7 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/transcript"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
         forbidden = client.get(
@@ -3877,7 +3877,7 @@ async def test_child_attachment_route_is_bearer_gated_and_no_store(tmp_path, mon
     app.state.desktop_sessions = DesktopSessions(tmp_path)
     path = f"/v1/desktop/sessions/{PARENT_ID}/children/{CHILD_ID}/attachments/{ref.digest}"
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         assert client.get(path).status_code == 401
         headers = {"Authorization": "Bearer token"}
         response = client.get(path, headers=headers)
@@ -4949,12 +4949,16 @@ def _move_body(cwd: str, request_id: str | None = None) -> dict[str, str]:
 def _error_message(response: Any) -> str:
     """The human sentence from a refusal, in either body shape this API uses.
 
-    The ladder answers a NAMED condition with ``{"code", "message"}`` and an
-    ordinary refusal with a bare string, so a test that wants the sentence reads
-    both rather than assuming one — which is also what the desktop client does.
+    The ladder answers a NAMED condition with the message envelope
+    (``{code, params, text}`` since E2a; ``message`` before it) and an ordinary
+    refusal with a bare string, so a test that wants the sentence reads
+    whatever the dict carries rather than assuming one — which is also what
+    the desktop client does.
     """
     detail = response.json()["detail"]
-    return str(detail["message"]) if isinstance(detail, dict) else str(detail)
+    if not isinstance(detail, dict):
+        return str(detail)
+    return str(detail.get("text") or detail.get("message") or "")
 
 
 def _error_code(response: Any) -> str | None:
@@ -5369,7 +5373,7 @@ async def test_a_move_during_owner_recovery_answers_503(move_api) -> None:
         assert response.status_code == 503, response.text
         detail = response.json()["detail"]
         assert detail["code"] == "runtime_unreachable"
-        assert detail["message"] == (
+        assert detail["text"] == (
             "Session owner is unavailable. Reconnect and reconcile before retrying."
         )
         assert bridge.remote.cwd == str(before)
@@ -5705,6 +5709,49 @@ async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path
 
     assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
     assert remote.is_cold
+
+
+@pytest.mark.asyncio
+async def test_the_retire_frame_publishes_the_honest_projection_before_any_engage(tmp_path) -> None:
+    """THE HONESTY UPDATE IS NOT THE ENGAGE'S TO DECLINE (2026-10-10 incident).
+
+    Session 62480a153ced served ``frontend.streaming: true`` for 6+ minutes
+    during the daemon-wide update rollover: the retire raced its turn-end
+    delta, the successor-snapshot repair was declined by the daemon latch, and
+    this callback published nothing that could restate the claim — so mounted
+    viewers kept steering (mode="steer" on the 10:05:24 and 10:07:59 presses)
+    and painted the stuck "thinking" indicator off a bit nothing could clear.
+    The replacement is now published FIRST — before the engage attempt — and
+    the latch's decline only ever declines the SUCCESSOR.
+    """
+    from local_operator.mobile.attach_client import RETIRING_REASON
+    from local_operator.session.attached import AttachedSession
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path), retiring=lambda: True)
+    remote = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=module._no_takeover
+    )
+    bridge.remote = remote
+    remote.set_refresh_callback(bridge._on_runtime_retired)
+    # The incident's exact shape: the claim raced the retirement into the
+    # facade and its canonical mirror. ``_drop_liveness_claim`` corrects both,
+    # and this frame is what must carry that correction to mounted viewers.
+    remote._streaming = True
+    store = remote._frontend_store
+    assert store is not None, "cold() installs the synthesised canonical state"
+    store.replace(store.state.model_copy(update={"streaming": True}))
+
+    remote._on_disconnected(RETIRING_REASON)
+
+    frames = [frame for frame, _size in bridge.replay if frame["type"] == "frontend.replace"]
+    assert frames, "the retire published nothing; the served claim would stand"
+    payload = frames[-1]["payload"]
+    assert (
+        payload["frontend"]["snapshot"]["streaming"] is False
+    ), "the replacement must carry the dropped claim, not restate it"
+    assert payload["cold"] is True, "a retired facade reports itself as cold"
+    assert bridge.warm_task is None, "a latched daemon's retire frame started a runtime"
+    assert remote.is_streaming is False
 
 
 @pytest.mark.asyncio
@@ -6418,7 +6465,10 @@ async def test_an_unreadable_marker_refuses_before_anything_is_mutated(move_api)
             f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
         )
         assert response.status_code == 409, response.text
-        assert "cannot read the session's working-directory marker" in response.json()["detail"]
+        assert (
+            "cannot read the session's working-directory marker"
+            in response.json()["detail"]["text"]
+        )
         assert marker.is_dir(), "the unreadable marker must not be replaced or removed"
         assert double.ops == [], "a refusal before mutation must not retire the owner"
         assert bridge.cwd == str(before)
@@ -6464,7 +6514,10 @@ async def test_a_failed_marker_write_refuses_and_leaves_the_live_marker_intact(
             f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
         )
         assert response.status_code == 409, response.text
-        assert "cannot write the session's working-directory marker" in response.json()["detail"]
+        assert (
+            "cannot write the session's working-directory marker"
+            in response.json()["detail"]["text"]
+        )
         monkeypatch.undo()
         assert marker.read_bytes() == original, "the live marker was partially written"
         assert [path.name for path in marker.parent.glob(f".{marker.name}.*")] == []
@@ -6726,17 +6779,20 @@ async def test_a_legacy_viewer_cannot_mount_across_a_move(move_api, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkeypatch) -> None:
-    """The additive query flag is what a mounted legacy viewer is judged by.
+    """The additive query flags are what a mounted viewer's subscription carries.
 
-    Without it a renderer negotiates nothing and the route refuses it for the
-    duration of a move — an actionable 409 rather than a silent stale paint —
-    and with it the subscription is admitted carrying the flag the move's own
-    precondition reads back.
+    ``frontend_replace`` is the one the move fence reads: without it a renderer
+    negotiates nothing and the route refuses it for the duration of a move — an
+    actionable 409 rather than a silent stale paint — and with it the
+    subscription is admitted carrying the flag the move's own precondition reads
+    back. ``supplements`` (memo §2.7) is the same kind of declaration on its own
+    parameter: the route forwards it into the subscription exactly as the client
+    sent it.
 
     The stream body is stubbed because ``ASGITransport`` buffers a response
     until the app RETURNS, and the real generator is an SSE loop that only ends
-    when the client leaves; the subject here is the two hand-offs on either side
-    of the response — the query flag into the subscription, and the refusal into
+    when the client leaves; the subject here is the hand-offs on either side of
+    the response — the query flags into the subscription, and the refusal into
     the status code — not the frames themselves.
     """
     client, app, root = move_api
@@ -6745,12 +6801,33 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
     pool = app.state.desktop_sessions
     sid = await pool.create(str(before))
     url = f"/v1/desktop/sessions/{sid}/events"
-    negotiated: list[bool] = []
+    # Recorded as the PAIR each call carried: the route builds the subscription
+    # from both additive flags, and a spy that watched only ``frontend_replace``
+    # would let the supplements half be dropped without a failure.
+    negotiated: list[tuple[bool, bool, bool, bool]] = []
     real_subscribe = module.DesktopSessionBridge.subscribe
 
-    def spy(self, *, frontend_replace: bool = False):  # noqa: ANN001
-        negotiated.append(frontend_replace)
-        return real_subscribe(self, frontend_replace=frontend_replace)
+    def spy(
+        self,
+        *,
+        frontend_replace: bool = False,
+        supplements: bool = False,
+        journal_order: bool = False,
+        peer_journal_source: bool = False,
+    ):  # noqa: ANN001
+        # THE SPY MIRRORS THE COLLABORATOR'S SIGNATURE, which gained the
+        # complete declaration's flag with the peer-source contract: a spy
+        # frozen at the old signature fails on a keyword the real method
+        # takes, and one that silently swallowed it would let the route drop
+        # the declaration unnoticed. Four flags, four hand-offs asserted.
+        negotiated.append((frontend_replace, supplements, journal_order, peer_journal_source))
+        return real_subscribe(
+            self,
+            frontend_replace=frontend_replace,
+            supplements=supplements,
+            journal_order=journal_order,
+            peer_journal_source=peer_journal_source,
+        )
 
     async def no_frames(*args, **kwargs):  # noqa: ANN002, ANN003
         # An async generator with nothing to yield: the response completes
@@ -6765,11 +6842,42 @@ async def test_the_events_route_negotiates_the_replacement_flag(move_api, monkey
         legacy = await client.get(url)
         assert legacy.status_code == 409, legacy.text
         assert "Update the desktop app" in legacy.json()["detail"]
-        assert negotiated == [False], "the legacy mount did not present itself as legacy"
+        assert negotiated == [
+            (False, False, False, False)
+        ], "the legacy mount did not present itself as legacy"
         admitted = await client.get(url, params={"frontend_replace": 1})
         assert admitted.status_code == 200, admitted.text
-        assert negotiated == [False, True], "the route dropped the negotiated flag"
+        assert negotiated == [
+            (False, False, False, False),
+            (True, False, False, False),
+        ], "the route dropped the negotiated flag"
         bridge.move_in_progress = False
+        # The supplements declaration is the same hand-off on its own parameter
+        # (memo §2.7): ``?supplements=1`` must arrive as True, with the
+        # replacement flag still at its default.
+        declared = await client.get(url, params={"supplements": 1})
+        assert declared.status_code == 200, declared.text
+        assert negotiated == [
+            (False, False, False, False),
+            (True, False, False, False),
+            (False, True, False, False),
+        ], "the route dropped the supplements declaration"
+
+        ordered = await client.get(url, params={"journal_order": 1})
+        assert ordered.status_code == 200, ordered.text
+        assert negotiated[-1] == (False, False, True, False), "source order opt-in was dropped"
+
+        # The complete contract's declaration is the fourth hand-off on the
+        # same seam (peer-source contract): ``?peer_journal_source=1`` must
+        # arrive on the subscription as True.
+        declared_complete = await client.get(url, params={"peer_journal_source": 1})
+        assert declared_complete.status_code == 200, declared_complete.text
+        assert negotiated[-1] == (
+            False,
+            False,
+            False,
+            True,
+        ), "the complete peer-source declaration was dropped"
 
 
 @pytest.mark.asyncio
@@ -6885,13 +6993,12 @@ async def test_the_list_route_refuses_rather_than_answering_an_empty_catalogue(
     # The body is the ladder's NAMED-CONDITION shape, not a bare sentence: the
     # code is what lets a client tell this apart from "your credential was
     # refused", which is the distinction the app's identity probe needs.
-    assert answer.json()["detail"] == {
-        "code": "session_store_unavailable",
-        "message": (
-            "Conversations could not be read right now. "
-            "This recovers on its own; retry in a moment."
-        ),
-    }
+    # E2a: the sentence rides `text` on the message envelope.
+    detail = answer.json()["detail"]
+    assert detail["code"] == "session_store_unavailable"
+    assert detail["text"] == (
+        "Conversations could not be read right now. " "This recovers on its own; retry in a moment."
+    )
     # Nothing about the store's own contents leaked into the sentence.
     assert str(root) not in answer.text
 
@@ -6926,7 +7033,7 @@ async def test_the_refusal_carries_a_code_no_status_could_express(draft_api, mon
         detail = answer.json()["detail"]
         assert detail["code"] == "session_store_unavailable"
         assert detail["code"] == SessionStoreUnavailable.code
-        assert isinstance(detail["message"], str) and detail["message"]
+        assert isinstance(detail["text"], str) and detail["text"]
 
 
 @pytest.mark.asyncio
@@ -7224,7 +7331,7 @@ def test_the_messages_route_accepts_prose_that_opens_with_a_command_word(monkeyp
     headers = {"Authorization": "Bearer policy-token"}
     body = {"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in MESSAGE_DRAFTS:
             response = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",
@@ -7288,7 +7395,7 @@ def test_the_command_route_and_the_admission_rule_share_one_derivation(monkeypat
         ("logout", "openai"),
     ]
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for command, args in cases:
             spec = slash_command_for("/" + command)
             assert spec is not None
@@ -7344,7 +7451,7 @@ def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands
     assert command_argument_is_used(spec, canary) is True
     assert command_argument_is_used(spec, "my pass phrase") is True
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         for text in (f"/credential {canary}", f"/cred {canary}"):
             refused = client.post(
                 "/v1/desktop/sessions/0badc0ffee00/messages",
@@ -7362,7 +7469,7 @@ def test_the_credential_route_refuses_text_the_admission_rule_calls_the_commands
             # survives the shaper `prompt`'s 422 does not — asserted here because
             # it is the instruction that names the route the user wants.
             assert response.status_code == 422, (command, response.status_code)
-            assert response.json()["detail"] == (
+            assert response.json()["detail"]["text"] == (
                 "Enter credentials in the masked credential form, not command text"
             ), (command, response.text)
 
@@ -7385,7 +7492,7 @@ async def test_the_session_copy_flag_is_refused_by_name_and_bare_session_still_o
         json={"request_id": str(uuid.uuid4()), "command": "session", "args": "--copy"},
     )
     assert refused.status_code == 422, refused.text
-    assert refused.json()["detail"] == (
+    assert refused.json()["detail"]["text"] == (
         "--copy works only in the terminal; the /session view shows the ID"
     )
 
@@ -7838,7 +7945,7 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
                 assert command.status_code == 422, command.text
                 body = command.json()
                 assert body["detail"]["code"] == "operator_authority_required", body
-                assert body["detail"]["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, body
+                assert body["detail"]["text"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, body
 
                 answer = await client.post(
                     f"/v1/desktop/sessions/{sid}/answers",
@@ -7856,7 +7963,7 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
                 assert answer.status_code == 422, answer.text
                 detail = answer.json()["detail"]
                 assert detail["code"] == "operator_authority_required", detail
-                assert detail["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, detail
+                assert detail["text"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, detail
                 assert detail["still_pending"] is True, detail
     finally:
         await pool.close()
@@ -8145,8 +8252,8 @@ async def test_a_retiring_refusal_answers_its_code_on_the_message_route(
     # character-for-character the text the bare-string arm answered with — which
     # is what makes the object additive for a client that reads `detail` as a
     # string: it loses nothing it was reading before.
-    assert detail["message"] == str(refusal), detail
-    assert detail["message"] == shipped, detail
+    assert detail["text"] == str(refusal), detail
+    assert detail["text"] == shipped, detail
 
 
 # --- the scoped, paged catalogue: the wire contract --------------------------
@@ -8223,7 +8330,11 @@ async def test_a_request_without_the_paging_parameters_is_answered_as_before(dra
         "cursor_missing",
         "scope",
         "counts",
+        # Additive and one-shot: None unless a delegated-retention sweep has
+        # removed something this store has not yet announced.
+        "delegated_cleanup_notice",
     }
+    assert result["delegated_cleanup_notice"] is None
     assert result["next_cursor"] is None
     assert result["cursor_missing"] is False
     assert result["scope"] is None
@@ -8372,7 +8483,9 @@ async def test_a_bad_scope_is_refused_by_name(draft_api, query: str, code: str) 
     assert answer.status_code == 422, answer.text
     detail = answer.json()["detail"]
     assert detail["code"] == code, detail
-    assert isinstance(detail["message"], str) and detail["message"]
+    # E2a: the refusal is the message envelope; `text` carries the sentence
+    # that used to ride `message` (machine codes stay verbatim as `code`).
+    assert isinstance(detail["text"], str) and detail["text"]
     # Nothing about the store leaked into the refusal, and no scope can be
     # applied to a name the route would not accept.
     assert "sessions" not in answer.text
@@ -9174,7 +9287,7 @@ async def test_the_gate_body_still_needs_its_epoch(answers_api) -> None:
         json={"epoch": "e-old", "request_id": "r1", "approved": True},
     )
     assert result.status_code == 409
-    assert "earlier session owner" in result.json()["detail"]
+    assert "earlier session owner" in result.json()["detail"]["text"]
 
 
 def test_visible_transcript_rows_drops_an_ask_gate_divert_row() -> None:
@@ -9573,3 +9686,67 @@ async def test_the_ask_attachments_feature_is_published(draft_api) -> None:
     client, _root = draft_api
     features = (await client.get("/v1/capabilities")).json()["result"]["features"]
     assert features["ask_attachments"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_peeks_the_delegated_cleanup_notice_until_acked(draft_api) -> None:
+    """The notice is a READ-ONLY peek on the list; the ack route consumes it.
+
+    Many readers poll this route — the app's own attach and auth probes among
+    them — and consuming on read let a main-process read eat the once-per-store
+    notice before the renderer could render it, permanently (the UI PR's
+    round-1 review). Every read carries it until the renderer acknowledges
+    through the ack route; the flag on disk is what a restart reads.
+    """
+    import json
+
+    client, root = draft_api
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    state_path = sessions / ".delegated-retention.json"
+    state_path.write_text(
+        json.dumps({"removed_total": 3, "max_age_hours": 48, "notice_acknowledged": False})
+    )
+    first = (await client.get("/v1/desktop/sessions")).json()["result"]
+    notice = first["delegated_cleanup_notice"]
+    assert notice["removed"] == 3 and notice["in_progress"] is False
+    assert "Cleaned up 3 delegated sessions" in notice["message"]
+    assert "Your own conversations were not touched." in notice["message"]
+    # A second read still carries it, and NOTHING was flipped on disk.
+    second = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert second["delegated_cleanup_notice"] == notice
+    assert json.loads(state_path.read_text())["notice_acknowledged"] is False
+    # The renderer acknowledges; from then on it is gone — and the persisted
+    # flag is what any later process (a restart) reads: null.
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200, ack.text
+    assert ack.json()["result"] == {"acknowledged": True}
+    assert json.loads(state_path.read_text())["notice_acknowledged"] is True
+    third = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert third["delegated_cleanup_notice"] is None
+    again = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert again.status_code == 200 and again.json()["result"] == {"acknowledged": True}
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_carries_no_notice_when_nothing_was_ever_removed(draft_api) -> None:
+    client, root = draft_api
+    answer = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert "delegated_cleanup_notice" in answer and answer["delegated_cleanup_notice"] is None
+    # The ack route is idempotent and invents nothing when there is no record.
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}
+    assert not (root / "sessions" / ".delegated-retention.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_list_route_tolerates_a_malformed_notice_record(draft_api) -> None:
+    """A malformed record yields null, never an error — on the read and the ack."""
+    client, root = draft_api
+    sessions = root / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / ".delegated-retention.json").write_text("{nope")
+    answer = (await client.get("/v1/desktop/sessions")).json()["result"]
+    assert answer["delegated_cleanup_notice"] is None
+    ack = await client.post("/v1/desktop/delegated-cleanup-notice/ack")
+    assert ack.status_code == 200 and ack.json()["result"] == {"acknowledged": True}

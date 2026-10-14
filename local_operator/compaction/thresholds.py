@@ -60,9 +60,15 @@ DEFAULT_RESERVE_TOKENS = 16384
 #: :func:`resolve_threshold_percent`).
 DEFAULT_THRESHOLD_PERCENT = 0.80
 
-#: Absolute trigger default: compact once the context passes 600k tokens even
-#: when that is a small fraction of a very large window.
-DEFAULT_THRESHOLD_TOKENS = 600_000
+#: Absolute trigger default: compact once the context passes 400k tokens even
+#: when that is a small fraction of a very large window. Lowered from 600k: a
+#: session that grows to 600k is slow and expensive on every request, and the
+#: percentage term (80%) already binds first on any window under 500k, so this
+#: only changes behaviour for windows above 500k. An explicit
+#: ``compaction.threshold_tokens`` is untouched. ``settings_io`` mirrors this
+#: number as a literal (importing this package there would pull the whole pass
+#: engine into every settings read); a test pins the two together.
+DEFAULT_THRESHOLD_TOKENS = 400_000
 
 #: HARD ceiling on the serialized request, in bytes — the number the render
 #: seam sheds frames to satisfy. NOT a token figure; see
@@ -130,7 +136,7 @@ class CompactionSettings(BaseModel):
         description=(
             "Absolute token trigger. The resolved trigger is the SMALLER of"
             " this and the percentage trigger. Non-positive falls back to"
-            " 600000 with a warning."
+            " 400000 with a warning."
         ),
     )
     auto_continue: bool = Field(
@@ -209,10 +215,11 @@ class CompactionSettings(BaseModel):
     #
     # The advisor exists because the shipped trigger is a SIZE trigger and the
     # thing that actually hurts is a cut landing inside a live task. The
-    # operator has explicitly asked to retain capacity up to the 600k ceiling
-    # when genuinely needed, so the fix is NOT a lower default threshold; it is
-    # a semantic second opinion that may only pull the trigger earlier, and
-    # only down to ``advisor_floor_tokens``.
+    # operator has explicitly asked to retain capacity up to the trigger ceiling
+    # when genuinely needed, so the advisor's answer to a cut landing inside a
+    # live task is NOT to lower the ceiling further; it is a semantic second
+    # opinion that may only pull the trigger earlier, and only down to
+    # ``advisor_floor_tokens``.
     advisor_enabled: bool = Field(
         default=False,
         description=(
@@ -394,11 +401,11 @@ def resolve_threshold_tokens(window_tokens: int, settings: CompactionSettings) -
 
     - The percentage keeps a small-context model compacting in proportion to
       what it can actually hold: 80% of a 200k window is 160k, and an absolute
-      600k trigger there could never fire at all.
+      400k trigger there could never fire at all.
     - The absolute ceiling stops a very large window from letting one session
       grow to a size that is slow and expensive on every single request even
-      though it technically still fits: at 600k of a 1M window every turn is
-      re-sending 600k tokens.
+      though it technically still fits: at 400k of a 1M window every turn is
+      re-sending 400k tokens.
 
     Which is why a resolved trigger must never be re-derived by a caller. A
     session on a 1M-context model was observed compacting at ~235k — a

@@ -1,0 +1,219 @@
+"""The message envelope: additive `{code, params, text}` with a safe fallback."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from local_operator.i18n import catalogues, messages
+
+
+@pytest.fixture()
+def fixture_catalogues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "en" / "wire.errors.json").write_text(
+        json.dumps(
+            {
+                "wire.errors.model_unavailable": "Model {model} is unavailable.",
+                "wire.errors.files": "{n, plural, one {# file} other {# files}}",
+                "wire.errors.count": "{n, number} items",
+                "wire.errors.when": "on {d, date}",
+                "wire.errors.broken": "{unclosed",
+                "wire.errors.retry.exhausted": "Retries exhausted after {n} attempts.",
+                "wire.errors.auth.legacy_note": "Legacy login note.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "en" / "wire.errors.auth.json").write_text(
+        json.dumps({"wire.errors.auth.login_failed": "Login failed for {user}."}),
+        encoding="utf-8",
+    )
+    (root / "en" / "wire.settings.json").write_text(
+        json.dumps(
+            {
+                "wire.settings.model.title": "Model",
+                "wire.settings.display_composer_cost.label": "Composer cost",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Core hardening (S2 M1): decode/parse failures are runtime
+    # CatalogueInvalid, so they degrade. `wire.errors.retry.json` is
+    # deliberately malformed beside the valid `wire.errors.retry.exhausted` in
+    # `wire.errors.json`: the resolver must SKIP a candidate that fails to
+    # parse, not raise through it.
+    (root / "en" / "wire.errors.retry.json").write_bytes(b"{garbled")
+    (root / "en" / "wire.errors.malformed.json").write_bytes(b"\xff\xfe{}")
+    (root / "fr").mkdir()
+    (root / "fr" / "wire.errors.json").write_text(
+        json.dumps({"wire.errors.model_unavailable": "Le modèle {model} est indisponible."}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+
+
+def test_envelope_renders_text_from_the_catalogue(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.model_unavailable", {"model": "gpt-x"})
+    assert got == {
+        "code": "wire.errors.model_unavailable",
+        "params": {"model": "gpt-x"},
+        "text": "Model gpt-x is unavailable.",
+    }
+
+
+def test_envelope_uses_the_requested_locale_then_falls_back_to_en(
+    fixture_catalogues: None,
+) -> None:
+    got = messages.envelope("wire.errors.model_unavailable", {"model": "m"}, locale="fr")
+    assert got["text"] == "Le modèle m est indisponible."
+    # A locale with no file at all falls back to en, not to an error.
+    got = messages.envelope("wire.errors.model_unavailable", {"model": "m"}, locale="es")
+    assert got["text"] == "Model m is unavailable."
+
+
+def test_unknown_code_degrades_to_the_code_itself(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.not_extracted_yet", {"n": 1})
+    assert got["code"] == "wire.errors.not_extracted_yet"
+    assert got["params"] == {"n": 1}
+    assert got["text"] == "wire.errors.not_extracted_yet"
+
+
+def test_dotless_code_degrades_without_touching_the_disk(fixture_catalogues: None) -> None:
+    got = messages.envelope("plain")
+    assert got["text"] == "plain"
+
+
+def test_malformed_message_degrades_instead_of_raising(fixture_catalogues: None) -> None:
+    # The additive contract wins at run time: a catalogue that does not render
+    # still yields an envelope (the parity check is where this goes red).
+    got = messages.envelope("wire.errors.broken", {})
+    assert got["text"] == "wire.errors.broken"
+
+
+def test_non_numeric_plural_binding_degrades_instead_of_raising(
+    fixture_catalogues: None,
+) -> None:
+    # round-1 M1: the envelope's never-raise contract must hold for the first
+    # non-numeric binding a wire slice passes, not just for missing codes.
+    for bad in ("abc", True):
+        got = messages.envelope("wire.errors.files", {"n": bad})
+        assert got["code"] == "wire.errors.files"
+        assert got["params"] == {"n": bad}
+        assert got["text"] == "wire.errors.files"
+    assert messages.envelope("wire.errors.files", {"n": 3})["text"] == "3 files"
+
+
+def test_non_numeric_number_and_date_bindings_degrade(fixture_catalogues: None) -> None:
+    # round-2 M2 + Q2-1: the never-raise contract must hold for the number and
+    # date branches too, not only plurals.
+    for code, params in (
+        ("wire.errors.count", {"n": "abc"}),
+        ("wire.errors.count", {"n": True}),
+        ("wire.errors.when", {"d": "abc"}),
+        ("wire.errors.when", {"d": True}),
+    ):
+        got = messages.envelope(code, params)
+        assert got["text"] == code
+        assert got["params"] == params
+    assert messages.envelope("wire.errors.count", {"n": 1234})["text"] == "1,234 items"
+
+
+def test_msg_carries_code_and_params(fixture_catalogues: None) -> None:
+    message = messages.Msg("wire.errors.model_unavailable", {"model": "x"})
+    assert message.envelope() == {
+        "code": "wire.errors.model_unavailable",
+        "params": {"model": "x"},
+        "text": "Model x is unavailable.",
+    }
+    assert messages.msg("wire.errors.model_unavailable", model="x") == message
+
+
+def test_deep_codes_resolve_via_the_file_that_defines_them(fixture_catalogues: None) -> None:
+    # §2.2 keys carry <area>.<element>[.<state>] after the namespace, so
+    # resolution must be file-derived: "wire.errors.retry.exhausted" belongs
+    # to namespace "wire.errors", not to "wire.errors.retry" — string
+    # arithmetic resolved the wrong file for this shape and degraded the code.
+    got = messages.envelope("wire.errors.retry.exhausted", {"n": 3})
+    assert got["text"] == "Retries exhausted after 3 attempts."
+
+
+def test_slice_shaped_keys_resolve_through_their_namespace(fixture_catalogues: None) -> None:
+    # The S1 `wire.settings` key shapes: <area>.<element> and
+    # <area>.<element>.<state> after the namespace.
+    assert messages.render("wire.settings.model.title", {}) == "Model"
+    assert messages.render("wire.settings.display_composer_cost.label", {}) == "Composer cost"
+
+
+def test_nested_namespace_addresses_its_own_file(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.auth.login_failed", {"user": "d"})
+    assert got["text"] == "Login failed for d."
+
+
+def test_a_deeper_file_does_not_shadow_a_key_in_the_shallower_one(
+    fixture_catalogues: None,
+) -> None:
+    # "wire.errors.auth.legacy_note" is DEFINED by wire.errors.json while
+    # wire.errors.auth.json exists beside it: the resolver must skip the
+    # deeper file that does not define the key, not address it because its
+    # name matches a prefix.
+    got = messages.envelope("wire.errors.auth.legacy_note", {})
+    assert got["text"] == "Legacy login note."
+
+
+def test_unknown_deep_code_still_degrades(fixture_catalogues: None) -> None:
+    got = messages.envelope("wire.errors.auth.no_such_key", {})
+    assert got["text"] == "wire.errors.auth.no_such_key"
+
+
+def test_malformed_catalogue_degrades_instead_of_raising(fixture_catalogues: None) -> None:
+    # Core hardening (S2 M1): a file that is not valid UTF-8/JSON must degrade
+    # a lookup to the code — the never-raise contract — and an envelope keeps
+    # its code and params.
+    got = messages.envelope("wire.errors.malformed.thing", {"x": 1})
+    assert got["text"] == "wire.errors.malformed.thing"
+    assert got["params"] == {"x": 1}
+
+
+def test_a_malformed_deeper_file_does_not_block_a_shallower_definition(
+    fixture_catalogues: None,
+) -> None:
+    # The resolver's probe skips a candidate that fails to parse (the malformed
+    # `wire.errors.retry.json` beside the valid definition in
+    # `wire.errors.json`) instead of raising through it.
+    assert messages.render("wire.errors.retry.exhausted", {"n": 2}) == (
+        "Retries exhausted after 2 attempts."
+    )
+
+
+def test_two_fixture_roots_resolve_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # NIT-2 (#2166), reshaped per review round 1: the two trees must define the
+    # same code in DIFFERENT namespaces, or a root-blind cache key is
+    # invisible — message loading is uncached, so same-namespace fixtures flow
+    # per root even when the resolved namespace is wrongly shared. Here
+    # `demo.deep.word` lives in `demo` for root A and in `demo.deep` for root
+    # B: if `root` ever leaves the cache key, B's render reuses A's cached
+    # namespace (`demo`), finds no `demo.json` in B, and degrades to the bare
+    # code — the B assertion below goes red (mutation-probed in round 1).
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    (root_a / "en").mkdir(parents=True)
+    (root_a / "en" / "demo.json").write_text(
+        json.dumps({"demo.deep.word": "from A"}), encoding="utf-8"
+    )
+    (root_b / "en").mkdir(parents=True)
+    (root_b / "en" / "demo.deep.json").write_text(
+        json.dumps({"demo.deep.word": "from B"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_a)
+    assert messages.render("demo.deep.word", {}) == "from A"
+    assert messages.render("demo.deep.word", {}) == "from A"  # cached resolution
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_b)
+    assert messages.render("demo.deep.word", {}) == "from B"
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root_a)
+    assert messages.render("demo.deep.word", {}) == "from A"

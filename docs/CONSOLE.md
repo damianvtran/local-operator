@@ -55,6 +55,8 @@ process. The tier is recorded per call (`call_approval_tier`) and — this matte
 | method | what it does |
 |---|---|
 | `list` | Surfaces in this session, including the ones the user opened (`origin`, `command`, `cwd`, grid, running/exited, last output). |
+| `resources` | Aggregate app-wide counts and managed budgets, without foreign handles, commands or output. Older hosts refuse this additive method. |
+| `cleanup` | Release this owner's completed agent surfaces while preserving retained files. Running, secure, user-controlled, adopted and displayed surfaces stay protected. |
 | `create` | Start a surface: `command`/`args`/`cwd`/`env`, `cols`/`rows` (default 100x30), `reveal`, `retain`. |
 | `status` | `running`, `exit_code`, grid, `live`, `truncated`, `secure`, `retain`, time since last output. |
 | `read` | Text: `viewport` (the visible screen) or a `scrollback` window (`start`/`count`). |
@@ -327,6 +329,39 @@ carries the same list.
    because `code` is typed on the shared enum, and only a client that knows its own
    vocabulary can tell them apart). All three default to the existing behaviour, so
    every current host is byte-identical.
+
+## Lifecycle and capacity
+
+The desktop host distinguishes live PTYs from completed/retained history. Only
+starting and running terminals consume process admission; an exited handle and
+its retained output remain available, with bounded on-demand replay after a
+restart. Existing retained file rotation semantics are unchanged: memory pressure
+must not delete or silently shrink retained disk history.
+
+`console.max_live` is a configurable ceiling (default 128, safe range 32–256),
+not a guaranteed capacity for every grid. `console.max_owner` defaults to 8 and
+`console.user_reserved` to 16, bounded by one quarter of the global ceiling.
+The host separately gates managed log bytes, pending output, terminal-cell
+storage and native PTYs. Cell-byte accounting is modeled, not a measurement of
+child RSS; OS descriptor/PTY availability is reported as unknown when unavailable.
+Configuration changes affect future starts, never retroactively stop processes.
+
+Read or check status after exit to acknowledge its result. An unretained,
+unsecure, unadopted, undisplayed agent surface then has a 30-second read window
+before automatic release. User-controlled and retained history stay protected.
+The explicit owner `cleanup` action and ordinary/subagent session teardown use
+one completed-only seam, preserving retained files. They never treat a live auth
+prompt, REPL, background job or merely idle process as garbage.
+
+The pane shows aggregate live/completed counts and a completed-agent cleanup
+action; Settings exposes the same config keys as the TUI. `resources` returns
+aggregate diagnostics only, never another owner's handles, commands or output.
+Older hosts refuse the additive methods; old clients ignore the new fields.
+Current harness callers send their stable session ID on every surface operation,
+and the host checks a supplied owner before touching a runtime. The ID is a
+claimed scope under the existing trusted host key, not new authentication.
+Legacy SID-less clients retain nonce-capability compatibility; no stronger
+mixed-version authorization guarantee is claimed.
 
 ## Not shipped by this half
 

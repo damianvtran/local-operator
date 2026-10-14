@@ -9,7 +9,7 @@ was made to prevent.
 
 from __future__ import annotations
 
-from local_operator.providers.catalogue import picker_rows
+from local_operator.providers.catalogue import picker_rows, split_by_access
 from local_operator.providers.controller import CatalogueEntry
 
 
@@ -147,3 +147,47 @@ def test_every_presentable_field_survives_the_conversion():
 
 def test_an_empty_catalogue_is_an_empty_result_not_an_error():
     assert picker_rows([], usable=set()) == ([], 0)
+
+
+# -- ``split_by_access``: the filter alone, shared with the desktop route ------
+
+
+def test_split_by_access_keeps_entries_untouched_and_counts_what_it_dropped():
+    """The desktop route must not re-rank or re-window what it returns.
+
+    ``picker_rows`` rewrites an OpenAI row's advertised window and ranks the
+    list; ``scope=usable`` may only REMOVE rows, so a client toggling between
+    the two views sees the same rows in the same order, with the same numbers.
+    """
+    entries = [_entry("openai/gpt-5", context_window=400_000, default_context_window=272_000)]
+    kept, hidden = split_by_access(entries, usable={"openai"})
+    assert kept == entries, "the entries themselves must pass through unmodified"
+    assert kept[0].context_window == 400_000
+    assert hidden == 0
+
+
+def test_split_by_access_unreadable_store_keeps_everything():
+    kept, hidden = split_by_access([_entry("openai/gpt-5")], usable=None)
+    assert [entry.selector for entry in kept] == ["openai/gpt-5"]
+    assert hidden == 0
+
+
+def test_split_by_access_exempts_the_current_model_without_counting_it_hidden():
+    entries = [_entry("openai/gpt-5"), _entry("anthropic/claude-opus-5")]
+    kept, hidden = split_by_access(entries, usable={"openai"}, current="anthropic/claude-opus-5")
+    assert [entry.selector for entry in kept] == [
+        "openai/gpt-5",
+        "anthropic/claude-opus-5",
+    ]
+    assert hidden == 0
+
+
+def test_split_by_access_still_counts_a_non_current_drop():
+    entries = [
+        _entry("openai/gpt-5"),
+        _entry("anthropic/claude-opus-5"),
+        _entry("mistral/mistral-large"),
+    ]
+    kept, hidden = split_by_access(entries, usable={"openai"}, current="anthropic/claude-opus-5")
+    assert len(kept) == 2
+    assert hidden == 1

@@ -226,22 +226,32 @@ def _ink_on(segments: list[tuple[str, str | None]], needle: str) -> str | None:
 
 
 @pytest.mark.usefixtures("skill_root")
+@pytest.mark.parametrize("inherited_theme", ["light", "dark"])
 @pytest.mark.asyncio
-async def test_a_resolved_token_takes_the_signal_ink() -> None:
+async def test_a_resolved_token_takes_the_signal_ink(inherited_theme: str) -> None:
     """The must-have: `$research` is not indistinguishable from the prose.
 
     Read off the FINISHED strip, and both halves asserted: the token carries
-    the structured-token ink and the words beside it are untouched.
+    the structured-token ink and the words beside it are untouched. A previous
+    app's ramp must not determine the expectation for this app's default ramp.
+    The caret stays native and focused: its separate cell is not token ink.
     """
-    signal = theme_mod.semantic_color("signal").lower()
-    prose = theme_mod.semantic_color("fg").lower()
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(100, 30)) as pilot:
-        editor = await _draft(app, pilot, "$research fix this")
-        segments = _segment_inks(editor)
-    assert _ink_on(segments, "$research") == signal, segments
-    assert _ink_on(segments, " fix this") == prose, segments
+    previous_theme = theme_mod.current_theme()
+    try:
+        theme_mod.set_theme(inherited_theme)
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        # Construction activates this app's ramp. Reading these beforehand
+        # records the previous app's colours (light signal #2b6ea8 versus dark
+        # #6ea8d8), even though the finished strip correctly uses this app's.
+        signal = theme_mod.semantic_color("signal").lower()
+        prose = theme_mod.semantic_color("fg").lower()
+        async with app.run_test(size=(100, 30)) as pilot:
+            editor = await _draft(app, pilot, "$research fix this")
+            segments = _segment_inks(editor)
+        assert _ink_on(segments, "$research") == signal, segments
+        assert _ink_on(segments, " fix this") == prose, segments
+    finally:
+        theme_mod.set_theme(previous_theme)
 
 
 @pytest.mark.usefixtures("skill_root")
@@ -254,9 +264,11 @@ async def test_typing_the_full_name_lights_it_while_the_list_is_open() -> None:
     token names a discovered skill — from there the ink holds regardless of the
     list, which is the difference between "in progress" and "resolved".
     """
-    signal = theme_mod.semantic_color("signal").lower()
-
     app = OperatorApp(lambda: _factory(FakeSession()))
+    # A preceding app may legitimately restore light on teardown. As in the
+    # resolved-token test, expectations belong to THIS app's activated ramp,
+    # not the incoming module global; apply this phase rule to every ink case.
+    signal = theme_mod.semantic_color("signal").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$researc")
         assert editor.picker.mode is PickerMode.SKILL, "premise: the skill list is live"
@@ -272,6 +284,29 @@ async def test_typing_the_full_name_lights_it_while_the_list_is_open() -> None:
 
 
 @pytest.mark.usefixtures("skill_root")
+@pytest.mark.parametrize("incoming_theme", ["light", "dark"])
+@pytest.mark.asyncio
+async def test_a_restored_theme_does_not_poison_the_next_apps_ink(incoming_theme: str) -> None:
+    """Run the restored-theme neighbour sequence, with no between-case reset.
+
+    Isolated positive cases can all pass while handing a stale light palette
+    to their neighbour. Reuse those actual assertions in one process, entering
+    once and proving both resolved cases retain the incoming theme before the
+    next app activates its own. The native focus/caret path remains untouched.
+    """
+    previous_theme = theme_mod.current_theme()
+    try:
+        theme_mod.set_theme(incoming_theme)
+        await test_a_resolved_token_takes_the_signal_ink("light")
+        assert theme_mod.current_theme() == incoming_theme
+        await test_a_resolved_token_takes_the_signal_ink("dark")
+        assert theme_mod.current_theme() == incoming_theme
+        await test_typing_the_full_name_lights_it_while_the_list_is_open()
+    finally:
+        theme_mod.set_theme(previous_theme)
+
+
+@pytest.mark.usefixtures("skill_root")
 @pytest.mark.asyncio
 async def test_a_prefix_under_the_open_list_is_not_painted_then_dims_on_escape() -> None:
     """The suppression, and the close that ends it.
@@ -281,10 +316,9 @@ async def test_a_prefix_under_the_open_list_is_not_painted_then_dims_on_escape()
     list on the same buffer, and THEN the muted ink is the true sentence: this
     word, alone in the draft, will be sent as prose.
     """
+    app = OperatorApp(lambda: _factory(FakeSession()))
     dim = theme_mod.semantic_color("dim").lower()
     prose = theme_mod.semantic_color("fg").lower()
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$res")
         assert editor.picker.is_open(), "premise: a row is offered for the prefix"
@@ -310,9 +344,8 @@ async def test_the_closed_list_ink_reaches_the_composed_screen() -> None:
     COMPOSITOR's own style for the token's cells (what the terminal shows),
     with no forced refresh in between.
     """
-    dim = theme_mod.semantic_color("dim").lower()
-
     app = OperatorApp(lambda: _factory(FakeSession()))
+    dim = theme_mod.semantic_color("dim").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$res")
         await pilot.press("escape")
@@ -339,9 +372,8 @@ async def test_an_unresolved_word_dims_once_the_word_stops_matching() -> None:
     on — unlike the desktop the dim lands without a dismissal. The premise
     asserts the silent close, so this test fails loudly if that changes.
     """
-    dim = theme_mod.semantic_color("dim").lower()
-
     app = OperatorApp(lambda: _factory(FakeSession()))
+    dim = theme_mod.semantic_color("dim").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$zzz")
         assert not editor.picker.is_open(), "premise: a skill miss closes the list"
@@ -352,10 +384,9 @@ async def test_an_unresolved_word_dims_once_the_word_stops_matching() -> None:
 @pytest.mark.asyncio
 async def test_money_and_shell_stay_prose_in_the_real_composer() -> None:
     """The guards, swept on the live render path: no ink of either kind."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
     dim = theme_mod.semantic_color("dim").lower()
     signal = theme_mod.semantic_color("signal").lower()
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         for text in ("$5 for the redesign", "echo $PATH", "costs$5 for it", "a$b"):
             editor = await _draft(app, pilot, text)
@@ -372,9 +403,8 @@ async def test_an_inline_token_gets_nothing_until_acceptance() -> None:
     picker contract: the submit parser is anchored), and that is the moment the
     resolved ink becomes true.
     """
-    signal = theme_mod.semantic_color("signal").lower()
-
     app = OperatorApp(lambda: _factory(FakeSession()))
+    signal = theme_mod.semantic_color("signal").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "fix this $res")
         assert editor.picker.is_open(), "premise: the inline evidence gate opened the list"
@@ -396,9 +426,8 @@ async def test_a_slash_claimed_token_stays_prose() -> None:
     the OUTCOME both of them exist for: a command's argument never wears the
     skill inks.
     """
-    prose = theme_mod.semantic_color("fg").lower()
-
     app = OperatorApp(lambda: _factory(FakeSession()))
+    prose = theme_mod.semantic_color("fg").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "/model $5")
         assert editor.picker.mode is not PickerMode.SKILL, "premise: no skill list"
@@ -418,18 +447,24 @@ async def test_a_slash_claimed_token_stays_prose() -> None:
 async def test_an_empty_vocabulary_resolves_nothing_but_still_dims(tmp_path, monkeypatch) -> None:
     """Settled-empty is an ANSWER: no skill can fire, and `$zzz` says so.
 
-    The fixture wires in an EMPTY skills root as the only root, so discovery
-    really answers "none" — the state a fresh machine boots in (where the bare
-    `$` arm shows its own notice; that surface predates this ink and is out of
-    scope here).
+    The builtin catalog is appended to every discovery, so the empty answer
+    can no longer be produced through the roots environment knob — it is
+    pinned here by patching the root computation itself. (The bare `$` arm's
+    own notice is out of scope here.)
     """
-    dim = theme_mod.semantic_color("dim").lower()
     root = tmp_path / "skills"
     root.mkdir()
-    monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(root))
+    # Pin the empty answer through the call-time seam, not the environment:
+    # the catalog rides every discovery, so the EXTRA_ROOTS knob can no
+    # longer produce it and an env line would imply it still wires the empty
+    # root. `_discovered_skills` imports `default_skill_roots` from
+    # `skills.api` at call time — that module attribute is the seam patched
+    # here.
+    monkeypatch.setattr("local_operator.skills.api.default_skill_roots", lambda cwd=None: [root])
     monkeypatch.chdir(tmp_path)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
+    dim = theme_mod.semantic_color("dim").lower()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$zzz")
         assert editor._skill_names == frozenset(), "premise: the empty answer landed"
@@ -447,10 +482,9 @@ async def test_the_ink_follows_the_snapshot_the_app_pushes() -> None:
     level. `$research` alone is the demo shape: a member paints resolved, and
     once the same word is no longer a member it falls to the inert ink.
     """
+    app = OperatorApp(lambda: _factory(FakeSession()))
     signal = theme_mod.semantic_color("signal").lower()
     dim = theme_mod.semantic_color("dim").lower()
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _draft(app, pilot, "$research")
         assert _ink_on(_segment_inks(editor), "$research") == signal, "the app's snapshot"

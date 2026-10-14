@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple
 
+from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.network.tool import build_network_tool
@@ -28,6 +29,10 @@ from local_operator.tools.project_tool import (
 )
 from local_operator.tools.secret_tool import build_secret_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
+from local_operator.tools.video_tool import (
+    build_generate_video_tool,
+    build_video_status_tool,
+)
 from local_operator.web_fetch.tool import build_web_fetch_tool
 from local_operator.web_search.read_tool import build_web_read_tool
 from local_operator.web_search.tool import build_web_search_tool
@@ -114,6 +119,46 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which
     # is what the prompt cache keys on.
     "generate_image": lambda context: build_generate_image_tool(context),
+    # createIf: rung 3 — present only where the session has a store root
+    # (its own directory plus a resolvable config root), so a reduced host
+    # pays no schema for a tool whose every call could only say "no store".
+    # Read-only (`list`/`show`) and deferred by default (its schema is the
+    # biggest part of its cost; the recommendation hook and the tracked note
+    # are what keep it discoverable). Appended at the END of both tables on
+    # purpose: appending never shifts a provider-visible array prefix, which
+    # is what the prompt cache keys on.
+    "code_requests": lambda context: build_code_requests_tool(context),
+    # createIf: rung 3 — present only where the session may END A TURN QUIETLY
+    # (`context.quiet_end`; absent for subagent children, one-shot hosts,
+    # output-contract sessions and under LOP_NO_REPLY=0 — see
+    # `Session._quiet_end_callable` and docs/design/quiet-turns.md §4).
+    # Deferred (its schema is never needed to form its argumentless call, and
+    # the rule is named in the system prompt). Appended at the END of both
+    # tables on purpose: appending never shifts a provider-visible array
+    # prefix, which is what the prompt cache keys on.
+    "no_reply": lambda context: builtin.build_no_reply_tool(context),
+    # createIf: rung 3 — present only where a video job can run (a persisted
+    # Radient login or a FAL key, plus the session's job manager), sync and
+    # socket-free like the image gate. The pair rides together: the start
+    # tool and the one callable that answers a pending job after a restart.
+    # TRULY at the end of both tables when they landed (round-1 review V7:
+    # the pair first sat before `code_requests`/`no_reply`, which made the
+    # comment false and shifted those two entries) — and wave 4 slice A's
+    # `setting` appended after them, which is fine: only the NEWEST appends
+    # may follow, and the pin test moves with each newest append.
+    "generate_video": lambda context: build_generate_video_tool(context),
+    "video_status": lambda context: build_video_status_tool(context),
+    # The sanctioned AGENT write path for the settings registry (wave 4,
+    # slice A): reads and writes one /settings row through
+    # `settings_io.write_setting` — the same funnel every other surface uses —
+    # so the user's language (and every other setting) has ONE truth. Published
+    # rather than deferred: the tool exists for the moment the user asks for a
+    # change, which is exactly when a model that must read a tool:// page first
+    # is most likely not to reach for it (the `ask_withdraw` adoption lesson;
+    # see tools/deferral.py). Appended at the END of both tables on purpose:
+    # appending never shifts a provider-visible array prefix, which is what
+    # the prompt cache keys on.
+    "setting": lambda _context: builtin.build_setting_tool(),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -156,6 +201,11 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "sessions",
     "ask_withdraw",
     "generate_image",
+    "code_requests",
+    "no_reply",
+    "generate_video",
+    "video_status",
+    "setting",
 ]
 
 

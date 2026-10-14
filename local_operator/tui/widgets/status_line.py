@@ -44,6 +44,8 @@ from local_operator.harness.jobs import (
     model_fallback_badge,
 )
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
+from local_operator.i18n.keys import tui_status
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
     format_context_tokens as _format_context_tokens,
@@ -199,7 +201,29 @@ ICON_TUNNEL = ICON_APPROVALS
 #: is not what they can act on from there. The card is clamped to the terminal and
 #: has the room to name the cause. A reader who meets both without this note sees
 #: two names for one fact; with it, one is the lamp and the other the diagnosis.
-TUNNEL_PARKED_TEXT = "remote access off"
+#: Resolved through the i18n runtime (T2): the en catalogue's tui.status.tunnel.parked
+#: is the one source for this word, so a translation wave moves it like every
+#: other band string and this constant never drifts from the catalogued copy.
+_t = tr("tui.status")
+
+TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
+
+
+def _reload_copy() -> None:
+    """Re-materialise the band's constants after a locale move (slice C).
+
+    Nearly everything the band paints resolves per render — the `_t(...)`
+    calls inside the formatting functions read the active locale at each call
+    — so this one import-time constant is the whole list that needs an entry
+    with :func:`local_operator.i18n.text.register_refresh`. The assignment
+    mirrors the definition above; the live-locale slice test pins it against
+    the fixture catalogue, so a stale mirror fails loudly.
+    """
+    global TUNNEL_PARKED_TEXT
+    TUNNEL_PARKED_TEXT = _t(tui_status.tunnel_parked())
+
+
+register_refresh(_reload_copy)
 
 #: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
 #: The same word, brackets and case the /resume picker's row marker uses
@@ -889,7 +913,10 @@ def format_agents(count: int) -> str:
     """
     if count <= 0:
         return ""
-    return f"{count} agent" if count == 1 else f"{count} agents"
+    # ICU plural via the catalogue (T2): en renders '1 agent' / '2 agents' byte
+    # for byte with the pre-extraction f-string, and a wave changes the plural
+    # categories where the language's rules say so rather than in a branch here.
+    return _t(tui_status.agents(count=count))
 
 
 def format_jobs(count: int) -> str:
@@ -902,7 +929,8 @@ def format_jobs(count: int) -> str:
     """
     if count <= 0:
         return ""
-    return f"{count} job" if count == 1 else f"{count} jobs"
+    # ICU plural via the catalogue (T2); see format_agents.
+    return _t(tui_status.jobs(count=count))
 
 
 def format_tunnel(parked: bool) -> str:
@@ -2452,7 +2480,9 @@ class StatusLine:
             if parts:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
-            left.append(" starting…", style=muted)
+            # Catalogued caption (T2); the leading space is the segment join,
+            # composed here so the catalogue value stays the bare word.
+            left.append(f" {_t(tui_status.band_starting())}", style=muted)
         elif self._streaming:
             # The aggregate working LINE (WorkingBlock) carries the shimmer; the
             # band keeps a quiet activity glyph so a still frame still reads
@@ -2469,7 +2499,7 @@ class StatusLine:
             # is only the caption.
             left.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
             if not shimmer_enabled():
-                left.append(" working", style=dim)
+                left.append(f" {_t(tui_status.band_working())}", style=dim)
         return left
 
     def _right_text(
@@ -2626,10 +2656,12 @@ class StatusLine:
             # means configured tools are missing, and `▦` in red means the
             # context is at or past its compaction trigger OR past the absolute
             # re-send-cost rung. Those two coincide only where the window is
-            # small enough for the proportional ladder to govern: above ~625k
-            # the absolute rung fires at 500k while the resolved trigger is
-            # capped at 600k, so a 1M session shows red for a band of ~100k
-            # before a pass is actually due. It is the weakest of the three
+            # small enough for the proportional ladder to govern. Above ~500k
+            # the default absolute trigger (400k) sits BELOW the 500k red rung,
+            # so under defaults a pass is due before the rung is reached and a
+            # 1M session never shows red from it; only a user who raised
+            # `compaction.threshold_tokens` past 500k sees red before a pass is
+            # due. It is the weakest of the three
             # either way (compaction resolves it without the user acting), which
             # is why it is the only one gated behind a threshold rather than
             # being a state the segment can simply be in.

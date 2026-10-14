@@ -276,3 +276,374 @@ async def test_history_before_id_keeps_has_newer_null(tmp_path: Path) -> None:
         assert [row["id"] for row in page["entries"]] == harness.ids[2:4]
         assert page["has_newer"] is None
         assert page["cursor_missing"] is False
+
+
+def _seed_order_journal(directory: Path, ids: list[str]) -> None:
+    rows = [
+        TranscriptEntry(
+            id_,
+            100.0 - at,
+            ENTRY_MESSAGE,
+            {
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": f"synthetic order row {at}"}],
+                "tool_calls": [],
+            },
+        ).to_json()
+        for at, id_ in enumerate(ids)
+    ]
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_journal_order_is_opt_in_and_lookup_is_session_scoped(tmp_path: Path):
+    from local_operator.session import transcript_index as ti
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, harness.ids)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+        legacy = (await harness.client.get(base + "/history", params={"limit": 2})).json()["result"]
+        assert not any(key.startswith("journal_") for key in legacy)
+        assert all("journal_seq" not in row for row in legacy["entries"])
+        task, _ = ti.start_refresh(tmp_path, harness.session_id)
+        await task
+        response = await harness.client.get(
+            base + "/history",
+            params=[
+                ("journal_order", "1"),
+                ("limit", "2"),
+                ("order_ids", harness.ids[0]),
+                ("order_ids", "not-in-this-session"),
+            ],
+        )
+        assert response.status_code == 200, response.text
+        page = response.json()["result"]
+        assert page["journal_order_state"] == "ready"
+        assert [row["journal_seq"] for row in page["entries"]] == [6, 7]
+        assert page["journal_ordinals"] == {harness.ids[0]: 0}
+        assert page["journal_missing_ids"] == ["not-in-this-session"]
+        generation = page["journal_generation"]
+        older = (
+            await harness.client.get(
+                base + "/history",
+                params={"journal_order": 1, "before_id": harness.ids[6], "limit": 2},
+            )
+        ).json()["result"]
+        assert [row["journal_seq"] for row in older["entries"]] == [4, 5]
+        assert older["journal_generation"] == generation
+        around = (
+            await harness.client.get(
+                base + "/history",
+                params={"journal_order": 1, "around_id": harness.ids[3], "before": 1, "after": 1},
+            )
+        ).json()["result"]
+        assert [row["journal_seq"] for row in around["entries"]] == [2, 3, 4]
+        assert around["journal_generation"] == generation
+        snapshot_response = await harness.client.get(base, params={"journal_order": 1})
+        assert snapshot_response.status_code == 200, snapshot_response.text
+        snapshot = snapshot_response.json()["result"]["payload"]["history"]
+        assert snapshot["journal_generation"] == generation
+        assert [row["journal_seq"] for row in snapshot["entries"]] == list(range(8))
+        # New optional fields must not leak to an old strict viewer after warmup.
+        old_again = (await harness.client.get(base + "/history", params={"limit": 2})).json()[
+            "result"
+        ]
+        assert old_again == legacy
+        await harness.pool.close()
+    ti._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_journal_order_cold_index_has_no_fabricated_authority(tmp_path: Path):
+    from local_operator.session import transcript_index as ti
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, harness.ids)
+        base = f"/v1/desktop/sessions/{harness.session_id}/history"
+        first = await harness.client.get(base, params={"journal_order": 1})
+        assert first.status_code == 200, first.text
+        page = first.json()["result"]
+        assert page["journal_order_state"] == "building"
+        assert "journal_generation" not in page
+        assert all("journal_seq" not in row for row in page["entries"])
+        task, _ = ti.start_refresh(tmp_path, harness.session_id)
+        await task
+        second = (await harness.client.get(base, params={"journal_order": 1})).json()["result"]
+        assert second["journal_order_state"] == "ready"
+        assert second["journal_generation"]
+        assert [row["journal_seq"] for row in second["entries"]] == list(range(8))
+        await harness.pool.close()
+    ti._reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_cold_order_ids_correct_quiet_cached_echo_without_another_read(tmp_path, monkeypatch):
+    import asyncio
+
+    from local_operator.session import transcript_index as ti
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        ids = [f"{index:012x}" for index in range(205)]
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, ids)
+        # Hold only the existing index scheduler, so the real router must return
+        # a cold page. Releasing it is not a new page, commit, token or user action.
+        release = asyncio.Event()
+        original_refresh = ti.start_refresh
+
+        async def delayed_refresh():
+            await release.wait()
+            actual, _ = original_refresh(tmp_path, harness.session_id)
+            return await actual
+
+        gated = asyncio.create_task(delayed_refresh())
+        monkeypatch.setattr(ti, "start_refresh", lambda root, sid: (gated, False))
+        async with harness.pool.session(harness.session_id, read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe(journal_order=True)
+            try:
+                response = await harness.client.get(
+                    f"/v1/desktop/sessions/{harness.session_id}/history",
+                    params=[("journal_order", "1"), ("limit", "2"), ("order_ids", ids[0])],
+                )
+                assert response.status_code == 200, response.text
+                page = response.json()["result"]
+                assert page["journal_order_state"] == "building"
+                assert "journal_generation" not in page
+                assert ids[0] not in {row["id"] for row in page["entries"]}
+                assert all("journal_seq" not in row for row in page["entries"])
+                release.set()
+                await asyncio.wait_for(gated, timeout=2)
+                queued = await asyncio.wait_for(sub.queue.get(), timeout=2)
+                assert queued is not None
+                frame, _ = queued
+                assert frame["payload"]["type"] == "journal_order_ready", frame
+                correction = frame["payload"]
+                assert correction["journal_generation"]
+                assert {row["id"]: row["journal_seq"] for row in correction["rows"]} == {
+                    ids[0]: 0,
+                    ids[-2]: 203,
+                    ids[-1]: 204,
+                }
+                assert sub.queue.empty()
+            finally:
+                release.set()
+                await gated
+                bridge.subscribers.pop(sub.id, None)
+        await harness.pool.close()
+    ti._reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        [("journal_order", "2")],
+        [("journal_order", "1"), ("order_ids", "")],
+        [("journal_order", "1"), ("order_ids", "a" * 129)],
+        [("journal_order", "1")] + [("order_ids", "x") for _ in range(513)],
+    ],
+)
+async def test_journal_order_query_bounds_are_validation_errors(tmp_path: Path, params):
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        response = await harness.client.get(
+            f"/v1/desktop/sessions/{harness.session_id}/history", params=params
+        )
+        assert response.status_code == 422, response.text
+        await harness.pool.close()
+
+
+@pytest.mark.asyncio
+async def test_order_ready_events_are_opt_in_for_live_and_replay(tmp_path: Path, monkeypatch):
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    bridge = DesktopSessionBridge(tmp_path, "events-order-fixture", str(tmp_path))
+    legacy = bridge.subscribe()
+    current = bridge.subscribe(journal_order=True)
+    bridge.publish(
+        "event",
+        {
+            "type": JOURNAL_ORDER_EVENT,
+            "journal_generation": "synthetic-domain",
+            "rows": [{"id": "a", "journal_seq": 0}],
+        },
+    )
+    assert legacy.queue.empty()
+    assert current.queue.qsize() == 1
+
+    async def snapshot(**kwargs):
+        return {
+            "session_id": bridge.session_id,
+            "epoch": bridge.epoch,
+            "seq": bridge.sequence,
+            "type": "snapshot",
+            "payload": {
+                "frontend": {},
+                "history": {"entries": [], "has_more": False, "cursor_missing": False},
+            },
+        }
+
+    monkeypatch.setattr(bridge, "snapshot", snapshot)
+    late_legacy = bridge.subscribe()
+    stream = bridge.events(late_legacy, epoch=bridge.epoch, after_seq=0)
+    try:
+        # Consume handshake/snapshot. The unknown order event must not replay.
+        first = await anext(stream)
+        second = await anext(stream)
+        assert first["type"] == "open"
+        assert second["type"] == "snapshot"
+        assert late_legacy.queue.empty()
+        import asyncio
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(anext(stream), timeout=0.05)
+    finally:
+        await stream.aclose()
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_peer_order_never_uses_receiver_index(tmp_path: Path, monkeypatch):
+    row = SessionRow(
+        id="fffffffffff1",
+        mtime=1789400000.0,
+        name="peer order",
+        live_state="idle",
+        locality="remote",
+        owner_device="synthetic-peer",
+        owner_device_name="peer-box",
+        reachable=True,
+        unreachable_reason="",
+    )
+    bridge = DesktopSessionBridge(tmp_path, row.id, str(tmp_path), remote_row=row)
+
+    async def legacy_peer(**kwargs):
+        assert kwargs["journal_order"] is True
+        assert kwargs["order_ids"] == ["receiver-row"]
+        return {
+            "entries": [],
+            "has_more": False,
+            "cursor_missing": False,
+            "journal_order_state": "unsupported",
+        }
+
+    monkeypatch.setattr(bridge, "_remote_history", legacy_peer)
+    unknown = await bridge.history(journal_order=True, order_ids=["receiver-row"])
+    assert unknown["journal_order_state"] == "unsupported"
+    assert "journal_generation" not in unknown
+    assert "journal_ordinals" not in unknown
+
+    async def current_peer(**kwargs):
+        return {
+            "entries": [],
+            "has_more": False,
+            "cursor_missing": False,
+            "journal_order_state": "ready",
+            "journal_generation": "owner-domain",
+            "journal_ordinals": {"owner-row": 7},
+        }
+
+    monkeypatch.setattr(bridge, "_remote_history", current_peer)
+    known = await bridge.history(journal_order=True)
+    assert known["journal_generation"] == "owner-domain"
+    assert known["journal_ordinals"] == {"owner-row": 7}
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_in_replay", [False, True])
+async def test_off_page_order_correction_survives_snapshot_cutover(
+    tmp_path, monkeypatch, already_in_replay
+):
+    import asyncio
+
+    from local_operator.session import transcript_index as ti
+    from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
+
+    ti._reset_for_tests()
+    async with _Harness(tmp_path) as harness:
+        ids = [f"{index:012x}" for index in range(205)]
+        _seed_order_journal(tmp_path / "sessions" / harness.session_id, ids)
+        task, _ = ti.start_refresh(tmp_path, harness.session_id)
+        await task
+        index = ti.fresh_resident(tmp_path, harness.session_id)
+        assert index is not None
+        async with harness.pool.session(harness.session_id, read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe(journal_order=True)
+            legacy = bridge.subscribe()
+            payload = {
+                "type": JOURNAL_ORDER_EVENT,
+                "journal_generation": index.journal_generation,
+                "rows": [{"id": ids[0], "journal_seq": 0, "role": "user"}],
+            }
+            if already_in_replay:
+                bridge.publish("event", payload)
+
+            async def attention_glance():
+                # Only this decorative wait is controlled; snapshot/history and
+                # the pre-open cutover are production. The old ID is off-page.
+                if not already_in_replay:
+                    bridge.publish("event", payload)
+                await asyncio.sleep(0)
+
+            monkeypatch.setattr(
+                bridge, "_shared_attention_refresh", lambda: asyncio.create_task(attention_glance())
+            )
+            stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0, journal_order=True)
+            try:
+                assert (await anext(stream))["type"] == "open"
+                received = []
+                while True:
+                    frame = await asyncio.wait_for(anext(stream), timeout=2)
+                    if frame["type"] == "snapshot":
+                        snapshot = frame["payload"]["history"]
+                        break
+                    received.append(frame)
+                assert len(snapshot["entries"]) == 100
+                assert ids[0] not in {row["id"] for row in snapshot["entries"]}
+                assert ids[0] not in snapshot.get("journal_ordinals", {})
+                assert snapshot["journal_generation"] == index.journal_generation
+                if not already_in_replay:
+                    received.append(await asyncio.wait_for(anext(stream), timeout=2))
+                corrections = [
+                    frame
+                    for frame in received
+                    if frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                ]
+                assert len(corrections) == 1
+                assert corrections[0]["payload"] == payload
+                assert legacy.queue.empty()
+                # Ordinary watch/attention frames are independent of this
+                # metadata proof. Only a duplicate of the same published
+                # correction (not any subsequent frame) would violate cutover.
+                while True:
+                    try:
+                        extra = await asyncio.wait_for(anext(stream), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        break
+                    assert extra["seq"] != corrections[0]["seq"], extra
+            finally:
+                await stream.aclose()
+        await harness.pool.close()
+    ti._reset_for_tests()
+
+
+def test_source_route_defaults_are_plain_python_values():
+    import inspect
+
+    handlers = [
+        value
+        for _, value in inspect.getmembers(desktop_sessions, inspect.isfunction)
+        if "journal_order" in inspect.signature(value).parameters
+    ]
+    assert len(handlers) == 3
+    for handler in handlers:
+        parameters = inspect.signature(handler).parameters
+        assert parameters["journal_order"].default == 0
+        assert parameters["order_ids"].default is None

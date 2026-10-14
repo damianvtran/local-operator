@@ -36,6 +36,37 @@ TOKEN = "desktop-contract-test-token"
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _reset_bridge_availability():
+    """The agent-messages section's §5.6 visibility is PROCESS-global state.
+
+    Cleared around every test so one test's observation cannot decide whether
+    another's projection carries the section. The three census tests below
+    record a visible observation themselves, because they assert about the
+    projection of a FULLY-visible registry; the gate's own behaviour is pinned
+    in ``test_server_settings_visibility.py``.
+    """
+
+    from local_operator.team_bridge import availability
+
+    availability.clear()
+    yield
+    availability.clear()
+
+
+def _show_dynamic_sections(app: Any) -> None:
+    """Make dynamically-gated sections render for a census assertion."""
+
+    from local_operator.team_bridge import availability
+
+    availability.record(
+        app.state.config_manager.config_dir,
+        visible=True,
+        state="ready",
+        checked_at=1.0,
+    )
+
+
 @pytest_asyncio.fixture
 async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
@@ -603,6 +634,7 @@ async def test_the_cors_echo_follows_the_admitted_set(tmp_path: Path, monkeypatc
 
 async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     client, app = desktop
+    _show_dynamic_sections(app)
     manager = app.state.config_manager
     manager.set_config_value("private_secret", "never-serialize-me")
     data = (await client.get("/v1/settings")).json()["result"]
@@ -659,6 +691,67 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     assert fresh.config.values["private_secret"] == "never-serialize-me"
 
 
+async def test_settings_refusals_use_the_envelope(desktop, monkeypatch):
+    """The configuration surface's refusals carry the RFC §2.6 envelope.
+
+    `detail` is `{code, params, text}` on this surface: `code` is what a client
+    reacts to, `params` carry the untranslated exception text where one is
+    involved, and `text` keeps the exact sentence older readers display. The
+    invalid-value path doubles as the verbatim-compatibility pin: its `text`
+    IS the settings layer's prose (translated at the source in a later slice),
+    not a re-worded copy.
+    """
+    client, _app = desktop
+
+    # 404 — the setting is not registered.
+    response = await client.patch("/v1/settings/does.not.exist", json={"value": "x"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "code": "wire.errors.settings.not_registered",
+        "params": {},
+        "text": "This setting is not registered.",
+    }
+
+    # 422 — an endpoint value with inline credentials is refused up front.
+    response = await client.patch(
+        "/v1/settings/web_search.searxng_endpoint",
+        json={"value": "https://user:private@example.org"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "wire.errors.settings.inline_credentials"
+    assert response.json()["detail"]["text"] == (
+        "Use an endpoint without inline credentials or query parameters."
+    )
+
+    # 409 — the config file is unreadable; raised from the read gate.
+    def _unreadable(_manager):
+        raise settings_io.ConfigUnreadableError("config.yml cannot be parsed")
+
+    monkeypatch.setattr(settings_io, "_require_readable_config", _unreadable)
+    response = await client.get("/v1/settings")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "wire.errors.settings.config_unreadable",
+        "params": {},
+        "text": "The configuration file cannot be read. Repair it before saving.",
+    }
+    # No monkeypatch.undo(): it would also undo the fixture's setenv (desktop
+    # token, config dir, HOME) and make later calls 503; the patches below are
+    # inert for the remaining request.
+
+    # 422 — the settings layer's ValueError prose rides VERBATIM in `text`.
+    def _bad_write(*_args, **_kwargs):
+        raise ValueError("this setting is retired and cannot be changed")
+
+    monkeypatch.setattr(settings_io, "write_setting", _bad_write)
+    response = await client.patch("/v1/settings/language", json={"value": "en"})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "wire.errors.settings.invalid_value"
+    assert detail["params"] == {"error": "this setting is retired and cannot be changed"}
+    assert detail["text"] == "this setting is retired and cannot be changed"
+
+
 async def test_settings_projection_serves_the_registry_authored_annotations(desktop):
     """The three fields the registry authors and only the wire can carry.
 
@@ -676,6 +769,7 @@ async def test_settings_projection_serves_the_registry_authored_annotations(desk
     cannot grow a second opinion about a key's consequence).
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }
@@ -710,6 +804,7 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     actually present so the assertion cannot pass on all-empties.
     """
     client, _app = desktop
+    _show_dynamic_sections(_app)
     rows = {
         row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
     }
@@ -725,6 +820,32 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
     ), "a non-hotkey row carries a scope"
+
+
+async def test_settings_projection_carries_the_bounded_duration_contract(desktop):
+    """minimum / maximum / unit are what a bounded-hours control renders from.
+
+    The delegated retention window is the first INT whose unit matters to a
+    renderer; the contract is asserted against the live route so the desktop
+    UI coder's fixture is this response, not a restatement of the registry.
+    """
+    client, _app = desktop
+    rows = {
+        row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
+    }
+    hours = rows["session.cleanup.delegated.max_age_hours"]
+    assert (hours["kind"], hours["minimum"], hours["maximum"], hours["unit"]) == (
+        "int",
+        2,
+        720,
+        "hours",
+    )
+    assert hours["default"] == 48 and hours["gated_by"] == "session.cleanup.delegated.enabled"
+    assert hours["section"] == rows["session.cleanup.delegated.enabled"]["section"]
+    assert rows["session.cleanup.delegated.enabled"]["default"] is True
+    assert all(
+        row["unit"] == "" for key, row in rows.items() if key != hours["key"]
+    ), "only the hours row declares a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
@@ -1115,7 +1236,19 @@ async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
 
 
 async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
+    """An ACCESSIBLE choice stays: only a STRANDED default is replaced.
+
+    The credential is seeded first, because that is what makes the choice
+    "working" — before this feature, "registry-known" was the whole test, so this
+    fixture (a hosting with nothing behind it) WAS the stranded case.
+    """
     client, app = desktop
+    # Touch a host-dependent route first: the host (and its store) is built
+    # lazily by the first request that needs it, exactly as in production.
+    await client.get("/v1/auth/providers")
+    app.state.desktop_auth.store.upsert_credential(
+        "anthropic", {"type": "oauth", "access": "at", "refresh": "rt"}
+    )
     app.state.config_manager.set_config_value("hosting", "anthropic")
     app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-second"})
@@ -1124,6 +1257,31 @@ async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "anthropic"
     assert on_disk.get_config_value("model_name") == "claude-sonnet-5"
+
+
+async def test_key_save_replaces_a_stranded_default(desktop):
+    """The bug this feature exists for: a signed-out hosting must not outrank a key.
+
+    ``anthropic`` is a real provider with NO credential on this machine — the
+    user removed the sign-in, or signed in on another device. Saving a deepseek
+    key used to leave ``anthropic/claude-sonnet-5`` in place (registry membership
+    was the whole test), so every launch failed on a provider this user cannot
+    reach while a working key sat unused. Both halves are replaced, and the
+    receipt names both providers so the change is not silent.
+    """
+    client, app = desktop
+    app.state.config_manager.set_config_value("hosting", "anthropic")
+    app.state.config_manager.set_config_value("model_name", "claude-sonnet-5")
+    response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-strand"})
+    assert response.status_code == 200, response.text
+    applied = response.json()["result"]["defaults_applied"]
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert applied["receipt"] == (
+        "Default moved to deepseek/deepseek-flash — not signed in to anthropic."
+    )
+    on_disk = ConfigManager(app.state.config_manager.config_dir)
+    assert on_disk.get_config_value("hosting") == "deepseek"
+    assert on_disk.get_config_value("model_name") == "deepseek-flash"
 
 
 async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop):
@@ -1140,8 +1298,20 @@ async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop
 
 async def test_key_save_reads_config_written_elsewhere_since_boot(desktop):
     """The server's manager is re-read: a hosting chosen by the TUI after this
-    server booted must not be treated as empty (and then overwritten)."""
+    server booted must not be treated as empty (and then overwritten).
+
+    The chosen hosting carries a credential, or the stranded-default rule would
+    (correctly) replace it and the re-read could not be told apart from a stale
+    read: without that credential a manager that never re-read and one that did
+    both end up writing deepseek, which is exactly what this test must not
+    accept.
+    """
     client, app = desktop
+    # See the sibling test: the host is built by the first request that needs it.
+    await client.get("/v1/auth/providers")
+    app.state.desktop_auth.store.upsert_credential(
+        "anthropic", {"type": "oauth", "access": "at", "refresh": "rt"}
+    )
     ConfigManager(app.state.config_manager.config_dir).set_config_value("hosting", "anthropic")
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-elsewhere"})
     assert response.json()["result"]["defaults_applied"] is None
@@ -1183,7 +1353,13 @@ async def test_a_rejected_key_is_refused_and_not_stored(desktop, monkeypatch):
     client, app = desktop
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-bad-key"})
     assert response.status_code == 422
-    assert response.json()["detail"] == "DeepSeek rejected this API key. Check it and try again."
+    # The envelope is additive for released readers; pin the complete verdict
+    # and opaque params so a migration cannot weaken this no-write regression.
+    assert response.json()["detail"] == {
+        "code": "wire.errors.auth.provider_refusal",
+        "params": {"error": "DeepSeek rejected this API key. Check it and try again."},
+        "text": "DeepSeek rejected this API key. Check it and try again.",
+    }
     assert "sk-bad-key" not in response.text
     assert not app.state.desktop_auth.store.list_credentials("deepseek")
     # No defaults either: nothing usable was connected.
@@ -1561,7 +1737,11 @@ async def test_a_pasted_key_in_a_login_operation_is_checked_like_a_saved_one(des
         json={"value": "sk-bad", "prompt_id": awaiting["prompt_id"]},
     )
     assert refused.status_code == 422
-    assert refused.json()["detail"] == "OpenRouter rejected this API key."
+    assert refused.json()["detail"] == {
+        "code": "wire.errors.auth.provider_refusal",
+        "params": {"error": "OpenRouter rejected this API key."},
+        "text": "OpenRouter rejected this API key.",
+    }
     assert "sk-bad" not in refused.text
     assert not app.state.desktop_auth.store.list_credentials("openrouter")
     still = (await client.get(f"/v1/auth/operations/{operation_id}")).json()["result"]
@@ -1870,7 +2050,11 @@ async def test_a_start_after_close_answers_503(desktop):
     await host.close()
     refused = await client.post("/v1/auth/login", json={"provider": "radient"})
     assert refused.status_code == 503, refused.text
-    assert "shuts down" in refused.json()["detail"]
+    assert refused.json()["detail"] == {
+        "code": "wire.errors.auth.auth_refusal",
+        "params": {"error": "Sign-in is unavailable while the server shuts down."},
+        "text": "Sign-in is unavailable while the server shuts down.",
+    }
     # An unknown provider is still the caller's mistake: 422, unchanged.
     app.state.desktop_auth = None
     unknown = await client.post("/v1/auth/login", json={"provider": "no-such-provider"})

@@ -363,7 +363,7 @@ async def test_client_supplied_shape_fields_are_refused(config_app, field, value
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "agents_config_client_fields"
-    assert field in detail["message"]
+    assert field in detail["text"]
 
 
 @pytest.mark.asyncio

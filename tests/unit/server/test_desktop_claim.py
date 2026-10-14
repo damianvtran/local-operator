@@ -448,7 +448,9 @@ async def test_a_claim_refuses_an_origin_it_cannot_install(plane, declared, expe
     client, _ = plane
     response = await claim(client, body={"origins": declared})
     assert response.status_code == 400
-    assert expected in response.json()["detail"]
+    # E2a: the refusal is the message envelope; `text` is the sentence this
+    # assertion read from a bare-string `detail`.
+    assert expected in response.json()["detail"]["text"]
     assert not desktop.desktop_posture().enabled
     assert desktop.desktop_posture().origins == frozenset()
 
@@ -489,7 +491,10 @@ async def test_a_malformed_claim_body_is_refused_not_ignored(plane, raw, expecte
     client, _ = plane
     response = await client.post("/v1/desktop/claim", headers=bearer(CLAIM_KEY), content=raw)
     assert response.status_code == 400
-    assert expected in response.json()["detail"]
+    # E2a: the refusal is the message envelope; `text` is exactly the sentence
+    # this assertion used to read from a bare-string `detail` (the additive
+    # contract keeps the sentence a string-only reader displays).
+    assert expected in response.json()["detail"]["text"]
     assert not desktop.desktop_posture().enabled
 
 

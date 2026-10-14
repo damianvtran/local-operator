@@ -55,6 +55,7 @@ from local_operator.harness.types import (
 from local_operator.incidents import format_model_switch_message
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
+    ENTRY_CUSTOM,
     ENTRY_MESSAGE,
     TRANSCRIPT_FILENAME,
     Transcript,
@@ -95,7 +96,9 @@ from local_operator.tui.widgets.subagent_view import (
 )
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
+    HubMessageBlock,
     NoticeBlock,
+    QuietGroupBlock,
     TranscriptView,
     UserBlock,
     WorkingBlock,
@@ -2242,9 +2245,11 @@ async def test_durable_communication_dedupes_across_page_boundary(
         notices = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent · asked\nWhich file?"
+            if entry.kind == "parent_message"
+            and entry.text == "Which file?"
+            and (entry.details or {}).get("expects_reply") is True
         ]
-        assert notices == ["Parent · asked\nWhich file?"]
+        assert notices == ["Which file?"]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
@@ -2289,9 +2294,26 @@ async def test_durable_communications_are_human_facing_and_correlated(tmp_path) 
             if entry.kind in ("parent_message", "subagent_message")
         ]
         assert communications == [
-            ("parent_message", "Parent · asked\nWhich file failed?"),
-            ("subagent_message", "Subagent · replied\n\ntests/test_api.py"),
-            ("parent_message", "Parent · redirected\nFocus on retries"),
+            ("parent_message", "Which file failed?"),
+            ("subagent_message", "tests/test_api.py"),
+            ("parent_message", "Focus on retries"),
+        ]
+        # The typed facts ride the entry now (the receipt renders sender and
+        # intent from them); the label-in-text spelling this test used to pin
+        # is exactly what moved into `details`.
+        facts = [
+            (
+                (entry.details or {}).get("expects_reply"),
+                (entry.details or {}).get("steer"),
+                (entry.details or {}).get("direction"),
+            )
+            for entry in view._history_entries
+            if entry.kind in ("parent_message", "subagent_message")
+        ]
+        assert facts == [
+            (True, False, "to_child"),
+            (None, None, "to_parent"),
+            (False, True, "to_child"),
         ]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
@@ -2350,9 +2372,11 @@ async def test_a_persisted_steer_never_renders_the_model_facing_envelope(
         redirected = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent · redirected\nFocus on retries"
+            if entry.kind == "parent_message"
+            and entry.text == "Focus on retries"
+            and (entry.details or {}).get("steer") is True
         ]
-        assert redirected == ["Parent · redirected\nFocus on retries"]
+        assert redirected == ["Focus on retries"]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
@@ -2400,11 +2424,13 @@ async def test_two_identical_legacy_steers_render_two_rows(tmp_path) -> None:
         redirected = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent · redirected\nFocus on retries"
+            if entry.kind == "parent_message"
+            and entry.text == "Focus on retries"
+            and (entry.details or {}).get("steer") is True
         ]
         assert redirected == [
-            "Parent · redirected\nFocus on retries",
-            "Parent · redirected\nFocus on retries",
+            "Focus on retries",
+            "Focus on retries",
         ]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
@@ -2470,11 +2496,13 @@ async def test_a_mixed_vintage_pair_of_identical_steers_renders_two_rows(
         redirected = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent · redirected\nFocus on retries"
+            if entry.kind == "parent_message"
+            and entry.text == "Focus on retries"
+            and (entry.details or {}).get("steer") is True
         ]
         assert redirected == [
-            "Parent · redirected\nFocus on retries",
-            "Parent · redirected\nFocus on retries",
+            "Focus on retries",
+            "Focus on retries",
         ]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
@@ -2528,35 +2556,39 @@ async def test_two_facts_for_an_id_row_and_a_legacy_row_render_two_rows(
         redirected = [
             entry.text
             for entry in view._history_entries
-            if entry.text == "Parent · redirected\nFocus on retries"
+            if entry.kind == "parent_message"
+            and entry.text == "Focus on retries"
+            and (entry.details or {}).get("steer") is True
         ]
         assert redirected == [
-            "Parent · redirected\nFocus on retries",
-            "Parent · redirected\nFocus on retries",
+            "Focus on retries",
+            "Focus on retries",
         ]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("steer", "expects_reply", "label"),
+    ("steer", "expects_reply"),
     [
-        (True, False, "Parent · redirected"),
-        (False, True, "Parent · asked"),
-        (False, False, "Parent"),
+        (True, False),
+        (False, True),
+        (False, False),
     ],
 )
-async def test_the_no_fact_fallback_labels_an_envelope_by_its_own_kind(
-    tmp_path, steer: bool, expects_reply: bool, label: str
+async def test_the_no_fact_fallback_carries_the_envelopes_own_typed_facts(
+    tmp_path, steer: bool, expects_reply: bool
 ) -> None:
     """The fallback arm — an envelope row whose communication fact is NOT in
     the loaded window (it may sit on an unloaded page) — renders the extracted
-    body under the label matching the envelope's OWN kind.
+    body carrying the envelope's OWN typed facts.
 
-    It used to hardcode ``Parent · redirected`` for all three, so a note or a
-    question would have been reported as a redirection the parent never made.
-    The instruction line names the kind, so the fallback has no need to guess.
-    This is also the only direct coverage of the arm itself: the correlated and
+    The old spelling baked a label (``Parent · redirected``/``Parent · asked``)
+    into the row text and hardcoded the steer label for all three kinds, so a
+    note or a question was reported as a redirection the parent never made.
+    The facts now ride ``details`` and the receipt renders sender/intent from
+    them, so the same envelope still yields exactly one parent receipt. This is
+    also the only direct coverage of the arm itself: the correlated and
     legacy-with-fact cases both take the suppression path instead.
     """
     transcript = Transcript(tmp_path / "child")
@@ -2576,9 +2608,97 @@ async def test_the_no_fact_fallback_labels_an_envelope_by_its_own_kind(
         view = await _open(pilot, app, job)
         await _wait_history(pilot, view)
 
-        parents = [entry.text for entry in view._history_entries if entry.kind == "parent_message"]
-        assert parents == [f"{label}\nFocus on retries"]
+        parents = [
+            (
+                entry.text,
+                bool((entry.details or {}).get("steer")),
+                bool((entry.details or {}).get("expects_reply")),
+            )
+            for entry in view._history_entries
+            if entry.kind == "parent_message"
+        ]
+        assert parents == [("Focus on retries", steer, expects_reply)]
         assert "<parent-message>" not in " ".join(view.rendered_rows())
+
+
+def test_hub_entries_map_to_the_receipt_block_and_restate_in_place() -> None:
+    """The child page reuses the main transcript's receipt block for hub rows.
+
+    The entry-level contract: parent/subagent entries build a
+    ``HubMessageBlock`` from their retained facts (never a ``UserBlock`` —
+    routing a parent's steer there is what made it read as the operator
+    speaking), a richer same-ID fold restates the mounted receipt in place,
+    and a fold that LOST facts refuses to supersede what is on screen.
+    """
+    entry = subagent_view.SubagentEntry(
+        "e1",
+        "parent_message",
+        text="Which file?",
+        details={"direction": "to_child", "expects_reply": True},
+    )
+    block = subagent_view.entry_block(entry)
+    assert isinstance(block, HubMessageBlock)
+    assert not isinstance(block, UserBlock)
+    assert block.text() == "Which file?"
+
+    richer = subagent_view.SubagentEntry(
+        "e1",
+        "parent_message",
+        text="Which file?",
+        details={"direction": "to_child", "expects_reply": True, "label": "manager"},
+    )
+    assert subagent_view._supersedes(richer, entry) is True
+    assert subagent_view.update_entry_block(block, richer, entry) is True
+    assert block.hub_details.get("label") == "manager"
+
+    poorer = subagent_view.SubagentEntry("e1", "parent_message", text="Which file?")
+    assert subagent_view._supersedes(poorer, richer) is False
+
+    human = subagent_view.SubagentEntry("u1", "user", text="do the thing")
+    assert isinstance(subagent_view.entry_block(human), UserBlock)
+
+
+@pytest.mark.asyncio
+async def test_a_marked_steer_row_renders_as_a_parent_receipt_in_the_child(
+    tmp_path,
+) -> None:
+    """A persisted hub steer row (producer marker, no communication fact in
+    the loaded window) folds by provenance: the child page paints the receipt
+    with the authored body and typed facts, never the XML envelope."""
+    transcript = Transcript(tmp_path / "child")
+    marked = Message.user(_steer_envelope("Focus on retries"), id="steer-marked")
+    marked.provider_payload = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": "Focus on retries",
+        }
+    }
+    await transcript.append_message(marked)
+
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        parents = [
+            (entry.text, entry.details or {})
+            for entry in view._history_entries
+            if entry.kind == "parent_message"
+        ]
+        assert len(parents) == 1
+        assert parents[0][0] == "Focus on retries"
+        assert parents[0][1].get("steer") is True
+        assert "<parent-message>" not in " ".join(view.rendered_rows())
+        receipts = [block for block in view._body.blocks() if isinstance(block, HubMessageBlock)]
+        assert len(receipts) == 1
 
 
 @pytest.mark.asyncio
@@ -5032,9 +5152,10 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
         assert "durable row" in " ".join(view.rendered_rows())
 
 
+@pytest.mark.parametrize("refresh_during_append", [False, True])
 @pytest.mark.asyncio
 async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, refresh_during_append: bool
 ) -> None:
     """Recovering from a failed probe must not become the retry storm.
 
@@ -5050,9 +5171,13 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
     session.jobs = _fake_jobs(job)
     child_dir = tmp_path / "child"
     child_dir.mkdir()
-    session._subagent_comms = type(
-        "Comms", (), {"session_dir_of": lambda self, _job_id: child_dir}
-    )()
+    # The mounted app also projects the roster through the runtime handle.
+    # A session_dir_of-only double breaks that subscription before this test
+    # reaches the history seam; keep the real protocol and pin only its path.
+    comms = SubagentComms(cast(Session, session))
+    comms.record_launch(job.id, job.label)
+    monkeypatch.setattr(comms, "session_dir_of", lambda _job_id: child_dir)
+    session._subagent_comms = comms
 
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
@@ -5071,9 +5196,6 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
 
-        transcript = Transcript(child_dir)
-        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
-
         reads = 0
 
         async def always_fails(*args, **kwargs):
@@ -5081,7 +5203,25 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
             reads += 1
             raise OSError("permission denied")
 
+        # The append yields AFTER making the file visible. A timer refresh in
+        # that await can perform a successful probe and exhaust the page before
+        # the failing seam is installed. Pin failure first: the initial empty
+        # read has completed, and every subsequent look must test this path.
         monkeypatch.setattr(subagent_view, "load_transcript_page", always_fails)
+        transcript = Transcript(child_dir)
+        if refresh_during_append:
+            append = transcript.append_message
+
+            async def append_with_refresh(message: Message) -> None:
+                await append(message)
+                # Reproduce the timer's legal interleaving deterministically:
+                # the file is visible but append has not returned to its caller.
+                # Moving the failure seam back below append must fail this arm.
+                app._refresh_subagent_view(view.job_id)
+                await _wait_history(pilot, view)
+
+            monkeypatch.setattr(transcript, "append_message", append_with_refresh)
+        await transcript.append_message(Message.assistant("durable row", id="durable-1"))
 
         footers = set()
         for _ in range(20):
@@ -5098,6 +5238,7 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
         #
         # The storm this excludes is the one an error-guard fix would create:
         # unbounded growth with the EVENT rate rather than the refresh rate.
+        assert reads > 0, "the failing probe was never exercised"
         assert reads <= 2 * 20, f"probe storm: {reads} reads over 20 refreshes"
 
         # The bound above is necessary but NOT sufficient: the rejected
@@ -5567,3 +5708,221 @@ async def test_a_dropped_prepend_settle_does_not_wedge_the_history_gate(tmp_path
         assert (
             len(view._history_ids) > before
         ), "no history loaded after a dropped prepend settle: the gate is wedged"
+
+
+def _durable_row(entry_id: str, payload: dict[str, Any], entry_type: str = ENTRY_MESSAGE):
+    return TranscriptEntry(id=entry_id, ts=1.0, type=entry_type, payload=payload)
+
+
+def test_a_marked_row_adopts_attachments_from_a_later_same_id_row() -> None:
+    """Direct acceptance (review round 3 delta): a marked row first folded
+    WITHOUT a picture and a later same-ID row carrying authoritative
+    ImageContent must fold the attachment — adoption on later arrival — not
+    keep the bare receipt."""
+    text = [{"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"}]
+    marker = {
+        "hub_receipt": {
+            "direction": "to_child",
+            "expects_reply": False,
+            "steer": True,
+            "body": "Focus on retries",
+        }
+    }
+    no_image = _durable_row(
+        "late-image",
+        {"kind": "message", "role": "user", "content": text, "provider_payload": marker},
+    )
+    with_image = _durable_row(
+        "late-image",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": [*text, {"data": "QUJD", "mime_type": "image/png"}],
+            "provider_payload": marker,
+        },
+    )
+    folded = fold_transcript_entries([no_image, with_image])
+    kinds = [(entry.key, entry.kind) for entry in folded]
+    assert ("late-image", "parent_message") in kinds
+    assert ("late-image:attach:1", "attachment") in kinds
+    attachments = [entry for entry in folded if entry.kind == "attachment"]
+    assert [entry.att_data for entry in attachments] == ["QUJD"]
+
+
+def test_a_stamped_but_invalid_marker_is_not_re_guessed_from_its_envelope() -> None:
+    """R3-1 acceptance: the legacy wrapper parse is for rows the modern
+    producer never stamped. An INVALID marker on an envelope-looking row
+    keeps it the parent's own row; the identical text with NO stamp still
+    takes the legacy parse."""
+    envelope = [{"type": "text", "text": _steer_envelope("Focus on retries")}]
+    invalid = _durable_row(
+        "stamped-invalid",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": envelope,
+            "provider_payload": {
+                "hub_receipt": {"direction": "sideways", "body": "Focus on retries"}
+            },
+        },
+    )
+    legacy = _durable_row(
+        "legacy-unstamped", {"kind": "message", "role": "user", "content": envelope}
+    )
+    folded = fold_transcript_entries([invalid, legacy])
+    kinds = {entry.key: entry.kind for entry in folded}
+    assert kinds["stamped-invalid"] == "user"
+    assert kinds["legacy-unstamped"] == "parent_message"
+
+
+def test_a_marker_row_correlates_by_id_only_never_by_body_text() -> None:
+    """R3-4 (review round 3): a communication fact for a DIFFERENT source id
+    and a positively marked row carrying the same body are TWO deliveries.
+
+    The legacy body budget belongs to unmarked historical rows without usable
+    provenance; a marked row is suppressed only by identity, so it is neither
+    charged nor swallowed by a stranger's fact."""
+    fact = _durable_row(
+        "fact-old",
+        {
+            "custom_type": HUB_COMMUNICATION_CUSTOM_TYPE,
+            "details": {
+                "direction": "to_child",
+                "body": "same body",
+                "kind": "steer",
+                "communication_id": "old-source-unloaded",
+            },
+        },
+        entry_type=ENTRY_CUSTOM,
+    )
+    marked = _durable_row(
+        "marked-new",
+        {
+            "kind": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": "<parent-message>\nsame body\n</parent-message>"}],
+            "provider_payload": {
+                "hub_receipt": {
+                    "direction": "to_child",
+                    "expects_reply": False,
+                    "steer": True,
+                    "body": "same body",
+                }
+            },
+        },
+    )
+    folded = fold_transcript_entries([fact, marked])
+    keys = [(entry.key, entry.kind) for entry in folded]
+    assert ("comm:fact-old", "parent_message") in keys
+    assert ("marked-new", "parent_message") in keys
+    assert len(keys) == 2
+
+
+def test_a_marked_row_with_an_image_folds_an_attachment_row() -> None:
+    """R3-3 child half + the operator's attachment acceptance: the marked
+    row's image rides the fold as an attachment entry keyed by its ORIGINAL
+    source id and content index; an externalised digest with no resolvable
+    store degrades to the unavailable receipt instead of dropping the row."""
+    payload = {
+        "kind": "message",
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"},
+            {"data": "QUJD", "mime_type": "image/png"},
+        ],
+        "provider_payload": {
+            "hub_receipt": {
+                "direction": "to_child",
+                "expects_reply": False,
+                "steer": True,
+                "body": "Focus on retries",
+            }
+        },
+    }
+    folded = fold_transcript_entries([_durable_row("steer-marked", payload)])
+    rows = [(entry.key, entry.kind, entry.att_data) for entry in folded]
+    assert ("steer-marked", "parent_message", None) in rows
+    assert ("steer-marked:attach:1", "attachment", "QUJD") in rows
+
+    # Same rows, second fold: identical keys and payloads (replay-stable).
+    again = fold_transcript_entries([_durable_row("steer-marked", payload)])
+    assert [(entry.key, entry.kind, entry.att_data) for entry in again] == rows
+
+    # An externalised reference whose store read cannot resolve still folds a
+    # row (unavailable receipt), never a silent drop.
+    digest_payload = {
+        **payload,
+        "content": [
+            {"type": "text", "text": "<parent-message>\nFocus on retries\n</parent-message>"},
+            {"attachment": "f" * 16, "mime_type": "image/png"},
+        ],
+    }
+    digest_rows = [
+        (entry.key, entry.kind, entry.att_data)
+        for entry in fold_transcript_entries([_durable_row("steer-digest", digest_payload)])
+    ]
+    assert ("steer-digest:attach:1", "attachment", None) in digest_rows
+
+
+@pytest.mark.asyncio
+async def test_a_richer_same_id_receipt_restates_the_child_group_facts(tmp_path) -> None:
+    """R3-5 (review round 3): the mounted bar's summary must read the LATEST
+    member facts.
+
+    Drives the real styled SubagentView reconciliation: three tools plus a hub
+    receipt form a quiet group; opening it and then correcting the SAME
+    receipt id (label/intent) must update the bar's reply/steer facts while
+    membership and the open state stay."""
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: tmp_path}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await pilot.pause()
+
+        def receipt(label: str, expects_reply: bool, steer: bool):
+            return subagent_view.SubagentEntry(
+                "comm:q1",
+                "parent_message",
+                text="Focus on retries",
+                details={
+                    "direction": "to_child",
+                    "expects_reply": expects_reply,
+                    "steer": steer,
+                    "label": label,
+                },
+            )
+
+        tools = [
+            subagent_view.SubagentEntry(
+                f"tool-{index}",
+                "tool",
+                tool_name="read",
+                tool_args={"path": f"f{index}"},
+                outcome="success",
+            )
+            for index in range(3)
+        ]
+        view._history_entries = [*tools, receipt("before", True, False)]
+        view._reconcile_current_body()
+        await pilot.pause()
+        bars = [block for block in view._body.blocks() if isinstance(block, QuietGroupBlock)]
+        assert len(bars) == 1
+        bar = bars[0]
+        bar.toggle_expanded()
+        await pilot.pause()
+        assert bar.group.reply_requested == 1
+        assert bar.group.steered == 0
+
+        view._history_entries = [*tools, receipt("after", False, True)]
+        view._reconcile_current_body()
+        await pilot.pause()
+        assert bar._expanded
+        assert bar.group.reply_requested == 0
+        assert bar.group.steered == 1
+        assert "reply requested" not in bar._summary_text()
+        assert "steered" in bar._summary_text()

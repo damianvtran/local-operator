@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import os
-import select
+import selectors
 import sys
 import time
 from pathlib import Path
@@ -645,18 +645,22 @@ class _PtyChild:
     def drain(self, seconds: float) -> None:
         """Read whatever the child wrote for ``seconds``."""
         deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([self._master], [], [], 0.05)
-            if not readable:
-                continue
-            try:
-                data = os.read(self._master, 65536)
-            except OSError:
-                # EIO: the slave side closed, i.e. the child is gone.
-                return
-            if not data:
-                return
-            self._chunks.append(data)
+        # A long-lived shard can hand openpty an fd above select's FD_SETSIZE.
+        # This is a parent-harness limit, not a mouse-mode failure: use the
+        # platform's scalable readiness primitive without changing the budget.
+        with selectors.DefaultSelector() as reader:
+            reader.register(self._master, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not reader.select(0.05):
+                    continue
+                try:
+                    data = os.read(self._master, 65536)
+                except OSError:
+                    # EIO: the slave side closed, i.e. the child is gone.
+                    return
+                if not data:
+                    return
+                self._chunks.append(data)
 
     def wait_for_output(self, timeout: float = 60.0) -> None:
         """Block until the child has painted something."""
@@ -738,6 +742,45 @@ def _pointer_positions(tmp_path: Path, *, gate: bool) -> list[list[int]]:
         child.close()
 
 
+@pytest.fixture(params=[False, True], ids=["ordinary-fd", "high-fd"])
+def pty_master_descriptor(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Exercise the same real VT with and without select's descriptor limit.
+
+    Duplicate one master, not a thousand open files: the failure depends on
+    the fd number, not resource exhaustion. The child still receives stdio
+    normally, so only the parent reader's readiness primitive is challenged.
+    """
+    if not request.param:
+        yield
+        return
+    import fcntl
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 2048), hard))
+    openpty = os.openpty
+
+    def high_master() -> tuple[int, int]:
+        master, slave = openpty()
+        try:
+            high = fcntl.fcntl(master, fcntl.F_DUPFD, 1024)
+        except BaseException:
+            os.close(master)
+            os.close(slave)
+            raise
+        os.close(master)
+        return high, slave
+
+    monkeypatch.setattr(os, "openpty", high_master)
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+@pytest.mark.usefixtures("pty_master_descriptor")
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_a_dirty_mode_mid_session_does_not_move_the_pointer(tmp_path: Path) -> None:
     """The reported bug, end to end, and the gate that stops it.
@@ -811,6 +854,7 @@ def _compliant_vt_positions(tmp_path: Path, *, reset: str) -> tuple[str, list[An
         child.close()
 
 
+@pytest.mark.usefixtures("pty_master_descriptor")
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_a_compliant_vt_reports_cells_once_we_clear_1016(tmp_path: Path) -> None:
     """The VT class the divisor-only gate inverted, and the reset pair that serves it.
@@ -850,6 +894,7 @@ def test_a_compliant_vt_reports_cells_once_we_clear_1016(tmp_path: Path) -> None
     ), f"the pre-fix arm did not reproduce the misread this fix removes: {prefix}"
 
 
+@pytest.mark.usefixtures("pty_master_descriptor")
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_a_resize_re_closes_the_mode_through_the_real_driver(tmp_path: Path) -> None:
     """One 24-byte write per delivered Resize, and it reaches the wire.

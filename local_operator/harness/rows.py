@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The four, and why each is persisted:
+    The five, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -156,6 +156,9 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       notice instead.
     - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
       with no name and was dropped; the live run showed a notice instead.
+    - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
+      no text and no tool calls on a clean stop; the live run showed a notice
+      instead.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -183,6 +186,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     from local_operator.harness.loop import (
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
     from local_operator.session.session import _CONTINUATION_PROMPT
@@ -192,6 +196,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         _CONTINUATION_PROMPT,
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        WORDLESS_STOP_RECOVERY_PROMPT,
     )
 
 
@@ -205,8 +210,8 @@ def is_harness_chrome(text: str) -> bool:
     would suppress a chrome prompt that the other painted as the user's own
     words the moment a persisted prompt gained a trailing newline.
 
-    Two legs, one decision. Exact membership covers the three prompts that are
-    single fixed strings; a producer-side recogniser covers each family the
+    Two legs, one decision. Exact membership covers the prompts that are
+    single fixed strings (the five listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -415,6 +420,62 @@ def is_hidden_tool_message(message: Any) -> bool:
     if str(getattr(message, "text", "") or "").strip():
         return False
     return all(is_hidden_tool_call(call) for call in calls)
+
+
+#: The quiet-turn tool's name (design ``docs/design/quiet-turns.md`` §4/§5, slice
+#: S1). The literal lives with the tool's builder (``tools/builtin.py``); this
+#: module only ever COMPARES against it, so a rename shows up here as a predicate
+#: that stops matching rather than as a silent pass (the ``_ASK_TOOL_NAME`` rule).
+#:
+#: Deliberately NOT in :data:`HIDDEN_TOOL_NAMES`, and every edge of that
+#: exclusion is load-bearing: that set is subtracted from the history window's
+#: DISPLAY pages (``session/history_window.py``), from the served journal rows
+#: (:func:`visible_transcript_rows`) and from the transcript index's counts, and
+#: the dashboard UI needs the persisted pair as the structural close of its
+#: settled turn (design §5, the quiet-close rule). The pair therefore hides at
+#: the PAINT seams of the TUI and the relay fold — each host asks these
+#: predicates there — and stays an ordinary row everywhere else: the model's
+#: context, the journal, the display pages.
+QUIET_TURN_TOOL = "no_reply"
+
+
+def is_quiet_turn_name(name: Any) -> bool:
+    """Whether a tool NAME is the quiet-turn tool's (``no_reply``)."""
+    return str(name or "") == QUIET_TURN_TOOL
+
+
+def is_quiet_turn_call(call: Any) -> bool:
+    """Whether a ``ToolCall``-shaped object names the quiet-turn tool.
+
+    The call half of the pair the TUI and relay folds skip (design §5): the
+    assistant row's call never paints a ledger row, which is what keeps the
+    sentinel out of the transcript the operator reads while the pair itself
+    stays persisted. The result half is :func:`is_quiet_turn_result`.
+    """
+    return is_quiet_turn_name(getattr(call, "name", None))
+
+
+def is_quiet_turn_result(result: Any) -> bool:
+    """Whether a tool RESULT-shaped object is the quiet pair's result.
+
+    Reads the marker (``harness.types.QUIET_TURN_KEY``) the loop stamps on the
+    result's ``details`` — the details-mapping shape
+    :func:`is_ask_gate_divert_details` classifies. Unlike the call predicate this
+    does not read a name: a result can reach a settle seam without its call's
+    name being freshly readable, and the marker is the quiet end's OWN fact.
+    A fold that receives one settles nothing for it — no row may be born for the
+    pair at any seam (design §5: "hidden in TUI and relay").
+    """
+    details = getattr(result, "details", None)
+    if not isinstance(details, Mapping):
+        return False
+    # Imported HERE, not at module scope: this module imports no harness type at
+    # module scope (see the header), and the key lives beside ``FAULT_KEY`` in
+    # ``harness.types`` because that is where the harness declares what it writes
+    # into ``ToolResult.details``. The same shape as ``output_limit_call_receipt``.
+    from local_operator.harness.types import QUIET_TURN_KEY
+
+    return details.get(QUIET_TURN_KEY) is True
 
 
 def is_ask_gate_divert_details(details: Any) -> bool:
@@ -651,7 +712,7 @@ def is_harness_notice_row(row: Any) -> bool:
     person who pastes a harness notice verbatim loses their display row: the text
     is hidden on every human surface. It is NOT lost anywhere else — the row is
     still in the journal, and still in the model's context; only the renderer drops
-    it, exactly as :func:`is_harness_chrome` does for the three loop/continuation
+    it, exactly as :func:`is_harness_chrome` does for the loop/continuation
     prompts, which a person can equally paste verbatim. Those two are the verified
     retention surfaces, and they are named alone because a claim about anywhere
     else would be one nobody measured. That precedent is the reason this is
@@ -1759,3 +1820,51 @@ def sessions_row_summary(args: Mapping[str, object]) -> str:
             parts.append(query)
         return " · ".join(parts)
     return op
+
+
+# ---------------------------------------------------------------------------
+# Turn supplements: the ROW-IDENTITY decision (memo §2.7/§3.2)
+# ---------------------------------------------------------------------------
+#
+# The supplement block's CONTENT decision is ``supplements.contract.reader_disposition``
+# (which both hosts import, so "paint as preparing / as the settled block / as
+# cancelled·Retry / as nothing" is one function). What is left for the surfaces is the
+# question below — "is this raw row one of ours, and what does it say" — and it lives
+# here for this module's stated reason: a decision made in one renderer is a decision the
+# other will not make. The TUI folds the mapping a live beat carries and the mapping the
+# lazy read (``supplements_for``) serves; the phone fold sees raw transcript-entry payloads.
+# Both are read here, once.
+#
+# PROVENANCE NOTE, measured on this branch: supplement rows are ``ENTRY_CUSTOM`` journal
+# entries, so they do NOT ride either replay mode (``build_llm_history`` and the audit
+# replay both skip them — probed directly), and the TUI lane's replay mechanism is the C0
+# read op rather than a history-fold arm. This reader is what that op's answers and the
+# live payloads have in common.
+
+
+def supplement_row_details(row: Any) -> Mapping[str, Any] | None:
+    """The ``details`` of a ``supplement_v1`` row, or ``None`` when not one of ours.
+
+    Accepts the two shapes a surface actually holds:
+
+    * a raw transcript-entry payload mapping — ``{"custom_type": "supplement_v1",
+      "details": {...}}`` — which is what ``Transcript.latest_custom`` returns and what
+      the phone fold walks;
+    * a wrapped entry — ``{"payload": {...}}`` — for a caller holding the entry rather
+      than its payload.
+
+    A row whose ``custom_type`` matches but whose ``details`` is not a mapping answers
+    ``None``: a malformed row paints nothing rather than raising on a render path, the
+    same rule ``supplements.contract``'s readers follow.
+    """
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+    if not isinstance(row, Mapping):
+        return None
+    payload: Any = row.get("payload", row)
+    if not isinstance(payload, Mapping):
+        return None
+    if str(payload.get("custom_type", "")) != SUPPLEMENT_CUSTOM_TYPE:
+        return None
+    details = payload.get("details")
+    return details if isinstance(details, Mapping) else None

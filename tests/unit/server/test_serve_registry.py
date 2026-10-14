@@ -102,9 +102,28 @@ def test_publish_is_atomic_and_0600_under_a_0700_directory(tmp_path: Path) -> No
         # disposition is to terminate. A reader that could not find the key would
         # have to guess, and guessing is what kills the daemon.
         "reloadable",
+        # The rolling-continuity contract (``server/reload.rolling_contract``).
+        # Pinned for the same reason as ``reloadable``: a caller that writes the
+        # install pointer reads THIS field to decide whether the daemon's
+        # request/scheduler fences are actually wired before it asks for a
+        # reload. Handler presence alone cannot prove it, so the empty default is
+        # "unknown", and a reader that could not find the key would have to guess.
+        "rolling_reload_contract",
+        # The Phase A local-surface credentials (file-serving RFC §4.1). Pinned
+        # for the same reason as ``retiring_*``: a surface reads THIS file to
+        # find what it presents (``access_token``) and what it compares against
+        # to classify staleness (``boot_generation``), so a reader that could
+        # not find the keys would have to guess. Both are the additive, defaulted
+        # tail; the seed and signing key behind them are never published.
+        "access_token",
+        "boot_generation",
     }
     assert (data["retiring_from"], data["retiring_to"]) == ("", "")
     assert data["reloadable"] is False
+    # A record built without the caller's minted keys publishes empties, not a
+    # regenerated credential: a reader must be able to tell "no Phase A keys on
+    # this boot" from a token to present.
+    assert (data["access_token"], data["boot_generation"]) == ("", 0)
 
 
 def test_unpublish_is_best_effort_and_namespace_scoped(tmp_path: Path, monkeypatch) -> None:

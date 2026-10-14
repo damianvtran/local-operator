@@ -58,10 +58,15 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
     # WakeBlock's subclass, so the COLLAPSED pin reaches it through Textual's
     # type matching — but its expanded class is `monitor-expanded`, not
     # `wake-expanded`, so the combined selector below is the only thing that
-    # keeps an expanded monitor receipt out of `auto`. Combined selectors so
-    # the four cannot drift.
+    # keeps an expanded monitor receipt out of `auto`. The quiet-group bar
+    # (S5) joins the collapsed selector: it is a ledger row like the others,
+    # always one line tall, and has no expanded class of its own to pin
+    # (opening it reveals sibling member rows, not rows of its own).
+    # Combined selectors so the rows cannot drift.
     tool_block = re.search(
-        r"^ToolCard,\s*WakeBlock,\s*PeerMessageBlock\s*\{([^}]*)\}", text, re.MULTILINE
+        r"^ToolCard,\s*WakeBlock,\s*PeerMessageBlock,\s*QuietGroupBlock\s*\{([^}]*)\}",
+        text,
+        re.MULTILINE,
     )
     expanded = re.search(
         r"^ToolCard\.tool-expanded,\s*WakeBlock\.wake-expanded,\s*"
@@ -101,7 +106,7 @@ def test_block_selectors_declare_no_margin_or_padding() -> None:
     match = re.search(
         r"^TranscriptBlock,\s*UserBlock,\s*NoticeBlock,\s*RichBlock,\s*"
         r"AssistantBlock,\s*ReasoningBlock,\s*ToolCard,\s*WakeBlock,\s*"
-        r"PeerMessageBlock\s*\{([^}]*)\}",
+        r"PeerMessageBlock,\s*QuietGroupBlock\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )

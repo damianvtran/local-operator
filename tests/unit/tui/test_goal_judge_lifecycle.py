@@ -128,6 +128,43 @@ async def test_a_running_loop_owns_the_verdict() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [ACHIEVED, CONTINUE])
+async def test_a_loop_taking_over_a_held_tui_answer_yields_to_waiting(monkeypatch, verdict):
+    # Exercise the mounted app's TurnEnded hook and live interaction flag. This
+    # host uses a fake session; the runtime test covers an actual GoalLoop task.
+    session = _armed([verdict])
+    started = asyncio.Event()
+    release = asyncio.Event()
+    complete_aside = session.complete_aside
+
+    async def held(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return await complete_aside(*args, **kwargs)
+
+    monkeypatch.setattr(session, "complete_aside", held)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 2)
+        app.post_message(TurnEnded(aborted=False, error=None))
+        await asyncio.wait_for(started.wait(), 2)
+        app._loop_running = True
+        try:
+            release.set()
+            await _settle(pilot)
+            assert session.judge_calls == 1
+            assert session.goal_status == "active"
+            assert session.goal_judge is not None
+            assert session.goal_judge["state"] == "waiting"
+            assert session.goal_judge["verdict"] == ""
+            assert session.prompts == []
+            assert session.history_view() == []
+        finally:
+            release.set()
+            app._loop_running = False
+
+
+@pytest.mark.asyncio
 async def test_an_error_turn_waits_without_judging() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))

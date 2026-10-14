@@ -1066,12 +1066,12 @@ async def test_u7b_two_providers_rows_survive_compaction_uncollapsed(tmp_path: P
     await transcript.append_message(Message.user("hello"))
     await record(transcript, _binding())
     await record(transcript, _binding(credential_id=43))
-    await record(transcript, _binding(provider="[redacted]", credential_id=7))
+    await record(transcript, _binding(provider="anthropic", credential_id=7))
     await transcript.append_prune("dropped-turn", "trimmed")
     reclaimed = await transcript.compact_file(min_reclaim_bytes=1)
     assert reclaimed > 0, "the compaction did nothing; this cell would not witness it"
     openai = recall_for(transcript, PROVIDER)
-    anthropic = recall_for(transcript, "[redacted]")
+    anthropic = recall_for(transcript, "anthropic")
     assert openai is not None and openai.credential_id == 43
     assert anthropic is not None and anthropic.credential_id == 7
     assert len(_rows(transcript)) == 3

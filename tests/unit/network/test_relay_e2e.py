@@ -10,6 +10,7 @@ human-confirmed pairing), R4 (zero trust: an unauthorised frame is refused) and 
 from __future__ import annotations
 
 import ast
+import json
 import socket
 import threading
 import time
@@ -2475,3 +2476,90 @@ def test_a_refused_leave_is_reported_as_a_refusal_not_as_a_reachable_peer(
     # The local half, unconditionally: stopped trusting, secret gone, trail kept.
     assert store.load(record.network_id, server_b.root).trust == "disconnected"
     assert not store.secrets_path(record.network_id, server_b.root).exists()
+
+
+# ---------------------------------------------------------------------------
+# Record compression over a REAL relay-to-relay link (wire.py "Record compression")
+# ---------------------------------------------------------------------------
+
+
+def _big_ping(pad_bytes: int = 200_000) -> dict[str, Any]:
+    # A ping is answered by the peer's read loop alone (``PeerLink._handle``), so the
+    # request exercises the full production path — writer thread, ``seal``, socket,
+    # ``FrameReader``, ``open``, dispatch, ack — without touching any op's logic. The
+    # pad is repetitive on purpose: that is the shape of the journal pages this serves.
+    return {"op": "ping", "req": 77, "pad": "lorem ipsum dolor sit amet " * (pad_bytes // 27)}
+
+
+def _sealed_bytes_of_a_big_ping(link: relay.PeerLink) -> tuple[int, int]:
+    """Send ``_big_ping`` over ``link``; return ``(plaintext_bytes, sealed_bytes)``.
+
+    ``sealed_bytes`` is what the writer thread put on the wire FOR THAT FRAME, read
+    from inside the writer's own ``_write`` rather than from ``link.bytes_out`` after
+    the reply. ``_write`` bumps ``bytes_out`` only AFTER ``sendall`` returns (the
+    counter means "bytes that left", so a failed send must not count), and the peer
+    answers as soon as the bytes arrive — so the ack can reach ``request`` before the
+    writer thread has run its increment. CI measured exactly that (shard 3.12/1, run
+    38030597356: ``assert (72 - 72) >= 200020`` — the counter had not moved yet), and
+    the compressed cell's ``< plaintext // 5`` passed VACUOUSLY in the same window
+    (a delta of 0 is below any bound). Wrapping ``_write`` closes both: the wrapper
+    returns only after the real ``_write`` has finished its increment, and the writer
+    is a single thread, so the ``bytes_out`` movement inside one call is exactly that
+    frame's sealed size — nothing else's (the establishment ``net_member_list`` pull
+    writes through the same method and would otherwise bleed into a window delta).
+    The wait is on that event, not on a clock; the deadline is a hang backstop.
+    """
+    sealed: dict[str, int] = {}
+    written = threading.Event()
+    flush = link._write  # noqa: SLF001 — the writer's own write path, wrapped below
+
+    def _record(frame: dict[str, Any]) -> None:
+        before = link.bytes_out
+        flush(frame)
+        if frame.get("req") == 77 and "size" not in sealed:
+            sealed["size"] = link.bytes_out - before
+            written.set()
+
+    link._write = _record  # type: ignore[method-assign]  # noqa: SLF001
+    frame = _big_ping()
+    plaintext = len(json.dumps(frame, separators=(",", ":")).encode())
+    reply = link.request(frame, timeout=10.0)
+    assert reply is not None and reply["op"] == "ack", reply
+    assert written.wait(timeout=10.0), "the writer never finished sealing the big ping"
+    return plaintext, sealed["size"]
+
+
+def test_a_big_frame_crosses_a_real_link_compressed_when_both_ends_negotiate_it(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record, link = _live_link(devices, monkeypatch)
+    try:
+        assert link.codec.compression is True
+        assert wire.ZLIB_RECORDS_V1 in link.capabilities
+        # The peer's read loop decoded it (it answered), and far fewer bytes crossed.
+        plaintext, sealed = _sealed_bytes_of_a_big_ping(link)
+        assert 0 < sealed < plaintext // 5
+    finally:
+        link.close("test")
+
+
+def test_a_link_to_a_peer_without_the_capability_carries_the_plain_bytes(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old-peer cell at relay level: neither end advertises the capability (both
+    relays are this build, so the LIST is what is narrowed — the same thing an old
+    build's list is), and a big frame goes out at its full plaintext size."""
+    monkeypatch.setattr(
+        wire,
+        "LINK_CAPABILITIES",
+        tuple(c for c in wire.LINK_CAPABILITIES if c != wire.ZLIB_RECORDS_V1),
+    )
+    _record, link = _live_link(devices, monkeypatch)
+    try:
+        assert link.codec.compression is False
+        plaintext, sealed = _sealed_bytes_of_a_big_ping(link)
+        assert sealed >= plaintext
+    finally:
+        link.close("test")

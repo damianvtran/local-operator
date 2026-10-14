@@ -90,24 +90,51 @@ test("an owner that is NOT resuming keeps its terminal intent", async (t) => {
   await assert.rejects(() => run(loaded, "open", OWNER), /browser scope ended/);
 });
 
-test("a foreign session cannot clear someone else's terminal by claiming a resume", async (t) => {
+test("the actual ownership producer distinguishes stale and foreign refusals", async (t) => {
+  // Producer exception assertions only: HTTP serialization and Python consumer
+  // mapping are exercised separately by the existing protocol-peer fixture.
   const { loaded, close } = await loadModule();
   t.after(close);
   await settle(loaded);
 
-  // The flag is only reachable PAST the proof/session/generation check, so it
-  // grants a stranger nothing: this is refused before the clear is considered.
+  // A different requester (wrong session) → `foreign`.
   await assert.rejects(
-    () => run(loaded, "owner_recover", { ...OWNER, requester: "session:attacker", resumed_scope: true }),
-    /stale/,
+    () => run(loaded, "owner_recover", { ...OWNER, requester: "session:someone-else", resumed_scope: true }),
+    (err) => {
+      assert.equal(err.code, "owner_refused");
+      assert.equal(err.data?.refusal, "foreign");
+      return true;
+    },
   );
+  // Our own stale generation, unknown predecessor → `stale`.
   const stale = "stale-generation-0123456789abcdefgh";
   await assert.rejects(
     () => run(loaded, "owner_recover", {
-      ...OWNER, owner_generation: stale, previous_generations: [stale], resumed_scope: true,
+      ...OWNER, owner_generation: stale, previous_generation: "", previous_generations: [stale], resumed_scope: true,
     }),
-    /stale/,
+    (err) => {
+      assert.equal(err.code, "owner_refused");
+      assert.equal(err.data?.refusal, "stale");
+      return true;
+    },
   );
-  const recovered = await run(loaded, "owner_recover", { ...OWNER });
-  assert.equal(recovered.terminal, "completed", "the real owner's intent survived");
+  const unchanged = await run(loaded, "owner_recover", { ...OWNER });
+  assert.equal(unchanged.terminal, "completed", "the real owner's intent survived both rejected resumes");
+  // A stale generation that IS a declared predecessor re-registers (M2b).
+  const recovered = await run(loaded, "owner_recover", {
+    ...OWNER, owner_generation: stale, previous_generation: GEN, previous_generations: [GEN],
+    resumed_scope: true,
+  });
+  assert.equal(recovered.terminal, "", "a declared predecessor is a legitimate successor");
+  await assert.rejects(
+    () => run(loaded, "open", {
+      ...OWNER, owner_generation: stale, tab: "bridge:999:foreign-capability",
+    }),
+    (err) => {
+      assert.equal(err.code, "owner_refused");
+      assert.equal(err.data?.refusal, "foreign");
+      return true;
+    },
+  );
 });
+

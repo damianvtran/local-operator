@@ -311,6 +311,20 @@ class ServeRecord:
     #: principal no new class of secret, while a page in a browser — which can
     #: read no files — can neither see it nor guess it.
     claim_key: str = ""
+    #: The local surface ACCESS TOKEN (Phase A of the file-serving RFC): what a
+    #: local surface presents as ``X-Local-Token`` to prove it read this record,
+    #: in the shape ``"<generation>.<secret>"`` (see
+    #: ``server/utils/local_tokens.py`` and ``docs/DESKTOP_API.md``). Public to
+    #: every reader of the record BY DESIGN -- that read is the local
+    #: authorization story, and Phase A does not enforce the token yet: it
+    #: exists so the compat window can be observed (valid presentations counted,
+    #: stale generations logged once) before Phases B/C gate on it. The seed it
+    #: was derived from, and the URL signing key, are NEVER published.
+    access_token: str = ""
+    #: The boot generation the token above belongs to. A restart bumps the
+    #: counter (persisted beside the records); a surface holding a token from an
+    #: older generation is classifiable as stale from this field alone.
+    boot_generation: int = 0
     #: When this record was first written, and when its owner last proved it
     #: was alive. ``heartbeat_at`` is stamped by every write (the shared
     #: ``publish``), and the difference between it and now is what makes a live
@@ -349,6 +363,9 @@ class ServeRecord:
     #: Additive, like every field here: a reader built before it drops the key and
     #: sees the daemon it always saw.
     reloadable: bool = False
+    #: Handler presence alone cannot prove scheduler/request continuity. Old
+    #: records default unknown; only an actually wired fence advertises safety.
+    rolling_reload_contract: str = ""
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for
@@ -375,6 +392,9 @@ def build_record(
     announced: tuple[str, int],
     desktop_governed: bool | None = None,
     reloadable: bool = False,
+    rolling_reload_contract: str = "",
+    access_token: str = "",
+    boot_generation: int = 0,
 ) -> ServeRecord:
     """Assemble the record for THIS process, reading identity fresh.
 
@@ -409,6 +429,14 @@ def build_record(
     understates the fleet — a caller reports it as "cannot move itself" and asks
     the operator to restart it by hand — which is the safe direction and the one
     the default takes.
+
+    ``access_token``/``boot_generation`` are the local surface credentials
+    (Phase A of the file-serving RFC), passed by the CALLER because they are
+    minted against the serve run directory -- where the generation counter
+    persists -- and this assembler deliberately does not know that location.
+    The contract that matters is kept by the caller's ordering instead: the
+    keys are minted BEFORE this call, so the credential exists from the instant
+    the record is published (see ``server/utils/local_tokens.py``).
 
     **The claim key is minted HERE, and only when the plane is nobody else's**
     (``desktop_posture().enabled`` false). Two reasons for the placement: the
@@ -450,9 +478,14 @@ def build_record(
         # claiming the capability for a daemon that installed no handler is a
         # caller signalling a process whose default answer to SIGUSR1 is death.
         reloadable=bool(reloadable),
+        rolling_reload_contract=rolling_reload_contract if reloadable else "",
         # ``""``, never a regenerated key: an env-governed daemon has no claim
         # to publish, and a reader must be able to tell that from a key.
         claim_key="" if governed else secrets.token_urlsafe(32),
+        # The Phase A surface credential: minted by the caller before this call
+        # (see this function's docstring) so the record never exists without it.
+        access_token=access_token,
+        boot_generation=boot_generation,
     )
 
 

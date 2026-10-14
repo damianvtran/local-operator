@@ -602,6 +602,18 @@ async def run_print_mode(
         declare = getattr(session, "declare_one_shot_exit", None)
         if callable(declare):
             declare()
+    # THE HOST FACT, declared for EVERY run this function drives -- the loop runs
+    # included. The one-shot declaration above is skipped for ``--loop``/goal runs
+    # on purpose (its latches belong to the teardown contract; see
+    # ``Session.declare_one_shot_exit``), but this host is STILL headless to the
+    # turn-supplements predicate, whose rule 6 must refuse every ``run_print_mode``
+    # shape ("exec/SDK unaffected", docs/design/turn-supplements.md §2.2). Reading
+    # the one-shot latch alone left exactly the loop runs eligible (measured on a
+    # real ``lop exec --loop`` subprocess: the job was scheduled);
+    # ``Session.declare_headless_host`` is the host fact WITHOUT the latch.
+    declare_headless = getattr(session, "declare_headless_host", None)
+    if callable(declare_headless):
+        declare_headless()
     try:
         for message in messages:
             # A handler may REPORT a failed turn rather than raise, because the

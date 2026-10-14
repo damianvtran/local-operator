@@ -180,7 +180,7 @@ async def test_the_route_refuses_a_superseded_token_with_a_machine_code(tmp_path
         refused = await client.post(route, json={"completion_token": stale})
         assert refused.status_code == 409
         assert refused.json()["detail"]["code"] == "superseded_completion_token"
-        assert "current token" in refused.json()["detail"]["message"]
+        assert "current token" in refused.json()["detail"]["text"]
         assert store.state(f"session/{sid}")["unseen"] is True
 
         read = await client.post(route, json={"completion_token": current})

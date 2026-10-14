@@ -16,8 +16,8 @@ OpenRouter and Radient session therefore ran on the fallbacks in
 
 * **Context window** fell back to ``UNKNOWN_CONTEXT_WINDOW`` (128k). Auto
   compaction derives its threshold from the window, so a 1M-context model
-  compacted at ~102k instead of ~600k (`min(0.8 * window, 600_000)`, the cap in
-  `compaction/thresholds.py`) — a ~5.9x premature summarisation of history the
+  compacted at ~102k instead of ~400k (`min(0.8 * window, 400_000)`, the cap in
+  `compaction/thresholds.py`) — a ~3.9x premature summarisation of history the
   model could still hold, on every long session.
 * **Prices** stayed 0.0, so the status band could only report ``$—``. Cost is
   one of the few numbers an operator steers by mid-task.

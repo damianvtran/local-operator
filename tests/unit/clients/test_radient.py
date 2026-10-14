@@ -594,13 +594,54 @@ def test_generate_image_with_source_url(
             "num_images": 1,
             "image_size": "square_hd",
             "sync_mode": True,
-            "source_url": "https://example.com/source.jpg",
+            # Canonical key: the legacy ``source_url`` payload key is
+            # REFUSED by the hub today, so both spellings cross canonically.
+            "image_url": "https://example.com/source.jpg",
             "strength": 0.7,
         },
     )
 
     # Verify the response was parsed correctly
     assert isinstance(response, RadientImageGenerationResponse)
+
+
+def test_generate_image_with_source_urls_sends_canonical_files(
+    radient_client: RadientClient,
+    mock_image_generation_response: Dict[str, Any],
+) -> None:
+    """The list spelling: N>1 sends ``image_urls``; N==1 sends ``image_url``;
+    passing both spellings is refused before any request."""
+    mock_requests_post = MagicMock()
+    mock_requests_post.return_value.status_code = 200
+    mock_requests_post.return_value.json.return_value = mock_image_generation_response
+
+    with patch("requests.post", mock_requests_post):
+        radient_client.generate_image(
+            prompt="test prompt",
+            source_urls=["https://example.com/one.jpg", "https://example.com/two.jpg"],
+        )
+
+    payload = mock_requests_post.call_args.kwargs["json"]
+    assert payload["image_urls"] == [
+        "https://example.com/one.jpg",
+        "https://example.com/two.jpg",
+    ]
+    assert "image_url" not in payload and "source_url" not in payload
+
+    mock_requests_post.reset_mock()
+    with patch("requests.post", mock_requests_post):
+        radient_client.generate_image(prompt="test prompt", source_urls=["https://one.jpg"])
+    payload = mock_requests_post.call_args.kwargs["json"]
+    assert payload["image_url"] == "https://one.jpg"
+    assert "image_urls" not in payload
+
+    with pytest.raises(ValueError):
+        radient_client.generate_image(
+            prompt="test prompt",
+            source_url="https://one.jpg",
+            source_urls=["https://two.jpg"],
+        )
+    assert mock_requests_post.call_count == 1, "the refusal happened before any request"
 
 
 def test_generate_image_api_error(radient_client: RadientClient) -> None:
@@ -622,6 +663,9 @@ def test_generate_image_api_error(radient_client: RadientClient) -> None:
             radient_client.generate_image(prompt="test prompt")
         assert "Failed to generate image" in str(exc_info.value)
         assert "Error message from API" in str(exc_info.value)
+        # Typed since the legacy-client pass: APIError IS a RuntimeError, so
+        # old catchers keep working while new callers switch on the status.
+        assert isinstance(exc_info.value, APIError)
 
 
 def test_get_image_generation_status_success(
@@ -2020,3 +2064,76 @@ def test_create_speech_types_a_transport_failure_without_a_status(
 
     assert exc_info.value.status_code is None
     assert exc_info.value.body is None
+
+
+# -- PR-3: client correlation headers ------------------------------------------
+
+
+def test_correlation_headers_are_grammar_gated() -> None:
+    """The docs' grammar is ``[A-Za-z0-9._:-]{1,64}`` and the server IGNORES a bad value.
+
+    We gate client-side anyway: sending bytes the far end is documented to
+    discard is noise, and a local session id can carry a slash or exceed the
+    cap. Absence must be absence — an empty/ungrammatical value sends NOTHING
+    (the request stays byte-identical to the pre-correlation one).
+    """
+    from local_operator.clients.radient import _correlation_headers
+
+    assert _correlation_headers("sess-1", "req:1") == {
+        "X-Radient-Client-Session-Id": "sess-1",
+        "X-Radient-Client-Request-Id": "req:1",
+    }
+    assert _correlation_headers(None, None) == {}
+    assert _correlation_headers("", "") == {}
+    assert _correlation_headers("has/slash", "x" * 65) == {}
+    assert _correlation_headers("  sess-1  ", None) == {"X-Radient-Client-Session-Id": "sess-1"}
+
+
+def test_create_speech_response_sends_the_correlation_headers(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    posted = MagicMock(return_value=real_response(200, b"audio"))
+    with patch("requests.post", posted):
+        radient_client.create_speech_response(
+            input_text="hello",
+            session_id="sess-1",
+            client_request_id="req-abc",
+        )
+    headers = posted.call_args.kwargs["headers"]
+    assert headers["X-Radient-Client-Session-Id"] == "sess-1"
+    assert headers["X-Radient-Client-Request-Id"] == "req-abc"
+
+    # And an ungrammatical pair is OMITTED entirely: the old-hub tolerance.
+    posted_again = MagicMock(return_value=real_response(200, b"audio"))
+    with patch("requests.post", posted_again):
+        radient_client.create_speech_response(input_text="hello", session_id="bad/id")
+    headers = posted_again.call_args.kwargs["headers"]
+    assert "X-Radient-Client-Session-Id" not in headers
+    assert "X-Radient-Client-Request-Id" not in headers
+
+
+def test_create_transcription_sends_the_correlation_headers(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    import json as _json
+    import tempfile
+
+    body = _json.dumps(
+        {"msg": "ok", "result": {"text": "hi", "provider": "x", "status": "completed"}}
+    ).encode()
+    posted = MagicMock(return_value=real_response(200, body))
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+        handle.write(b"audio")
+        path = handle.name
+    try:
+        with patch("requests.post", posted):
+            radient_client.create_transcription(
+                file_path=path, session_id="sess-2", client_request_id="req-def"
+            )
+        headers = posted.call_args.kwargs["headers"]
+        assert headers["X-Radient-Client-Session-Id"] == "sess-2"
+        assert headers["X-Radient-Client-Request-Id"] == "req-def"
+    finally:
+        import os as _os
+
+        _os.unlink(path)

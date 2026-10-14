@@ -1,0 +1,372 @@
+{
+  "collapsed-minimum-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b73+",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "collapsed-resolved-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "scroll": {
+      "top": 0,
+      "max": 147,
+      "cx": 195,
+      "cy": 370
+    },
+    "bar": {
+      "box": {
+        "top": 61,
+        "bottom": 105,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 147,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "expanded-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": true,
+      "text": "\u25b8Peer messages\u00b73+"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25bePeer messages\u00b73+",
+      "expanded": "true"
+    },
+    "receipts": 4,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "mixed-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "wake-only-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 44
+      },
+      "text": "\u25b8Wake messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "single-receipt-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 686,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 633
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 390,
+    "innerW": 390
+  },
+  "collapsed-minimum-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b73+",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "collapsed-resolved-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "scroll": {
+      "top": 0,
+      "max": 211,
+      "cx": 180,
+      "cy": 338
+    },
+    "bar": {
+      "box": {
+        "top": 61,
+        "bottom": 105,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Peer messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 211,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "expanded-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "press": {
+      "pressed": true,
+      "text": "\u25b8Peer messages\u00b73+"
+    },
+    "bar": {
+      "box": {
+        "top": 71,
+        "bottom": 115,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25bePeer messages\u00b73+",
+      "expanded": "true"
+    },
+    "receipts": 4,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "mixed-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "wake-only-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": {
+      "box": {
+        "top": 114,
+        "bottom": 158,
+        "left": 12,
+        "right": 348,
+        "width": 336,
+        "height": 44
+      },
+      "text": "\u25b8Wake messages\u00b72",
+      "expanded": "false"
+    },
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  },
+  "single-receipt-360x780": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "bar": null,
+    "receipts": 0,
+    "scroller": {
+      "top": 53,
+      "bottom": 622,
+      "left": 0,
+      "right": 360,
+      "width": 360,
+      "height": 569
+    },
+    "scrollTop": 0,
+    "scrollMax": 0,
+    "bodyScrollW": 360,
+    "innerW": 360
+  }
+}

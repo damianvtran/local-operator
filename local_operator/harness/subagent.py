@@ -420,7 +420,7 @@ def read_model_choice() -> str:
     return DEFAULT_MODEL_CHOICE
 
 
-def model_may_choose_tier(delegation_depth: int = 0) -> bool:
+def model_may_choose_tier() -> bool:
     """May a DELEGATING MODEL pick the model a child runs on?
 
     The policy half of the ``task``/``agent`` schemas: when this is ``False``
@@ -429,46 +429,14 @@ def model_may_choose_tier(delegation_depth: int = 0) -> bool:
     says what to do instead. See :func:`read_model_choice` for why the default
     is the restrictive one.
 
-    ``delegation_depth`` is the hops between the asking session and the
-    top-level one (``Session._delegation_depth``): **a session that is itself a
-    subagent (depth >= 1) never may, whatever ``subagents.model_choice`` says**.
-    The key is the OPERATOR delegating the choice to the model they are talking
-    to, and that grant stops at the first hop. Measured incident (session
-    3463fc25dade): ``model_choice=model`` with ``models.hi`` on Claude Sonnet,
-    session model Radient auto. A depth-1 subagent launched five ``scout``
-    children with ``effort='hi'``; they ran on Sonnet (``owns_model=True``)
-    instead of inheriting Radient auto — roughly $5 of Sonnet spend against
-    $0.76 on auto, invisible in the panel rows, which show only the depth-1
-    child's own usage. The operator had agreed to the model they were driving
-    choosing tiers, not to a fan-out of delegated models re-deciding the bill
-    one level down, where nothing reviews the choice. So below the top the
-    policy is exactly ``operator``: children inherit the launching session's
-    model, and only an operator-authored ROLE pin (``profile.effort``, resolved
-    at launch by ``Session._resolve_subagent_model``) can still move a nested
-    child — that is the operator's own decision, not the model's, and it is
-    deliberately untouched here.
-
-    The default of ``0`` keeps every existing caller (and every top-level
-    session) on the pure config read.
+    Honoured at EVERY delegation depth, on purpose: ``model_choice=model`` hands
+    the picker to the delegating model wherever it sits in the tree. A gate at
+    depth >= 1 was tried (and reverted) because it removed a capability the
+    operator wanted; the cost surprise behind it (nested ``effort='hi'`` scouts
+    billed to a paid tier while the panel showed only the depth-1 child's own
+    usage) is a cost-DISPLAY defect, so fix it in the display, not here.
     """
-    if delegation_depth >= 1:
-        return False
     return read_model_choice() == MODEL_CHOICE_MODEL
-
-
-def depth_closed_the_tier_choice(delegation_depth: int) -> bool:
-    """Is the picker closed BY DEPTH, i.e. would the key alone have left it open?
-
-    True only for a subagent under ``model_choice=model``. Under ``operator``
-    the key already closes the picker for everyone, so a nested session is
-    refused for the same reason the top level is, and the copy it is shown must
-    say so: telling it "only the top-level session may pick a tier" would be
-    false there (nobody on the model side can), and would drop the operator's
-    route (``subagents.model_choice``) that the operator-arm copy carries. The
-    nested wording exists for exactly the case where the key says "model" and a
-    reader would otherwise be told the picker is open to it.
-    """
-    return delegation_depth >= 1 and read_model_choice() == MODEL_CHOICE_MODEL
 
 
 def configured_effort_tiers() -> dict[str, str]:
@@ -897,10 +865,7 @@ def _session_lineage(session: "Session") -> tuple[str, ...]:
 
 def _session_depth(session: "Session") -> int:
     depth = getattr(session, "_delegation_depth", 0)
-    # ``type(...) is int``: a bool is an int, and ``True`` would be depth 1. The
-    # tool-side readers (``effort_validation_context``/``_delegation_depth``)
-    # apply the same rule, so every reader of a depth agrees on what one is.
-    return depth if type(depth) is int and depth >= 0 else 0
+    return depth if isinstance(depth, int) and depth >= 0 else 0
 
 
 def lookup_team(session: "Session", name: str) -> Any:
@@ -1088,6 +1053,7 @@ def run_subagent(
     resume_dir: "Path | None" = None,
     agent: str = "task",
     effort: str | None = None,
+    model_selector: str | None = None,
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
     target: LaunchTarget | None = None,
@@ -1182,12 +1148,12 @@ def run_subagent(
         # absence. The runner still overwrites this once the child is built, and
         # that write must win: a restored provider fallback is the model the
         # child actually calls, and pricing reads this field.
+        # Mirror the builder's selected-spec precedence, not the parent's
+        # transient effective route: a fresh child does not inherit that fallback.
         named = model_spec if model_spec is not None else inherited_model
-        job.model_label = (
-            f"{named.provider}/{named.model_id}"
-            if named is not None
-            else (getattr(parent_session, "effective_model_label", "") or None)
-        )
+        if named is None:
+            named = parent_session.model
+        job.model_label = f"{named.provider}/{named.model_id}"
         # And whose choice that was, on the same registration-time rule. Stamped
         # here rather than inferred from the label later: a tier or role pin
         # that resolves to the session's OWN model produces a label identical to
@@ -1196,6 +1162,16 @@ def run_subagent(
         # was accepted" are different facts about who spent the money. The
         # runner never rewrites this one (see ``AsyncJob.owns_model``).
         job.owns_model = model_spec is not None
+        job.model_selector = model_selector
+        job.model_selection_source = (
+            "explicit_inherit"
+            if model_selector == "inherit"
+            else (
+                "explicit_model"
+                if model_selector is not None
+                else "effort" if effort else "role" if model_spec is not None else "parent"
+            )
+        )
         # And WHICH model the pin asked for, on the same registration-time rule
         # and as the mirror of that attribution: ``model_label`` above is
         # overwritten once the child is built (and again by every route edge),
@@ -1221,6 +1197,8 @@ def run_subagent(
             launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
+            model_selector=model_selector,
+            model_selection_source=job.model_selection_source if job is not None else "",
             team_name=str(getattr(target.team, "name", "") or ""),
             team_lineage=target.team_lineage,
             depth=target.depth,
@@ -1562,6 +1540,19 @@ def _make_runner(
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
                 finally:
+                    # Record the child's cleanup VERDICT on its owning ancestor
+                    # BEFORE detaching the job edge (review round 2,
+                    # R7-descendant / QA Q5): once this returns, nothing else
+                    # holds the child object, and a settled job is not proof
+                    # its resources joined cleanly. Recorded through this
+                    # existing finalization path, one hop per level; the
+                    # child's verdict is itself recursive, so a grandchild's
+                    # failure reaches the root the same way.
+                    verdict = child._cleanup_verdict_errors()
+                    if verdict:
+                        parent_session._record_descendant_cleanup_failures(
+                            child.session_id, verdict
+                        )
                     if job is not None:
                         # Clear the live edge even if teardown itself fails: a
                         # retained parent row must never pin the child Session.
@@ -2761,6 +2752,7 @@ async def _construct_child_session(
 
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
+    from local_operator.i18n.resolve import preferred_language_line
     from local_operator.prompts_api import CHANNEL_HUB, build_system_blocks
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
@@ -2797,7 +2789,19 @@ async def _construct_child_session(
     # ``/resume`` as if the user had opened it. Re-stamped on resume as well:
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
-    mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
+    # ``mark_session_origin`` carries the DURABLE child→parent link: ``parent=`` below is
+    # what lets a later backfill attribute a child's code-request rows to the conversation
+    # that asked for the work, and it is the ONLY writer of that key — a second marker
+    # writer in the same function is how the marker's shape and the directory's mtime
+    # start disagreeing between them.
+    parent_id = getattr(parent_session, "session_id", None)
+    mark_session_origin(
+        session_dir,
+        ORIGIN_SUBAGENT,
+        label=label,
+        agent=agent,
+        **({"parent": parent_id} if isinstance(parent_id, str) and parent_id else {}),
+    )
     # Birth metadata must be durable before publication, without its fsync
     # blocking the parent or other children sharing this event loop.
     transcript = await asyncio.to_thread(Transcript, session_dir)
@@ -2808,6 +2812,11 @@ async def _construct_child_session(
     # the parent — children are built outside the factory, and this keeps the
     # one source of truth in one function.
     user_instructions = load_user_instructions()
+    # Same read-once discipline as the instructions above, and for the same
+    # reason: the language line rides the child's STABLE head block, so it is
+    # resolved at spawn, never per turn. The operator's preference is
+    # machine-wide, so a child inherits it by resolving the same chain.
+    language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
     # Whether this child runs on a role allowlist. Decided HERE, before the
@@ -3071,6 +3080,7 @@ async def _construct_child_session(
             goal_status=getattr(parent_session, "goal_status", ""),
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
+            language_line=language_line,
             credentials=names,
             model_label=model_label,
             # THE PARENT'S ANSWER, read live off the parent's holder for the same
@@ -3120,6 +3130,16 @@ async def _construct_child_session(
         # Register before Session.__init__, which can itself fail. close() is
         # idempotent: this fallback also runs if a later child dispose hook fails.
         cleanup.push_async_callback(child_stream.close)
+        # Bind the child stream's request-observation IDENTITY from the fields
+        # this construction already carries: a record for a request the child
+        # makes must name the job and role it belongs to, and these are the
+        # only identity a subagent has (the same ``job_id``/``agent_type`` the
+        # Session constructor receives below). Guarded by the same
+        # ``is not parent_stream`` check as the model pin: binding the PARENT
+        # stream would mislabel the parent's own requests.
+        bind_actor = getattr(child_stream, "bind_request_actor", None)
+        if callable(bind_actor):
+            bind_actor(job_id=job_id, actor_role=agent)
         if model_spec is not None:
             # PIN the child's routing to the model the launch resolved (a role
             # tier, or a resumed child's recorded tier). Marked on the CHILD's
@@ -3177,6 +3197,14 @@ async def _construct_child_session(
         # Hooks report it as ``agent_type``, as Claude Code does.
         agent_type=agent,
         parent_display_name=_parent_display_name_resolver(parent_session),
+        # The parent LINK, for the channel ledger: a child's live channel
+        # records are relayed into the parent's children block as they land
+        # (design §5.1 — the parent total includes a child's records once), and
+        # the id stamps every journal and analytics row so a tree can be rolled
+        # up by parent. The object is held weakly by the child; both are
+        # best-effort and neither can fail the launch.
+        parent_session=parent_session,
+        parent_session_id=str(getattr(parent_session, "session_id", "") or ""),
         # The PARENT's comms instance, so the child's every-turn tool context
         # rebuild keeps pointing at the agent that delegated to it instead of
         # minting a private one nobody is listening to.
@@ -3198,7 +3226,7 @@ async def _construct_child_session(
         convert_to_llm=parent_session._convert_to_llm,
         # The parent's compaction budget. A one-shot child was assumed to be
         # too short to need compaction, but a real review child ran 48
-        # requests / 1.5M tokens before its default (600k-cap) threshold
+        # requests / 1.5M tokens before its default (then 600k-cap) threshold
         # ever fired — the CAP the parent's operator set must bound the child
         # too, or a delegated task silently bypasses the very knob that keeps
         # long sessions alive. Defensively COPIED so the child can never
@@ -3210,6 +3238,14 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # The LIVE half of the same link: an event this child records for an opened or
+    # acted-on code request is propagated to the parent's transcript as it happens, so
+    # the operator's conversation shows the PR its subagent opened without waiting for
+    # a scan of the child's directory. Best-effort; a session without the handle simply
+    # propagates nothing (the scanner still finds the child's own rows).
+    from local_operator.code_requests.hook import attach_parent
+
+    attach_parent(child, parent_session)
     # THE CHILD CANNOT ANSWER THIS ITSELF, so its own holder gets the PROBE
     # OBJECT rather than a copied value: the child holds no control socket and no
     # registrant, and its only channel to a human is ``hub`` -> parent, so "is an
@@ -3388,17 +3424,6 @@ async def _construct_child_session(
         child.active_team = target.team
         child._team_lineage = tuple(target.team_lineage)
         child._delegation_depth = target.depth
-        # THE DEPTH LANDS AFTER THE TOOLS WERE BUILT. The constructor's
-        # capability merge rendered this child's ``task``/``agent`` at depth 0
-        # (``Session._delegation_depth`` defaults to 0), i.e. WITH the tier
-        # field under ``model_choice=model``. Re-render them now that the stamp
-        # is in, or a nested child is advertised a picker the call-time gate
-        # then refuses (see ``model_may_choose_tier`` for why it may not have
-        # one). Only tools already in the inventory are replaced, so a child
-        # whose ``task`` was pruned above stays without it; a no-op for the
-        # ``operator`` default, where the field was already absent.
-        if target.depth >= 1:
-            child._rebuild_effort_tier_tools()
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no
