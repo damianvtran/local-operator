@@ -21,6 +21,39 @@ _BIDI_CONTROLS = frozenset(
 )
 
 
+def _validate_token_pairs(value: str) -> None:
+    """Check a deliberately small balanced-delimiter subset, not shell syntax.
+
+    Openers ANYWHERE in a declared token must close inside its island, including
+    fn(arg) and --x=[id]. Quote pairs may occur internally (mode='own'); bracket
+    characters inside quotes are literal. Backslash escape rules and unquoted
+    apostrophes are ambiguous without a language parser, so reject rather than
+    invent shell/identifier semantics. This validates pairing, not authenticity
+    or whether a caller has classified a human name as a technical identifier.
+    """
+    paired = {"{": "}", "[": "]", "(": ")"}
+    stack: list[str] = []
+    quote: str | None = None
+    for index, char in enumerate(value):
+        if char == "\\":
+            raise ValueError("escaped technical tokens are outside the display subset")
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            if index and value[index - 1] not in "=([{":
+                raise ValueError("ambiguous embedded quote is outside the display subset")
+            quote = char
+        elif char in paired:
+            stack.append(paired[char])
+        elif char in "}])":
+            if not stack or stack.pop() != char:
+                raise ValueError("technical token delimiters must balance inside the island")
+    if quote is not None or stack:
+        raise ValueError("technical token quotes/delimiters must close inside the island")
+
+
 @dataclass(frozen=True)
 class TechnicalSpan:
     """Owner-declared complete ASCII token at Python string offsets, not bytes.
@@ -46,7 +79,15 @@ def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalS
     external input cannot close an isolate or smuggle terminal control state.
     """
     text = record.text
-    if any(c in _BIDI_CONTROLS or (unicodedata.category(c) == "Cc" and c != "\n") for c in text):
+    # LF is the only admitted separator: U+2029 ends a bidi paragraph and
+    # U+2028 is a renderer-dependent line break. Neither may cross our LF-only
+    # isolate balance. Reject at paint, never sanitize the shared raw result.
+    if any(
+        c in _BIDI_CONTROLS
+        or c in "\u2028\u2029"
+        or (unicodedata.category(c) == "Cc" and c != "\n")
+        for c in text
+    ):
         raise ValueError("status display requires plain text without control sequences")
     if any(
         not isinstance(span, TechnicalSpan)
@@ -69,18 +110,14 @@ def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalS
             or text[span.start : span.end] != span.expected
         ):
             raise ValueError("invalid or overlapping technical status span")
-        paired = {"'": "'", '"': '"', "{": "}", "[": "]", "(": ")"}
-        if span.expected[0] in paired and (
-            len(span.expected) < 2 or span.expected[-1] != paired[span.expected[0]]
-        ):
-            raise ValueError("technical status quotes/braces must be complete")
+        _validate_token_pairs(span.expected)
         # A token cannot begin inside --force, /session, quoted IDs or {names}.
         # End punctuation may belong to the prose; quotes/braces belong to the
         # technical island and must be supplied in full by its owner.
         if span.start and not text[span.start - 1].isspace():
             raise ValueError("technical status span must include its whole prefix")
         suffix = span.end
-        while suffix < len(text) and text[suffix] in ".,;:!?)]":
+        while suffix < len(text) and text[suffix] in ".,;:!?":
             suffix += 1
         if suffix < len(text) and not text[suffix].isspace():
             raise ValueError("technical status span must include its whole suffix")

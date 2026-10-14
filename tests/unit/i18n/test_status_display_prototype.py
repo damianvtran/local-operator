@@ -173,3 +173,64 @@ def test_controls_never_enter_raw_paths_and_cannot_be_hint_insertions(corpus):
     with pytest.raises(ValueError):
         status_display(external, locale="ur")
     assert messages.render_record(message.code, {}, locale="ur").source_locale is None
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_unicode_separators_rejected_only_at_paint_boundary(corpus, separator):
+    from local_operator.i18n.display import isolated_status_text
+
+    msg = messages.Msg(
+        "tui.status.demo", {"command": "--force", "name": "احمد" + separator + "علی"}
+    )
+    record = messages.render_record(msg.code, msg.params, locale="ur")
+    assert separator in record.text
+    assert msg.envelope(locale="ur")["text"] == record.text
+    with pytest.raises(ValueError):
+        isolated_status_text(record)
+    with pytest.raises(ValueError):
+        status_display(msg, locale="ur")
+
+
+@pytest.mark.parametrize(
+    "whole, hinted",
+    [
+        ("fn(arg)", "fn(arg"),
+        ("--x=[id]", "--x=[id"),
+        ("--x={id", "--x={id"),
+        ('--x="id', '--x="id'),
+        ("'id-7''", "'id-7''"),
+        ("{names}}", "{names}}"),
+        ("mode=own'", "mode=own'"),
+        ("fn([arg)]", "fn([arg)]"),
+    ],
+)
+def test_internal_delimiter_bypasses_rejected_lowlevel_and_adapter(corpus, whole, hinted):
+    from local_operator.i18n.display import isolated_status_text
+
+    msg = messages.Msg("tui.status.demo", {"command": whole, "name": "احمد"})
+    record = messages.render_record(msg.code, msg.params, locale="ur")
+    hint = token(record.text, hinted)
+    with pytest.raises(ValueError):
+        isolated_status_text(record, (hint,))
+    with pytest.raises(ValueError):
+        status_display(msg, locale="ur", technical=(hint,))
+
+
+@pytest.mark.parametrize("value", ["fn(arg)", "--x=[id]", "mode='own'", '--x="id"', "--x={id}"])
+def test_complete_internal_delimiters_keep_whole_island_and_suffix(corpus, value):
+    msg = messages.Msg("tui.status.demo", {"command": value + ",", "name": "احمد\nعلی"})
+    record = messages.render_record(msg.code, msg.params, locale="ur")
+    painted = status_display(msg, locale="ur", technical=(token(record.text, value),)).plain
+    assert LRI + value + PDI + "," in painted
+    assert painted.translate({ord(c): None for c in (RLI, LRI, PDI)}) == record.text
+    for line in painted.split("\n"):
+        assert line.count(RLI) + line.count(LRI) == line.count(PDI)
+
+
+@pytest.mark.parametrize("value", ["don't", "own'id'", "id\\path", "fn(arg))"])
+def test_ambiguous_quote_escape_and_closing_suffix_subset_rejected(corpus, value):
+    msg = messages.Msg("tui.status.demo", {"command": value, "name": "احمد"})
+    record = messages.render_record(msg.code, msg.params, locale="ur")
+    hinted = "fn(arg)" if value == "fn(arg))" else value
+    with pytest.raises(ValueError):
+        status_display(msg, locale="ur", technical=(token(record.text, hinted),))
