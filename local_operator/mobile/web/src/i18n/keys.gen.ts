@@ -987,6 +987,7 @@ export type MessageParams = {
   "wire.slash.goal": undefined;
   "wire.slash.help": undefined;
   "wire.slash.highlights": undefined;
+  "wire.slash.hub": undefined;
   "wire.slash.info": undefined;
   "wire.slash.keys": undefined;
   "wire.slash.language": undefined;
