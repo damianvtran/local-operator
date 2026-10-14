@@ -101,6 +101,10 @@ a rename.
 #: Custom-message type journaled by the session; rendered to a user message by
 #: the shared renderer (``harness/render.py``) so both a live next-turn and a
 #: resumed replay see the same incident.
+import hashlib
+import json
+from typing import Any, Mapping
+
 SESSION_INCIDENT_MESSAGE_TYPE = "session_incident"
 
 #: Custom-message type journaled by the session when the credential-shape guard
@@ -367,6 +371,97 @@ PEER_FAMILY_INPUT_TYPES = frozenset(
 #: governs what may be STAMPED on delivery; that set governs what reaches the
 #: model as input.
 PEER_DELIVERABLE_CUSTOM_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE})
+
+#: The CLOSED key set of the internal ``bridge_meta`` locator (H5 F3; S-3/S-7
+#: binding): a bounded hint carried beside a bridge WAKE so the RECEIVER can
+#: find its own trusted records — never clearance, never request-kind proof,
+#: never authority. The receiver re-reads its local screening receipt + fence +
+#: claim; a copied ``screened`` boolean / type / scope from model text or a UI
+#: proves nothing, which is why no such key exists here.
+BRIDGE_META_KEYS = frozenset(
+    {
+        "v",
+        "delivery_ref",
+        "message_id",
+        "thread_id",
+        "type",
+        "request_state",
+        "body_sha256",
+        "display_digest",
+        "sender_name",
+        "sender_label",
+        "organization",
+        "excerpt",
+    }
+)
+
+#: Bounds for the canonical display context (S-9). The producer and the
+#: receiver MUST normalize identically or a tamper-evident digest cannot exist;
+#: an oversized value is REFUSED, never silently truncated on one side only.
+DISPLAY_CONTEXT_BOUNDS = {
+    "sender_name": 200,
+    "organization": 200,
+    "sender_label": 200,
+    "thread_id": 200,
+    "excerpt": 2400,
+}
+DISPLAY_CONTEXT_FIELDS = ("sender_name", "organization", "sender_label", "thread_id", "excerpt")
+
+
+def display_context_digest(fields: Mapping[str, Any]) -> str | None:
+    """The ONE canonical bounded display-context serializer (S-9).
+
+    Both the producer (over the authenticated item) and the receiver (over the
+    ACTUAL received hint fields) hash THIS exact field set with THESE bounds.
+    ``None`` means the form is unknown/oversized/ambiguous — the caller must
+    REFUSE rather than render or ask; a transported digest string is only a
+    selector, never proof that the other fields match it.
+    """
+
+    context: dict[str, str] = {}
+    for name in DISPLAY_CONTEXT_FIELDS:
+        value = fields.get(name)
+        if not isinstance(value, str) or len(value) > DISPLAY_CONTEXT_BOUNDS[name]:
+            return None
+        context[name] = value
+    return hashlib.sha256(
+        json.dumps(context, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+#: Bound for the whole serialized block (the carriage's 2 KiB cap).
+BRIDGE_META_MAX_BYTES = 2048
+
+
+def validate_bridge_meta(raw: Any) -> dict[str, Any]:
+    """``raw`` as a bounded, closed-key bridge locator — or a typed refusal.
+
+    Called at every carriage hop (sender assembly, local-server op, serving
+    re-validation) so an unknown key, a non-scalar value, an over-budget block
+    or a missing version tag is REFUSED rather than coerced: a widened block
+    would silently change what a receiver thinks it can look up. Imports here
+    are stdlib-only on purpose — this module is the import-clean home the
+    renderer reaches (see the module docstring).
+    """
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("bridge_meta must be a mapping")
+    normalized: dict[str, Any] = {}
+    for key, value in raw.items():
+        name = str(key)
+        if name not in BRIDGE_META_KEYS:
+            raise ValueError(f"bridge_meta carries an unknown key {name!r}")
+        if isinstance(value, bool) or isinstance(value, str):
+            pass
+        elif isinstance(value, int):
+            value = str(value)
+        else:
+            raise ValueError(f"bridge_meta[{name!r}] must be a scalar")
+        normalized[name] = value
+    if str(normalized.get("v") or "") not in ("1", "v1"):
+        raise ValueError("bridge_meta is missing its version tag")
+    if len(json.dumps(normalized, separators=(",", ":"), sort_keys=True)) > BRIDGE_META_MAX_BYTES:
+        raise ValueError("bridge_meta exceeds the 2 KiB bound")
+    return normalized
 
 #: The custom-message type the session's continuation guardrail injects at the
 #: yield boundary (``Session._todo_continuation``). The vocabulary is owned by

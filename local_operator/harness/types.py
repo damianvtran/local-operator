@@ -1356,6 +1356,12 @@ class ToolContext(BaseModel):
     dispatch_tool: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = Field(
         default=None, exclude=True, repr=False
     )
+    # H5d: the Team Bridge runtime (client + enrollment owner + session id) a
+    # session stashes when it is signed in and designated. DECLARED rather
+    # than probed (see the class docstring): the `bridge` tool builder reads
+    # exactly this field, and its absence is what keeps the tool out of a
+    # session that has no bridge. Stays None until the session lane wires it.
+    bridge_runtime: Any | None = Field(default=None, exclude=True, repr=False)
     # The path a READER resolved, reported by the reader itself the instant it
     # resolved it: ``(resolved_path, resolvable)``. Installed by the loop for the
     # duration of ONE call -- the recorder it holds is bound to that call's own id

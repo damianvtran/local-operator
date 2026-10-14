@@ -142,6 +142,12 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # defect the project registry above records. The stub is never
         # awaited: the builder only checks presence.
         quiet_end=_allow_quiet,
+        # The bridge runtime (H5d, the signed-in/designated session's Team
+        # Bridge bundle): its tool's createIf gate reads PRESENCE only, so a
+        # stub satisfies it — without one the measured surface is one tool
+        # short of a real signed-in session's (``bridge``), the same defect
+        # the project registry above records. Never called by a measurement.
+        bridge_runtime=_UntypedStub(),
     )
 
 

@@ -1550,6 +1550,79 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     return None
 
 
+def read_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | None:
+    """The NEWEST row carrying ``entry_id`` as its transcript entry id, or ``None``.
+
+    The by-ID sibling of :func:`read_latest_custom_entry`, with the same two
+    guarantees: it NEVER creates the directory (a pure read of another
+    session's journal leaves nothing behind), and it answers with the same
+    parse semantics the walk uses — a malformed line is skipped individually
+    and an absent journal answers ``None``.
+
+    WHY SCANNING BYTES IS SOUND HERE: a message's OWN id IS its entry id
+    (``append_message`` persists it rather than minting one — the compaction
+    contract depends on that), and ``TranscriptEntry.to_json`` has written the
+    id first with compact separators since the format existed, so every row
+    opens ``{"id":"<id>"``. The byte scan is the fast path — the same
+    needle / line-start / parse-verify shape the cursor locator already uses
+    for row ids; a candidate is believed only after :func:`_row_at_offset`
+    re-reads the row and the parsed id matches. The parse walk below stays the
+    authority for a journal re-serialized by something other than this writer,
+    exactly as :func:`read_latest_custom_entry` documents for its own fast
+    path. Scanning backward makes the newest occurrence win, matching the
+    resolution rule the cursor locator keeps.
+    """
+
+    encoded = json.dumps(entry_id)
+    if encoded != f'"{entry_id}"':
+        # An escaped spelling cannot be searched for by bytes; the walk answers.
+        return _walk_entry_by_id(directory, entry_id)
+    needle = b'{"id":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                if _byte_before(handle, offset) in (b"", b"\n"):
+                    located = _row_at_offset(handle, offset)
+                    if located is not None and located[1].id == entry_id:
+                        return located[1]
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return _walk_entry_by_id(directory, entry_id)
+
+
+def _walk_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | None:
+    """Parse-walk fallback for :func:`read_entry_by_id` (re-serialized rows)."""
+
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is not None and entry.id == entry_id:
+                    return entry
+    return None
+
+
 def read_latest_custom(directory: str | Path, custom_type: str) -> dict[str, Any] | None:
     """Details mapping of the newest ``custom_type`` row — the single-scan twin.
 
