@@ -2835,3 +2835,24 @@ async def test_the_dock_names_a_FAILED_cut_off_child_as_cut_off_not_failed() -> 
         "a cut-off child and a plain failure render identically — the cause "
         f"reaches no visible surface: cut={rendered['cut']!r} plain={rendered['plain']!r}"
     )
+
+
+def test_no_two_app_bindings_share_a_key() -> None:
+    """A second binding on one key silently shadows the first (the ctrl+g bug).
+
+    ``ctrl+g`` was bound to BOTH ``hub_links`` (this slice) and the pre-existing
+    ``toggle_subagents``; the later-wins resolution meant the hub panel could
+    never be reached by its own advertised key and the subagent cycle was dead.
+    Nothing caught it because each binding is individually valid. This pins the
+    invariant that no key has two app-level bindings.
+    """
+    seen: dict[str, str] = {}
+    clashes: list[str] = []
+    for binding in OperatorApp.BINDINGS:
+        key = str(binding.key)
+        action = str(binding.action)
+        if key in seen and seen[key] != action:
+            clashes.append(f"{key!r}: {seen[key]!r} vs {action!r}")
+        else:
+            seen.setdefault(key, action)
+    assert not clashes, f"duplicate app bindings: {clashes}"

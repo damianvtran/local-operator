@@ -4497,10 +4497,6 @@ class OperatorApp(App[None]):
         # copy so the two cannot drift onto different keys.
         Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
         Binding("f8", "aside", "Aside", show=False),
-        # Hub links overlay. A hidden key (no i18n catalogue entry needed) so the
-        # surface is reachable now; a user-facing slash command is added with the
-        # i18n lane. Commands/keymap are the wiring point the capture rig drives.
-        Binding("ctrl+g", "hub_links", "Hub links", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
         # Pin/unpin the session under the pointer (else under the sidebar's
@@ -5214,6 +5210,9 @@ class OperatorApp(App[None]):
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
         self._usage_focus_restore: Any | None = None
+        #: What had focus when the Hub links overlay opened, so Esc puts it
+        #: back — the usage card's own restore, for the same reason.
+        self._hub_links_focus_restore: Any | None = None
         #: What had focus when the goal overlay opened, so Esc puts it back —
         #: the same restore the usage card keeps for the same reason.
         self._goal_focus_restore: Any | None = None
@@ -11152,6 +11151,10 @@ class OperatorApp(App[None]):
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
         self._sync_boot_layout()
+        if opened:
+            # The hub DOOR's count is local-only, so it rides the open gesture
+            # (never a poll): the footer notes the fleet total the same way.
+            self.refresh_hub_total()
         if self._sidebar_timer is not None:
             if opened:
                 self._sidebar_timer.resume()
@@ -27377,6 +27380,12 @@ class OperatorApp(App[None]):
     ) -> None:
         """The sidebar footer's fleet-ask note was pressed: open the fleet list."""
         self.action_open_fleet_asks()
+
+    def on_session_sidebar_hub_links_requested(
+        self, message: "SessionSidebar.HubLinksRequested"
+    ) -> None:
+        """The sidebar footer's hub door was pressed: open the Hub links surface."""
+        self.run_worker(self.action_hub_links(), thread=False, group="hub-links")
 
     def action_open_fleet_asks(self) -> None:
         """Open the ask list on the FLEET scope — every conversation's queue.
@@ -46241,7 +46250,12 @@ class OperatorApp(App[None]):
         if panel is None:
             self._system_notice("hub links panel unavailable", "warning")
             return
+        # Save the focus to restore on dismiss, and TAKE it: the panel's own
+        # bindings (esc/up/down/enter/r) are dead without it, and `Dismissed`
+        # never fires — the usage-panel pattern, which this mirrors.
+        self._hub_links_focus_restore = self.focused
         panel.start_fetch()
+        panel.focus()
         self.run_worker(
             self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
         )
@@ -46271,10 +46285,36 @@ class OperatorApp(App[None]):
         )
         return svc.links_snapshot(ctx)
 
+    def refresh_hub_total(self) -> None:
+        """Feed the sidebar footer's hub DOOR the local link count (no network).
+
+        Rides the sidebar refresh gesture, like the fleet total: the door is
+        geometry-preserving and local-only, so it never warrants a poll. Read
+        off the loop and fed back on it (a thread may not touch a widget).
+        """
+        sidebar = self._session_sidebar
+        if not sidebar.is_mounted:
+            return
+
+        async def load() -> None:
+            try:
+                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+            except Exception:  # noqa: BLE001 - a door must not break the sidebar
+                return
+            total = len(snapshot.get("links", [])) + len(snapshot.get("unresolved", []))
+            sidebar.set_hub_total(total)
+
+        self.run_worker(load(), thread=False, group="hub-total")
+
     def on_hub_links_panel_dismissed(self, message: "HubLinksPanel.Dismissed") -> None:
         message.stop()
         self.workers.cancel_group(self, "hub-links")
-        self._editor().focus()
+        restore = self._hub_links_focus_restore
+        self._hub_links_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
 
     def on_hub_links_panel_refresh_requested(
         self, message: "HubLinksPanel.RefreshRequested"
@@ -46284,9 +46324,7 @@ class OperatorApp(App[None]):
             self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
         )
 
-    def on_hub_links_panel_policy_requested(
-        self, message: "HubLinksPanel.PolicyRequested"
-    ) -> None:
+    def on_hub_links_panel_policy_requested(self, message: "HubLinksPanel.PolicyRequested") -> None:
         """The reserved slot's action: apply/retry/policy for a SOURCE-SCOPED link.
 
         A legacy link has no link_id and never reaches here with an action (its

@@ -151,6 +151,45 @@ class HubLinksPanel(Static):
     def _visible_rows(self) -> list[core.LinkRow]:
         return list(self._rows)
 
+    def _body_window(self, body_len: int) -> int:
+        """The first body row to paint so the SELECTED row stays visible.
+
+        The body carries a header per non-empty section, so the selected LINK's
+        painted row is its index plus the headers above it. The window scrolls to
+        keep that row inside the :data:`MAX_BODY_ROWS` cap (the architect's third
+        bug: rows past the cap were unreachable).
+        """
+
+        if body_len <= MAX_BODY_ROWS:
+            return 0
+        painted = self._painted_index()
+        start = max(0, painted - MAX_BODY_ROWS // 2)
+        return min(start, max(0, body_len - MAX_BODY_ROWS))
+
+    def _painted_index(self) -> int:
+        """The body row the SELECTED link paints on (headers included).
+
+        Mirrors ``core.render_rows``' own ordering — sections in
+        :func:`core.section_order`, headers only for non-empty sections, rows
+        sorted by name — so the window and the paint cannot disagree about where
+        the selection sits.
+        """
+
+        by_kind: dict[str, list[core.LinkRow]] = {}
+        for row in self._rows:
+            by_kind.setdefault(row.kind, []).append(row)
+        painted = 0
+        for kind in core.section_order():
+            group = by_kind.get(kind, [])
+            if not group:
+                continue
+            painted += 1  # the section header
+            for row in sorted(group, key=lambda r: r.name.casefold()):
+                if row is self.selected_row:
+                    return painted
+                painted += 1
+        return max(0, painted - 1)
+
     def _repaint(self) -> None:
         if not self.display or not self.is_mounted:
             return
@@ -165,13 +204,18 @@ class HubLinksPanel(Static):
                 loading=self._loading,
                 tail_style=self._tail_style(),
             )
+        # WINDOW the body around the selection, so a link past the visible rows
+        # is reachable: the old `body[:MAX_BODY_ROWS]` sliced from the top and
+        # ignored `_offset`, so rows past the cap could never be shown or
+        # activated (the architect's third bug). `_offset` is a BODY-row index;
+        # it is clamped so the selection stays inside the window.
+        window = self._body_window(len(body))
+        visible = body[window : window + MAX_BODY_ROWS]
         lines = [self._title()]
         lines.append(Text("─" * min(width, 60), style="dim"))
         lines.append(Text(""))
-        lines.extend(body[:MAX_BODY_ROWS])
+        lines.extend(visible)
         lines.append(Text(""))
-        # The hint row is the overlay's transient affordance; the sidebar wiring
-        # (D5) replaces letter shortcuts with the existing list bindings.
         lines.append(Text(_t(_k.policy_saving()), style="dim") if self._refreshing else Text(""))
         out = Text()
         for index, row in enumerate(lines):

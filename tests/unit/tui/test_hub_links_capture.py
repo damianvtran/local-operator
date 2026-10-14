@@ -95,8 +95,14 @@ def _seed_link(
     return identity
 
 
-async def _capture(name: str, *, size=(100, 30), **seed) -> Path:
-    """Capture one case in its OWN config root, so state cannot accumulate (D3)."""
+async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = None, **seed) -> Path:
+    """Capture one case in its OWN config root, so state cannot accumulate (D3).
+
+    ``contact_sheet`` names the SURFACE to drive before capture: ``None`` opens
+    the ``/hub`` overlay (the action the command calls); ``"door"`` opens the
+    sidebar so the footer hub DOOR is on screen (the architect's side placement);
+    ``"overlay-rows"`` seeds more links than fit to prove the body windows.
+    """
 
     import shutil
     import tempfile
@@ -117,10 +123,16 @@ async def _capture(name: str, *, size=(100, 30), **seed) -> Path:
             await pilot.pause()
             for link in seed.get("links", []):
                 _seed_link(case_root, **link)
-            # Drive the REAL open path: the action the binding/commands call.
-            await app.action_hub_links()
-            await pilot.pause()
-            await pilot.pause()
+            if contact_sheet == "door":
+                # Drive the REAL sidebar-open path so the footer door paints.
+                await pilot.press("ctrl+b")
+                await pilot.pause()
+                await pilot.pause()
+            else:
+                # Drive the REAL open path: the action the binding/commands call.
+                await app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
             path = OUT / f"{name}.svg"
             # INSIDE the run_test block: the export composites the ACTIVE screen,
             # and after the context exits there is no screen on the stack.
@@ -230,10 +242,48 @@ async def test_capture_hub_links_states(tmp_path: Path, monkeypatch: pytest.Monk
     # 6. empty.
     await _capture("empty", links=[])
 
-    # NOTE: the persistent SIDEBAR roster captures are added WITH the roster
-    # build (D1); the overlay frames above are what exists today.
+    # NOTE: the persistent SIDEBAR roster pane is NOT built — the architect
+    # chose the footer-DOOR placement instead, so the sidebar captures below
+    # drive the DOOR, not a rail.
+
+    # 7. The FOOTER DOOR (the architect's placement): the sidebar open with the
+    # hub note on its footer. The geometry-preserving route.
+    await _capture(
+        "footer-door",
+        contact_sheet="door",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
+    # 8. More links than the body cap: the overlay must WINDOW so a selection
+    # past MAX_BODY_ROWS is reachable (the architect's third bug).
+    await _capture(
+        "overlay-windowed",
+        links=[
+            dict(
+                local_id=f"a{i}",
+                name=f"agent-{i:02d}",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+            for i in range(20)
+        ],
+    )
 
     svgs = sorted(OUT.glob("*.svg"))
-    assert len(svgs) == 6
+    assert len(svgs) == 8
     for svg in svgs:
         assert "<svg" in svg.read_text()[:200]
