@@ -121,6 +121,9 @@ ECHO_POLICY = {
     # The cascade tree IS the receipt, and there is no argument to restate.
     "failovers": False,
     "usage": False,
+    # The overlay IS the receipt (`/usage`'s rule): it replaces the transcript
+    # region and takes no argument, so nothing here reaches the model.
+    "hub": False,
     # The screen it opens IS the receipt (same rule as `/usage`); the argument
     # names a view, never words the model is told.
     "analytics": False,
@@ -232,6 +235,9 @@ PROMPT_POLICY = {
     "accounts": False,
     "failovers": False,
     "usage": False,
+    # The PAGE is the receipt and it takes no argument at all — nothing typed
+    # for an inline engage to consume (the `/settings` rule).
+    "hub": False,
     # A view selector, not a prompt: `/analytics [view]` names which screen to
     # open, so it splices-and-runs inline like `/usage` rather than reassembling.
     "analytics": False,

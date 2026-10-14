@@ -17689,7 +17689,7 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume", "/notifications"}
+        {"/copy", "/links", "/sidebar", "/help", "/settings", "/hub", "/resume", "/notifications"}
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -27385,7 +27385,7 @@ class OperatorApp(App[None]):
         self, message: "SessionSidebar.HubLinksRequested"
     ) -> None:
         """The sidebar footer's hub door was pressed: open the Hub links surface."""
-        self.run_worker(self.action_hub_links(), thread=False, group="hub-links")
+        self.action_hub_links()
 
     def action_open_fleet_asks(self) -> None:
         """Open the ask list on the FLEET scope — every conversation's queue.
@@ -39441,6 +39441,11 @@ class OperatorApp(App[None]):
                 self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
+        elif command == "/hub":
+            # The Hub links surface. The action is SYNC and owns its own worker,
+            # the fleet-door and usage-panel pattern: calling it directly keeps
+            # the async fetch spawned once, in one place, not double-wrapped.
+            self.action_hub_links()
         elif command == "/search":
             self._cmd_search(arg, notice)
         elif command == "/accounts":
@@ -46244,8 +46249,15 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 - optional chrome
             return None
 
-    async def action_hub_links(self) -> None:
-        """Open the Hub links overlay and paint the current inventory."""
+    def action_hub_links(self) -> None:
+        """Open the Hub links overlay and paint the current inventory.
+
+        SYNC, owning its worker internally, exactly as `action_open_fleet_asks`
+        and `_open_usage_panel` do: the three callers (the footer door's
+        message, the sidebar `ctrl+n` chord, the `/hub` dispatch) all reach this
+        one entry point, so none of them `run_worker`s it — the async fetch is
+        spawned here once, `exclusive` so a re-open re-reads rather than racing.
+        """
         panel = self._hub_links_panel()
         if panel is None:
             self._system_notice("hub links panel unavailable", "warning")

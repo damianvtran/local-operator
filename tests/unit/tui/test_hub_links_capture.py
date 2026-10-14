@@ -99,9 +99,11 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
     """Capture one case in its OWN config root, so state cannot accumulate (D3).
 
     ``contact_sheet`` names the SURFACE to drive before capture: ``None`` opens
-    the ``/hub`` overlay (the action the command calls); ``"door"`` opens the
-    sidebar so the footer hub DOOR is on screen (the architect's side placement);
-    ``"overlay-rows"`` seeds more links than fit to prove the body windows.
+    the ``/hub`` overlay via the ACTION; ``"door"`` opens the sidebar so the
+    footer hub DOOR is on screen (the architect's side placement); ``"command"``
+    types ``/hub`` into the real editor and presses Enter (the user's own route,
+    proving the registry entry's dispatch); ``"overlay-rows"`` seeds more links
+    than fit to prove the body windows.
     """
 
     import shutil
@@ -128,9 +130,19 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 await pilot.press("ctrl+b")
                 await pilot.pause()
                 await pilot.pause()
+            elif contact_sheet == "command":
+                # The USER's route: type the command into the real editor and
+                # submit it, so the capture proves the registry entry dispatches.
+                editor = app._editor()
+                editor.focus()
+                editor.load_text("/hub")
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.pause()
             else:
-                # Drive the REAL open path: the action the binding/commands call.
-                await app.action_hub_links()
+                # Drive the REAL open path: the sync action the binding, the
+                # /hub command and the footer door all call.
+                app.action_hub_links()
                 await pilot.pause()
                 await pilot.pause()
             path = OUT / f"{name}.svg"
@@ -282,9 +294,27 @@ async def test_capture_hub_links_states(tmp_path: Path, monkeypatch: pytest.Monk
             for i in range(20)
         ],
     )
+    # 9. The `/hub` COMMAND route: typed into the real editor and submitted, so
+    # this frame proves the registry entry dispatches the overlay to the user.
+    await _capture(
+        "command-invoked",
+        contact_sheet="command",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
 
     svgs = sorted(OUT.glob("*.svg"))
-    assert len(svgs) == 8
+    assert len(svgs) == 9
     for svg in svgs:
         assert "<svg" in svg.read_text()[:200]
 

@@ -1560,6 +1560,15 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="usage",
     ),
+    # The Hub links surface — the per-link subscribe/auto-push policy page. The
+    # panel IS the receipt (the `/usage`/`/settings` rule): it replaces the
+    # transcript region and holds focus while open, so a notice printed behind it
+    # would only be readable after leaving. No `argument_shape`: this slice has
+    # no trailing-text control, so the text is prose (the `/context` criterion).
+    SlashCommand(
+        "hub",
+        _tr(wire_slash.hub()),
+    ),
     SlashCommand(
         "context",
         _tr(wire_slash.context()),

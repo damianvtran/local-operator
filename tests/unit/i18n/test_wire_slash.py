@@ -87,16 +87,9 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     # pre-slice English for a command that did not exist, so this row pins the
     # text the catalogue shipped with — the same edit-together rule applies.
     "highlights": "Cancel, retry or steer the highlights under an answer",
-}
-
-
-#: Descriptions whose REGISTRY entry has not landed yet. ``hub`` is the /hub
-#: command's line: the key ships ahead of the command (hub-streams core
-#: consumes it, then registers the command in the same window), so the
-#: catalogue legitimately carries one description the registry cannot show.
-#: REMOVE WITH THE /hub ENTRY: when the command registers, fold ``hub`` into
-#: PREVIOUS_ENGLISH and delete this mapping.
-SHIPPED_AHEAD: dict[str, str] = {
+    # The hub-streams core slice's `/hub` row: the catalogue key landed first
+    # (shipped ahead), and this row folds it in as the command registers — the
+    # edit-together rule the SHIPPED_AHEAD allowance existed to keep honest.
     "hub": "Open Hub links — per-link subscribe and auto-push policy",
 }
 
@@ -107,7 +100,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # KeyError here rather than passing silently.
     # 50 at S2, +1 with C's `/language` (see the table note); a missing or
     # extra command raises a KeyError either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 51
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 52
     for command in SLASH_COMMANDS:
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 
@@ -117,10 +110,6 @@ def test_the_catalogue_carries_exactly_the_command_descriptions() -> None:
     # key that is not a registry description.
     messages = catalogues.load_catalogue("en", "wire.slash")
     expected = {f"wire.slash.{name}": text for name, text in PREVIOUS_ENGLISH.items()}
-    # The shipped-ahead set is EXACTLY the keys with no registry entry yet —
-    # disjoint from the pinned table, so a stale allowance cannot hide there.
-    assert not (set(SHIPPED_AHEAD) & set(PREVIOUS_ENGLISH))
-    expected.update({f"wire.slash.{name}": text for name, text in SHIPPED_AHEAD.items()})
     assert messages == expected
 
 
