@@ -23791,6 +23791,8 @@ CONSOLE_SURFACE_PREFIX = "con:"
 #: and parameter docs use it.
 CONSOLE_ACTIONS: tuple[str, ...] = (
     "list",
+    "resources",
+    "cleanup",
     "create",
     "status",
     "read",
@@ -23805,7 +23807,7 @@ CONSOLE_ACTIONS: tuple[str, ...] = (
 #: The methods whose approval tier is `read`; every other console method is
 #: `exec` (§11.1). A frozenset rather than a list because the question asked of it
 #: is membership only, and the tier hook runs per call.
-CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot"})
+CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot", "resources"})
 
 #: Guard on a scrollback window. The app clamps further; this bounds what ONE
 #: tool result can carry, because a paged read that returns 5,000 lines costs more
@@ -23922,7 +23924,7 @@ class ConsoleParams(BaseModel):
     surface: str = Field(
         default="",
         description="The handle from 'list'/'create' (e.g. 'con:1:9f2a'); required for every "
-        "method but 'list'/'create'.",
+        "method but 'list'/'create'/'resources'/'cleanup'.",
     )
     cwd: str = Field(
         default="", description="'create': the working directory (default: the user's home)."
@@ -24021,6 +24023,12 @@ def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[s
         if params.rows is not None:
             target["rows"] = params.rows
 
+    if method == "resources":
+        return {}, ""
+    if method == "cleanup":
+        # Cleanup is owner-scoped, completed-only and preserves retained files.
+        # Never accept a caller-supplied owner or let turn-end imply a kill.
+        return {"session_id": session_id}, ""
     if method == "list":
         # The session filter is the CALLER's own session, always. It is not a
         # parameter: a surface belongs to the session that created it, another
@@ -24245,7 +24253,10 @@ def build_console_tool(context: ToolContext | None) -> AgentTool | None:
             "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
             "ordinary commands: `bash` returns output directly. The surface handle names this "
             "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
-            "asking them to repeat their output. Playbook: `guide://console`."
+            "asking them to repeat their output. `resources` gives aggregate capacity; `cleanup` "
+            "releases only this owner's completed surfaces, preserving retained logs. "
+            "After exit, read/status acknowledges completion for protected cleanup. "
+            "Never close live idle/auth/REPL work at turn end. Playbook: `guide://console`."
         ),
         parameters=ConsoleParams.model_json_schema(),
         # The tool's tier is the HIGHEST of its ops (create/input/keys/resize/
@@ -24421,6 +24432,9 @@ def _console_status_text(result: dict[str, Any]) -> str:
         lines.append(f"idle: {float(idle) / 1000:.1f}s since the last output")
     elif result.get("last_output_at") or result.get("last_activity"):
         lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        lines.append(f"grid degraded: {dropped_grid} parser bytes omitted under resource pressure; retained history may contain them")
     if result.get("cursor") is not None:
         lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
@@ -24459,6 +24473,9 @@ def _console_read_text(result: dict[str, Any]) -> str:
         footer.append(f"cursor {_console_cursor_text(cursor)}")
     if result.get("truncated"):
         footer.append("truncated by the app")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        footer.append(f"grid degraded: {dropped_grid} parser bytes omitted under resource pressure")
     if result.get("live") is False:
         footer.append("not live: this is the retained history of a surface whose app has gone")
     tail = " [stdout and stderr are one pty stream]"
@@ -24691,7 +24708,7 @@ async def execute_console(
             f"{', '.join(CONSOLE_ACTIONS)})",
         )
     surface = params.surface.strip()
-    if method not in ("list", "create"):
+    if method not in ("list", "create", "resources", "cleanup"):
         if not surface:
             return _error(
                 tool_call_id,
@@ -24702,7 +24719,7 @@ async def execute_console(
         if refusal:
             return _error(tool_call_id, "console", refusal)
     session_id = str(getattr(context, "session_id", "") or "").strip()
-    if method in ("list", "create") and not session_id:
+    if method in ("list", "create", "cleanup") and not session_id:
         # A surface is keyed by the session that owns it, so a create with no
         # session would make a surface nobody can list or read. Names the reason
         # rather than sending an empty id the app would have to guess about.
@@ -24713,6 +24730,10 @@ async def execute_console(
             "run the call from a session rather than from a bare tool context.",
         )
     wire, problem = _console_wire_params(params, session_id)
+    # Additive identity for the shared lifecycle fence. Older hosts ignore it;
+    # current hosts refuse a different owner before reading/signalling a surface.
+    if "surface" in wire and session_id:
+        wire["session_id"] = session_id
     if problem:
         return _error(tool_call_id, "console", problem)
     if method == "input":
@@ -24725,6 +24746,7 @@ async def execute_console(
         CONSOLE_ABSENT_COPY,
         CONSOLE_FEATURE_OFF_COPY,
         ConsoleHostClient,
+        aggregate_console_metrics,
         console_error_text,
     )
     from local_operator.ui_console.state import Liveness
@@ -24740,6 +24762,13 @@ async def execute_console(
         return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
 
     client = ConsoleHostClient()
+    if method in ("resources", "cleanup") and f"console_{method}" not in client.capabilities().methods:
+        return _error(
+            tool_call_id, "console",
+            "This desktop app does not support console capacity/cleanup methods yet. "
+            "Update the desktop app; its existing console methods remain available. "
+            "No global listing or automatic close was attempted.",
+        )
     try:
         result = await client.call(f"console_{method}", wire)
     except BridgeUnreachable as exc:
@@ -24747,6 +24776,17 @@ async def execute_console(
     except BridgeError as exc:
         return _error(tool_call_id, "console", console_error_text(exc))
 
+    if method in ("resources", "cleanup"):
+        # New host methods are additive. Older hosts return unsupported_method
+        # through the existing typed error path; never substitute a global list.
+        if method == "resources":
+            projected = aggregate_console_metrics(result)
+        else:
+            projected = {
+                key: value for key in ("released", "protected", "running")
+                if isinstance(value := result.get(key), int) and not isinstance(value, bool) and value >= 0
+            }
+        return _text(tool_call_id, "console", json.dumps(projected, separators=(",", ":")), details=projected)
     if method == "list":
         surfaces = result.get("surfaces") if isinstance(result, dict) else None
         return _text(
