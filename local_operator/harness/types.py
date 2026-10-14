@@ -968,13 +968,35 @@ class AgentToolUpdate(BaseModel):
 class WakeSchedulerProtocol(Protocol):
     """The slice of a wake scheduler the ``wake`` tool drives.
 
-    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The
-    tool only ever reads the current list and writes a replacement, so the
+    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The tool
+    only ever reads the current list and writes a replacement, so the
     arming/timer half of the scheduler stays out of the contract.
     """
 
     @property
-    def schedules(self) -> Sequence[WakeSchedule]: ...
+    def schedules(self) -> Sequence[WakeSchedule]:
+        """The complete OWNED view: runnable rows plus held (pending) ones.
+
+        A held handle is a schedule this runtime still owns — its successor
+        one-shot has not been handed over yet — so its id is taken. Every
+        caller that asks "which ids exist / are free?" (the tool's
+        create/cancel/edit, the cap count, the desktop owner helpers, the video
+        check-wake) must read THIS, never a runnable-only list, or a create can
+        allocate a handle a draining fire already reserved and be discarded when
+        the handover lands. What the timer may actually run is the scheduler's
+        own affair (:attr:`armed_schedules` on the concrete class); a reader that
+        wants "what can fire here" rather than "what exists" must ask for it.
+        """
+        ...
+
+    #: OPTIONAL capability, deliberately NOT a member of this protocol: a host
+    #: that cannot report a live reservation (a read-only snapshot facade, a
+    #: reduced test host) must stay a valid ``WakeSchedulerProtocol`` rather than
+    #: fail ``isinstance``. ``tools.builtin`` probes it with ``getattr`` and reads
+    #: the empty set when it is absent — the honest "no live phase known" answer,
+    #: never a fabricated ``pending`` flag. The concrete ``WakeScheduler`` and any
+    #: cross-process view that mirrors it implement it as
+    #: ``()->frozenset[str]`` returning the ids held for the successor.
 
     async def update(self, schedules: list[WakeSchedule]) -> None: ...
 

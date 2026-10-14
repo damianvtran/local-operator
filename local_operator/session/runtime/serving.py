@@ -2156,7 +2156,9 @@ class ServingSessionHandle(SessionHandle):
         runs it, and a final fire's re-arm rides ``_hand_wakes_to_successor``
         at the exit. Spooling that window again would mean re-latching
         ``begin_drain``, which ``_abandon_move`` records against: a second
-        retire discards the ``_wake_rearms`` the drain already swallowed.
+        retire re-runs ``retire_wakes_to_inbox``, and the fires the first drain
+        swallowed are already RESERVED in the scheduler's owned view
+        (``WakeScheduler.hold_pending``) — a second retire must not strand them.
         """
         if not getattr(self, "_draining", False):
             return False
@@ -2710,12 +2712,22 @@ class ServingSessionHandle(SessionHandle):
         derived file for processes that have no session; this process has
         the truth in memory. A disposed scheduler reports no wakes so the
         reaper never waits on a schedule that can no longer fire.
+
+        RUNNABLE ROWS ONLY. A held handle (``WakeScheduler.held_schedules``) is
+        owned by this runtime but fired by its SUCCESSOR, so counting its
+        already-due instant here would pin the runtime warm for a delivery this
+        process will never make — the reaper would never reclaim the very runtime
+        that is trying to leave. ``armed_schedules`` is the runnable half of the
+        owned view; a scheduler that predates the split (or a reduced host) has
+        no such property, in which case its ``schedules`` IS its runnable set and
+        reading it is the correct fallback.
         """
         scheduler = getattr(self._session, "wake_scheduler", None)
         if scheduler is None or getattr(scheduler, "disposed", False):
             return None
         try:
-            schedules = scheduler.schedules
+            armed = getattr(scheduler, "armed_schedules", None)
+            schedules = armed if armed is not None else scheduler.schedules
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
