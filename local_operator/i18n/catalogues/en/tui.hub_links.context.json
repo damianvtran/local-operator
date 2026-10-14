@@ -234,24 +234,28 @@
     "tone": "plain, precise",
     "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
   },
-  "tui.hub_links.confirm.alt": {
-    "role": "escape route",
-    "tone": "plain, precise",
-    "note": "A command-line fallback shown only when it fits unwrapped, for terminals that swallow ctrl+y. Names the CLI verb, the <id> placeholder and --auto-push true --confirm-public-egress; the real id is shown on the next line so the command is completable. No secrets."
-  },
   "tui.hub_links.refusal.revision_moved": {
     "role": "refusal message",
     "tone": "plain, precise",
     "note": "Shown when the armed consent's policy revision differs from the row at confirm time; the user is confirming a value they never saw, so nothing is written."
   },
-  "tui.hub_links.confirm.id": {
-    "role": "link identifier",
-    "tone": "plain, precise",
-    "note": "The 64-char link id, shown so the escape-route command can be completed by hand; an opaque identifier, not a secret."
+  "tui.hub_links.hint.failed": {
+    "note": "Status fragment in the dim key-hint row when the selected link's last check failed; {reason} is a short lower-case phrase (e.g. `provider error`). Keep it compact: whole segments of this row drop to fit, and this one drops last among the hints.",
+    "maxCells": 48
   },
-  "tui.hub_links.confirm.id_hint": {
-    "role": "escape route pointer",
-    "tone": "plain, precise",
-    "note": "Shown alongside the escape-route command when the real link id does not fit on a line, so the user still has a way to obtain it. Names the `lop hub links` inventory command."
+  "tui.hub_links.reason.baseline_unknown": {
+    "note": "Refusal sentence for enabling Auto-push (U4). One complete sentence naming the situation and the next step; no developer codes."
+  },
+  "tui.hub_links.reason.mixed_lineage": {
+    "note": "Refusal sentence for enabling Auto-push (U4): the local copy mixes sources. Sentence plus next step; no developer codes."
+  },
+  "tui.hub_links.reason.no_receipt": {
+    "note": "Refusal sentence for enabling Auto-push (U4): no agreed starting point exists yet. Names the next step (pull or publish once). No developer codes."
+  },
+  "tui.hub_links.reason.unsafe_publication": {
+    "note": "Refusal sentence for enabling Auto-push (U4): public scope needs the deliberate consent first. The interactive TUI usually shows the consent prompt instead; this copy is the fallback."
+  },
+  "tui.hub_links.reason.unsupported_precondition": {
+    "note": "Refusal sentence for enabling Auto-push (U4): the hub server has not positively attested atomic revision support. Complete sentence, no developer codes."
   }
 }

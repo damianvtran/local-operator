@@ -46440,21 +46440,49 @@ class OperatorApp(App[None]):
             return None
 
         async def run() -> None:
-            refusal = await asyncio.to_thread(work)
             panel = self._hub_links_panel()
+            try:
+                # `work()` converts its own LinkErrors into refusal strings; no
+                # typed clause out here, because `LinkError` is imported INSIDE
+                # `work()` and a bare `except LinkError` here would NameError
+                # while matching (the U1 fix's first draft did exactly that and
+                # `exit_on_error=False` swallowed it).
+                refusal = await asyncio.to_thread(work)
+            except Exception:  # noqa: BLE001 — U1: a failed write/re-read must
+                # NEVER kill the session. A read-only or full config dir (or an
+                # unreadable config) raises OSError/PermissionError/RuntimeError
+                # out of `update_policy` or the snapshot read; before this the
+                # worker's default `exit_on_error` ended the whole TUI and the
+                # conversation with it. The user gets the card's own
+                # save-failed line and keeps everything else.
+                if panel is not None and panel.is_open:
+                    panel.show_save_failed(message.policy, message.link_id, message.local_id)
+                self.refresh_hub_total()
+                return
             # D19: the refusal is painted ON the card the user is looking at, not
             # a transcript notice hidden behind the overlay.
             if refusal is not None and panel is not None and panel.is_open:
                 panel.show_notice(refusal, "warning")
             # Re-read either way: a success shows the new policy, a refusal (a
-            # CAS mismatch) shows the row that moved under the user.
+            # CAS mismatch) shows the row that moved under the user. The re-read
+            # can fail on its own (U1) — the write already landed or not, and a
+            # failed re-read reports through the same in-card line, never by
+            # ending the process.
             if panel is not None and panel.is_open:
-                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                try:
+                    snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                except Exception:  # noqa: BLE001 — U1, see above
+                    panel.show_save_failed(message.policy, message.link_id, message.local_id)
+                    self.refresh_hub_total()
+                    return
                 if panel.is_open:
                     panel.show_links(snapshot)
             self.refresh_hub_total()
 
-        self.run_worker(run(), thread=False, group="hub-links", exclusive=True)
+        # U1: `exit_on_error=False` as the liveness/viewer workers do — the
+        # handler above names its own failure paths, and this flag guarantees
+        # that anything left unexpected is reported, not fatal to the session.
+        self.run_worker(run(), thread=False, group="hub-links", exclusive=True, exit_on_error=False)
 
     # -- the /btw aside ------------------------------------------------------
     #

@@ -46,9 +46,12 @@
   "tui.hub_links.hint.select": "↑↓ select",
   "tui.hub_links.refusal.ineligible": "Auto-push is not available for this link: {reason}.",
   "tui.hub_links.refusal.resolve_first": "Resolve this link's source before acting on it.",
-  "tui.hub_links.confirm.alt": "or: lop hub link set <id> --auto-push true --confirm-public-egress",
   "tui.hub_links.refusal.revision_moved": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest.",
-  "tui.hub_links.confirm.id": "link id {id}",
-  "tui.hub_links.confirm.id_hint": "see `lop hub links` for the link id",
-  "tui.hub_links.hint.engage": "↑↓ to begin"
+  "tui.hub_links.reason.baseline_unknown": "This link's history isn't known yet, so it can't publish unattended. Pull or resolve it first.",
+  "tui.hub_links.reason.mixed_lineage": "This copy holds changes from more than one source. Resolve them before enabling automatic updates.",
+  "tui.hub_links.reason.no_receipt": "Auto-push isn't available yet: pull or publish this item once to set a starting point, then try again.",
+  "tui.hub_links.reason.unsafe_publication": "Publishing to this public location needs your explicit consent first.",
+  "tui.hub_links.reason.unsupported_precondition": "This hub server hasn't confirmed it can safely accept automatic updates yet.",
+  "tui.hub_links.hint.engage": "↑↓ to begin",
+  "tui.hub_links.hint.failed": "check failed: {reason}"
 }

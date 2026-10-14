@@ -91,58 +91,118 @@ def _seed_link(
     error: str | None,
     attest_revision_cas: bool = False,
 ) -> LinkIdentity:
-    """Write a real baseline + status row so the inventory enumerates it as a link."""
-    identity = LinkIdentity(kind, local_id, HUB, visibility, tenant, f"h-{local_id}")
-    # A skill baseline carries a full SkillDocument (its fingerprint covers the
-    # manifest), so a skill row needs a valid one-file document.
-    if kind == "skill":
-        fields: dict[str, Any] = {
-            "document_version": 1,
-            "name": name,
-            "description": "d",
-            "files": [
-                {"path": "SKILL.md", "content": f"---\nname: {name}\ndescription: d\n---\nbody\n"}
-            ],
-        }
-    else:
-        fields = {"instructions": "x"}
-    record = prov.make_record(kind, local_id, f"h-{local_id}", tenant, fields, "pull")
-    import dataclasses
+    """ONE link: a real baseline + status row (the single-link convenience)."""
 
-    record = dataclasses.replace(
-        record, identity=identity, remote_revision='"rev-1"', lineage="clean", local_alias=name
-    )
-    prov.write_baseline(root, record)
-    hub: dict[str, Any] = {
-        "links": {identity.link_id: {"subscribe": subscribe, "auto_push": auto_push}}
-    }
-    if tenant:
-        # The verified persisted display name; the frozen row shows `<org> ·
-        # Private` from it, so the rig seeds it rather than leaving the bare
-        # `Private` fallback (D2).
-        hub["tenant_names"] = {tenant: tenant.title()}
-    ConfigManager(root).set_config_value("hub", hub)
-
-    def fold(doc: dict[str, Any]) -> None:
-        item = doc.setdefault("items", {}).setdefault(
-            f"{kind}:{local_id}", st.blank_item(kind, local_id, name, f"h-{local_id}", tenant)
-        )
-        item.update(state=state, error_class=error, last_checked_at="2026-10-14T00:00:00Z")
-        if attest_revision_cas:
-            # A positively-attested atomic revision-CAS: the service's eligibility
-            # precondition, seeded here (per SOURCE, the link's own) so the consent
-            # frame reaches the public-egress prompt rather than the named refusal.
-            entry = (
-                doc.setdefault("server", {})
-                .setdefault("sources", {})
-                .setdefault(identity.hub_source, {})
+    return _seed_links(
+        root,
+        [
+            dict(
+                kind=kind,
+                local_id=local_id,
+                name=name,
+                visibility=visibility,
+                tenant=tenant,
+                subscribe=subscribe,
+                auto_push=auto_push,
+                state=state,
+                error=error,
+                attest_revision_cas=attest_revision_cas,
             )
-            entry["revision_cas"] = 1
-            if kind == "skill":
-                entry["skills"] = 1
+        ],
+    )[0]
 
-    st.StatusStore(root).mutate(fold)
-    return identity
+
+def _seed_links(root: Path, entries: list[dict[str, Any]]) -> list[LinkIdentity]:
+    """Every link's baseline + status row, then ONE merged hub config write.
+
+    EVIDENCE DEFECT FIXED HERE (design round 1): the helper used to call
+    ``ConfigManager.set_config_value("hub", {...})`` PER LINK, and that call
+    REPLACES the whole hub mapping — seeding agent+team+skill left only the
+    LAST link's policy, so every earlier row rendered creation defaults
+    (`crew` showed `Subscribe On` beside a `subscribe=False` seed and lost its
+    org name). Multi-link frames could not demonstrate a mixed policy state or
+    an org label. The batch builds every link first and the config is written
+    ONCE, merged over whatever the case root already holds; `tenant_names`
+    accumulate across the batch for the same reason.
+    """
+
+    identities: list[LinkIdentity] = []
+    hub_links: dict[str, dict[str, bool]] = {}
+    tenant_names: dict[str, str] = {}
+    for entry in entries:
+        kind: Kind = entry.get("kind", "agent")
+        local_id = str(entry["local_id"])
+        name = str(entry["name"])
+        visibility: Visibility = entry["visibility"]
+        tenant = entry.get("tenant")
+        subscribe = bool(entry["subscribe"])
+        auto_push = bool(entry["auto_push"])
+        state = str(entry["state"])
+        error = entry.get("error")
+        attest_revision_cas = bool(entry.get("attest_revision_cas", False))
+        identity = LinkIdentity(kind, local_id, HUB, visibility, tenant, f"h-{local_id}")
+        # A skill baseline carries a full SkillDocument (its fingerprint covers the
+        # manifest), so a skill row needs a valid one-file document.
+        if kind == "skill":
+            fields: dict[str, Any] = {
+                "document_version": 1,
+                "name": name,
+                "description": "d",
+                "files": [
+                    {
+                        "path": "SKILL.md",
+                        "content": f"---\nname: {name}\ndescription: d\n---\nbody\n",
+                    }
+                ],
+            }
+        else:
+            fields = {"instructions": "x"}
+        record = prov.make_record(kind, local_id, f"h-{local_id}", tenant, fields, "pull")
+        import dataclasses
+
+        record = dataclasses.replace(
+            record, identity=identity, remote_revision='"rev-1"', lineage="clean", local_alias=name
+        )
+        prov.write_baseline(root, record)
+        hub_links[identity.link_id] = {"subscribe": subscribe, "auto_push": auto_push}
+        if tenant:
+            # The verified persisted display name; the frozen row shows `<org> ·
+            # Private` from it, so the rig seeds it rather than leaving the bare
+            # `Private` fallback (D2).
+            tenant_names[tenant] = tenant.title()
+
+        def fold(doc: dict[str, Any], _identity: LinkIdentity = identity) -> None:
+            item = doc.setdefault("items", {}).setdefault(
+                f"{kind}:{local_id}", st.blank_item(kind, local_id, name, f"h-{local_id}", tenant)
+            )
+            item.update(state=state, error_class=error, last_checked_at="2026-10-14T00:00:00Z")
+            if attest_revision_cas:
+                # A positively-attested atomic revision-CAS: the service's eligibility
+                # precondition, seeded here (per SOURCE, the link's own) so the consent
+                # frame reaches the public-egress prompt rather than the named refusal.
+                entry = (
+                    doc.setdefault("server", {})
+                    .setdefault("sources", {})
+                    .setdefault(_identity.hub_source, {})
+                )
+                entry["revision_cas"] = 1
+                if kind == "skill":
+                    entry["skills"] = 1
+
+        st.StatusStore(root).mutate(fold)
+        identities.append(identity)
+
+    existing = ConfigManager(root).get_config().values.get("hub", {})
+    merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    links_map = dict(merged.get("links", {}) or {})
+    links_map.update(hub_links)
+    merged["links"] = links_map
+    if tenant_names:
+        names = dict(merged.get("tenant_names", {}) or {})
+        names.update(tenant_names)
+        merged["tenant_names"] = names
+    ConfigManager(root).set_config_value("hub", merged)
+    return identities
 
 
 async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = None, **seed) -> Path:
@@ -173,8 +233,7 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            for link in seed.get("links", []):
-                _seed_link(case_root, **link)
+            _seed_links(case_root, seed.get("links", []))
             if contact_sheet == "door":
                 # Drive the REAL sidebar-open path so the footer door paints.
                 await pilot.press("ctrl+b")
@@ -1117,3 +1176,68 @@ async def test_capture_round1_engage_hint_frames(
     ]
     await _capture("engage-hint-40x24", size=(40, 24), links=one)
     await _capture("engage-hint-100x30", size=(100, 30), links=one)
+
+
+@pytest.mark.asyncio
+async def test_multi_link_seed_shows_mixed_policies_and_the_org_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rig's batch seed survives: mixed On/Off and the org name render.
+
+    Evidence defect (design round 1): per-link `set_config_value("hub", ...)`
+    replaced the whole hub mapping, so the populated frame could not
+    demonstrate a mixed policy state (`crew` read `Subscribe On` under a
+    `subscribe=False` seed) or the `<org> · Private` label. This drives the
+    REAL app over the batch-seeded root and reads the painted frame.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        _seed_links(
+            tmp_path,
+            [
+                dict(
+                    kind="agent",
+                    local_id="a1",
+                    name="coder",
+                    visibility="public",
+                    tenant=None,
+                    subscribe=True,
+                    auto_push=False,
+                    state="up-to-date",
+                    error=None,
+                ),
+                dict(
+                    kind="team",
+                    local_id="t1",
+                    name="crew",
+                    visibility="org",
+                    tenant="acme",
+                    subscribe=False,
+                    auto_push=True,
+                    state="up-to-date",
+                    error=None,
+                ),
+                dict(
+                    kind="skill",
+                    local_id="s1",
+                    name="deploy",
+                    visibility="public",
+                    tenant=None,
+                    subscribe=True,
+                    auto_push=False,
+                    state="up-to-date",
+                    error=None,
+                ),
+            ],
+        )
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Acme · Private" in painted, painted
+        assert "crew" in painted, painted
+        assert "Subscribe Off" in painted, painted
+        assert "Auto-push On" in painted, painted

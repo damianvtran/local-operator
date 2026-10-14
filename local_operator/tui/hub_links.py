@@ -303,11 +303,18 @@ def render_rows(
     lines: list[Text] = []
     # Paint from the SAME ordered list the panel indexes (D27): a header per
     # non-empty section, its rows in paint order. One grouping rule, not two.
+    # D6 (pre-release batch): a BLANK line separates the sections — bold alone
+    # left the three groups reading as one run on the populated frame. The
+    # separator is painted BETWEEN sections only (never leading, never trailing),
+    # and the panel's window/index helpers classify it as neither a header nor a
+    # link entry, so the selection/write-target mapping is untouched.
     ordered = paint_order(rows)
     last_kind: str | None = None
     index = 0
     for row in ordered:
         if row.kind != last_kind:
+            if last_kind is not None:
+                lines.append(Text(""))
             lines.append(Text(_section_title(row.kind), style="bold"))
             last_kind = row.kind
         lines.append(_render_row(row, width, selected=(selected == index), tail_style=tail_style))
@@ -315,6 +322,23 @@ def render_rows(
     if not lines:
         lines.append(Text(_t(_k.state_empty()), style="dim"))
     return lines
+
+
+def _pad_selected(line: Text, width: int, *, selected: bool) -> Text:
+    """Pad a SELECTED physical line to the full content width (D7).
+
+    The highlight bar covered only the text span, so a short row's selection
+    stopped mid-row and a wrapped row showed a broken block. The pad carries
+    the SAME ``reverse`` ink, making the bar exactly the row's width; an
+    unselected line is returned untouched.
+    """
+
+    if not selected:
+        return line
+    deficit = width - cell_len(line.plain)
+    if deficit > 0:
+        line.append(" " * deficit, style="reverse")
+    return line
 
 
 def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "dim") -> Text:
@@ -356,7 +380,7 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
         line.append(prefix, style="dim" if not selected else "reverse")
         line.append(name, style="reverse" if selected else "")
         line.append(fitted_tail, style=tail_style if not selected else "reverse")
-        return line
+        return _pad_selected(line, width, selected=selected)
     # Narrow: the policy moves to its own indented line(s) so neither policy
     # word is lost. The first line is `<slot> <name> — <scope>`; the policy is
     # indented under the name column, and when it does not fit ONE line each flag
@@ -381,13 +405,24 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
     else:
         details = flags
     out = Text.assemble(head)
+    if selected:
+        # D7: the head line's bar runs to the row width too (the assembled
+        # head is shorter than the box on every wrapped row).
+        head_pad = width - cell_len(out.plain)
+        if head_pad > 0:
+            out.append(" " * head_pad, style="reverse")
     for part in details:
         out.append("\n")
         # N1 (round-3): the INDENT carries the selection ink too, so a wrapped
         # row's highlight is a clean block rather than a ragged one with an
         # unhighlighted gap under the slot column.
+        fitted = truncate_cells(part, detail_width)
         out.append(indent, style=style)
-        out.append(truncate_cells(part, detail_width), style=style)
+        out.append(fitted, style=style)
+        if selected:
+            detail_pad = detail_width - cell_len(fitted)
+            if detail_pad > 0:
+                out.append(" " * detail_pad, style="reverse")
     return out
 
 
