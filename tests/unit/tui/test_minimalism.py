@@ -71,7 +71,8 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
     expanded = re.search(
         r"^ToolCard\.tool-expanded,\s*WakeBlock\.wake-expanded,\s*"
         r"PeerMessageBlock\.peer-expanded,\s*"
-        r"MonitorDeltaBlock\.monitor-expanded\s*\{([^}]*)\}",
+        r"MonitorDeltaBlock\.monitor-expanded,\s*"
+        r"TeamBridgeBlock\.bridge-expanded\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )
@@ -82,7 +83,8 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
         r"^\.comfortable-rows ToolCard\.tool-expanded,\s*\.comfortable-rows "
         r"WakeBlock\.wake-expanded,\s*"
         r"\.comfortable-rows PeerMessageBlock\.peer-expanded,\s*"
-        r"\.comfortable-rows MonitorDeltaBlock\.monitor-expanded\s*\{([^}]*)\}",
+        r"\.comfortable-rows MonitorDeltaBlock\.monitor-expanded,\s*"
+        r"\.comfortable-rows TeamBridgeBlock\.bridge-expanded\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )

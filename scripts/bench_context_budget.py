@@ -1493,7 +1493,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ~25,808 -> ~26,004). The additive task/batch/hub model field is required
 #: to express inherit without erasing a role; no profiles/defaults were changed.
 #: Preserve the existing 55-token headroom band on both measured arms.
-BUDGET_BILLED_TOKENS = 29_015
+#: A 41st tool, `bridge` (H5d, Team Bridge): measured with isolated
+#: HOME/config on both trees, the TOP arm moves 81,252 -> 82,358 chars
+#: (+1,106, ~29,227 -> ~29,625 billed) and the child arm moves by the
+#: identical +1,106 (73,035 -> 74,141, ~26,272 -> ~26,669). The only
+#: component that moves is ``tool_schemas`` (53,669 -> 54,836);
+#: ``instructions`` (25,863), ``tool_inventory`` (785 -> 794),
+#: ``environment`` (81) and ``knowledge`` (854) are byte-identical to base
+#: (the inventory line grows by the tool's own 9-char name). The tool's
+#: description was trimmed twice before this number was taken; what remains
+#: is the published schema, which cannot shrink without unpublishing ops.
+#: 212 of the 610 tokens the gate reports pre-date this branch: the same
+#: script on the shared checkout (2115d3e194) reads 212/213 over the OLD
+#: ceiling, i.e. the ratchet drifted behind a schema change this path-gated
+#: job did not run for. That drift is reported on the PR rather than folded
+#: in silently; the ceiling is still head + the 55-token band, on both arms.
+BUDGET_BILLED_TOKENS = 29_680
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1594,7 +1609,7 @@ BUDGET_BILLED_TOKENS = 29_015
 #:   delta                             +249 chars = ~+90
 #:
 #: Ceiling = head + the 55-token band.
-BUDGET_CHILD_BILLED_TOKENS = 26_059
+BUDGET_CHILD_BILLED_TOKENS = 26_724
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -96,6 +96,21 @@ class FakeConfigManager:
     def get_config_value(self, key: str, default=None):
         return self.values.get(key, default)
 
+    def get_nested_value(self, path, default=None):
+        """The nested reader ``settings_io.write_setting`` pairs with.
+
+        The composition root reads the bridge section through this method now
+        (``TeamBridgeSettings._derive``), so a double without it fails before the
+        behaviour under test. Mirrors ``ConfigManager.get_nested_value``: a
+        non-mapping partway down reads as absent rather than raising.
+        """
+        current = self.values
+        for part in path:
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        return current
+
     def get_config(self):
         return SimpleNamespace(values=self.values)
 
