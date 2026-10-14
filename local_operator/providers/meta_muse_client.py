@@ -271,23 +271,23 @@ class MetaMuseClient(OpenAICompatClient):
                 state = _ACTIVE_OBSERVATION.get() or {}
                 details = state.get("error_diagnostics") or {}
                 diagnostic_note = "; ".join(f"{key}={value}" for key, value in details.items())
-                request_id = state.get("request_id")
-                # Error headers can reflect submitted secrets, too. Restrict
-                # receipt evidence to conventional UUID/hex request-id shapes.
-                if isinstance(request_id, str) and re.fullmatch(
-                    r"(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|req_[0-9a-fA-F]{16,64})",
-                    request_id,
-                ):
-                    diagnostic_note += f"; request_id={request_id}"
-                if diagnostic_note:
-                    diagnostic_note = f" ({diagnostic_note.strip('; ')})"
-                message = (
-                    f"Muse rejected the request (HTTP {original.status or 'unavailable'})"
-                    f"{diagnostic_note}. An unchanged Continue resends the rejected input; "
-                    "change the request or select another configured model. "
-                    "No automatic PAYG switch was attempted."
+                # A receipt-shaped header can still reflect private submitted
+                # input. Syntax is not origin evidence, so never publish it in
+                # the durable error message. Successful attribution is unchanged.
+                context_advice = (
+                    " Shorten the conversation context or start a new conversation."
+                    if details.get("code") == "context_length_exceeded"
+                    else ""
                 )
+                message = (
+                    "Muse rejected this request. Don't Continue unchanged; use /model "
+                    "to choose another configured model, or change the request."
+                    f"{context_advice} No automatic PAYG switch was attempted."
+                )
+                # The shared error frame already names kind/status. Put recovery
+                # first so narrow terminals do not bury the action under details.
+                if diagnostic_note:
+                    message += f" Details: {diagnostic_note}."
             else:
                 message = (
                     f"Unofficial Muse Code request failed "
