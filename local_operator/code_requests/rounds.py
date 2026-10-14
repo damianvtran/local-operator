@@ -134,12 +134,12 @@ _VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.I
 #: BOUNDED (``[ \t]{0,8}+``): possessive so the engine cannot re-try an alignment, and
 #: bounded because an unbounded possessive run still costs one scan per start position —
 #: which made a 32 kB run of TABS quadratic even after the space case was fixed (round 3).
-#: (``[ \t]*+``) are what make the scan linear — they cannot hand space back, so the
-#: engine cannot re-try the same alignment combinatorially. The base is bounded, and
-#: the separator is ``..``/``...`` with non-dot lookarounds so a longer dot run is not
-#: one. Without these a ``Scope:`` line of ``a-a-a-…`` measured **18.2 s at 32 kB and
-#: 72.9 s at 64 kB** against ~1.3 ms / 2.5 ms here (review round 2, F5; QA round 2,
-#: Q6), on a parse that runs inline on the event loop over forge-supplied bodies.
+#: The base is bounded, and BOTH separators (``..`` and ``...``) carry non-dot
+#: lookarounds, so a longer dot run is never a range — dropping them from the three-dot
+#: arm let ``main....`def5678abc` `` read FRESH (review round 4, F16; QA round 4, Q9).
+#: Without these guards a ``Scope:`` line of ``a-a-a-…`` measured **18.2 s at 32 kB and
+#: 72.9 s at 64 kB** against well under 1 ms here (review round 2, F5; QA round 2, Q6),
+#: on a parse that runs inline on the event loop over forge-supplied bodies.
 _SHA_RANGE = re.compile(
     r"`?[ \t]{0,8}+(?<![0-9A-Za-z._/-])(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]{1,100}?)"
     # Two dots may have room around them; THREE dots must sit tight against the base
@@ -148,7 +148,7 @@ _SHA_RANGE = re.compile(
     # named. That is the false-FRESH direction, the one this field exists to prevent
     # (review round 3, F10).
     r"(?:[ \t]{0,8}+`?[ \t]{0,8}+(?<!\.)\.\.(?!\.)[ \t]{0,8}+`?[ \t]{0,8}+"
-    r"|`?\.\.\.`?)"
+    r"|`?(?<!\.)\.\.\.(?!\.)`?)"
     r"(?P<head>[0-9a-f]{7,40})[ \t]{0,8}+`?"
 )
 _SHA = re.compile(r"\b(?P<sha>[0-9a-f]{7,40})\b")
@@ -726,8 +726,9 @@ _MAX_FIELD = 4096
 #: compete for the single-hash rule. Reading the label is not a guess; guessing the
 #: order instead was wrong-stale on 29 of 45 real passes (QA round 2, Q4).
 #:
-#: The window is DELIBERATELY NARROW — the label must sit within three of
-#: ``[\s`:=]`` from the hash. A wider window was tried and reverted: written as
+#: The window is DELIBERATELY NARROW — the label must sit within five of
+#: ``[\s`:=*]`` from the hash (``*`` so a bold ``**Base:**`` still counts, F17).
+#: A wider window was tried and reverted: written as
 #: ``[^0-9a-f]`` it missed labels whose window contained a hex LETTER (the ``a`` in
 #: "main", QA round 3 Q7), and widened to "anything that is not the start of a hex
 #: run" it then reached across prose — ``(origin/main, the PR base) ..`` and
@@ -736,7 +737,7 @@ _MAX_FIELD = 4096
 #: one reads ``unknown``, so the narrow window wins and the lanes it costs are named
 #: on the PR rather than hidden.
 _LABELLED_ELSEWHERE = re.compile(
-    r"(?i)\b(?:base|parent|merge(?:[- ]base)?|tree|root|onto)\b[\s`:=]{0,3}$"
+    r"(?i)\b(?:base|parent|merge(?:[- ]base)?|tree|root|onto)\b[\s`:=*]{0,5}$"
 )
 
 #: A weak label is ordinary prose, so it has to sit right against the hash to count:
@@ -853,8 +854,9 @@ def _reviewed_head(scope: str, head: str) -> str | None:
     Q5). It names ONE head, and its standard spelling quotes the head first and any
     earlier head after it — ``\"X\" (was \"Y\")``, ``X (one commit on top of Y)`` — so the
     LEADING hash is the head (review round 1, F1: applying the scope's set rule here
-    dropped 116 correct heads across 49 real PRs); if the field quotes a range, that
-    range's head wins (review round 2, F6).
+    dropped 116 correct heads across 49 real PRs); a range quoted as the FIRST thing
+    the field says gives that range's head (review round 2, F6), while a range quoted
+    after the leading hash describes a delta and does not override it (round 3, F11).
 
     The cost of every rejection is recall, never safety: a rejected shape degrades to
     ``unknown``, and no rejected shape can report a stale round as fresh.

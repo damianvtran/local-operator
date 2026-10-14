@@ -52,6 +52,8 @@ _TAIL_40 = "89abcdef0123456789abcdef0123456789abcdef"
     [
         # -- must not regress (green on the frozen module) -----------------------------
         ("`2d47e1fd30..8dc2b9797f`", "8dc2b9797f"),  # whole-range backticks
+        # A bold label is still a label: the base it names is not the head (F17).
+        ("`3ea522cc21` (**Base:** `82adb042eb`)", "3ea522cc21"),
         ("`main..72bea95`", "72bea95"),  # symbolic base, hex head
         ("`abc1234..def5678` + `abc1234..def5678`", "def5678"),  # duplicate range
         # The repo's own assertions on this field (tests/unit/code_requests/test_rounds.py):
@@ -117,6 +119,11 @@ def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
         # it is prose, and two named hashes with no range leave nothing to decide on —
         # which is the safe answer, not the looser one (F10).
         "`82adb042eb... 3ea522cc21`",
+        # Four or more dots are never a range: the three-dot arm lost its non-dot guards
+        # once and these read FRESH (review round 4, F16; QA round 4, Q9).
+        "`abc1234....def5678abc`",
+        "`abc1234` — rebased onto main....`def5678abc`",
+        "waited.....`def5678abc` and `abc1234`",
         # The accepted cost of the narrow label window (F12). ``Base `main` @ `d1fd63d` ``
         # needs a window wide enough to cross a quoted token, and that same width
         # mislabelled real heads on #2223/#2114 — a wrong head can read FRESH, a lost
