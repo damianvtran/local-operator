@@ -1085,6 +1085,11 @@ class AuthStore:
         HTTP clients stay per-process.
     """
 
+    #: The WRITABLE handle, definitely typed. A read-only store never assigns it
+    #: (its handle lives in :attr:`_ro_conn`); the annotation keeps the type
+    #: non-Optional for every unguarded ``self._conn.x`` on the writable path.
+    _conn: _SerializedConnection
+
     def __init__(
         self,
         db_path: str | Path | None = None,
@@ -1148,11 +1153,18 @@ class AuthStore:
         self._closed = False
         if read_only:
             # Construction must WRITE NOTHING: an absent database is simply an
-            # empty store, so the read-only open degrades to ``None`` instead
-            # of raising out of the constructor (the mode=ro open cannot be
-            # created, only opened).
-            self._conn = self._connect_read_only()
+            # empty store, so the read-only handle is allowed to be ``None``
+            # instead of raising out of the constructor (the mode=ro open cannot
+            # be created, only opened). It lives in its OWN Optional attribute,
+            # and the WRITABLE ``self._conn`` is left UNASSIGNED here, so pyright
+            # keeps ``self._conn``'s declared type definite -- assigning a
+            # possibly-``None`` to it widened the attribute to Optional and made
+            # every unguarded ``store._conn.x`` across the tree a pyright error.
+            # Read paths branch on ``self._read_only`` and never touch
+            # ``self._conn`` on such a store.
+            self._ro_conn = self._connect_read_only()
         else:
+            self._ro_conn = None
             self._conn = self._connect()
 
     @classmethod
@@ -1217,7 +1229,7 @@ class AuthStore:
             return False
         if not self._db_path.exists():
             return False
-        if self._conn is None:
+        if self._ro_conn is None:
             return True
         return not self._has_required_schema()
 
@@ -1229,12 +1241,13 @@ class AuthStore:
         build), which then fails at the first SELECT rather than at open. Both
         the table and every column the read path selects are required.
         """
-        if self._conn is None:
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
             return False
         try:
             cols = {
                 str(row[1])
-                for row in self._conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
+                for row in conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
             }
         except Exception:  # noqa: BLE001 — unreadable schema = unavailable
             return False
@@ -1334,7 +1347,10 @@ class AuthStore:
         # must be a safe no-op, not a ``NoneType.close`` raise. The phone route
         # closes whatever it opened, and "there was nothing to open" is the
         # common cold-start case.
-        if self._conn is not None:
+        if self._read_only:
+            if self._ro_conn is not None:
+                self._ro_conn.close()
+        else:
             self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
@@ -1485,19 +1501,18 @@ class AuthStore:
         ``provider`` is resolved through :meth:`_storage_id`, so asking for a
         login flavour returns the rows its login actually wrote.
         """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return []
         if provider is not None:
             provider = self._storage_id(provider)
-            if self._conn is None:
-                return []
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
                 (provider,),
             ).fetchall()
         else:
-            if self._conn is None:
-                return []
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials ORDER BY id"
             ).fetchall()
@@ -1783,9 +1798,10 @@ class AuthStore:
         return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
-        if self._conn is None:
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
             return None
-        row = self._conn.execute(
+        row = conn.execute(
             "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
             " created_at, updated_at FROM auth_credentials WHERE id = ?",
             (credential_id,),
