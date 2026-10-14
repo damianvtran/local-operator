@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 SCHEMA = 1
 LIFECYCLE_FILENAME = "lifecycle.json"
 LIFECYCLE_LOCK_FILENAME = ".lifecycle.lock"
+LIFECYCLE_OVERFLOW_FILENAME = ".lifecycle-restriction-overflow.json"
 
 #: Counters are positive integers bounded like consent revisions, keeping headroom
 #: below 2**53 (JSON numbers must round-trip through JavaScript peers).
@@ -427,6 +428,43 @@ class LifecycleStore:
             return doc
         return LifecycleDocument.from_json(self.network_id, data)
 
+    def restriction_overflowed(self) -> bool:
+        """Presence-only, constant-size recipient baseline latch for this network.
+
+        Omitted scope identities cannot be reconstructed after capacity refusal.
+        Any present path (including malformed/unreadable/symlink) is therefore
+        restrictive, never a false/auto-clear flag. It is device-local and is not
+        copied, and has no automatic recovery: an authoritative baseline is needed.
+        """
+        try:
+            self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME).lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def _capacity_refusal(self, obs: Observation) -> ObservationResult:
+        """Called under the lifecycle lock BEFORE any ephemeral receipt/ack.
+
+        One marker rather than another owner/key/scope table keeps overflow
+        bounded, including when lifecycle.json itself has hit its byte limit.
+        The coarse network-wide restriction trades availability for proof: no
+        other scope's login can prove the omitted restriction superseded. The
+        mesh store's atomic 0600 write is process-crash durable, not a new claim
+        of host/power-loss durability. An existing marker is never overwritten.
+        """
+        if obs.state in _RESTRICTIVE_STATES and not self.restriction_overflowed():
+            store._write_private_json(
+                self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME),
+                {"reason": NEEDS_AUTHORITATIVE_BASELINE},
+            )
+        return ObservationResult(
+            False,
+            OBSERVED_TABLE_FULL,
+            state=STATE_WITHDRAWN if self.restriction_overflowed() else None,
+        )
+
     def _save(self, doc: LifecycleDocument) -> None:
         """Persist, refusing any document :meth:`load` would reject.
 
@@ -446,7 +484,11 @@ class LifecycleStore:
         store._write_private_json(self.path, payload)
 
     def status(self) -> str:
-        return NEEDS_AUTHORITATIVE_BASELINE if self.load().needs_baseline else "ok"
+        return (
+            NEEDS_AUTHORITATIVE_BASELINE
+            if self.restriction_overflowed() or self.load().needs_baseline
+            else "ok"
+        )
 
     def snapshot(self, key: str, scope: str) -> Optional[CounterRow]:
         doc = self.load()
@@ -496,6 +538,8 @@ class LifecycleStore:
             return ObservationResult(False, OBSERVED_INVALID)
         ident = (obs.owner, obs.key, obs.account_scope_ref)
         with self.locked():
+            if self.restriction_overflowed():
+                return ObservationResult(False, NEEDS_AUTHORITATIVE_BASELINE, state=STATE_WITHDRAWN)
             doc = self.load()
             if doc.needs_baseline:
                 return ObservationResult(False, NEEDS_AUTHORITATIVE_BASELINE)
@@ -511,7 +555,7 @@ class LifecycleStore:
                     or sum(owner == obs.owner for owner, _, _ in doc.high_water)
                     >= min(MAX_ROWS, MAX_OWNER_OBSERVATIONS)
                 ):
-                    return ObservationResult(False, OBSERVED_TABLE_FULL)
+                    return self._capacity_refusal(obs)
                 doc.high_water[ident] = hw
             changed = reason == OBSERVED
             if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY):
@@ -536,7 +580,7 @@ class LifecycleStore:
                 except MeshRefusal as refusal:
                     if refusal.code != TABLE_FULL:
                         raise
-                    return ObservationResult(False, OBSERVED_TABLE_FULL)
+                    return self._capacity_refusal(obs)
             receipt_state = None
             if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY, OBSERVED_STALE):
                 # EffectiveAccess is provider-level: another scope's availability
@@ -758,7 +802,7 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
             )
         providers[item["credential_key"]] = str(entry.provider or item["credential_key"])
     life = LifecycleStore(document.network_id, root)
-    if life.load().needs_baseline:
+    if life.load().needs_baseline and not life.restriction_overflowed():
         return _announce_error(
             NEEDS_AUTHORITATIVE_BASELINE,
             "",

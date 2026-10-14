@@ -379,3 +379,27 @@ Lifecycle announcements remain gated by recipient consent/fence before native
 metadata observation, finite placement or verified future coverage, and both
 MAC-covered link feature advertisements. Receipts reconcile per connection;
 retry batches rotate independently of delivery success.
+
+### Restrictive observation overflow requires recovery
+
+If a new restrictive observation cannot fit the recipient's row, per-owner or
+file-byte bound, the recipient writes one constant-size, device-local
+`.lifecycle-restriction-overflow.json` marker under that network's credential
+root, atomically at 0600 under the lifecycle lock, before applying the ephemeral
+restriction or returning the refusal. No omitted owner/key/scope identity is
+added to another table. The existing mesh store's process-crash durability
+contract applies; this is not a new host/power-loss durability guarantee.
+
+Any marker presence, including malformed/unreadable contents or a symlink, is
+fail-closed. Existing symlinks are not overwritten. While it stands, lifecycle
+observations return `needs_authoritative_baseline` and restore only `withdrawn`
+receipt evidence, even after recipient restart. The first overflow remains
+`applied:false, observation_table_full`; no delivery success is claimed.
+
+This deliberately reduces metadata availability for the entire recipient
+network: another scope's replay, material update or higher login cannot prove
+an omitted restriction superseded. There is no automatic clear, reset or
+permanent-success claim. Reviewed authoritative baseline recovery is required;
+this slice does not implement or authorize clearing that recovery marker.
+The marker is never copied with sessions or to another device, and does not
+change the native credential database, counters, grants or credential payloads.
