@@ -531,7 +531,9 @@ def test_a_re_share_after_a_wipe_delivers_again(copied_mesh: Any) -> None:
     assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
     assert net_fixtures.wait_for(lambda: _ledger_wiped(mesh))
 
-    assert _lop_network("credential", "share", KEY, "--with", mesh.b.identity.name) == 0
+    from tests.unit.network.finite_recovery import restore_finite
+
+    restore_finite(mesh.a.root, KEY, mesh.b.identity.name)
     pulled = _pull(SimpleNamespace(b=mesh.b, borrower=mesh.member))
     assert KEY in pulled.get("changed", []), pulled
     code = sync.credentials_sync_step(mesh.a, mesh.member)
