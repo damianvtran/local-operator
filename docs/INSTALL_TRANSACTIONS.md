@@ -50,12 +50,16 @@ This does not exclude older installers or other noncooperating processes.
 
 ## Admission is separate from mutual exclusion
 
-Both preparation and promotion require no busy session in the configured and
-locally discoverable session namespaces. Missing/unreadable/incompletely parsed
-records fail closed; a wedged busy record is not idle. There is no force bypass.
+Both preparation and promotion of a MUTABLE (pip/pipx, in-place) install require
+no busy session in the configured and locally discoverable session namespaces.
+Missing/unreadable/incompletely parsed records fail closed; a wedged busy record
+is not idle. There is no force bypass.
 This census is **not** an exclusion protocol for a session becoming busy after
 it is sampled, nor a promise to discover an unregistered arbitrary profile.
-Immutable generations and the updater mutex do not waive the fleet policy.
+Immutable generations do NOT take this gate at all: a promotion lands in its own
+tree and moves a pointer, never rewriting a running runtime's imports, so the
+fleet may be busy. Central components update promptly; a running session keeps
+running on its own root and rolls onto the new build at its own next idle.
 
 ## Observation and recovery
 
