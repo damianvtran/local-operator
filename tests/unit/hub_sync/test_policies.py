@@ -1,0 +1,201 @@
+"""Policy migration, exact-bool validation and real on-disk CAS controls."""
+
+import threading
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+import yaml
+
+from local_operator import settings_io
+from local_operator.config import ConfigManager, read_config_values
+from local_operator.hub_sync.identity import LinkError, LinkIdentity
+from local_operator.hub_sync.policies import (
+    materialize_policy,
+    read_policy,
+    update_policy,
+)
+
+
+def identity() -> LinkIdentity:
+    return LinkIdentity(
+        "agent", "synthetic-local", "https://hub.example/v1", "public", None, "remote"
+    )
+
+
+def test_migration_preserves_legacy_off_once_explicit_policy_wins(tmp_path: Path) -> None:
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hub", {"auto_update": {"agents": False}})
+    link = identity()
+    first = materialize_policy(manager, link)
+    assert first.policy.subscribe is False and first.policy.auto_push is False
+    manager.set_config_value(
+        "hub", {**manager.get_config_value("hub"), "auto_update": {"agents": True}}
+    )
+    assert materialize_policy(manager, link) == first
+    another = replace(link, local_id="another")
+    assert materialize_policy(manager, another).policy.subscribe is True
+    chosen = update_policy(manager, link, expected_revision=first.revision, subscribe=True)
+    assert chosen.policy.subscribe is True
+    manager.set_config_value(
+        "hub", {**manager.get_config_value("hub"), "auto_update": {"agents": False}}
+    )
+    assert materialize_policy(manager, link) == chosen
+
+
+def test_deferred_resolution_materializes_captured_hint_not_new_creation_default(
+    tmp_path: Path,
+) -> None:
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hub", {"auto_update": {"agents": True}})
+    link = identity()
+    original = materialize_policy(manager, link, legacy_subscribe_hint=False)
+    assert original.policy.subscribe is False
+    # Neither a subsequently changed creation default nor a later migration
+    # hint can rewrite an already explicit per-link setting.
+    assert materialize_policy(manager, link, legacy_subscribe_hint=True) == original
+
+
+def test_fresh_direct_config_edit_changes_digest_and_rejects_stale_write(tmp_path: Path) -> None:
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    document = yaml.safe_load(manager.config_file.read_text())
+    document["values"]["hub"]["links"][link.link_id]["subscribe"] = False
+    document["values"]["unrelated"] = {"keep": True}
+    manager.config_file.write_text(yaml.safe_dump(document))
+    actual = manager.config_file.read_bytes()
+    with pytest.raises(LinkError) as refusal:
+        update_policy(manager, link, expected_revision=before.revision, subscribe=True)
+    assert refusal.value.code == "policy-revision-changed"
+    assert manager.config_file.read_bytes() == actual
+    values = read_config_values(tmp_path)
+    assert values is not None
+    assert read_policy(values, link).revision != before.revision
+    assert values["unrelated"] == {"keep": True}
+
+
+def test_public_optin_requires_capability_and_explicit_grant(tmp_path: Path) -> None:
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    original = manager.config_file.read_bytes()
+    with pytest.raises(LinkError) as refusal:
+        update_policy(
+            manager,
+            link,
+            expected_revision=before.revision,
+            auto_push=True,
+            confirm_public_egress=True,
+        )
+    assert refusal.value.code == "unsupported-precondition"
+    assert manager.config_file.read_bytes() == original
+    with pytest.raises(LinkError) as refusal:
+        update_policy(
+            manager,
+            link,
+            expected_revision=before.revision,
+            auto_push=True,
+            can_enable_auto_push=True,
+        )
+    assert refusal.value.code == "unsafe-publication"
+    assert manager.config_file.read_bytes() == original
+    enabled = update_policy(
+        manager,
+        link,
+        expected_revision=before.revision,
+        auto_push=True,
+        subscribe=False,
+        can_enable_auto_push=True,
+        confirm_public_egress=True,
+    )
+    assert enabled.policy.to_json() == {"subscribe": False, "auto_push": True}
+    assert enabled.public_egress_grant is not None
+    values = read_config_values(tmp_path)
+    assert values is not None
+    assert read_policy(values, link) == enabled
+    assert values["hub"]["public_egress_grants"][link.link_id]["link_id"] == link.link_id
+    # Turning outbound OFF and changing Subscribe must work while hub capability
+    # or credentials are unavailable. Stored ON elsewhere remains a paused fact.
+    off = update_policy(manager, link, expected_revision=enabled.revision, auto_push=False)
+    assert off.policy.to_json() == {"subscribe": False, "auto_push": False}
+    assert off.public_egress_grant == enabled.public_egress_grant
+
+
+@pytest.mark.parametrize("value", ["true", "false", 0, 1, [], {}])
+def test_invalid_policy_never_mutates_unrelated_values(tmp_path: Path, value) -> None:
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    original = manager.config_file.read_bytes()
+    with pytest.raises(LinkError) as refusal:
+        update_policy(manager, link, expected_revision=before.revision, subscribe=value)
+    assert refusal.value.code == "invalid-link-policy"
+    assert manager.config_file.read_bytes() == original
+
+
+def test_actual_policy_cas_and_language_writer_preserve_both_values(tmp_path: Path) -> None:
+    first, second = ConfigManager(tmp_path), ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(first, link)
+    ready, release, started = threading.Event(), threading.Event(), threading.Event()
+    real_write = first._write_config
+    errors = []
+
+    def paused_write(config) -> None:
+        ready.set()
+        assert release.wait(10)
+        real_write(config)
+
+    first._write_config = paused_write
+
+    def policy_writer() -> None:
+        try:
+            update_policy(first, link, expected_revision=before.revision, subscribe=False)
+        except BaseException as error:
+            errors.append(error)
+
+    def language_writer() -> None:
+        started.set()
+        try:
+            settings_io.write_setting(second, settings_io.BY_KEY["language"], "en")
+        except BaseException as error:
+            errors.append(error)
+
+    policy = threading.Thread(target=policy_writer)
+    language = threading.Thread(target=language_writer)
+    policy.start()
+    try:
+        assert ready.wait(10)
+        language.start()
+        assert started.wait(10)
+    finally:
+        release.set()
+        policy.join(10)
+        if language.ident is not None:
+            language.join(10)
+    assert not errors and not policy.is_alive() and not language.is_alive()
+    values = read_config_values(tmp_path)
+    assert values is not None and values["language"] == "en"
+    assert read_policy(values, link).policy.subscribe is False
+    assert values["hub"]["links"][link.link_id] == {"subscribe": False, "auto_push": False}
+
+
+def test_unknown_or_mixed_lineage_attestation_cannot_be_overridden_by_confirmation(
+    tmp_path: Path,
+) -> None:
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    for reason in ("baseline-unknown", "mixed-lineage"):
+        with pytest.raises(LinkError) as refusal:
+            update_policy(
+                manager,
+                link,
+                expected_revision=before.revision,
+                auto_push=True,
+                confirm_public_egress=True,
+                ineligible_reason=reason,
+            )
+        assert refusal.value.code == reason
+    assert read_policy(manager.get_config().values, link) == before

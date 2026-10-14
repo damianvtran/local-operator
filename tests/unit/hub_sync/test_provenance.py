@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,15 @@ def test_fingerprints_match_the_legacy_agent_hash_and_ignore_line_endings() -> N
     # The legacy marker form is kept byte-identical so existing tags stay valid.
     assert prov.legacy_agent_fingerprint("a", "b") == hub_fingerprint("a", "b")
     assert prov.fingerprint_agent("x.\r\n\r\n", "d") == prov.fingerprint_agent("x.", "d")
+
+
+def test_complete_snapshot_hash_is_not_the_legacy_two_text_field_hash() -> None:
+    original = {"instructions": "i", "description": "d", "tools": ["read"]}
+    changed = {**original, "tools": ["read", "bash"]}
+    assert prov.fingerprint_fields("agent", original) == prov.fingerprint_fields("agent", changed)
+    assert prov.fingerprint_snapshot("agent", original) != prov.fingerprint_snapshot(
+        "agent", changed
+    )
 
 
 def test_team_fingerprint_ignores_name_version_and_roster_order() -> None:
@@ -49,6 +59,87 @@ def test_write_read_round_trip_and_atomic_no_temp_left(tmp_path: Path) -> None:
         and got.fields["instructions"] == "i"
     )
     assert [p.name for p in prov.baselines_dir(tmp_path).iterdir()] == ["agent-abc.json"]
+
+
+def test_legacy_schema_remains_readable_without_fabricated_clean_origin(tmp_path: Path) -> None:
+    record = prov.make_record("agent", "legacy", "remote", None, {"instructions": "B"}, "pull")
+    payload = record.to_json()
+    payload["schema"] = 1
+    for key in ("identity", "remote_revision", "lineage", "outbound"):
+        payload.pop(key)
+    path = prov.baseline_path(tmp_path, "agent", "legacy")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(payload))
+    restored = prov.read_baseline(tmp_path, "agent", "legacy")
+    assert restored is not None and restored.fields == record.fields
+    assert restored.identity is None and restored.lineage == "unknown"
+    assert restored.outbound is None and restored.schema == 1
+
+
+def test_outbound_pair_never_advances_integrated_baseline_and_survives_legacy_helpers(
+    tmp_path: Path,
+) -> None:
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    identity = LinkIdentity("agent", "local", "https://hub.example/v1", "public", None, "remote")
+    baseline = prov.make_record("agent", "local", "remote", None, {"instructions": "B"}, "pull")
+    captured, accepted = {"instructions": "A"}, {"instructions": "P accepted"}
+    pair = prov.OutboundReceipt(
+        captured, accepted, prov.fingerprint_snapshot("agent", captured), '"etag"', "operation"
+    )
+    prov.write_baseline(
+        tmp_path, replace(baseline, identity=identity, lineage="clean", outbound=pair)
+    )
+    restored = prov.read_baseline(tmp_path, "agent", "local")
+    assert restored is not None and restored.fields == baseline.fields
+    assert restored.outbound is not None and restored.outbound.local_fields == captured
+    assert restored.outbound.accepted_fields == accepted
+    updated = prov.make_record("agent", "local", "remote", None, {"instructions": "new B"}, "pull")
+    prov.write_baseline(tmp_path, updated)
+    restored = prov.read_baseline(tmp_path, "agent", "local")
+    assert restored is not None and restored.fields == updated.fields
+    assert (
+        restored.identity == identity and restored.outbound == pair and restored.lineage == "clean"
+    )
+
+
+def test_existing_writable_origin_cannot_be_relinked_or_forged_by_record_write(
+    tmp_path: Path,
+) -> None:
+    from local_operator.hub_sync.identity import LinkError, LinkIdentity
+
+    identity = LinkIdentity("agent", "local", "https://hub.example/v1", "public", None, "remote")
+    record = prov.make_record("agent", "local", "remote", None, {"instructions": "B"}, "pull")
+    prov.write_baseline(tmp_path, replace(record, identity=identity))
+    before = prov.baseline_path(tmp_path, "agent", "local").read_bytes()
+    for proposed in (
+        replace(record, hub_id="other"),
+        replace(record, identity=replace(identity, hub_source="https://other.example/v1")),
+        replace(record, identity=replace(identity, visibility="org", tenant_id="org-one")),
+    ):
+        with pytest.raises(LinkError) as refusal:
+            prov.write_baseline(tmp_path, proposed)
+        assert refusal.value.code == "origin-conflict"
+        assert prov.baseline_path(tmp_path, "agent", "local").read_bytes() == before
+
+
+def test_source_resolution_retains_known_organization_and_legacy_hint(tmp_path: Path) -> None:
+    from local_operator.hub_sync.identity import LinkError, LinkIdentity
+
+    legacy = prov.make_record("agent", "legacy", "remote", "org-one", {"instructions": "B"}, "pull")
+    prov.write_baseline(tmp_path, replace(legacy, legacy_subscribe_hint=False))
+    path = prov.baseline_path(tmp_path, "agent", "legacy")
+    before = path.read_bytes()
+    for tenant in (None, "org-two"):
+        with pytest.raises(LinkError) as refusal:
+            prov.write_baseline(tmp_path, replace(legacy, tenant_id=tenant))
+        assert refusal.value.code == "origin-conflict"
+        assert path.read_bytes() == before
+    identity = LinkIdentity("agent", "legacy", "https://hub.example/v1", "org", "org-one", "remote")
+    prov.write_baseline(tmp_path, replace(legacy, identity=identity))
+    restored = prov.read_baseline(tmp_path, "agent", "legacy")
+    assert restored is not None and restored.legacy_subscribe_hint is False
+    assert restored.identity == identity and restored.fields == legacy.fields
 
 
 def test_an_unusable_record_reads_as_absent_not_trusted(tmp_path: Path) -> None:
