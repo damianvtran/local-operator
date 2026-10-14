@@ -4932,6 +4932,7 @@ def test_the_action_field_table_is_derived_from_every_kind() -> None:
     declared_kinds = {
         "click",
         "double_click",
+        "drag",
         "type",
         "key",
         "paste_text",

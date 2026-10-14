@@ -16,6 +16,19 @@ from collections.abc import Sequence
 
 MAX_PASTE_CHARACTERS = 100_000
 
+#: Drag duration bounds. They mirror the protocol's DragAction floor/ceiling
+#: (default 500 ms); the helper re-checks them so a caller that bypasses the
+#: protocol cannot compile a zero, negative or unbounded hold into the guest.
+#: A drift guard lives in the unit tests, exactly because a second unfettered
+#: number here is how the paste/type bounds silently diverged before.
+DRAG_MIN_DURATION_MS = 100
+DRAG_MAX_DURATION_MS = 5_000
+_DRAG_BUTTONS = ("left", "middle", "right")
+#: Generous sanity bound on a native coordinate. The protocol validates
+#: against the actual frame geometry; this only stops a nonsensical value
+#: (negative, or absurd) from reaching pyautogui if a caller bypasses it.
+MAX_DRAG_COORDINATE = 1_000_000
+
 
 def validate_paste_text(text: str) -> None:
     """Reject unrepresentable/control payloads without exposing their contents."""
@@ -158,6 +171,141 @@ def paste_text_source(text: str, keys: Sequence[str]) -> str:
     source += f"\n_paste_x11({encoded!r}, {tuple(keys)!r})"
     # Controllers commonly prepend imports with a semicolon, after which a
     # compound `def` statement is illegal. exec keeps this one simple statement.
+    return f"exec({source!r})"
+
+
+def _drag_x11(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    button: str,
+    duration_ms: int,
+) -> None:
+    """One atomic press-move-release; shipped as source into the guest.
+
+    This function is delivered as SOURCE, so it must stay import-cheap and
+    stdlib-only until the explicit pyautogui resolution below: the host need
+    not have a DISPLAY or pyautogui installed. All input mutation stays in
+    THIS process — there is deliberately no detached mouse-down state that
+    could survive the statement.
+    """
+    import importlib
+
+    # The host intentionally has no GUI dependency; resolve it only in the
+    # generated guest program, where the adapter already requires it.
+    pyautogui = importlib.import_module("pyautogui")
+
+    # `press_attempted` is marked BEFORE mouseDown: a press that injects and
+    # then raises still leaves the button held, and this flag is the only
+    # thing that makes the cleanup below attempt a release.
+    press_attempted = False
+    released = False
+    failure = None
+    release_failure = None
+    original_failsafe = getattr(pyautogui, "FAILSAFE", None)
+    try:
+        pyautogui.moveTo(start_x, start_y)
+        press_attempted = True
+        pyautogui.mouseDown(button=button)
+        # The drag's duration rides the PRESSED move: pyautogui eases the
+        # motion over that many seconds while the button is held.
+        pyautogui.moveTo(end_x, end_y, duration=duration_ms / 1000.0)
+        pyautogui.mouseUp(button=button)
+        released = True
+    except Exception as exc:
+        failure = exc
+    finally:
+        # These guarantees cover cooperative unwinding only (exceptions and
+        # graceful cancellation): a client timeout or SIGKILL cannot run
+        # finally, so a caller that cannot OBSERVE the release must retain an
+        # unknown/provisional outcome and never replay a drag it could not
+        # observe — the caller's no-replay policy stays the authority.
+        if press_attempted and not released:
+            try:
+                # FAILSAFE is disabled ONLY around this release and restored in
+                # the nested finally: a mouseUp at a screen corner must not
+                # itself raise FailSafeException, and the original value must
+                # survive even when the release fails. A naive finally:mouseUp
+                # would either leave a held button or permanently disarm the
+                # movement failsafe.
+                try:
+                    # setattr: pyautogui is a MODULE, and the failsafe switch
+                    # IS a module attribute (pyautogui reads pyautogui.FAILSAFE
+                    # on every move). A plain assignment trips the type checker
+                    # on ModuleType, and suppressing that diagnostic would also
+                    # hide a misspelled name; setattr performs the documented
+                    # switch without either.
+                    setattr(pyautogui, "FAILSAFE", False)
+                    try:
+                        pyautogui.mouseUp(button=button)
+                        released = True
+                    except Exception as exc:
+                        release_failure = exc
+                finally:
+                    setattr(pyautogui, "FAILSAFE", original_failsafe)
+            except Exception as exc:
+                if release_failure is None:
+                    release_failure = exc
+    if release_failure is not None:
+        # Truthful failure: never report success while the release is in
+        # doubt. The original motion failure (if any) stays chained as cause.
+        raise RuntimeError(
+            "drag failed and the pressed button could not be released; "
+            "the guest may still be holding a mouse button"
+        ) from (failure or release_failure)
+    if failure is not None:
+        if not press_attempted:
+            # The failing step was the approach move: no button was ever
+            # pressed, nothing was released, and the failsafe switch was never
+            # touched. Saying "after the press" here would be a false
+            # statement about the guest's input state.
+            raise RuntimeError("drag failed before the press; no button was pressed") from failure
+        raise RuntimeError("drag failed after the press; the button was released") from failure
+
+
+def validate_drag(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    button: str,
+    duration_ms: int,
+) -> None:
+    """Reject unrepresentable drags without touching the guest."""
+    for value in (start_x, start_y, end_x, end_y):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("drag coordinates must be integers")
+        if not 0 <= value <= MAX_DRAG_COORDINATE:
+            raise ValueError("drag coordinates must be inside the sanity bound")
+    if button not in _DRAG_BUTTONS:
+        raise ValueError("drag button must be one of left/middle/right")
+    if not DRAG_MIN_DURATION_MS <= duration_ms <= DRAG_MAX_DURATION_MS:
+        raise ValueError(f"drag duration must be {DRAG_MIN_DURATION_MS}..{DRAG_MAX_DURATION_MS} ms")
+
+
+def drag_source(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    button: str,
+    duration_ms: int,
+) -> str:
+    """Compile one atomic press-drag-release guest statement.
+
+    Coordinates are NATIVE pixels already mapped by the adapter's
+    ``FrameGeometry.model_to_native``; this function never rescales — a second
+    geometry implementation would be exactly the divergent copy the adapter's
+    comments forbid. Literals, never interpolation, carry the values into the
+    guest. No host GUI dependency is imported and no raw Python tool is
+    exposed to the model; the model only ever sees the typed action schema.
+    """
+    validate_drag(start_x, start_y, end_x, end_y, button, duration_ms)
+    source = textwrap.dedent(inspect.getsource(_drag_x11))
+    source += (
+        f"\n_drag_x11({start_x!r}, {start_y!r}, {end_x!r}, {end_y!r}, {button!r}, {duration_ms!r})"
+    )
     return f"exec({source!r})"
 
 
