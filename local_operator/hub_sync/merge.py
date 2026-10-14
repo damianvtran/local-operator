@@ -158,6 +158,13 @@ class FieldInput:
     #: merge relies on it for add/remove/delete semantics.
     local: "str | list[Any] | None"
     remote: "str | list[Any] | None"
+    #: Presence of the BASE side when ``base`` is None, for callers that KNOW the
+    #: ancestor: a skill FILE absent from a known base document is an ADD, not an
+    #: unknown baseline, and conflating the two made every added file an eternal
+    #: needs-review (round-2 QN4). ``None`` keeps the legacy meaning ("baseline
+    #: unknown"); ``False`` means "known ancestor, this field absent from it";
+    #: ``True`` means "known ancestor, present but empty" (equivalent to ``base=""``).
+    base_present: "bool | None" = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +293,16 @@ class _Decision:
     prov: str
     take: Literal["l", "r", "none", "conflict", "removal-vs-edit"]
     removed_by: str | None = None
+
+
+def _baseline_known(inp: "FieldInput") -> bool:
+    """Whether the ancestor is KNOWN (present, or observed absent), vs unrecorded.
+
+    Legacy: ``base is None`` and no explicit presence flag = unknown. An explicit
+    ``base_present`` (True or False) with ``base=None`` = known (QN4).
+    """
+
+    return inp.base is not None or inp.base_present is not None
 
 
 def decide(b_present: bool, local: str | None, remote: str | None, lr_equal: bool) -> _Decision:
@@ -544,7 +561,7 @@ def _triples_for(
     l_atoms: Sequence[seg.Atom],
     r_atoms: Sequence[seg.Atom],
     *,
-    has_base: bool,
+    baseline_known: bool,
     counter: list[int],
 ) -> list[_Triple]:
     """Align B<->L and B<->R, then L<->R for what B does not explain (A4.1)."""
@@ -604,7 +621,7 @@ def _triples_for(
             continue
         d = decide(False, None, "add", False)
         t = _Triple(None, None, r_atoms[rj], d.prov, d.take, r_index=rj, atom_id=new_id())
-        if not has_base:
+        if not baseline_known:
             t.note = "baseline-unknown"
         triples.append(t)
     return triples
@@ -681,6 +698,7 @@ class _Ctx:
 
 def _regions_for(inp: FieldInput, opts: MergeOptions, ctx: _Ctx) -> list[_Region]:
     has_base = inp.base is not None
+    baseline_known = _baseline_known(inp)
     bsegs = seg.segment(inp.base if isinstance(inp.base, str) else "") if has_base else ()
     lsegs = seg.segment(inp.local if isinstance(inp.local, str) else "")
     rsegs = seg.segment(inp.remote if isinstance(inp.remote, str) else "")
@@ -715,7 +733,7 @@ def _regions_for(inp: FieldInput, opts: MergeOptions, ctx: _Ctx) -> list[_Region
             b.atoms if b else (),
             l.atoms if l else (),
             r.atoms if r else (),
-            has_base=has_base,
+            baseline_known=baseline_known,
             counter=ctx.atom_counter,
         )
         out.append(region)
@@ -885,12 +903,12 @@ def _text_of(region: seg.Region | None) -> str | None:
 
 def _merge_text(inp: FieldInput, opts: MergeOptions) -> MergeResult:
     ctx = _Ctx(inp, opts)
-    has_base = inp.base is not None
+    baseline_known = _baseline_known(inp)
     regions = _regions_for(inp, opts, ctx)
     local_text = seg.norm(inp.local if isinstance(inp.local, str) else "")
     remote_text = seg.norm(inp.remote if isinstance(inp.remote, str) else "")
     warnings: list[str] = []
-    if not has_base:
+    if not baseline_known:
         warnings.append("baseline-unknown")
 
     # 1) conflicts -> model/fallback; 2) leftovers -> prefer or unresolved.
@@ -990,7 +1008,7 @@ def _merge_text(inp: FieldInput, opts: MergeOptions) -> MergeResult:
     if refusal:
         outcome: Outcome = "refused"
         final = local_text
-    elif unresolved or (not has_base and not opts.acknowledge_unknown_baseline):
+    elif unresolved or (not baseline_known and not opts.acknowledge_unknown_baseline):
         outcome, final = "needs-review", local_text
     elif seg.norm(merged) == local_text:
         outcome, final = "unchanged", local_text
@@ -1042,8 +1060,9 @@ def _merge_scalar(inp: FieldInput, opts: MergeOptions) -> MergeResult:
 
     local, remote = str(inp.local or "").strip(), str(inp.remote or "").strip()
     has_base = inp.base is not None
+    baseline_known = _baseline_known(inp)
     base = str(inp.base or "").strip() if has_base else None
-    warnings: list[str] = [] if has_base else ["baseline-unknown"]
+    warnings: list[str] = [] if baseline_known else ["baseline-unknown"]
     if has_base:
         d = decide(
             True,
@@ -1066,7 +1085,7 @@ def _merge_scalar(inp: FieldInput, opts: MergeOptions) -> MergeResult:
         merged = remote if d.take == "r" else local
         prov = d.prov
         outcome = "merged" if merged != local else "unchanged"
-        if not has_base and not opts.acknowledge_unknown_baseline and merged != local:
+        if not baseline_known and not opts.acknowledge_unknown_baseline and merged != local:
             outcome, merged = "needs-review", local
     if opts.max_chars is not None and len(merged) > opts.max_chars and outcome == "merged":
         return MergeResult(
@@ -1109,13 +1128,14 @@ def _merge_roster(inp: FieldInput, opts: MergeOptions) -> MergeResult:
     """Set merge by ``(kind, casefold(role))`` (A7): no text, no model."""
 
     has_base = inp.base is not None
+    baseline_known = _baseline_known(inp)
     base_slots: list[Any] = list(inp.base or []) if has_base else []  # type: ignore[arg-type]
     base = {_slot_key(s): _slot(s) for s in base_slots}
     local_list = [_slot(s) for s in inp.local]  # type: ignore[union-attr]
     remote_list = [_slot(s) for s in inp.remote]  # type: ignore[union-attr]
     local = {_slot_key(s): s for s in local_list}
     remote = {_slot_key(s): s for s in remote_list}
-    warnings: list[str] = [] if has_base else ["baseline-unknown"]
+    warnings: list[str] = [] if baseline_known else ["baseline-unknown"]
 
     order = [_slot_key(s) for s in local_list]
     for s in remote_list:
@@ -1184,7 +1204,7 @@ def _merge_roster(inp: FieldInput, opts: MergeOptions) -> MergeResult:
     if refusal:
         outcome: Outcome = "refused"
         final: list[dict[str, Any]] = local_list
-    elif unresolved or (not has_base and not opts.acknowledge_unknown_baseline):
+    elif unresolved or (not baseline_known and not opts.acknowledge_unknown_baseline):
         outcome, final = "needs-review", local_list
     elif [_key_count(s) for s in merged] == [_key_count(s) for s in local_list]:
         outcome, final = "unchanged", local_list
@@ -1222,6 +1242,34 @@ def merge_field(inp: FieldInput, opts: MergeOptions = MergeOptions()) -> MergeRe
     if inp.kind == "scalar":
         return _merge_scalar(inp, opts)
     return _merge_text(inp, opts)
+
+
+def file_add_conflict(path: str, local: str, remote: str) -> MergeResult:
+    """A file ADDED on both sides with DIFFERENT content: a deterministic conflict.
+
+    The text-level add/add pairing runs through the atom aligner, so a short
+    dissimilar pair can slip past it and UNION two additions that contradict each
+    other for the same path (measured: local "C" vs remote "D" merged as a
+    concatenation before this guard). For a manifest FILE the whole file is the
+    atom: base authority says the path is new, both sides offer content, and the
+    two differ -- unresolved by definition (round-2 QN4). The caller writes
+    NOTHING and keeps both copies.
+    """
+
+    inp = FieldInput(
+        field=path, kind="text", base=None, local=local, remote=remote, base_present=False
+    )
+    counts = _zero_counts()
+    counts["unresolved"] += 1
+    return MergeResult(
+        field=path,
+        outcome="needs-review",
+        merged=local,
+        regions=(_single_region(inp, path, "unresolved", None, local, note="add-vs-add"),),
+        counts=counts,
+        warnings=(),
+        kind="text",
+    )
 
 
 def replace_field(inp: FieldInput, *, take: Literal["local", "remote"]) -> MergeResult:

@@ -11,6 +11,7 @@ import pytest
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
+from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
 from local_operator.hub_sync.merge import ConflictProposal, ResolverError
@@ -20,14 +21,36 @@ BASE = "## Rules\nBe brief.\n\n## Legacy\nOld advice.\n\n## Tools\nUse tools car
 
 
 class Hub:
-    """A fake hub serving one agent listing and any number of team documents."""
+    """A fake hub serving one agent listing and any number of team documents.
+
+    ``get_agent`` answers the DETAIL read the agent check now performs for the
+    live revision (round-2 QN2a): the payload carries the row's ``revision`` and
+    ``sync_contract`` beside the metadata keys a real response has, and
+    ``revision`` can be moved by tests to simulate an accepted remote write.
+    """
 
     def __init__(self) -> None:
         self.agents: dict[str, tuple[str, str]] = {}
         self.teams: dict[str, dict[str, Any]] = {}
+        self.revision: str = '"hub-rev-1"'
+        #: The NORMALIZED base this fake answers from (used for served_by /
+        #: attestation keying in tests that go through ``client_for_tenant``).
+        self.base_url: str = "https://hub.test/v1"
 
     def client(self) -> Any:
         return self
+
+    def bearer_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer test-token"}
+
+    def get_agent(self, hub_id: str, **_kw: Any) -> dict[str, Any]:
+        text, desc = self.agents[hub_id]
+        return {
+            "instructions": text,
+            "description": desc,
+            "revision": self.revision,
+            "sync_contract": {"revision_cas": 1},
+        }
 
     def get_team(self, team_id: str, **_kw: Any) -> dict[str, Any]:
         if team_id not in self.teams:
@@ -682,7 +705,7 @@ def test_complementary_removal_large_shrink_applies_when_fully_covered(env) -> N
 # -- per-source attestation, outbound receipt advancement (round-1 remediation) ---------
 
 
-def _org_record(root: Path, *, kind: str = "agent", source: str = "https://hub.test/v1"):
+def _org_record(root: Path, *, kind: Kind = "agent", source: str = "https://hub.test/v1"):
     """A clean org link whose facts are all of ``_eligibility``'s preconditions."""
 
     from local_operator.hub_sync.identity import LinkIdentity
@@ -707,10 +730,15 @@ def _org_record(root: Path, *, kind: str = "agent", source: str = "https://hub.t
     record = prov.make_record(
         kind, "a1", "h1", "t1", fields, "merge-pull"  # type: ignore[arg-type]
     )
+    from local_operator.hub_sync.push import receipt_for
+
     record = dataclasses.replace(
         record,
         identity=identity,
         remote_revision='"rev-1"',
+        # An AGREED POINT: unattended push needs A/P (round-2 seeding ruling), so
+        # the fixtures that exercise later gates carry one.
+        outbound=receipt_for(kind, fields, fields, revision='"rev-1"'),
         lineage="clean",
         scope_known=True,
         local_alias="skill-a" if kind == "skill" else None,
@@ -798,6 +826,9 @@ def test_record_checks_folds_an_observed_sync_contract_for_its_source(env) -> No
         "up-to-date",
         remote_revision='"rev-1"',
         sync_contract={"revision_cas": 1},
+        # The base that ACTUALLY ANSWERED (round-2 R14): credit lands under this
+        # key, never under the link's recorded source.
+        served_by="https://hub.test/v1",
     )
     svc.record_checks(ctx, [c])
     assert (
@@ -807,6 +838,57 @@ def test_record_checks_folds_an_observed_sync_contract_for_its_source(env) -> No
     doc = st.StatusStore(root).load()
     assert "https://hub.test/v1" in doc["server"]["sources"]
     assert identity.hub_source == "https://hub.test/v1"
+
+
+def test_attestation_is_keyed_by_the_answering_base_and_downgrades_clear(env) -> None:
+    """R14: only the answering base earns credit, and a downgrade CLEARS it.
+
+    (a) a link whose recorded source is A but whose check was ANSWERED by base B
+    must not become eligible -- B's contract is B's fact, not A's.
+    (b) an observation that no longer advertises the contract clears the source
+    (last observation wins), so a downgraded deployment is honestly ineligible
+    again instead of permanently "proven".
+    """
+
+    ctx, _hub, _agents, _t, root = env
+    identity, _record = _org_record(root)
+    from local_operator.hub_sync.check import ItemCheck
+
+    def check(**over: object) -> ItemCheck:
+        base: dict[str, object] = {
+            "kind": "agent",
+            "local_id": "a1",
+            "name": "a",
+            "hub_id": "h1",
+            "tenant_id": "t1",
+            "verdict": "up-to-date",
+            "remote_revision": '"rev-1"',
+            "sync_contract": {"revision_cas": 1},
+            "served_by": "https://other.test/v1",
+        }
+        base.update(over)
+        return ItemCheck(**base)  # type: ignore[arg-type]
+
+    # (a) answered by B: no credit for A -> the PATCH/eligibility says no.
+    svc.record_checks(ctx, [check()])
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1"))["can_auto_push"] is False
+    )
+    doc = st.StatusStore(root).load()
+    assert identity.hub_source not in doc["server"]["sources"]
+
+    # answered by A itself: eligible (attested A + agreed point + clean lineage).
+    svc.record_checks(ctx, [check(served_by=identity.hub_source)])
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1"))["can_auto_push"] is True
+    )
+
+    # (b) a later observation from A that no longer advertises revision_cas
+    # clears it (non-monotone): the source is honestly unproven again.
+    svc.record_checks(ctx, [check(served_by=identity.hub_source, sync_contract={})])
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1"))["can_auto_push"] is False
+    )
 
 
 def test_auto_apply_holds_a_merge_that_would_empty_text_the_hub_has(env) -> None:
@@ -856,3 +938,152 @@ def test_the_legacy_updates_projection_never_lists_skill_rows(env) -> None:
     snapshot = svc.status_snapshot(ctx)
     assert {row["kind"] for row in snapshot["items"]} == {"agent"}
     assert snapshot["counts"]["available"] == 1  # the skill row is not counted either
+
+
+def test_the_check_records_the_agent_revision_and_serving_base(env) -> None:
+    """QN2a: the DETAIL read supplies the live revision; R14: the answering base."""
+
+    ctx, hub, agents, _t, root = env
+    _pull_agent(agents, hub, root)
+    checks = svc.check_items(ctx, kinds=("agent",))
+    (c,) = checks
+    assert c.remote_revision == '"hub-rev-1"'
+    assert c.served_by == "https://hub.test/v1"
+
+
+def test_an_applied_pull_seeds_the_outbound_receipt(env) -> None:
+    """Seeding ruling (A)a: the pull that integrates the remote agrees (A, P)."""
+
+    import dataclasses
+
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    # A LINKED item: the baseline carries the writer identity (the legacy rig's
+    # pull writes provenance without one; seeding requires a known origin).
+    rec = prov.read_baseline(root, "agent", row.id)
+    assert rec is not None
+    prov.write_baseline(
+        root,
+        dataclasses.replace(
+            rec, identity=LinkIdentity("agent", row.id, "https://hub.test/v1", "public", None, "h1")
+        ),
+    )
+    hub.agents["h1"] = (BASE + "\n\n## New\nAdded upstream.", "d")
+
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+
+    assert report.reports[0].applied
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    receipt = stored.outbound
+    assert receipt is not None
+    assert receipt.remote_revision == '"hub-rev-1"'
+    assert receipt.accepted_fields["instructions"].endswith("Added upstream.")
+
+
+def test_a_link_without_an_agreed_point_is_ineligible_with_a_named_reason(env) -> None:
+    """Seeding ruling (A): no receipt = a NAMED ineligible, never a guess."""
+
+    import dataclasses
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    from local_operator.hub_sync.identity import LinkIdentity
+    from local_operator.hub_sync.service import PUBLICATION_CONTRACT
+
+    identity = LinkIdentity("agent", row.id, "https://hub.test/v1", "public", None, "h1")
+    rec = prov.read_baseline(root, "agent", row.id)
+    assert rec is not None
+    rec = dataclasses.replace(
+        rec,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage="clean",
+        scope_known=True,
+        outbound=None,
+    )
+    prov.write_baseline(root, rec)
+    svc.record_server_capabilities(ctx, {"revision_cas": 1}, source="https://hub.test/v1")
+    ctx.config_manager.set_config_value(
+        "hub",
+        {
+            "links": {identity.link_id: {"subscribe": True, "auto_push": True}},
+            "public_egress_grants": {
+                identity.link_id: {
+                    "link_id": identity.link_id,
+                    "publication_contract": PUBLICATION_CONTRACT,
+                }
+            },
+        },
+    )
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    verdict = svc.push_eligibility(ctx, stored)
+    assert verdict == {"can_auto_push": False, "reason": "no-receipt"}
+
+
+def test_a_manual_publish_seeds_the_receipt_and_never_invents_a_revision(env) -> None:
+    """Seeding ruling (A)b: the accepted publish seeds; no revision seeds nothing."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    accepted = {"instructions": BASE, "description": "d"}
+
+    assert svc.seed_receipt_after_publish(
+        root,
+        "agent",
+        row.id,
+        accepted=accepted,
+        local_fields=dict(accepted),
+        revision='"rev-9"',
+    )
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    seeded = stored.outbound
+    assert seeded is not None and seeded.remote_revision == '"rev-9"'
+
+    # A missing revision changes NOTHING: the client never invents an ETag.
+    assert (
+        svc.seed_receipt_after_publish(
+            root,
+            "agent",
+            row.id,
+            accepted=accepted,
+            local_fields=dict(accepted),
+            revision=None,
+        )
+        is False
+    )
+    final = prov.read_baseline(root, "agent", row.id)
+    assert final is not None
+    kept = final.outbound
+    assert kept is not None and kept.remote_revision == '"rev-9"'
+
+
+def test_a_broken_skill_row_never_costs_the_agent_checks(env, monkeypatch) -> None:
+    """QN1: a per-item failure stays per-item -- the tick keeps every other kind."""
+
+    from local_operator.hub_sync import check as chk
+
+    ctx, hub, agents, _t, root = env
+    _pull_agent(agents, hub, root)
+    bad = chk.ItemCheck(
+        "skill",
+        "s1",
+        "s",
+        "sk-1",
+        "t1",
+        "unavailable",
+        reason="invalid-remote-manifest",
+        detail="missing description",
+    )
+    monkeypatch.setattr(chk, "check_hub_skills", lambda **kw: [bad])
+
+    checks = svc.check_items(ctx, kinds=("agent", "skill"))
+
+    kinds = {c.kind for c in checks}
+    assert kinds == {"agent", "skill"}
+    agent_check = next(c for c in checks if c.kind == "agent")
+    assert agent_check.verdict in ("up-to-date", "available")

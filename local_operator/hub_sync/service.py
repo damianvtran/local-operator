@@ -239,14 +239,137 @@ def record_checks(
             # A response that carried the server's sync_contract is an OBSERVATION
             # of the deployed source -- the only honest way the per-source
             # capability attestation becomes true (see record_server_capabilities).
-            if c.sync_contract is not None:
-                record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
-                if record is not None and record.identity is not None:
-                    _fold_capability(doc, c.sync_contract, record.identity.hub_source)
+            # It is credited to the base that ACTUALLY ANSWERED the check
+            # (round-2 R14), never to the link's recorded source: a client pointed
+            # elsewhere cannot launder its contract onto a source it never spoke
+            # to (eligibility still requires served_by == identity.hub_source, so
+            # a mismatch simply earns no credit).
+            if c.sync_contract is not None and c.served_by:
+                _fold_capability(doc, c.sync_contract, c.served_by)
         if live is not None:
             st.prune_items(doc, live)
 
     ctx.store().mutate(fold)
+
+
+def _canonical_for_compare(kind: Kind, fields: Mapping[str, Any]) -> dict[str, Any]:
+    """The shape two sides are compared in for AGREEMENT, normalization included.
+
+    The merge engine normalizes text (trailing whitespace and blank edges) when
+    it writes, so a fast-forwarded skill's on-disk content can differ from the
+    server's canonical spelling by exactly that normalization -- and comparing
+    the RAW fingerprints would then read a clean fast-forward as a real
+    difference and never seed. Normalizing both sides the same way keeps the
+    agreement criterion about CONTENT: a local edit that changes anything beyond
+    trailing whitespace still differs and still refuses to seed.
+    """
+
+    from local_operator.hub_sync import segment as seg
+
+    out = dict(fields)
+    # Text normalizes the same way the engine writes it, for every kind.
+    for key, value in list(out.items()):
+        if isinstance(value, str):
+            out[key] = seg.norm(value)
+    if kind != "skill":
+        return out
+    files = out.get("files")
+    if isinstance(files, list):
+        out["files"] = [
+            (
+                {**dict(row), "content": seg.norm(str(row.get("content") or ""))}
+                if isinstance(row, Mapping)
+                else row
+            )
+            for row in files
+        ]
+    if "description" in out:
+        out["description"] = seg.norm(str(out.get("description") or ""))
+    return out
+
+
+def _seed_receipt_if_agreed(
+    ctx: HubSyncContext, c: chk.ItemCheck, local_fields: Mapping[str, Any] | None
+) -> bool:
+    """Seed the outbound receipt (A/P) at a KNOWN-AGREED point (L == R).
+
+    THE FIRST PUBLICATION PROBLEM: an unattended push projects from an (A, P)
+    receipt, and until one exists a link can never publish -- a permanently
+    dormant auto-push. The honest seeding points are exactly where local and hub
+    are KNOWN to agree (a pull/adopt integrates the remote content, or a manual
+    publish is accepted), because there A = P's canonical text and no delta can
+    be invented. Safety properties, in order:
+
+    * the two sides must actually AGREE (fingerprint equality) -- nothing is
+      seeded from a merely similar state, so a later projection never starts
+      from a lie;
+    * A is the LOCAL canonical text (the bytes on disk after the write), P the
+      REMOTE canonical document, and the revision is the SERVER's opaque ETag --
+      client-side facts only where they ARE the server's own;
+    * the inbound integrated baseline ``B`` is NOT touched (seeding is not an
+      integration);
+    * a public origin is not special-cased here: when L == R for a public link
+      the local text IS the published text, and the egress GRANT still gates the
+      push itself.
+    """
+
+    if c.remote is None or not c.remote_revision or local_fields is None:
+        return False
+    try:
+        local_fp = prov.fingerprint_snapshot(c.kind, _canonical_for_compare(c.kind, local_fields))
+        remote_fp = prov.fingerprint_snapshot(c.kind, _canonical_for_compare(c.kind, c.remote))
+    except Exception:  # noqa: BLE001 - an unfingerprintable state simply earns no seed
+        return False
+    if local_fp != remote_fp:
+        return False
+    record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    if record is None or record.identity is None:
+        return False
+    from dataclasses import replace as dc_replace
+
+    from local_operator.hub_sync.push import receipt_for
+
+    receipt = receipt_for(c.kind, c.remote, dict(local_fields), revision=c.remote_revision)
+    try:
+        prov.write_baseline(ctx.config_dir, dc_replace(record, outbound=receipt))
+    except (prov.BaselineError, OSError):
+        logger.debug("could not seed outbound receipt for %s %s", c.kind, c.local_id, exc_info=True)
+        return False
+    return True
+
+
+def seed_receipt_after_publish(
+    config_dir: Any,
+    kind: Kind,
+    local_id: str,
+    *,
+    accepted: Mapping[str, Any],
+    local_fields: Mapping[str, Any],
+    revision: str | None,
+) -> bool:
+    """Seed A/P after an ACCEPTED manual publish/republish (parent ruling (A)b).
+
+    The server returned the canonical document and its ETag; A is the local input
+    that was published and P the accepted document. Nothing client-side is
+    invented: without a revision (an older server) nothing is seeded and the link
+    stays honestly ``no-receipt``. The inbound baseline B is untouched.
+    """
+
+    if not revision:
+        return False
+    from dataclasses import replace as dc_replace
+
+    from local_operator.hub_sync.push import receipt_for
+
+    record = prov.read_baseline(config_dir, kind, local_id)
+    if record is None:
+        return False
+    receipt = receipt_for(kind, accepted, dict(local_fields), revision=revision)
+    try:
+        prov.write_baseline(config_dir, dc_replace(record, outbound=receipt))
+    except (prov.BaselineError, OSError):
+        return False
+    return True
 
 
 def _adopt_if_equal(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
@@ -259,6 +382,11 @@ def _adopt_if_equal(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
         prov.write_baseline(ctx.config_dir, record)
     except (prov.BaselineError, OSError):
         logger.debug("could not adopt baseline for %s %s", c.kind, c.local_id, exc_info=True)
+        return
+    # The adopted baseline IS an agreed point (L == R by construction here), so
+    # this is where a freshly discovered/never-pulled link first becomes able to
+    # auto-push. Seeding never gates the adopt itself.
+    _seed_receipt_if_agreed(ctx, c, c.local)
 
 
 def resolve_source(
@@ -810,6 +938,9 @@ def _apply_skill(
         logger.warning("hub skill apply failed for %s", c.name, exc_info=True)
         return fail("hub-error", f"could not write the update: {exc}")
 
+    # The merged document IS the remote's canonical text when the pull integrated
+    # it (fingerprint equality decides); that is the skill's agreed point.
+    _seed_receipt_if_agreed(ctx, c, merged.to_json())
     summary = _summary(results)
     fold(lambda item: st.settle_applied(item, summary, None))
     return ItemMergeReport(
@@ -942,6 +1073,7 @@ def apply_one(
                 _advance_baseline(ctx, c, "merge-pull")
             except (prov.BaselineError, OSError):
                 logger.debug("could not advance baseline", exc_info=True)
+            _seed_receipt_if_agreed(ctx, c, c.local)
             fold(lambda item: st.settle_unchanged(item))
         return report
     if dry_run:
@@ -961,6 +1093,11 @@ def apply_one(
         else:
             _write_team(ctx, c, report)
         _advance_baseline(ctx, c, "merge-pull")
+        written = dict(c.local or {})
+        for field_result in report.fields:
+            if field_result.outcome == "merged" and field_result.merged is not None:
+                written[field_result.field] = field_result.merged
+        _seed_receipt_if_agreed(ctx, c, written)
     except ConcurrentEdit as exc:
         return fail("concurrent-edit", str(exc))
     except (ValueError, KeyError) as exc:
@@ -1410,10 +1547,11 @@ def _capability_auto_push(doc: Mapping[str, Any], identity: LinkIdentity) -> boo
 def _fold_capability(doc: dict[str, Any], capabilities: Mapping[str, Any], source: str) -> None:
     """Merge one observed ``sync_contract`` into the per-source attestation store.
 
-    Monotone per field: an observation can raise a source's attested contract,
-    never lower it, so a single old/limited response cannot revoke a capability
-    that a later full response proved. The legacy flat mirror is kept for any
-    older reader of ``server.revision_cas``.
+    LAST OBSERVATION WINS per source and per field (round-2 R14): attestation is
+    a fact about the DEPLOYED server, so a deployment that no longer advertises
+    revision-CAS must be able to CLEAR it -- a monotone max() could only ever
+    ratchet up and made a downgraded source permanently "proven". The legacy flat
+    mirror is kept for any older reader of ``server.revision_cas``.
     """
 
     revision_cas = _attested(capabilities.get("revision_cas"))
@@ -1423,8 +1561,8 @@ def _fold_capability(doc: dict[str, Any], capabilities: Mapping[str, Any], sourc
     server["attested_at"] = prov.now_iso()
     entries = server.setdefault("sources", {})
     entry = entries.setdefault(str(source), {})
-    entry["revision_cas"] = max(int(entry.get("revision_cas") or 0), revision_cas)
-    entry["skills"] = max(int(entry.get("skills") or 0), skills)
+    entry["revision_cas"] = revision_cas
+    entry["skills"] = skills
     entry["attested_at"] = prov.now_iso()
 
 
@@ -1497,6 +1635,16 @@ def _eligibility(
             or grant.get("publication_contract") != PUBLICATION_CONTRACT
         ):
             return {"can_auto_push": False, "reason": "unsafe-publication"}
+    if record.outbound is None:
+        # NO AGREED POINT YET: an unattended push projects from an (A, P) receipt,
+        # and nothing has ever recorded one -- first publication is a deliberate
+        # action (manual push) or a pull that integrates the remote content
+        # (both paths SEED the receipt at that point). Until then the honest
+        # answer is a named ineligible, never a zero-delta guess. LAST on
+        # purpose: a public link's missing EGRESS CONSENT is the actionable
+        # refusal its confirm flow mints against, so that reason wins when both
+        # are absent.
+        return {"can_auto_push": False, "reason": "no-receipt"}
     return {"can_auto_push": True, "reason": "eligible"}
 
 

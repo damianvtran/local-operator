@@ -57,8 +57,18 @@ def _seed_link(
     else:
         fields = {"instructions": "x"}
     record = prov.make_record(kind, local_id, f"h-{local_id}", tenant, fields, "pull")
+    # An AGREED POINT: since the seeding ruling (round 2, (A)), unattended push
+    # needs an (A, P) receipt, so an "eligible" link must carry one -- without it
+    # the honest answer is the NAMED `no-receipt` refusal.
+    from local_operator.hub_sync.push import receipt_for
+
     record = dataclasses.replace(
-        record, identity=identity, remote_revision='"rev-1"', lineage="clean", local_alias=name
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage="clean",
+        local_alias=name,
+        outbound=receipt_for(kind, fields, fields, revision='"rev-1"'),
     )
     prov.write_baseline(root, record)
     hub: dict[str, Any] = {
@@ -280,6 +290,17 @@ async def test_the_card_teaches_its_engage_key_until_engaged(
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_link(tmp_path, visibility="org", tenant="acme", auto_push=False, attest_revision_cas=True)
+    # TWO links: with one link the arrows never also teach SELECT, so the QN6
+    # duplicate-hint regression ("↑↓ to begin · ↑↓ select") needs a second row.
+    _seed_link(
+        tmp_path,
+        local_id="a2",
+        name="bravo",
+        visibility="org",
+        tenant="acme",
+        auto_push=False,
+        attest_revision_cas=True,
+    )
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -289,9 +310,14 @@ async def test_the_card_teaches_its_engage_key_until_engaged(
         panel = _mounted_panel(app)
         hint = panel._hint_row(True).plain
         assert "↑↓ to begin" in hint, hint
+        # QN6 (discriminating): BEFORE engagement the same arrows must not be
+        # taught twice; the select hint waits until the card is engaged.
+        assert "↑↓ select" not in hint, hint
         await pilot.press("down")
         await pilot.pause()
-        assert "↑↓ to begin" not in panel._hint_row(True).plain
+        hint = panel._hint_row(True).plain
+        assert "↑↓ to begin" not in hint, hint
+        assert "↑↓ select" in hint, hint
 
 
 @pytest.mark.asyncio

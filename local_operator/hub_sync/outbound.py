@@ -74,6 +74,7 @@ def merge_skill_file(
     local: str | None,
     remote: str | None,
     opts: MergeOptions,
+    base_present: bool | None = None,
 ) -> tuple[str | None, MergeResult]:
     """Three-way merge ONE manifest file through the shared engine (no fork).
 
@@ -83,8 +84,22 @@ def merge_skill_file(
     None when the file is gone, result)``; callers treat ``unresolved`` as a
     refusal rather than writing either side.
     """
+    if base_present is False and local is not None and remote is not None and local != remote:
+        # Both sides ADDED this path with different content: a conflict at the
+        # FILE level, decided before the text merge can union them (QN4).
+        from local_operator.hub_sync.merge import file_add_conflict
+
+        return None, file_add_conflict(path, local, remote)
     result = merge_field(
-        FieldInput(field=path, kind="text", base=base, local=local, remote=remote), opts
+        FieldInput(
+            field=path,
+            kind="text",
+            base=base,
+            local=local,
+            remote=remote,
+            base_present=base_present,
+        ),
+        opts,
     )
     if not skill_file_present(local, remote, result.merged):
         return None, result
@@ -166,6 +181,10 @@ def merge_skill_document(
             local=local_files.get(path),
             remote=remote_files.get(path),
             opts=opts,
+            # A KNOWN base document makes each file's absence from it a FACT
+            # (an add), not an unknown baseline (QN4); an unknown base document
+            # keeps the legacy held-for-review meaning.
+            base_present=None if base_doc is None else path in base_files,
         )
         results.append(result)
         if content is not None:
@@ -220,7 +239,8 @@ def _project_skill(
             no_op=False,
             results=tuple(results_one),
             warnings=(),
-            unresolved=tuple(r.field for r in results_one if r.outcome == "needs-review"),
+            unresolved=tuple(r.field for r in results_one if r.outcome == "needs-review")
+            or ("document",),
         )
     stage_two, results_two = merge_skill_document(accepted, stage_one, remote_latest, opts=opts)
     results = results_one + results_two
@@ -230,7 +250,8 @@ def _project_skill(
             no_op=False,
             results=tuple(results),
             warnings=(),
-            unresolved=tuple(r.field for r in results if r.outcome == "needs-review"),
+            unresolved=tuple(r.field for r in results if r.outcome == "needs-review")
+            or ("document",),
         )
     try:
         remote_canonical = SkillDocument.from_json(dict(remote_latest)).to_json()
@@ -377,4 +398,10 @@ def refuses(projection: ProjectionResult) -> str | None:
             return "merge-refused"
         if r.outcome == "needs-review":
             return r.engine.failure_class or "merge-refused"
+    if projection.unresolved:
+        # A stage that could not even build its documents (an invalid remote
+        # latest, say) returns NO per-file results; the sentinel field names
+        # keeps that from reading as "nothing to merge" and publishing empty
+        # (round-2 R15).
+        return "merge-refused"
     return None

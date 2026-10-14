@@ -22,16 +22,35 @@ from .test_skill_storage import _input
 
 
 class SkillHub:
-    """A fake hub serving one skill manifest (the check/pull network seam)."""
+    """A fake hub serving one skill DETAIL response (the check/pull seam).
 
-    def __init__(self, document: SkillDocument) -> None:
+    The payload carries the METADATA envelope a real response has beside the
+    manifest (``revision``, ``sync_contract``, ids -- agent-server@bdd03ab,
+    internal/responses/skills.go HubSkillResponse), so every test here also
+    exercises the tolerant-envelope/strict-manifest split (round-2 QN1).
+    """
+
+    def __init__(self, document: SkillDocument, *, revision: str = '"hub-skill-rev-1"') -> None:
         self.document = document
+        self.revision = revision
 
     def client(self) -> Any:
         return self
 
     def get_skill(self, skill_id: str, **_kw: Any) -> dict[str, Any]:
-        return self.document.to_json()
+        payload = dict(self.document.to_json())
+        payload.update(
+            {
+                "revision": self.revision,
+                "content_revision": 3,
+                "sync_contract": {"revision_cas": 1, "skills": 1},
+                "id": "sk-1",
+                "visibility": "org",
+                "tenant_id": "t1",
+                "moderation": {"flagged": False},
+            }
+        )
+        return payload
 
 
 def _profile(tmp_path: Path):
@@ -186,3 +205,173 @@ def test_removing_a_reference_file_propagates(tmp_path: Path) -> None:
     assert "scripts/inert.py" not in paths and "SKILL.md" in paths
     stored = _baseline(storage.config_dir, identity.local_id)
     assert stored.fields == hub.document.to_json()  # B := the removal decision
+
+
+def test_the_check_tolerates_the_metadata_envelope_and_captures_the_revision(
+    tmp_path: Path,
+) -> None:
+    """QN1/QN2: the DETAIL envelope is tolerated, its revision becomes the check's.
+
+    Before the split, one metadata key in the response made ``from_json`` raise
+    out of ``check_items`` and take every other kind's checks down with it; the
+    revision the push needs is that response's ``revision``.
+    """
+
+    from local_operator.hub_sync import check as chk
+
+    storage, hub, ctx, identity, _doc = _profile(tmp_path)
+    checks = chk.check_hub_skills(
+        config_dir=storage.config_dir, client_for_tenant=lambda _t: hub.client()
+    )
+    (c,) = checks
+    assert c.verdict == "up-to-date"
+    assert c.remote_revision == hub.revision
+    assert c.sync_contract == {"revision_cas": 1, "skills": 1}
+
+
+def test_a_broken_manifest_is_a_named_unavailable_not_an_exception(tmp_path: Path) -> None:
+    """QN1: a malformed remote manifest stays ONE named row and never raises."""
+
+    import dataclasses
+
+    storage, hub, ctx, identity, _doc = _profile(tmp_path)
+    broken = hub.get_skill("x")
+    broken.pop("description")  # a MANIFEST field is missing; metadata still rides
+
+    class BrokenHub:
+        api_key = "k"
+        base_url = "https://hub.test/v1"
+
+        def get_skill(self, skill_id: str, **_kw: Any) -> dict[str, Any]:
+            return dict(broken)
+
+    checks = svc.check_items(
+        dataclasses.replace(ctx, client_for_tenant=lambda _t: BrokenHub()), kinds=("skill",)
+    )
+    (c,) = checks
+    assert c.verdict == "unavailable" and c.reason == "invalid-remote-manifest"
+
+
+def test_a_public_skill_check_asks_for_no_credential(tmp_path: Path) -> None:
+    """QN3: the anonymous client must not demand a key for a public skill row."""
+
+    import inspect
+
+    from local_operator.clients.radient import RadientClient
+    from local_operator.hub_sync import check as chk
+
+    storage, hub, ctx, identity, _doc = _profile(tmp_path)
+    flag = [
+        p
+        for p in inspect.signature(RadientClient.get_skill).parameters
+        if p not in ("self", "skill_id", "timeout")
+    ][0]
+
+    seen: list[dict[str, Any]] = []
+
+    class Anon:
+        api_key = None
+        base_url = "https://hub.test/v1"
+
+        def get_skill(self, skill_id: str, **kw: Any) -> dict[str, Any]:
+            seen.append(kw)
+            return hub.get_skill(skill_id)
+
+    checks = chk.check_hub_skills(
+        config_dir=storage.config_dir, client_for_tenant=lambda _t: Anon()
+    )
+    (c,) = checks
+    assert c.verdict == "up-to-date"
+    assert seen and seen[0].get(flag) is False  # no credential demanded or sent
+
+
+def test_a_remote_added_reference_file_lands_through_the_service(tmp_path: Path) -> None:
+    """QN4: a file ADDED upstream is an add, not an eternal needs-review."""
+
+    storage, hub, ctx, identity, v1 = _profile(tmp_path)
+    v2_json = v1.to_json()
+    v2_json["files"] = v2_json["files"] + [{"path": "references/extra.md", "content": "extra\n"}]
+    hub.document = SkillDocument.from_json(v2_json)
+
+    report = svc.apply_items(ctx, kind="skill", auto=True, allow_llm=False)
+
+    assert report.reports[0].outcome == "merged" and report.reports[0].applied, report.reports[
+        0
+    ].message
+    assert {f.path for f in _disk(storage, identity).files} >= {
+        "references/extra.md",
+        "SKILL.md",
+    }
+    assert _baseline(storage.config_dir, identity.local_id).fields == hub.document.to_json()
+
+
+def test_a_locally_added_reference_file_survives_a_remote_change(tmp_path: Path) -> None:
+    """QN4: a local add is not refused as "an edit against a removal"."""
+
+    storage, hub, ctx, identity, v1 = _profile(tmp_path)
+    local_json = v1.to_json()
+    local_json["files"] = local_json["files"] + [
+        {"path": "references/local.md", "content": "mine\n"}
+    ]
+    local = SkillDocument.from_json(local_json)
+    storage.apply(
+        identity,
+        local.name,
+        local,
+        _baseline(storage.config_dir, identity.local_id),
+        expected_fingerprint=_disk(storage, identity).fingerprint,
+    )
+    hub.document = _input("# New body\n")[1]
+
+    report = svc.apply_items(ctx, kind="skill", auto=True, allow_llm=False)
+
+    assert report.reports[0].outcome in ("merged", "unchanged"), report.reports[0].message
+    files = {f.path: f.content for f in _disk(storage, identity).files}
+    # The write path normalizes trailing whitespace (the engine's seg.norm), so
+    # the surviving local add is compared by content, not by newline count.
+    assert "references/local.md" in files and files["references/local.md"].rstrip("\n") == "mine"
+    assert "New body" in files["SKILL.md"]
+
+
+def test_both_sides_adding_the_same_path_differently_holds_for_review(tmp_path: Path) -> None:
+    """QN4: add/add with DIFFERENT text is a real conflict, silently nothing."""
+
+    storage, hub, ctx, identity, v1 = _profile(tmp_path)
+    local_json = v1.to_json()
+    local_json["files"] = local_json["files"] + [{"path": "references/x.md", "content": "LOCAL\n"}]
+    local = SkillDocument.from_json(local_json)
+    storage.apply(
+        identity,
+        local.name,
+        local,
+        _baseline(storage.config_dir, identity.local_id),
+        expected_fingerprint=_disk(storage, identity).fingerprint,
+    )
+    remote_json = v1.to_json()
+    remote_json["files"] = remote_json["files"] + [
+        {"path": "references/x.md", "content": "REMOTE\n"}
+    ]
+    hub.document = SkillDocument.from_json(remote_json)
+
+    report = svc.apply_items(ctx, kind="skill", auto=True, allow_llm=False)
+
+    assert report.reports[0].outcome == "needs-review", report.reports[0].message
+    files = {f.path: f.content for f in _disk(storage, identity).files}
+    assert files["references/x.md"] == "LOCAL\n"  # nothing written
+    assert _baseline(storage.config_dir, identity.local_id).fields == v1.to_json()
+
+
+def test_a_fast_forward_pull_seeds_the_outbound_receipt(tmp_path: Path) -> None:
+    """Seeding ruling (A)a: integrating the remote agrees the pair (A, P, revision)."""
+
+    storage, hub, ctx, identity, _v1 = _profile(tmp_path)
+    v2 = _input("# New body\n")[1]
+    hub.document = v2
+
+    report = svc.apply_items(ctx, kind="skill", auto=True, allow_llm=False)
+
+    assert report.reports[0].applied
+    stored = _baseline(storage.config_dir, identity.local_id)
+    assert stored.outbound is not None
+    assert stored.outbound.remote_revision == hub.revision
+    assert stored.outbound.accepted_fields == v2.to_json()

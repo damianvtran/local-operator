@@ -245,7 +245,10 @@ class SkillAdapter(_SharedIdentity):
     def canonical_fields(self, raw: Mapping[str, Any]) -> Mapping[str, Any]:
         from local_operator.hub_sync.skill_document import SkillDocument
 
-        return SkillDocument.from_json(dict(raw)).to_json()
+        # TOLERANT ENVELOPE, STRICT MANIFEST: a hub DETAIL response carries
+        # metadata beside the manifest (revision/sync_contract/id/...), so the
+        # manifest is built from the manifest subset only (round-2 QN1).
+        return SkillDocument.from_remote(dict(raw)).to_json()
 
     def validate(self, fields: Mapping[str, Any]) -> None:
         from local_operator.hub_sync.skill_document import SkillDocument

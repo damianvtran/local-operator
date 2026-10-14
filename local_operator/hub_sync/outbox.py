@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import errno
 import json
 import logging
@@ -98,6 +99,17 @@ class OutboxRecord:
     #: never a re-projection -- so an uncertain commit can never turn into a
     #: fresh create or a second paid preview.
     intent: Mapping[str, Any] | None = None
+    #: A DETERMINISTIC refusal (round-2 R12): nothing about retrying the SAME
+    #: input can change the outcome (needs-review, an ack-required preview, an
+    #: invalid document), so the record waits for the INPUT to change instead of
+    #: burning the dead-letter cap tick after tick. ``begin_attempt`` skips it
+    #: while ``input_fp`` is unchanged and re-arms it the moment it differs.
+    waiting_input: bool = False
+    #: Fingerprint of the projection INPUT this record last attempted (kind,
+    #: captured/accepted/local/remote documents, expected revision). It is what
+    #: makes "wait for input change" and "a deliberate edit re-arms the cap"
+    #: decidable without reading the registries.
+    input_fp: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -115,6 +127,8 @@ class OutboxRecord:
             "attempts": self.attempts,
             "next_retry_at": self.next_retry_at,
             "intent": dict(self.intent) if self.intent is not None else None,
+            "waiting_input": self.waiting_input,
+            "input_fp": self.input_fp,
         }
 
 
@@ -220,6 +234,8 @@ class Outbox:
                     str(raw["next_retry_at"]) if raw.get("next_retry_at") is not None else None
                 ),
                 intent=raw.get("intent") if isinstance(raw.get("intent"), Mapping) else None,
+                waiting_input=bool(raw.get("waiting_input") or False),
+                input_fp=str(raw["input_fp"]) if raw.get("input_fp") is not None else None,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -260,6 +276,8 @@ class Outbox:
         result: Mapping[str, Any] | None = None,
         error_class: str | None = None,
         next_retry_at: str | None = None,
+        refund_attempt: bool = False,
+        waiting_input: bool = False,
     ) -> bool:
         """Record the outcome, fenced by generation. False = rejected or skipped.
 
@@ -270,6 +288,14 @@ class Outbox:
         ``next_retry_at`` is the push-side backoff schedule for a failed attempt
         (``None`` = eligible immediately); the attempt count is carried so the
         dead-letter decision has the full history.
+
+        ``refund_attempt`` gives the attempt back (R12): outcomes that are NOT
+        the client's failure -- a deterministic refusal that waits for input, or
+        a 412 from a concurrent remote edit -- must not walk a healthy link
+        toward the dead-letter cap. ``waiting_input`` marks a deterministic
+        refusal whose retry needs the projection INPUT to change; with it set the
+        record carries no backoff and ``_skip_reason`` answers
+        ``awaiting-input-change``.
         """
         with self._locked() as held:
             if not held:
@@ -282,6 +308,7 @@ class Outbox:
                 # a rewrite. A pending-reconciliation record IS settleable: its
                 # replay is the worker that owns that same generation.
                 return False
+            attempts = max(0, record.attempts - 1) if refund_attempt else record.attempts
             settled = OutboxRecord(
                 operation_id=record.operation_id,
                 kind=record.kind,
@@ -293,9 +320,11 @@ class Outbox:
                 updated_at=now_iso(),
                 result=dict(result) if result is not None else None,
                 error_class=error_class,
-                attempts=record.attempts,
-                next_retry_at=next_retry_at if error_class else None,
+                attempts=attempts,
+                next_retry_at=(next_retry_at if error_class and not waiting_input else None),
                 intent=None,
+                waiting_input=bool(waiting_input),
+                input_fp=record.input_fp,
             )
             self._atomic_write(settled)
         return True
@@ -328,6 +357,7 @@ class Outbox:
                 attempts=record.attempts,
                 next_retry_at=record.next_retry_at,
                 intent=dict(intent),
+                input_fp=record.input_fp,
             )
             self._atomic_write(nxt)
         return True
@@ -340,6 +370,7 @@ class Outbox:
         local_id: str,
         max_attempts: int = PUSH_MAX_ATTEMPTS,
         now: str | None = None,
+        input_fp: str | None = None,
     ) -> "Attempt | None":
         """Start (or resume) an attempt; ``None`` = skip this tick.
 
@@ -350,12 +381,17 @@ class Outbox:
         * no record -> fresh enqueue, attempt 1;
         * ``pending-reconciliation`` -> an UNCERTAIN prior attempt: resume with the
           SAME generation and hand back its stored intent for a verbatim replay
-          (no new projection, no new preview); an intent-less legacy record is
-          skipped (``None``) rather than re-projected into a fresh create;
+          (no new projection, no new preview); an intent-less legacy record waits
+          for its INPUT to change (a changed projection may start fresh) rather
+          than re-projecting an unchanged one into a fresh create;
         * ``done`` -> a NEW authored change: reset the attempt counter, fence the
           old worker with a new generation;
-        * ``failed`` -> after ``next_retry_at`` and under the attempt cap, fence
-          and start the next attempt; over the cap -> skipped (``None``).
+        * ``failed`` -> a DETERMINISTIC refusal (``waiting_input``) is skipped
+          while the input fingerprint is unchanged and re-armed the moment it
+          differs (retrying the same bytes cannot change the answer); a
+          RETRYABLE failure waits out ``next_retry_at`` and the attempt cap;
+          either way a CHANGED fingerprint resets the counter, so a deliberate
+          new edit re-arms a capped operation (round-2 R12).
         """
         at = now or now_iso()
         with self._locked() as held:
@@ -374,11 +410,14 @@ class Outbox:
                     updated_at=at,
                     attempts=1,
                 )
-                self._atomic_write(record)
+                self._atomic_write(dataclasses.replace(record, input_fp=input_fp))
                 return Attempt(generation=1, attempts=1)
+            changed = input_fp is not None and input_fp != record.input_fp
             if record.state == "pending-reconciliation":
                 if not isinstance(record.intent, Mapping):
-                    return None  # cannot replay what was never stored: dead-lettered
+                    if not changed:
+                        return None  # nothing to replay; wait for the input to move
+                    return self._begin(record, attempts=1, at=at, input_fp=input_fp)
                 return Attempt(
                     generation=record.generation,
                     attempts=record.attempts,
@@ -387,19 +426,27 @@ class Outbox:
             if record.state == "pending":
                 # An abandoned attempt (crash between begin and settle): fence it.
                 attempts = record.attempts + 1
-                if attempts > max_attempts:
+                if attempts > max_attempts and not changed:
                     return None
-                return self._begin(record, attempts=attempts, at=at)
+                return self._begin(
+                    record, attempts=1 if changed else attempts, at=at, input_fp=input_fp
+                )
             if record.state == "done":
-                return self._begin(record, attempts=1, at=at)
+                return self._begin(record, attempts=1, at=at, input_fp=input_fp)
             # failed
-            if record.attempts >= max_attempts:
+            if record.waiting_input and not changed:
+                return None  # deterministic refusal: skip until the input changes
+            if record.attempts >= max_attempts and not changed:
                 return None
-            if record.next_retry_at is not None and at < record.next_retry_at:
+            if not changed and record.next_retry_at is not None and at < record.next_retry_at:
                 return None  # backoff window: skip this tick without burning an attempt
-            return self._begin(record, attempts=record.attempts + 1, at=at)
+            return self._begin(
+                record, attempts=1 if changed else record.attempts + 1, at=at, input_fp=input_fp
+            )
 
-    def _begin(self, record: OutboxRecord, *, attempts: int, at: str) -> "Attempt":
+    def _begin(
+        self, record: OutboxRecord, *, attempts: int, at: str, input_fp: str | None = None
+    ) -> "Attempt":
         nxt = OutboxRecord(
             operation_id=record.operation_id,
             kind=record.kind,
@@ -410,6 +457,7 @@ class Outbox:
             created_at=record.created_at,
             updated_at=at,
             attempts=attempts,
+            input_fp=input_fp if input_fp is not None else record.input_fp,
         )
         self._atomic_write(nxt)
         return Attempt(generation=nxt.generation, attempts=attempts)
@@ -445,6 +493,7 @@ class Outbox:
                 attempts=record.attempts,
                 next_retry_at=record.next_retry_at,
                 intent=record.intent,
+                input_fp=record.input_fp,
             )
             self._atomic_write(nxt)
         return True
@@ -470,6 +519,7 @@ class Outbox:
                 created_at=record.created_at,
                 updated_at=now_iso(),
                 attempts=record.attempts + 1,
+                input_fp=record.input_fp,
             )
             self._atomic_write(nxt)
         return nxt.generation

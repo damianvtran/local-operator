@@ -447,6 +447,14 @@ class HubSyncRunner:
             policy = policies.get(c.link_id) if c.link_id else None
             if policy is None or not policy.auto_push:
                 continue
+            if c.verdict == "unavailable":
+                # A check whose FETCH failed knows nothing about the remote; a
+                # push built on it would be a guess (and, before this guard, a
+                # multi-tick source outage burned the dead-letter cap on a
+                # healthy link -- round-2 R12b). Skip with the check's own named
+                # reason; nothing is attempted and nothing is settled.
+                self._mark_push_skipped(ctx, c, str(c.reason or "unavailable"))
+                continue
             item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
             if not st.push_due(item, settings.interval_min) or not st.auto_apply_due(item):
                 continue
@@ -541,16 +549,21 @@ class HubSyncRunner:
             # explain why an enabled auto-push is not publishing.
             self._mark_push_skipped(ctx, c, "no-outbound-receipt")
             return
-        # The revision the merge derives from: the CHECK-time remote revision when
-        # the fetch exposed one, else the last accepted receipt revision. The
+        # The revision the merge derives from: the CHECK-time remote revision
+        # when the fetch exposed one, else the last ACCEPTED receipt revision
+        # (the value the server itself minted at the previous successful push),
+        # NEVER the stale inbound baseline -- that stale If-Match produced a
+        # forever-412 after the first successful push (round-2 QN2b). The
         # transport refuses an EMPTY one; there is no unconditional-write path.
-        expected = c.remote_revision or record.remote_revision
+        outbound = record.outbound
+        assert outbound is not None  # narrowed once; the calls below re-widen the attribute
+        expected = c.remote_revision or outbound.remote_revision
         budget = OperationBudget.start("automatic", self._operation_id(c), 1)
         outcome = await push_item(
             kind=c.kind,
             local_id=c.local_id,
-            captured_local=record.outbound.local_fields,
-            accepted=record.outbound.accepted_fields,
+            captured_local=outbound.local_fields,
+            accepted=outbound.accepted_fields,
             current_local=c.local or {},
             remote_latest=c.remote or {},
             expected_revision=expected,

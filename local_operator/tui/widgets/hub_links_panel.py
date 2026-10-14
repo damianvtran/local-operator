@@ -840,8 +840,10 @@ class HubLinksPanel(Static):
                 )
             )
         # D18: more than one link means the arrows SELECT; below the cap that is
-        # still the way to move between rows, so it is not scroll-only.
-        if len(self._visible_rows()) > 1:
+        # still the way to move between rows, so it is not scroll-only. QN6: only
+        # while ENGAGED -- before that the `↑↓ to begin` hint already shows the
+        # same arrows, and the pair read as "↑↓ to begin · ↑↓ select".
+        if self._engaged and len(self._visible_rows()) > 1:
             segments.append(_t(_k.hint_select()))
         segments.append(_t(_k.hint_subscribe()))
         segments.append(_t(_k.hint_auto_push()))

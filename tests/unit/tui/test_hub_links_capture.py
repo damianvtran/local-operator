@@ -603,6 +603,55 @@ async def test_capture_round2_remediation_frames(
     )
 
     # Assert THIS test's own round-2 frames by name (shared OUT dir).
+    # QN6: TWO links, NOT engaged -- the frame where `↑↓ to begin` and
+    # `↑↓ select` used to stack into "↑↓ to begin · ↑↓ select". The hint row now
+    # shows the arrows ONCE until a bound key engages the card.
+    await _capture(
+        "engage-single-hint",
+        size=(100, 30),
+        links=[
+            dict(
+                local_id="a1",
+                name="alpha",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            ),
+            dict(
+                local_id="a2",
+                name="bravo",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            ),
+        ],
+    )
+    # Q11: an ORG-PRIVATE row's scope separator at 100x30. The designer reported
+    # `priv-agent– Private` (no space before the dash); the row is composed with
+    # explicit spaces (hub_links.py `_render_row`), so this frame is the evidence
+    # for whichever way it reads.
+    await _capture(
+        "org-private-100x30",
+        size=(100, 30),
+        links=[
+            dict(
+                local_id="p1",
+                name="priv-agent",
+                visibility="org",
+                tenant="Acme",
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
     for name in (
         "narrow-40x24",
         "footer-all-three",
@@ -610,6 +659,8 @@ async def test_capture_round2_remediation_frames(
         "consent-public",
         "consent-public-40x24",
         "multi-link-select",
+        "engage-single-hint",
+        "org-private-100x30",
     ):
         svg = OUT / f"{name}.svg"
         assert svg.exists() and "<svg" in svg.read_text()[:200], name

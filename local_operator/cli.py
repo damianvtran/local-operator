@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 
     from local_operator.agents import AgentData, AgentRegistry
     from local_operator.clients.radient import RadientClient
+    from local_operator.hub_sync.identity import Kind
 
 from local_operator.helpers import setup_cross_platform_environment
 
@@ -11711,12 +11712,87 @@ def _confirm_plan(
     )
 
 
+def _seed_after_publish(
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None", result: Any
+) -> None:
+    """Seed the outbound receipt after an ACCEPTED CLI publish (parent ruling (A)b).
+
+    The accepted result carries the canonical document and the server's opaque
+    ETag; A is the local input that was published. BEST-EFFORT AND SILENT on
+    failure: the publication itself succeeded, and the link honestly stays
+    ``no-receipt`` (the inventory says so) until the next seed point.
+    """
+
+    if not seed or not isinstance(result, Mapping):
+        return
+    config_dir, kind, local_id, local_fields = seed
+    try:
+        from local_operator.hub_sync.service import seed_receipt_after_publish
+
+        seed_receipt_after_publish(
+            config_dir,
+            kind,
+            local_id,
+            accepted=result.get("accepted_document") or {},
+            local_fields=dict(local_fields),
+            revision=str(result.get("revision") or "") or None,
+        )
+    except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
+        return
+
+
+def _seed_context_agent(
+    agent_registry: Any, agent: Any, document: Mapping[str, Any]
+) -> "tuple[Any, Kind, str, Mapping[str, Any]] | None":
+    """The seeding context of an accepted agent publish (None when unknowable)."""
+
+    try:
+        local_id = str(getattr(agent, "id", "") or "")
+        if not local_id:
+            return None
+        return (
+            agent_registry.config_dir,
+            "agent",
+            local_id,
+            {
+                "instructions": str(document.get("instructions") or ""),
+                "description": str(document.get("description") or ""),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _seed_context_team(
+    team_registry: Any, team: Any
+) -> "tuple[Any, Kind, str, Mapping[str, Any]] | None":
+    """The seeding context of an accepted team publish (None when unknowable)."""
+
+    try:
+        from local_operator.hub_sync import provenance as prov
+
+        local_id = str(getattr(team, "id", "") or "")
+        if not local_id:
+            return None
+        fields = prov.team_fields(
+            description=str(getattr(team, "description", "") or ""),
+            manager=str(getattr(team, "manager", "") or ""),
+            members=getattr(team, "members", None),
+            instructions=str(getattr(team, "instructions", "") or ""),
+            project=str(getattr(team, "project", "") or ""),
+        )
+        return team_registry.config_dir, "team", local_id, fields
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _publish_against_old_server(
     client: Any,
     kind: str,
     document: Mapping[str, Any],
     target: _PublishTarget,
     flags: argparse.Namespace,
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None" = None,
 ) -> "tuple[int, Optional[dict[str, Any]]]":
     """The pre-preview hub: warn, confirm with a plain yes/no, publish as before (§4.5).
 
@@ -11757,6 +11833,7 @@ def _publish_against_old_server(
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
+    _seed_after_publish(seed, result)
     return 0, result
 
 
@@ -11767,6 +11844,7 @@ def _publish_with_preview(
     target: _PublishTarget,
     base: Any,
     flags: argparse.Namespace,
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None" = None,
 ) -> "tuple[int, Optional[dict[str, Any]]]":
     """Preview -> show -> confirm -> commit, for every instruction-set transport (§7.3).
 
@@ -11820,7 +11898,7 @@ def _publish_with_preview(
         return 130, None
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         if _is_missing_preview_route(exc):
-            return _publish_against_old_server(client, kind, document, target, flags)
+            return _publish_against_old_server(client, kind, document, target, flags, seed=seed)
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
 
@@ -11841,6 +11919,7 @@ def _publish_with_preview(
     while True:
         try:
             result = _commit_publication(client, kind, target, plan)
+            _seed_after_publish(seed, result)
             return 0, result
         except KeyboardInterrupt:
             # The commit was in flight, so unlike the preview the hub may still
@@ -11968,7 +12047,15 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
             return stop
 
     target = _PublishTarget("org", tenant, hub_id, f"organization '{tenant}'")
-    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "agent",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_agent(agent_registry, agent, document),
+    )
     if code != 0:
         return code
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
@@ -12117,7 +12204,15 @@ def agents_push_public_republish_command(
         return stop
 
     target = _PublishTarget("public", None, hub_id, "the public hub")
-    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "agent",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_agent(agent_registry, agent, document),
+    )
     if code != 0:
         return code
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
@@ -12402,7 +12497,15 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         if stop is not None:
             return stop
 
-    code, result = _publish_with_preview(client, "team", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "team",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_team(team_registry, team),
+    )
     if code != 0:
         return code
     info = result.get("team") if isinstance(result, dict) else None

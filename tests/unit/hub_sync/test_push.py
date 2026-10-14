@@ -92,6 +92,14 @@ class FakeTransport:
     async def commit(
         self, *, document, preview_token, accept_unresolved, expected_revision, budget
     ):
+        # CLOSED-DECODER FAKE: the server's commit route reads the BARE document
+        # (closed key set per family; an envelope key is refused verbatim as
+        # "preview_version is not a recognised field" -- agent-server@bdd03ab,
+        # internal/requests/skills.go + docs/HUB-REVISIONS.md:35-37). A fake that
+        # accepted the envelope would let R11 regress unnoticed.
+        if "preview_version" in document or "document" in document:
+            raise PushRefused("invalid_skill_document", "preview_version is not a recognised field")
+
         self.commit_calls.append(
             {
                 "document": dict(document),
@@ -252,16 +260,36 @@ def test_a_failed_push_waits_for_its_backoff_window(tmp_path: Path) -> None:
 
 
 def test_a_dead_lettered_record_is_skipped_without_requests(tmp_path: Path) -> None:
+    from local_operator.hub_sync.push import _projection_fingerprint
+
     out = Outbox(tmp_path)
     out.enqueue(operation_id="op1", kind="agent", local_id="a1", direction="push", generation=1)
+    # The SAME projection input ``_run`` will compute, so the capped record can
+    # tell "the same input again" (skip) from "a deliberate new edit" (re-arm).
+    fp = _projection_fingerprint(
+        kind="agent",
+        captured_local=A,
+        accepted=A,
+        current_local=EDITED,
+        remote_latest=A,
+        expected_revision="rev-a",
+    )
     for _ in range(PUSH_MAX_ATTEMPTS):
-        attempt = out.begin_attempt("op1", kind="agent", local_id="a1")
+        attempt = out.begin_attempt("op1", kind="agent", local_id="a1", input_fp=fp)
         assert attempt is not None
         assert out.settle("op1", generation=attempt.generation, error_class="hub-error")
     server = FakeTransport()
     outcome, _out2, _server2 = asyncio.run(_run(tmp_path, transport=server))
     assert outcome.state == "skipped" and outcome.reason == "push-retries-exhausted"
     assert server.preview_calls == [] and server.commit_calls == []
+
+    # A CHANGED input re-arms the capped operation (round-2 R12a): retrying the
+    # same bytes cannot change the answer, but a new edit deserves a fresh budget.
+    changed = {"instructions": "# A\nbase rule\nANOTHER\n", "description": "d"}
+    again, _out3, server3 = asyncio.run(
+        _run(tmp_path, transport=FakeTransport(), current_local=changed)
+    )
+    assert again.state == "pushed" and len(server3.preview_calls) == 1
 
 
 def test_no_outbound_receipt_refuses_without_touching_the_outbox(tmp_path: Path) -> None:
@@ -322,7 +350,10 @@ def test_the_http_transport_previews_and_commits_on_the_frozen_wire() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
+        body = json.loads(request.content)
         if request.url.path.endswith("/preview"):
+            # The PREVIEW request envelope: only preview_version/document/base_document.
+            assert set(body) <= {"preview_version", "document", "base_document"}
             return httpx.Response(
                 200,
                 json={
@@ -335,6 +366,14 @@ def test_the_http_transport_previews_and_commits_on_the_frozen_wire() -> None:
                         "pin": {"token": "pin-1"},
                     },
                 },
+            )
+        # The COMMIT route reads the BARE document: any envelope key is refused by
+        # the real server ("preview_version is not a recognised field"), so this
+        # fake answers exactly as the server would.
+        if "preview_version" in body or "document" in body:
+            return httpx.Response(
+                422,
+                json={"error": {"code": "invalid_skill_document", "field": "preview_version"}},
             )
         return httpx.Response(
             200,
@@ -384,9 +423,12 @@ def test_the_http_transport_previews_and_commits_on_the_frozen_wire() -> None:
         assert dict(request.url.params) == {"visibility": "org", "tenant_id": "t1"}
     envelope = json.loads(first.content)
     assert envelope["preview_version"] == 1 and "document" in envelope
-    # The commit carries the preview pin and the PREVIEW-returned document.
+    # The commit carries the preview pin AND the BARE preview-returned document:
+    # no envelope (round-2 R11 -- the server's commit decoders are closed, and
+    # docs/HUB-REVISIONS.md:35-37 says "Commit sends only the returned
+    # result.document").
     assert second.headers["X-Radient-Preview-Token"] == "pin-1"
-    assert json.loads(second.content)["document"] == {"instructions": "# generalized\n"}
+    assert json.loads(second.content) == {"instructions": "# generalized\n"}
 
 
 def test_the_http_transport_stale_commit_maps_to_412_and_repreviews() -> None:
@@ -548,3 +590,115 @@ def test_a_replay_skips_when_the_record_left_the_uncertain_attempt(
     assert raced2.state == "skipped" and raced2.reason == "reconciliation-required"
     assert server2.commit_calls == []
     assert _stored(out2, "op1").state == "pending-reconciliation"  # untouched by us
+
+
+def test_a_preview_deadline_is_retryable_and_the_next_healthy_tick_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R12c: a PREVIEW-stage deadline owes nothing -- backoff, then it republishes.
+
+    The old code marked it pending-reconciliation with NO stored intent, which
+    ``begin_attempt`` then skipped forever ("reconciliation-required"). Nothing
+    was dispatched, so retrying is the honest answer.
+    """
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    wonky = FakeTransport(fail_preview=OperationDeadlineExceeded("preview over budget"))
+    outcome, out, server = asyncio.run(_run(tmp_path, transport=wonky))
+    assert outcome.state == "refused" and outcome.reason == "deadline"
+    record = _stored(out, "op1")
+    assert record.state == "failed" and record.waiting_input is False and record.next_retry_at
+    assert server.commit_calls == []  # nothing was dispatched
+
+    # The backoff window passes (fake clock), then a healthy tick publishes.
+    future = ["2099-01-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda: future[0])
+    replay, _o2, server2 = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert replay.state == "pushed" and len(server2.preview_calls) == 1
+
+
+def test_five_deterministic_refusals_wait_for_input_instead_of_dead_lettering(
+    tmp_path: Path,
+) -> None:
+    """R12a + R15: a refusal retrying the SAME bytes cannot change never burns the cap.
+
+    Five consecutive ticks of an unsatisfiable projection (a skill whose remote
+    latest is empty) must leave the attempt counter alone and wait for the INPUT
+    to move; a changed input then proceeds on the SAME record.
+    """
+
+    skill_md = "---\nname: s\ndescription: d\n---\n\nbody\n"
+    skill = {
+        "document_version": 1,
+        "name": "s",
+        "description": "d",
+        "files": [{"path": "SKILL.md", "content": skill_md}],
+    }
+    first, out, server = asyncio.run(
+        _run(
+            tmp_path,
+            transport=FakeTransport(),
+            kind="skill",
+            captured_local=skill,
+            accepted=skill,
+            current_local=skill,
+            remote_latest={},
+        )
+    )
+    assert first.state == "needs-review" and first.reason == "merge-refused"
+    assert server.preview_calls == []
+    # Ticks 2..5: the SAME input is skipped BY NAME, not retried into the cap.
+    for _ in range(4):
+        again, _o, server_n = asyncio.run(
+            _run(
+                tmp_path,
+                transport=FakeTransport(),
+                kind="skill",
+                captured_local=skill,
+                accepted=skill,
+                current_local=skill,
+                remote_latest={},
+            )
+        )
+        assert again.state == "skipped" and again.reason == "awaiting-input-change"
+        assert server_n.preview_calls == []
+    record = _stored(out, "op1")
+    assert record.attempts == 0 and record.waiting_input is True
+
+    good, _o2, server2 = asyncio.run(
+        _run(
+            tmp_path,
+            transport=FakeTransport(),
+            kind="skill",
+            captured_local=skill,
+            accepted=skill,
+            current_local=skill,
+            remote_latest=skill,
+        )
+    )
+    assert good.state == "pushed" and len(server2.preview_calls) == 1
+
+
+def test_five_conflicts_refund_their_attempts_and_a_quiet_remote_proceeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R12d: 412s back off but never dead-letter an actively edited link."""
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    for i in range(5):
+        future = [f"2099-01-0{i + 1}T00:00:00Z"]
+        monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+        outcome, out, _server = asyncio.run(
+            _run(tmp_path, transport=FakeTransport(fail_commit=RemoteRevisionChanged()))
+        )
+        assert outcome.state == "conflict"
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.attempts == 0  # conflicts are refunded, never counted
+    assert record.state == "failed"
+
+    future = ["2099-02-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda: future[0])
+    quiet, _o2, server2 = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert quiet.state == "pushed" and len(server2.commit_calls) == 1

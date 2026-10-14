@@ -275,6 +275,33 @@ class SkillDocument:
         if len(self.wire_bytes()) > MAX_WIRE_BYTES:
             raise _large("skill encoded JSON exceeds 2 MiB")
 
+    #: The manifest's OWN fields: everything the CLIENT's SkillDocument model
+    #: carries. A hub DETAIL response (server source, agent-server@bdd03ab,
+    #: internal/responses/skills.go HubSkillResponse) wraps the manifest in
+    #: METADATA keys (content_revision, revision, sync_contract, id, tenant_id,
+    #: account_id, account_metadata, visibility, moderation, created_date,
+    #: updated_at) and may also carry a server-side `version` the client model
+    #: does not store; the manifest is the subset below. The server documents
+    #: this shape ONLY in that struct and docs/swagger.json --
+    #: docs/HUB-REVISIONS.md predates the skill routes and does not claim them.
+    MANIFEST_KEYS = ("document_version", "name", "description", "files")
+
+    @classmethod
+    def from_remote(cls, value: Mapping[str, Any]) -> "SkillDocument":
+        """Build a manifest from a hub DETAIL payload, ignoring METADATA keys.
+
+        The manifest itself stays STRICT (``from_json`` on the filtered subset):
+        a wrong document_version, a bad file, an oversized set still refuses.
+        What is tolerated is the response ENVELOPE, so one extra server-side key
+        can never raise out of a check and take other kinds' checks down with it
+        (round-2 QN1).
+        """
+
+        if not isinstance(value, Mapping):
+            raise _invalid("the remote skill payload is not an object")
+        subset = {key: value[key] for key in cls.MANIFEST_KEYS if key in value}
+        return cls.from_json(subset)
+
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> "SkillDocument":
         if not isinstance(value, Mapping) or set(value) != {

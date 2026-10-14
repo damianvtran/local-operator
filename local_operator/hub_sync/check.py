@@ -97,6 +97,23 @@ class ItemCheck:
     #: observation is what makes a source's revision-CAS capability ATTESTED (the
     #: status store records it per source; eligibility reads that record).
     sync_contract: Mapping[str, Any] | None = None
+    #: The NORMALIZED credential-free base this check's response actually came
+    #: FROM (round-2 R14). The attestation is keyed by this, never by the link's
+    #: recorded source: only the base that answered can be trusted for what the
+    #: answer proved, and eligibility still requires it to equal the link's
+    #: ``hub_source``.
+    served_by: str | None = None
+
+
+def _served_by(client: Any) -> str | None:
+    """The normalized base a response actually came from (None when unreadable)."""
+
+    from local_operator.hub_sync.identity import normalize_source
+
+    try:
+        return normalize_source(str(getattr(client, "base_url", "")).rstrip("/"))
+    except Exception:  # noqa: BLE001 - an unreadable base cannot be credited to anyone
+        return None
 
 
 def _remote_meta(document: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
@@ -243,6 +260,22 @@ def check_hub_agents(
             continue
         remote = _agent_fields(text, desc)
         remote_fp = prov.fingerprint_agent(remote["instructions"], remote["description"])
+        # LIVE REVISION + CONTRACT from the DETAIL read (server source:
+        # internal/responses/agent.go AgentResponse carries `revision` and
+        # `sync_contract`). The legacy zip pull cannot expose either, which made
+        # agent auto-push unverifiable (round-2 QN2a); a detail failure only
+        # leaves them None -- the push then refuses by name, never unconditionally.
+        detail_payload: Mapping[str, Any] | None = None
+        try:
+            fetched = client.get_agent(hub_id, **{"with_credential": bool(tenant)})
+            if isinstance(fetched, Mapping):
+                detail_payload = fetched
+        except Exception:  # noqa: BLE001 - metadata is additive; the zip already landed
+            detail_payload = None
+        revision, sync_contract = (
+            _remote_meta(detail_payload) if detail_payload is not None else (None, None)
+        )
+        served_by = _served_by(client)
 
         base_fields: Mapping[str, Any] | None = None
         base_fp: str | None = None
@@ -291,6 +324,9 @@ def check_hub_agents(
                     if record is not None and record.identity is not None
                     else None
                 ),
+                remote_revision=revision,
+                sync_contract=sync_contract,
+                served_by=served_by,
             )
         )
     return checks
@@ -419,6 +455,7 @@ def check_hub_teams(
                     local=local,
                     reason=reason,
                     detail=detail,
+                    served_by=_served_by(client),
                 )
             )
             continue
@@ -437,6 +474,7 @@ def check_hub_teams(
                     local=local,
                     reason="hub-error",
                     detail=f"the hub now reports this team under organization {owner}",
+                    served_by=_served_by(client),
                 )
             )
             continue
@@ -478,6 +516,7 @@ def check_hub_teams(
                 detail=note,
                 remote_revision=revision,
                 sync_contract=sync_contract,
+                served_by=_served_by(client),
             )
         )
     return checks
@@ -594,10 +633,34 @@ def check_hub_skills(
                     reason=reason,
                     detail=detail,
                     link_id=record.identity.link_id if record.identity is not None else None,
+                    served_by=_served_by(client),
                 )
             )
             continue
-        remote = adapter.canonical_fields(document)
+        try:
+            remote = adapter.canonical_fields(document)
+        except Exception as error:  # noqa: BLE001 - one bad payload stays ONE item
+            # A malformed/unknown-key remote payload is a named per-item
+            # 'unavailable', never an exception out of check_items: before this
+            # guard, ONE metadata key in a skill GET crashed the whole tick and
+            # took the agent/team checks with it (round-2 QN1).
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason="invalid-remote-manifest",
+                    detail=str(error)[:200],
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                    served_by=_served_by(client),
+                )
+            )
+            continue
         # Source-name space: the local alias is display-only, but the manifest
         # name is part of the document the engine fingerprints and merges. Rename
         # the LOCAL copy's name to the remote spelling for comparison so a local
@@ -635,15 +698,25 @@ def check_hub_skills(
                 link_id=record.identity.link_id if record.identity is not None else None,
                 remote_revision=revision,
                 sync_contract=sync_contract,
+                served_by=_served_by(client),
             )
         )
     return checks
 
 
 def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
-    """Default skill fetch: the client's manifest pull, through the tested seam."""
+    """Default skill fetch: the client's manifest pull, through the tested seam.
 
-    return client.get_skill(skill_id, timeout=timeout)
+    PUBLIC skill rows are readable UNAUTHENTICATED -- the server registers
+    ``GET /v1/skills/:skillid`` behind optionalAuth (routes.go:453, checked at
+    agent-server@bdd03ab) -- so the anonymous client must not demand a key while
+    the signed-in client still carries its bearer (an org row answers 404 to
+    anyone who cannot prove membership). Before this, a public skill link was
+    'unavailable: Radient API key is required' with zero requests (round-2 QN3).
+    """
+
+    send_bearer = bool(getattr(client, "api_key", None))
+    return client.get_skill(skill_id, timeout=timeout, **{"with_credential": send_bearer})
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:

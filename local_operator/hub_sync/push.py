@@ -204,15 +204,28 @@ class HttpPushTransport:
         headers = dict(self._headers)
         headers.update(extra_headers)
         headers[ETAG_IF_MATCH] = expected_revision
+        # WIRE FACT (verified against the server source, agent-server@bdd03ab,
+        # internal/controllers/generalization_preview.go + internal/requests/skills.go):
+        # PREVIEW takes the envelope {preview_version, document[, base_document]};
+        # the COMMIT route reads the BARE document with a closed field set -- any
+        # top-level envelope key is refused as "not a recognised field" -- and the
+        # pin travels in the X-Radient-Preview-Token header, with the SAME If-Match
+        # as its preview (docs/HUB-REVISIONS.md: "Commit sends only the returned
+        # result.document"). The document a commit sends is the one the PREVIEW
+        # RETURNED, which the caller already carries.
+        envelope = path.endswith("/preview")
+        json_body = (
+            {"preview_version": 1, "document": dict(document)} if envelope else dict(document)
+        )
         try:
             response = await self._dispatcher.send(
                 "PUT",
                 f"{self._base}{path}",
                 budget=budget,
-                json_body={"preview_version": 1, "document": dict(document)},
+                json_body=json_body,
                 headers=headers,
                 params=self._params,
-                stage="preview" if path.endswith("/preview") else "commit",
+                stage="preview" if envelope else "commit",
             )
         except OperationDeadlineExceeded:
             raise
@@ -317,7 +330,12 @@ async def push_item(
         # Checked BEFORE any outbox write: a refusal must not even fence a record.
         return PushOutcome("refused", reason="no-outbound-receipt")
 
-    attempt: Attempt | None = outbox.begin_attempt(operation_id, kind=kind, local_id=local_id)
+    input_fp = _projection_fingerprint(
+        kind, captured_local, accepted, current_local, remote_latest, expected_revision
+    )
+    attempt: Attempt | None = outbox.begin_attempt(
+        operation_id, kind=kind, local_id=local_id, input_fp=input_fp
+    )
     if attempt is None:
         # Dead-lettered (over the attempt cap), inside its backoff window, or an
         # unreplayable uncertain record: skip with a NAMED status. The caller
@@ -351,8 +369,7 @@ async def push_item(
         # refuse by NAME here rather than crashing the tick (the projection's
         # KeyError is a programming-shape signal, not a transport failure).
         code = exc.code if isinstance(exc, LinkError) else "unsupported-kind"
-        outbox.settle(operation_id, generation=generation, error_class=code)
-        return PushOutcome("refused", operation_id=operation_id, reason=code)
+        return _settle_deterministic(outbox, operation_id, generation, code)
 
     # SETTLE THE NO-OP BEFORE ANY PAID CALL: if the projected document is already
     # what the hub holds, there is nothing to accept and no preview/model is paid.
@@ -362,13 +379,20 @@ async def push_item(
 
     refusal = refuses(projection)
     if refusal is not None:
-        outbox.settle(operation_id, generation=generation, error_class=refusal)
-        return PushOutcome("needs-review", operation_id=operation_id, reason=refusal)
+        return _settle_deterministic(
+            outbox, operation_id, generation, refusal, state="needs-review"
+        )
+    if kind == "skill" and not projection.fields:
+        # Belt and braces (R15): an EMPTY skill projection must never reach the
+        # wire as a document; the server's manifest decoder would refuse it, and
+        # a previous path could project exactly that from an empty remote.
+        return _settle_deterministic(
+            outbox, operation_id, generation, "merge-refused", state="needs-review"
+        )
 
     expected = str(expected_revision or "").strip()
     if not expected:
-        outbox.settle(operation_id, generation=generation, error_class="unsupported-precondition")
-        return PushOutcome("refused", operation_id=operation_id, reason="unsupported-precondition")
+        return _settle_deterministic(outbox, operation_id, generation, "unsupported-precondition")
 
     try:
         document = dict(
@@ -379,8 +403,7 @@ async def push_item(
     except Exception as exc:  # noqa: BLE001 - a local builder refusal has a named class
         code = _refusal_of(exc)
         logger.debug("hub publish document refused for %s %s: %s", kind, local_id, exc)
-        outbox.settle(operation_id, generation=generation, error_class=code)
-        return PushOutcome("refused", operation_id=operation_id, reason=code)
+        return _settle_deterministic(outbox, operation_id, generation, code)
 
     try:
         preview = await transport.preview(
@@ -391,18 +414,18 @@ async def push_item(
     except PushRefused as exc:
         return _settle_refused(outbox, operation_id, generation, exc.code)
     except OperationDeadlineExceeded:
-        # An aborted preview is UNCERTAIN, not failed: the server may or may not
-        # have recorded it. Leave the intent pending for reconciliation rather
-        # than settling a definitive failure the client cannot actually prove.
-        outbox.mark_pending_reconciliation(operation_id, generation=generation)
-        return PushOutcome("pending-reconciliation", operation_id=operation_id, reason="deadline")
+        # A PREVIEW-stage deadline owes NOTHING: no commit was dispatched, so
+        # nothing can have been written. Retry with backoff -- an intent-less
+        # pending-reconciliation here used to wedge the record forever
+        # (round-2 R12c). Only a COMMIT-stage deadline is uncertain.
+        return _settle_deadline(outbox, operation_id, generation)
 
     # POSITIVE CAS VERIFICATION before the commit spends anything further: the
     # preview must name the SAME revision our merge derived from, and a preview
     # that names none cannot be verified at all.
     observed = str(preview.get("revision") or "")
     if not observed:
-        return _settle_refused(outbox, operation_id, generation, "unsupported-precondition")
+        return _settle_deterministic(outbox, operation_id, generation, "unsupported-precondition")
     if observed != expected:
         return _settle_conflict(outbox, operation_id, generation)
 
@@ -412,16 +435,15 @@ async def push_item(
         # An unattended push never auto-acknowledges unclassified values: the
         # publisher's own confirmation is the point of the ack, and value privacy
         # depends on it. Stop safely with the ids recorded for a manual surface.
-        outbox.settle(operation_id, generation=generation, error_class="generalization-needs-ack")
-        return PushOutcome(
-            "needs-review", operation_id=operation_id, reason="generalization-needs-ack"
+        return _settle_deterministic(
+            outbox, operation_id, generation, "generalization-needs-ack", state="needs-review"
         )
 
     preview_document = preview.get("document")
     pin = preview.get("pin")
     token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
     if not isinstance(preview_document, Mapping) or not token:
-        return _settle_refused(outbox, operation_id, generation, "unsupported-precondition")
+        return _settle_deterministic(outbox, operation_id, generation, "unsupported-precondition")
 
     # DURABLE INTENT BEFORE THE COMMIT LEAVES: a crash or deadline after this
     # write can replay exactly these bytes (same pin/body/expected revision).
@@ -529,13 +551,92 @@ async def _replay_verbatim(
 
 
 def _settle_conflict(outbox: Outbox, operation_id: str, generation: int) -> PushOutcome:
+    # A 412 is a CONCURRENT REMOTE EDIT, not a client failure: it gets a backoff
+    # (so a busy remote is not hammered) but the attempt is REFUNDED so conflicts
+    # alone can never walk an actively edited link into the dead-letter cap
+    # (round-2 R12d).
     outbox.settle(
         operation_id,
         generation=generation,
         error_class="remote-revision-changed",
         next_retry_at=_retry_at(generation, outbox, operation_id),
+        refund_attempt=True,
     )
     return PushOutcome("conflict", operation_id=operation_id, reason="remote-revision-changed")
+
+
+def _settle_deterministic(
+    outbox: Outbox,
+    operation_id: str,
+    generation: int,
+    code: str,
+    *,
+    state: str = "refused",
+) -> PushOutcome:
+    """A refusal retrying the SAME input cannot change (needs-review, no-op rules,
+    an invalid document, a missing revision): settle without backoff, REFUND the
+    attempt and wait for the INPUT fingerprint to move (round-2 R12a)."""
+
+    outbox.settle(
+        operation_id,
+        generation=generation,
+        error_class=code,
+        refund_attempt=True,
+        waiting_input=True,
+    )
+    return PushOutcome(state, operation_id=operation_id, reason=code)
+
+
+def _settle_deadline(outbox: Outbox, operation_id: str, generation: int) -> PushOutcome:
+    """A PREVIEW-stage deadline: retryable (backoff), never a reconciliation.
+
+    Nothing was dispatched that could have written, so no commit is owed; the
+    old code marked these pending-reconciliation with no stored intent, which
+    ``begin_attempt`` then skipped forever (round-2 R12c).
+    """
+
+    outbox.settle(
+        operation_id,
+        generation=generation,
+        error_class="deadline",
+        next_retry_at=_retry_at(generation, outbox, operation_id),
+    )
+    return PushOutcome("refused", operation_id=operation_id, reason="deadline")
+
+
+def _projection_fingerprint(
+    kind: str,
+    captured_local: Mapping[str, Any] | None,
+    accepted: Mapping[str, Any] | None,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    expected_revision: str | None,
+) -> str:
+    """Hash of everything a projection decision depends on (round-2 R12).
+
+    Retrying the SAME input cannot change a deterministic refusal, so the outbox
+    waits; a differing fingerprint is a deliberate new edit and re-arms the
+    attempt budget. Computed over the raw canonical mappings, sorted, so a
+    re-serialized dict with identical content hashes identically.
+    """
+
+    import hashlib
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "kind": kind,
+            "captured": captured_local,
+            "accepted": accepted,
+            "local": current_local,
+            "remote": remote_latest,
+            "expected": expected_revision,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _settle_refused(outbox: Outbox, operation_id: str, generation: int, code: str) -> PushOutcome:
@@ -579,6 +680,10 @@ def _skip_reason(outbox: Outbox, operation_id: str) -> str:
         return "push-unavailable"
     if record.state == "pending-reconciliation":
         return "reconciliation-required"
+    if record.waiting_input:
+        # A deterministic refusal: the SAME input cannot change the answer, so
+        # the skip names the thing that CAN end it (round-2 R12a).
+        return "awaiting-input-change"
     if record.attempts >= PUSH_MAX_ATTEMPTS:
         return "push-retries-exhausted"
     return "push-backoff"
