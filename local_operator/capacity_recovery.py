@@ -166,14 +166,16 @@ def reclaimable_now(
 ) -> ReclaimPlan:
     """The generations positive evidence says nothing can run from, and the rest.
 
-    THIS IS ``prune_generations`` WEARING A READ-ONLY FACE. It asks the same
+    THIS IS ``prune_generations`` WEARING A DECISION-ONLY FACE. It asks the same
     function with ``keep=0`` so the answer is exactly the set the retention policy
     would allow deleting regardless of the count margin — "not the pointer's
     target, not the running tree, named by no record, marker present-or-aged, no
     protected attempt" — and turns each :class:`PruneDecision` into a
-    :class:`ReclaimDecision`. There is deliberately NO second predicate: a second
-    implementation of "safe to delete" is how the two drift and the safer one stops
-    being the one that runs.
+    :class:`ReclaimDecision`. It is run with ``dry_run=True``, so it makes the
+    DECISION without performing a tree or staging mutation (no generation removal,
+    no staging-link sweep, no attestation). There is deliberately NO second
+    predicate: a second implementation of "safe to delete" is how the two drift and
+    the safer one stops being the one that runs.
 
     ``keep=0`` is the key choice: the count margin is a retention preference, and
     the controller's question is not "what would a prune keep" but "what is
@@ -303,8 +305,13 @@ def run_capacity_recovery(
     now = [path for path in fresh.reclaimable if path in keep]
     if not now:
         return "moved-unreclaimed"
-    if reclaim is not None:
-        reclaim(now)
+    # ONLY A REAL RECLAIM REPORTS "reclaimed". A caller that passed no ``reclaim``
+    # asked for the DECISION, so it gets "moved-unreclaimed": the cohort moved and
+    # the roots are provably unreferenced, but nothing was deleted — claiming
+    # "reclaimed" there would report a deletion that never happened.
+    if reclaim is None:
+        return "moved-unreclaimed"
+    reclaim(now)
     return "reclaimed"
 
 

@@ -5022,7 +5022,12 @@ def prune_generations(
         )
     if current is not None:
         wanted.add(_real(current))
-    _sweep_staging_links(moment)
+    # THE STAGING SWEEP IS A MUTATION, so a dry run must not perform it: the
+    # caller asked what WOULD be reclaimed, and removing an aged staging link /
+    # alias here would be a real tree change on a decision-only path. The normal
+    # path is unchanged.
+    if not dry_run:
+        _sweep_staging_links(moment)
     named_by_a_record: set[Path] = set()
     for root in referenced:
         try:
