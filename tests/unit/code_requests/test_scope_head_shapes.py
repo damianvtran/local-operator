@@ -27,6 +27,7 @@ import time
 
 import pytest
 
+from local_operator.code_requests import rounds
 from local_operator.code_requests.rounds import (
     FRESHNESS_FRESH,
     FRESHNESS_UNKNOWN,
@@ -77,6 +78,16 @@ _TAIL_40 = "89abcdef0123456789abcdef0123456789abcdef"
         # One bare hash and no hex range: the only head the comment names.
         ("`..def5678`", "def5678"),
         ("`main... 3ea522cc21`", "3ea522cc21"),
+        # -- review round 2: three-dot ranges, labelled companions, exact chains -------
+        # Git's three-dot range names the same head on its right-hand side (F7).
+        ("`1c2d3e4...5f6a7b8`", "5f6a7b8"),
+        # A labelled base/merge hash is not the head, so the head is the only candidate (Q4).
+        ("`main..release-next` (head `3ea522cc21`) (base `82adb042eb`)", "3ea522cc21"),
+        ("`main..release-next` (merge `5f6a7b8`) (head `3ea522cc21`)", "3ea522cc21"),
+        # A base that EQUALS the previous head still chains; only prefixes are restricted.
+        ("`b..b1a2c3d4` + `b1a2c3d4..f0e1d2c3`", "f0e1d2c3"),
+        # Two hashes joined by git's three-dot form ARE a range, and its head is the answer.
+        ("`82adb042eb... 3ea522cc21`", "3ea522cc21"),
     ],
 )
 def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
@@ -93,8 +104,10 @@ def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
         "`abcdef1..` + `def5678`",
         # A range that returns to its own start is a cycle, not a chain.
         "`a1b2c3d..b2c3d4e` + `b2c3d4e..a1b2c3d`",
-        # A prose ellipsis is not a range, so nothing decides between two hashes.
-        "`82adb042eb... 3ea522cc21`",
+        # A cycle that never returns to its own root is still a cycle (F8).
+        "`aaaaaaa..bbbbbbb` + `bbbbbbb..ccccccc` + `ccccccc..bbbbbbb`",
+        # A prose ellipsis with a word inside is not a range: nothing decides here.
+        "`82adb042eb and 3ea522cc21`",
         # No range at all, and two bare hashes to choose from.
         "`82adb042eb` and `3ea522cc21`",
         # A symbolic range names no hash; freshness is unknown, never stale.
@@ -121,6 +134,10 @@ def test_an_ambiguous_scope_is_unknown_and_never_fresh(scope: str) -> None:
         # The Head field's standard spelling: the head first, the earlier one after it.
         ("", "`3ea522cc21` (was `82adb042eb`)", "3ea522cc21"),
         ("", "`3ea522cc21f2` (one commit on top of `82adb042eb`)", "3ea522cc21f2"),
+        # Review round 2: a Head field quoting a range takes that range's head (F6), and
+        # an indecisive Scope now falls through to Head instead of stopping (Q5).
+        ("", "`82adb042eb..3ea522cc21`", "3ea522cc21"),
+        ("`82adb042eb` and `3ea522cc21`", "f0e1d2c3b4a5", "f0e1d2c3b4a5"),
     ],
 )
 def test_the_head_field_still_resolves(scope: str, head_field: str, expected: str) -> None:
@@ -150,14 +167,46 @@ def test_the_real_2345_review_reads_fresh() -> None:
 
 
 def test_a_long_scope_line_parses_in_bounded_time() -> None:
-    """Q1: without the leading ``\\b`` the range pattern backtracked combinatorially.
+    """F5/Q6: the range pattern has to stay LINEAR on hostile payloads.
 
-    A forge commenter could put a 32 kB ``Scope:`` line on a tracked PR and stall the
-    event loop for 11.4 s (measured); with the anchor the same line takes milliseconds.
-    The bound is deliberately loose — it flags the quadratic shape, not a busy host.
+    Two rounds of review found quadratic shapes here — a run of ``z`` measured 11.4 s at
+    32 kB, and runs of ``a-a-``, ``a.`` and ``a/`` measured 18-73 s at 32-64 kB — on a
+    parse that runs inline on the event loop over forge-supplied text. Every payload
+    below measured ~0.2-0.4 ms on this head, so the 1 s bound carries ~2500x headroom:
+    it flags a quadratic regression, it is not a stopwatch on a busy host.
+
+    (A 32 kB run of *spaces* costs this parser ~2.5 s, and does so on ``main`` as well —
+    a pre-existing cost outside this pattern, recorded here rather than fixed here.)
     """
-    body = "### Agent review — round 1\n\nReviewer: r\nScope: `" + "a1b2c3d.." + "z" * 32000 + "`\n"
-    start = time.perf_counter()
-    parse([Comment(id="1", created_at="2026-10-14T00:00:00Z", body=body)])
-    elapsed = time.perf_counter() - start
-    assert elapsed < 2.0, f"a 32 kB Scope line took {elapsed:.1f}s"
+    hostile = {
+        "z run": "z" * 32000,
+        "a-a- run": "a-a-" * 8000,
+        "a. run": "a." * 16000,
+        "a/ run": "a/" * 16000,
+        "dotted words": "abc.def.ghi " * 2600,
+    }
+    for label, payload in hostile.items():
+        body = f"### Agent review — round 1\n\nReviewer: r\nScope: `{payload}`\n"
+        start = time.perf_counter()
+        parse([Comment(id="1", created_at="2026-10-14T00:00:00Z", body=body)])
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"{label} took {elapsed:.1f}s"
+
+
+@pytest.mark.parametrize(
+    "left,right,expected",
+    [
+        # One commit at two prefix lengths is the same commit.
+        ("ec9a5e628f4", "ec9a5e628f4d0e1", True),
+        ("main", "main", True),
+        # Prefix agreement is for hex on BOTH sides only: a branch named ``b`` is not a
+        # head starting with ``b`` (F9), and two different words never agree.
+        ("b", "b1a2c3d4", False),
+        ("main", "mainline", False),
+    ],
+)
+def test_prefix_agreement_is_hex_only(left: str, right: str, expected: bool) -> None:
+    # Reached through the module, not a direct import: the pre-fix module has no such
+    # helper, and a direct import would turn the failing-first run into a collection
+    # error instead of the failures it is meant to show.
+    assert rounds._same_sha(left, right) is expected
