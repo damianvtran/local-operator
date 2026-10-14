@@ -197,6 +197,76 @@ operator fixture ONLY; actual native operator prompt, live policy, installed old
 actor, full remote runtime and activation are NOT validated. Independent CLI
 UX/design/QA rounds still required; no merge/install/version changes.
 
+## Round-3 durability fence — owner-local PENDING journal
+
+QA Q3-1 reproduced HERE at cc5 with their OWN unmodified producer (1.1s): a
+consent-only compensation failure left a withheld projection, but the bare public
+share then EXITed 0 restoring the holder, the source record unchanged, and a
+fresh Owner in the SAME session returned `grant` with material. A missing holder
+alone is NOT a durable negative.
+
+Fix: an owner-LOCAL, keyless `finite_journal.json` (plus an init sentinel)
+records a PENDING fence BEFORE any mutable policy/projection write, persisted
+with fsync + readback. The central `consent.check_borrow` consults it FIRST — ahead
+of the legacy absent-consent fast path — so every owner borrow/mint/copy path and
+the placement bulk granters refuse with `finite_recovery_pending` while a fence is
+live. Actual serving holds consent→journal across its final check; positive
+producers already holding placement read only the atomic snapshot (no reverse
+lock). The journal is cleared LAST, under the held lock, only after the exact
+current admitted signed run, EXECUTED+terminal receipts, policy/holder/capability
+readbacks and a current member/key/public-fingerprint recheck. Completion writes
+the existing LOCAL `set_member_capabilities` (revoke legitimately drops the last-key
+capability) with `store.save` + readback, NOT the relay-first CLI variant — no
+socket/native I/O under locks. Uncertainty at ANY boundary leaves an INDEPENDENT
+negative fence.
+
+Recovery is PUBLIC and signed: a retained fence requires a NEW exact finite
+request that binds the fence id+revision, the retained ORIGINAL withdrawals, and
+CURRENT policy/member/public-fingerprint/key/scope; apply clears ONLY that target
+fence and preserves unrelated denies and future-policy state. Bare share, replay,
+generic run and Owner-broker copy all refuse while the fence is live; a fresh
+signed apply succeeds and same-session grant resumes. The journal is bounded
+(262144 B, ≤64 records, ≤256 deny tuples, ≤200 key/≤256 ref, strict dup/schema/
+symlink/enum/MAXREV), never evicts/normalizes, and refuses on a missing/corrupt/
+unconfirmed initialized store. Losing BOTH durable stores (all-IO outage) is
+explicitly NOT claimed recoverable: status stays unknown and borrows refuse.
+
+Exact delta evidence at this head (existing Python 3.12.13, serial env-i HOME/
+config/PYTHONPATH, `run_bounded.py --timeout 120`, 512 MiB, n0/addopts empty):
+- `test_finite_journal.py`: **29 passed** (source fault→bare/replay/generic/Owner
+  copy replay refused, fresh signed public recovery succeeds; crash boundaries;
+  initialized missing/marker/corrupt/duplicate/symlink; bounds/schema; disclosure
+  before signer; uncertain final publish retains fence; finite expired/denied/
+  stale-scope/FP/revision remedies).
+- `test_finite_share.py` **27**, `test_credentials_consent.py` **31**,
+  `test_reason_surfaces.py` **2**, unchanged `test_copy_receipts.py` **37**,
+  full `test_wipe_notice.py` **14**, full `test_secret_copies.py` **6**, full
+  `test_credentials_real_link.py` **10**, unchanged parser-demand **4/80 deselected**.
+- scoped black/isort/flake8 pass; explicit existing-interpreter pyright **0 errors**.
+Own after-control keeps the QA injector untouched, corrects only the expected
+invariant, then drives public request/show/software-approve/apply: retained
+fence id/rev + ORIGINAL deny in the new signed intent, clears only the target
+fence, same-session GRANT resumes (1.3s). `finite_journal.py` is a new module;
+bounded/whole-store loss and all-IO outage remain explicitly unproven-recoverable.
+
+### Round-3 design D1 / CLI-UX U1 / U2 (source CLI disclosure and remedies)
+
+The normal human `approvals show` **and** the pre-sign `approvals approve` stderr
+now print the leading key/peer/scope sentence followed by the bounded signed
+policy revision and EACH matched withdrawal's selector/revision/reference (no
+credential values, tokens, private keys or account-kind guesses). `--json` keeps
+stdout exactly one object; the disclosure rides stderr. Own actual source capture
+(request → `approvals show` → approve) shows both denies disclosed before the
+signer hook runs. The summary now reads "clear only the withdrawals listed below"
+so the sentence matches what is shown.
+
+Finite-only failures keep their security codes but carry an actionable finite
+remedy (regenerate the exact `credential share … --request-approval`, approve,
+then apply with `--approval`), never onboarding/setup/SSH text: the `_apply`
+wrapper relabels `approval_denied`/`approval_expired`/`approval_already_connected`
+and the mismatch/CAS codes, leaving the normal onboarding surfaces unchanged. A
+journal is refused as its own durable fence, not an onboarding error.
+
 ## Explicit deferrals / activation holds
 
 - **Deferred — next reviewed lifecycle slice:** positive inventory reconciliation,

@@ -2171,7 +2171,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                     "summary": finite_share.summary(requested),
                 },
                 [
-                    finite_share.summary(requested) or "",
+                    *finite_share.details(requested),
                     "Request only; nothing shared.",
                     f"Approve: lop network approvals approve {requested['approval_id']}",
                     f"Apply: lop network credential share {key} --with {device} "
@@ -2243,7 +2243,14 @@ def _cmd_credential(args: argparse.Namespace) -> int:
 
     capability = ""
     if verb == "share":
-        _change, capability = _apply_capability_change(record, device, grant=["broker_credential"])
+        if finite_result is not None:
+            # Capability already read back LOCALLY before the journal cleared:
+            # no fallible relay/native work follows committed finite completion.
+            capability = "locally (signed finite recovery)"
+        else:
+            _change, capability = _apply_capability_change(
+                record, device, grant=["broker_credential"]
+            )
     else:
         # The capability goes with the share. Leaving ``broker_credential`` on a device
         # that no longer holds anything is a grant that can only ever be refused, and
@@ -8126,7 +8133,7 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     finite_summary = finite_share.summary(dict(record))
     if finite_summary is not None:
         return [
-            finite_summary,
+            *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
             "This operation restores only the signed finite share; nothing is installed or joined.",
         ]
@@ -8368,7 +8375,8 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     finite_summary = finite_share.summary(record)
     if finite_summary is not None:
         # Presign intent is stderr; JSON stdout remains one complete object.
-        print(finite_summary, file=sys.stderr)
+        for disclosure_line in finite_share.details(record):
+            print(disclosure_line, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between

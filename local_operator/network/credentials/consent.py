@@ -284,6 +284,12 @@ def check_borrow(
     None context is the pre-resolve provider-wide check; an empty context at the
     final boundary is UNKNOWN account identity, not provider-confirmed N/A.
     """
+    from local_operator.network.credentials import finite_journal
+
+    # The transaction fence is independent of missing/restoration-lost denies,
+    # and MUST precede the legacy absent-consent fast path. Snapshot only here:
+    # positive bulk producers may already hold placement and cannot reverse-lock.
+    finite_journal.check(network_id, owner, recipient, key, root)
     path = placement.placement_path(network_id, root).with_name("consent.json")
     if not path.exists():
         return
@@ -324,7 +330,9 @@ def serving_guard(
         store.safe_component(network_id)
         store.safe_component(owner)
     doc = ConsentDocument(network_id, owner, root)
-    with doc.locked():
+    from local_operator.network.credentials.finite_journal import Journal
+
+    with doc.locked(), Journal(network_id, owner, root).locked():
         check_borrow(network_id, owner, recipient, key, context, root)
         yield
 
