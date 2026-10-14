@@ -160,6 +160,19 @@ def test_both_ends_serve_the_readiness_op(request: pytest.FixtureRequest) -> Non
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES
 
 
+def test_credential_lifecycle_is_advertised_once_in_the_negotiated_set() -> None:
+    """The capability must ride the link a release before its sender gates on it.
+
+    A sender reads the negotiated set and only then sends a lifecycle request, so
+    an old peer — which advertises nothing — is never asked to compose a refusal
+    it did not ask to make. The tuple is the one spelling the handshake, the ask
+    condition and this test read; a duplicate would be a second advertised
+    feature under one name.
+    """
+    assert wire.CREDENTIAL_LIFECYCLE_V1 == "credential-lifecycle-v1"
+    assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 1
+
+
 def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
