@@ -5652,3 +5652,48 @@ async def test_a_pinned_preflight_round_trips_an_aggregator_pin_onto_its_own_mod
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_used,paid_balance", [(100, 10), (25, 0)])
+async def test_usage_preflight_keeps_openai_with_plan_or_credits(
+    tmp_path, plan_used, paid_balance
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential("openai", _oauth("synthetic-openai", "synthetic-account"))
+    store.upsert_credential("zai", {"key": "synthetic-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {"retry": {"usageAwareFallback": True, "fallbackChains": {"default": ["zai/glm-5.3"]}}},
+        session_id="synthetic-credit-session",
+    )
+    report = UsageReport(
+        provider="openai",
+        limits=[
+            UsageLimit("plan", "Plan", UsageAmount(used_fraction=plan_used / 100), shared=True),
+            UsageLimit(
+                "openai:credits",
+                "Credits",
+                UsageAmount(remaining=paid_balance, unit="credits"),
+                paid_fallback=True,
+                available=True,
+            ),
+        ],
+    )
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", return_value=report):
+            await stream.preflight_usage(ModelSpec(provider="openai", model_id="gpt-5.3-codex"))
+        assert not store.is_blocked(row.id, "openai")
+        assert stream._route_state.active is None
+        with patch("local_operator.providers.usage.fetch_usage", return_value=report):
+            assert (
+                await stream._provider_quota_availability(
+                    "openai", "gpt-5.3-codex", reserve_percent=10, cache={}
+                )
+                == "usable"
+            )
+    finally:
+        await stream.close()
+        store.close()

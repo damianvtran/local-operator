@@ -4562,7 +4562,9 @@ class SessionStreamFn:
         """Whether ``provider`` still has spendable quota for ``model_id``.
 
         ``usable`` means at least one account still has remaining > 0
-        (healthy *or* reserve — reserve is still spendable). ``depleted``
+        (healthy *or* reserve — reserve is still spendable). Healthy also
+        includes explicitly payable balance-only credits: never require a
+        percentage to keep such an account on the route. ``depleted``
         means every account that answered is at 0%. ``unknown`` is fail-open:
         no endpoint, no report, or a fetch error, so the caller must not
         skip the target on a missing signal.

@@ -3501,3 +3501,50 @@ def test_credential_identity_reads_a_row_and_ignores_the_dedupe_key() -> None:
         identity_key="a@b.c",
     )
     assert credential_identity(labelled) == "a@b.c"
+
+
+async def test_credit_only_cache_is_neutral_not_hidden_by_older_spent_plan(
+    tmp_path, monkeypatch
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.providers.usage_cache import (
+        UsageCacheStore,
+        account_preflight_key,
+    )
+
+    store = AuthStore(tmp_path / "auth.db")
+    cache = UsageCacheStore(tmp_path / "usage.db")
+    now = store._now_ms()
+    row = store.upsert_credential("openai", {**_oauth(), "email": "synthetic@example.test"})
+    monkeypatch.setattr(store, "_usage_cache_store", lambda: cache)
+    old = UsageReport(
+        provider="openai",
+        fetched_at=now - 1000,
+        limits=[UsageLimit("plan", "Plan", UsageAmount(used_fraction=1), shared=True)],
+    )
+    cache.set(
+        account_preflight_key("openai", row.data["email"]),
+        "openai",
+        [old],
+        expires_at_ms=now + 60000,
+    )
+    fresh = UsageReport(
+        provider="openai",
+        fetched_at=now,
+        identity=row.data["email"],
+        limits=[
+            UsageLimit(
+                "credits",
+                "Credits",
+                UsageAmount(remaining=10, unit="credits"),
+                paid_fallback=True,
+                available=True,
+            )
+        ],
+    )
+    cache.set("openai:synthetic", "openai", [fresh], expires_at_ms=now + 60000)
+    try:
+        assert store._cached_remaining_fraction(row, "openai", "gpt-codex", now) is None
+    finally:
+        cache.close()
+        store.close()
