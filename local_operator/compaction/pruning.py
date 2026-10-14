@@ -38,27 +38,39 @@ Prompt-cache guards (the whole point of doing this carefully):
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from dataclasses import dataclass
+from typing import Any, Collection, Sequence
 
-from local_operator.harness.types import Content, ImageContent, Message, TextContent
+from local_operator.harness.types import (
+    CapturedFrame,
+    Content,
+    ImageContent,
+    Message,
+    TextContent,
+)
 
 from .marker import marker_exists
 from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
 
 __all__ = [
+    "CaptureElision",
+    "CapturePartition",
     "MIN_PRUNE_TOKENS",
     "SESSION_KEEP_RECENT_FRAMES",
     "STALE_FRAME_NOTICE",
     "SUPERSEDED_NOTICE",
     "USELESS_NOTICE",
+    "apply_capture_elisions",
     "compute_suffix_tokens",
     "count_frame_messages",
     "count_stale_observations",
     "downscale_stale_frames",
     "fit_frames_to_wire_budget",
+    "partition_captures",
     "prune_stale_frames",
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
+    "reclaim_captures_to_wire_budget",
     "shed_frames_to_wire_budget",
     "shed_stale_frames",
 ]
@@ -123,17 +135,32 @@ def _has_frame(message: Message) -> bool:
     return any(isinstance(block, ImageContent) for block in message.content)
 
 
-def _without_frames(content: Sequence[Content]) -> list[Content]:
+def _without_frames(
+    content: Sequence[Content],
+    *,
+    index: int = 0,
+    reclaimable: Collection[tuple[int, int]] | None = None,
+) -> list[Content]:
     """``content`` with every image replaced by ONE notice.
 
     Consecutive images collapse into a single notice rather than one each: a
     message that carried three views of a surface reads as "a screenshot was
     here", not as three lines of the same boilerplate, and the point of the
     prune is to spend fewer tokens on the past, not to spend them on notices.
+
+    ``reclaimable`` narrows which image blocks may be replaced at all: when
+    given, a block is a candidate only when its ``(index, content position)``
+    is listed -- the coordinates :func:`partition_captures` reports, so the
+    prune and the epoch elision agree block for block about what is
+    superseded. ``None`` keeps the legacy every-image contract for callers
+    that manage protection themselves.
     """
     out: list[Content] = []
-    for block in content:
+    for position, block in enumerate(content):
         if isinstance(block, ImageContent):
+            if reclaimable is not None and (index, position) not in reclaimable:
+                out.append(block)
+                continue
             if out and isinstance(out[-1], TextContent) and out[-1].text == STALE_FRAME_NOTICE:
                 continue
             out.append(TextContent(text=STALE_FRAME_NOTICE))
@@ -143,7 +170,10 @@ def _without_frames(content: Sequence[Content]) -> list[Content]:
 
 
 def prune_stale_frames(
-    messages: Sequence[Message], *, keep_recent_frames: int
+    messages: Sequence[Message],
+    *,
+    keep_recent_frames: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace every image except those in the newest ``keep_recent_frames``
     frame-bearing messages with :data:`STALE_FRAME_NOTICE`.
@@ -167,15 +197,24 @@ def prune_stale_frames(
     decision (the runner rebuilds its whole prefix on a frame budget, the
     session would do it inside a compaction pass) and encoding a frontier
     here would make two callers disagree about it.
+
+    ``reclaimable`` gates WHICH blocks the prune may replace, in
+    :func:`partition_captures` coordinates: the render fallback passes the
+    superseded-capture set, so user uploads, unknown images and every
+    stream's latest capture survive the hard-wire shed exactly as they
+    survive the epoch elision. ``None`` keeps the legacy every-image
+    contract for callers that own protection themselves.
     """
     if keep_recent_frames < 0:
         raise ValueError("keep_recent_frames must be non-negative")
     # Walk from the end: the newest ``keep_recent_frames`` frame-bearing
-    # messages are kept verbatim, everything older loses its images.
+    # messages are kept verbatim; any older message loses only the image
+    # blocks ``reclaimable`` admits (all of them under the legacy default).
     remaining = keep_recent_frames
     out: list[Message] = []
     dropped = 0
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if not _has_frame(message):
             out.append(message)
             continue
@@ -183,11 +222,24 @@ def prune_stale_frames(
             remaining -= 1
             out.append(message)
             continue
-        dropped += sum(1 for block in message.content if isinstance(block, ImageContent))
+        replaced_count = sum(
+            1
+            for position, block in enumerate(message.content)
+            if isinstance(block, ImageContent)
+            and (reclaimable is None or (index, position) in reclaimable)
+        )
+        if replaced_count == 0:
+            out.append(message)
+            continue
+        dropped += replaced_count
         # A copy rather than in-place mutation, so the caller's identity test
         # (see the docstring) holds; ``model_copy`` keeps the id, which is
         # what the token-estimate cache is keyed on, so invalidate it.
-        replaced = message.model_copy(update={"content": _without_frames(message.content)})
+        replaced = message.model_copy(
+            update={
+                "content": _without_frames(message.content, index=index, reclaimable=reclaimable)
+            }
+        )
         invalidate_message_cache(replaced)
         out.append(replaced)
     out.reverse()
@@ -195,7 +247,11 @@ def prune_stale_frames(
 
 
 def downscale_stale_frames(
-    messages: Sequence[Message], *, keep_recent_frames: int, max_edge: int
+    messages: Sequence[Message],
+    *,
+    keep_recent_frames: int,
+    max_edge: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace every image except those in the newest ``keep_recent_frames``
     frame-bearing messages with a smaller re-rendering bounded to ``max_edge``.
@@ -223,6 +279,12 @@ def downscale_stale_frames(
     image blocks whose bytes were replaced, not messages touched.
     ``keep_recent_frames`` counts frame-bearing MESSAGES from the end, so a
     message with two frames costs one slot (the same unit the prune uses).
+
+    ``reclaimable`` gates WHICH blocks are re-rendered, in
+    :func:`partition_captures` coordinates -- the same protection contract
+    :func:`prune_stale_frames` documents. ``None`` keeps the legacy
+    every-image contract; the render fallback passes the superseded-capture
+    set so protected pixels are never re-rendered by this walk.
     """
     # Imported HERE, not at module scope, and the placement is load-bearing:
     # this module sits on the shared renderer's import closure
@@ -238,7 +300,8 @@ def downscale_stale_frames(
     remaining = keep_recent_frames
     out: list[Message] = []
     downscaled = 0
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if not _has_frame(message):
             out.append(message)
             continue
@@ -248,8 +311,11 @@ def downscale_stale_frames(
             continue
         content: list[Content] = []
         changed = False
-        for block in message.content:
+        for position, block in enumerate(message.content):
             if isinstance(block, ImageContent):
+                if reclaimable is not None and (index, position) not in reclaimable:
+                    content.append(block)
+                    continue
                 shrunk = downscale_context_frame(block.data, block.mime_type, max_edge=max_edge)
                 if shrunk is not None:
                     data, mime_type = shrunk
@@ -272,7 +338,10 @@ def downscale_stale_frames(
 
 
 def shed_frames_to_wire_budget(
-    messages: Sequence[Message], *, budget: int
+    messages: Sequence[Message],
+    *,
+    budget: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace the OLDEST frames with notices until the request fits ``budget``
     bytes, keeping as many recent frames as possible.
@@ -298,11 +367,17 @@ def shed_frames_to_wire_budget(
     The loop mirrors ``_shed_stale_turns`` in the evaluation runner's provider
     client: walk the keep count DOWN and stop when a step frees nothing.
     Termination is structural — ``keep`` strictly decreases toward 0, and
-    ``keep=0`` drops every image there is — so a payload still over budget
-    with no images left exits rather than spinning. That residual case is
-    real: a text-only history cannot be shed here, and the caller must be
-    prepared for "still over" rather than assuming success (this is what the
-    byte-side auto-continue band checks).
+    ``keep=0`` drops every image there is that ``reclaimable`` admits — so a
+    payload still over budget with no eligible images left exits rather than
+    spinning. That residual case is real: a text-only history, or one whose
+    remaining images are all protected, cannot be shed here, and the caller
+    must be prepared for "still over" rather than assuming success (this is
+    what the byte-side auto-continue band checks).
+
+    ``reclaimable`` carries the same protection gate
+    :func:`prune_stale_frames` documents; the render fallback passes the
+    superseded-capture set so the shed can never drop user uploads, unknown
+    images or a stream's latest capture.
 
     Sheds the FEWEST frames that fit, not a fixed count, because every frame
     dropped is evidence the user may still need. Returns ``(messages,
@@ -319,7 +394,9 @@ def shed_frames_to_wire_budget(
     dropped = 0
     while keep > 0:
         keep -= 1
-        candidate, candidate_dropped = prune_stale_frames(messages, keep_recent_frames=keep)
+        candidate, candidate_dropped = prune_stale_frames(
+            messages, keep_recent_frames=keep, reclaimable=reclaimable
+        )
         if candidate_dropped <= dropped:
             # This step freed nothing new; another turn of the loop cannot
             # either, since the keep count only shrinks.
@@ -369,6 +446,14 @@ def fit_frames_to_wire_budget(
        tightest candidate to the existing
        :func:`shed_frames_to_wire_budget`, whose minimal-drop loop stays the
        backstop.
+
+    PROTECTION, the shared-image-compaction contract: steps 1 and 3 degrade
+    only SUPERSEDED captures -- the same set the epoch elision consumes
+    (:func:`partition_captures`) -- so user uploads, unknown images and every
+    stream's latest capture are never resized or dropped by them; a still-over
+    return with nothing eligible is the honest disposition rather than silent
+    loss. Step 2's descent of the newest frame is the remaining OPEN boundary
+    (see the in-body note).
 
     WHY DOWNSCALE FIRST, stated as the failure it repairs: the shed's steady
     state on a long screenshot session is one MORE frame dropped per turn
@@ -423,18 +508,37 @@ def fit_frames_to_wire_budget(
         return list(messages), 0, 0, None
     if estimate_wire_bytes(messages) <= budget:
         return list(messages), 0, 0, None
+    # The render fallback obeys the SAME protection rules as the epoch
+    # elision: steps 1 and 3 may degrade only SUPERSEDED captures -- user
+    # uploads, unknown images and every stream's latest capture are
+    # unreachable, so the hard-wire path cannot quietly lose what the epoch
+    # guaranteed. The terminal descent (step 2) deliberately keeps the
+    # pre-existing last-resort for the newest frame: a provider refusal is
+    # worse than a degraded view it alone can prevent, and replacing that
+    # with the absolute "latest captures are never resized" contract (plus
+    # its typed pre-dispatch transport-limit disposition) is an OPEN
+    # boundary with the architect rather than something improvised here.
+    partition = partition_captures(messages)
+    reclaimable = frozenset(
+        (capture.message_index, capture.content_index) for capture in partition.reclaimable
+    )
     working: list[Message] = list(messages)
     downscaled_total = 0
     for edge in IMAGE_CONTEXT_EDGES:
         candidate, downscaled = downscale_stale_frames(
-            messages, keep_recent_frames=keep_recent_frames, max_edge=edge
+            messages,
+            keep_recent_frames=keep_recent_frames,
+            max_edge=edge,
+            reclaimable=reclaimable,
         )
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
             return working, downscaled_total, 0, edge
     # Step 2 (see the docstring): the same ladder with the newest frame's
     # exemption removed, reached only when no protected rung fits so the
-    # common path never pays for it. Run from the ORIGINAL ``messages`` — like
+    # common path never pays for it. Deliberately NOT gated by
+    # ``reclaimable`` -- see the open-boundary note above. Run from the
+    # ORIGINAL ``messages`` — like
     # every rung above — so a replacement stays the deterministic, memoized
     # function of (bytes, rung) the prompt-cache argument rests on.
     for edge in IMAGE_CONTEXT_EDGES:
@@ -444,8 +548,315 @@ def fit_frames_to_wire_budget(
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
             return working, downscaled_total, 0, edge
-    working, dropped = shed_frames_to_wire_budget(working, budget=budget)
+    working, dropped = shed_frames_to_wire_budget(working, budget=budget, reclaimable=reclaimable)
     return working, downscaled_total, dropped, IMAGE_CONTEXT_EDGES[-1]
+
+
+@dataclass(frozen=True)
+class CaptureElision:
+    """One reclaimable image block, addressed in the SOURCE message list.
+
+    Coordinates are source coordinates -- message index in the sequence and
+    content index inside that message's ``content`` -- so a commit or a
+    replay applies the same projection to the same source without carrying
+    copies of the image anywhere.
+    """
+
+    message_index: int
+    content_index: int
+    stream_id: str
+    revision_id: str
+    producer_scope: str
+
+
+@dataclass(frozen=True)
+class CapturePartition:
+    """Which image blocks an epoch may reclaim, and which are untouchable.
+
+    ``reclaimable`` is ordered OLDEST FIRST by canonical arrival, so a
+    consumer that must clear a byte band consumes a prefix of it -- the same
+    prefix on every run over the same source, which is what makes the
+    projection reproducible without a second registry. ``protected`` is
+    informational (evidence counts and tests): it lists absent-metadata
+    images first, then each stream's latest capture.
+    """
+
+    reclaimable: tuple[CaptureElision, ...]
+    protected: tuple[tuple[int, int], ...]
+
+
+def partition_captures(messages: Sequence[Message]) -> CapturePartition:
+    """Split image blocks into latest captures vs SUPERSEDED captures.
+
+    WHY. Image bytes dominate transport pressure, but until capture
+    provenance existed no image was distinguishable from any other, so the
+    only safe move was nothing -- and every image a session ever saw stayed
+    on the wire. This is the selection half of the fix: a pure, metadata-only
+    reading of the source that names exactly which blocks a later step MAY
+    reclaim and leaves everything else PROTECTED.
+
+    Rules, all deliberate:
+
+    - Every image WITHOUT capture provenance is protected: user uploads,
+      unknown images and legacy rows. Absence is not "probably a frame";
+      the safe reading of an unannotated image is retention.
+    - The LATEST capture for each ``(producer_scope, stream_id)`` is
+      protected -- the current pixels of every stream survive pressure,
+      including streams that have not been updated recently.
+    - An older capture is reclaimable IFF a newer capture of the SAME
+      ``(producer_scope, stream_id)`` exists. Supersession is strict: another
+      producer's claim never supersedes this producer's captures, even with
+      identical stream/revision strings.
+    - Ordering is canonical arrival (message order), never a revision sort:
+      the ids are bounded opaque strings with no ordered meaning, and a
+      producer's invented revision numbers must not reorder what history
+      says arrived first.
+
+    Pure metadata: no mutation, no copies, no decoding -- the caller decides
+    HOW MUCH of ``reclaimable`` to consume against the byte band, and the
+    result is deterministic for a given source.
+    """
+    protected: list[tuple[int, int]] = []
+    annotated: list[tuple[tuple[int, int], CapturedFrame]] = []
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            address = (message_index, content_index)
+            if frame is None:
+                protected.append(address)
+            else:
+                annotated.append((address, frame))
+
+    # Latest = highest arrival index per (scope, stream); computed over the
+    # annotated subset only, so an unannotated image between two captures
+    # cannot become anyone's "latest".
+    latest: dict[tuple[str, str], int] = {}
+    for index, (_address, frame) in enumerate(annotated):
+        latest[(frame.producer_scope, frame.stream_id)] = index
+
+    reclaimable: list[CaptureElision] = []
+    for index, (address, frame) in enumerate(annotated):
+        if latest[(frame.producer_scope, frame.stream_id)] == index:
+            protected.append(address)
+            continue
+        reclaimable.append(
+            CaptureElision(
+                message_index=address[0],
+                content_index=address[1],
+                stream_id=frame.stream_id,
+                revision_id=frame.revision_id,
+                producer_scope=frame.producer_scope,
+            )
+        )
+    return CapturePartition(reclaimable=tuple(reclaimable), protected=tuple(protected))
+
+
+def _elide_capture_prefix(
+    messages: Sequence[Message],
+    candidates: Sequence[CaptureElision],
+    *,
+    fit_budget: int | None = None,
+    limit: int | None = None,
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
+    """Apply a deterministic prefix of ``candidates``; ONE elision algorithm.
+
+    Shared by the byte-band rung (:func:`reclaim_captures_to_wire_budget`)
+    and the replay watermark (:func:`apply_capture_elisions`) so projection
+    and replay can never drift into two opinions about what an epoch elided.
+
+    - ``fit_budget``: stop as soon as the estimate is at or below it.
+    - ``limit``: apply exactly this many eligible elisions (deterministic
+      skips do not count toward it).
+    - Neither: apply every eligible elision.
+
+    ``candidates`` must come from :func:`partition_captures` over the SAME
+    ``messages``; addresses resolve through the source block objects by
+    identity, and the never-empty guard skips rather than ever producing an
+    empty content list. Sources are never mutated: only elided messages are
+    rebuilt as copies.
+
+    Returns ``(messages, elided_candidates)`` -- the candidates ACTUALLY
+    elided, in elision order, so a caller can persist their stable addresses
+    and a replay can elide exactly those blocks instead of re-deriving a
+    candidate prefix: a later turn can retro-supersede a capture the pass
+    protected, which reorders the candidate list a count-replay would walk
+    (reviewer round 1, C1).
+    """
+    working = list(messages)
+    contents: dict[int, list[Content]] = {}
+    elided: list[CaptureElision] = []
+    for candidate in candidates:
+        if limit is not None and len(elided) >= limit:
+            break
+        message_index = candidate.message_index
+        content = contents.get(message_index)
+        if content is None:
+            content = list(messages[message_index].content)
+            contents[message_index] = content
+        # Identity, not equality: two captures may compare equal by VALUE, and
+        # earlier elisions from the same message shift positions -- so the
+        # SOURCE address is resolved through the original block object.
+        block = messages[message_index].content[candidate.content_index]
+        if not any(item is block for item in content):
+            continue
+        if len(content) <= 1:
+            # Never-empty guard (see :func:`reclaim_captures_to_wire_budget`);
+            # deterministic skip.
+            continue
+        content[:] = [item for item in content if item is not block]
+        working[message_index] = messages[message_index].model_copy(
+            update={"content": list(content)}
+        )
+        elided.append(candidate)
+        if fit_budget is not None and estimate_wire_bytes(working) <= fit_budget:
+            break
+    return working, tuple(elided)
+
+
+def capture_elision_entry(
+    messages: Sequence[Message], capture: CaptureElision
+) -> tuple[str, str, str, int]:
+    """The persistable address of an elided capture, with its occurrence ordinal.
+
+    Identity alone cannot name a block when a producer repeated a claim: the
+    never-empty guard can elide the SECOND occurrence while leaving the
+    first, and a first-k replay match would then hit the skipped one and
+    under-elide (reviewer round 1, C2). The ordinal -- how many
+    same-identity blocks precede this one in canonical arrival order --
+    disambiguates without any image bytes or a second registry, and both the
+    live and the replay walk count it the same way: message order, block
+    order.
+    """
+    ordinal = 0
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            if frame is None:
+                continue
+            if (frame.producer_scope, frame.stream_id, frame.revision_id) != (
+                capture.producer_scope,
+                capture.stream_id,
+                capture.revision_id,
+            ):
+                continue
+            if message_index == capture.message_index and content_index == capture.content_index:
+                return (capture.producer_scope, capture.stream_id, capture.revision_id, ordinal)
+            ordinal += 1
+    # Unreachable for a candidate that came from the same ``messages`` (the
+    # walk above visits it); the fallback keeps the entry well-formed rather
+    # than raising inside a pass.
+    return (capture.producer_scope, capture.stream_id, capture.revision_id, ordinal)
+
+
+def apply_capture_elisions(
+    messages: Sequence[Message], *, identities: Sequence[tuple[str, str, str, int]]
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
+    """Reapply a RECORDED elision set to ``messages`` (replay side).
+
+    The compaction record persists WHICH captures an epoch elided -- their
+    stable harness-stamped addresses ``(producer_scope, stream_id,
+    revision_id)`` plus each block's occurrence ordinal (see
+    :func:`capture_elision_entry`) -- and replay elides exactly those blocks.
+    Deliberately NOT a count re-derived at replay time: a later turn can
+    retro-supersede a capture the pass protected, so the candidate order
+    over the whole segment is not the order the pass saw, and a first-N walk
+    would drop a block the live session kept and resurrect one it elided
+    (reviewer round 1, C1). The ordinal disambiguates at block granularity
+    for the same reason: the never-empty guard can skip a duplicate
+    identity's first occurrence and the live pass elide the second, which a
+    first-k match would replay against the wrong block (reviewer round 1,
+    C2).
+
+    Same never-empty skip and copy/identity semantics as the live rung,
+    through the ONE :func:`_elide_capture_prefix` core. ``identities`` empty
+    returns the input list untouched.
+    """
+    if not identities:
+        return list(messages), ()
+    recorded = {
+        (producer_scope, stream_id, revision_id, ordinal)
+        for producer_scope, stream_id, revision_id, ordinal in identities
+    }
+    ordinal_of: dict[tuple[str, str, str], int] = {}
+    targets: list[CaptureElision] = []
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            if frame is None:
+                continue
+            identity = (frame.producer_scope, frame.stream_id, frame.revision_id)
+            ordinal = ordinal_of.get(identity, 0)
+            ordinal_of[identity] = ordinal + 1
+            if (*identity, ordinal) in recorded:
+                targets.append(
+                    CaptureElision(
+                        message_index=message_index,
+                        content_index=content_index,
+                        stream_id=frame.stream_id,
+                        revision_id=frame.revision_id,
+                        producer_scope=frame.producer_scope,
+                    )
+                )
+    if not targets:
+        return list(messages), ()
+    return _elide_capture_prefix(messages, targets)
+
+
+def reclaim_captures_to_wire_budget(
+    messages: Sequence[Message], *, budget: int
+) -> tuple[list[Message], tuple[CaptureElision, ...]]:
+    """Elide SUPERSEDED captures, oldest first, until the request fits ``budget``.
+
+    The FIRST recovery rung for image byte pressure, and deliberately the
+    narrowest one: it consumes only a prefix of :func:`partition_captures`'
+    ``reclaimable`` list -- captures a producer superseded, carrying harness
+    provenance -- and never touches unannotated images, any stream's LATEST
+    capture, text blocks, or tool pairing. General frame shedding
+    (:func:`shed_frames_to_wire_budget`) stays a separate, later rung for the
+    pressure this cannot clear. The caller derives ``budget`` (the byte
+    ceiling to land at-or-below) from the same wire trigger/recovery band the
+    auto-continue gate uses (``cleared_wire_headroom`` semantics), so both
+    sides measure with ONE ruler.
+
+    Behaviour mirrors the shed rung in the ways that matter:
+
+    - Early return: at or under ``budget`` nothing is recomputed and the
+      input list is returned, so every session under budget behaves
+      byte-identically to one without this function.
+    - Oldest first, deterministic: elisions follow the partition's
+      canonical-arrival order, so the same source consumed by the same
+      budget produces the same elided set -- which the caller persists as
+      stable ADDRESSES so replay re-applies exactly it.
+    - A block is never elided if it is its message's ONLY remaining block:
+      an empty content list breaks wire and transcript invariants, and the
+      skip is itself deterministic (the next-oldest eligible elision is
+      tried). If the eligible elisions cannot clear the budget the function
+      returns without pretending: the caller re-measures and records "no
+      eligible relief" rather than a fabricated success.
+
+    Elision REMOVES the block from the projected copy; the source message
+    objects stay untouched.
+
+    Returns ``(messages, elided_captures)`` -- the candidates actually
+    elided, in elision order (their addresses are what a record persists);
+    the tuple is empty and the input list is returned when nothing was over
+    budget or nothing eligible could run.
+    """
+    if budget <= 0:
+        return list(messages), ()
+    if estimate_wire_bytes(messages) <= budget:
+        return list(messages), ()
+
+    candidates = partition_captures(messages).reclaimable
+    if not candidates:
+        return list(messages), ()
+    return _elide_capture_prefix(messages, candidates, fit_budget=budget)
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

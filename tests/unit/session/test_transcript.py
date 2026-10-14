@@ -12,7 +12,9 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    CapturedFrame,
     CustomMessage,
+    ImageContent,
     Message,
     TextContent,
     ToolCall,
@@ -1023,6 +1025,149 @@ async def test_latest_custom_backward_scan(transcript):
     await transcript.append_custom("other", {"v": 99})
     assert transcript.latest_custom("wake_schedules") == {"v": 2}
     assert transcript.latest_custom("missing") is None
+
+
+def _captured_frame(*, stream: str, revision: str) -> CapturedFrame:
+    return CapturedFrame(stream_id=stream, revision_id=revision, producer_scope="mcp:sess:cam")
+
+
+def _capture_images(history) -> list[ImageContent]:
+    return [
+        block
+        for message in history
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_reapplies_the_capture_elision_frontier(transcript):
+    """The recorded frontier elides the SAME superseded captures on resume."""
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "SUMMARY",
+        first.id,
+        100,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "1", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1, "the superseded capture stays elided on resume"
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "2"
+
+
+@pytest.mark.asyncio
+async def test_resume_without_or_with_malformed_frontier_changes_nothing(transcript):
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction("SUMMARY", first.id, 100)  # no frontier
+    plain = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY2", first.id, 100, preserve_data={"capture_elisions": {"applied": -1}}
+    )
+    malformed = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY3",
+        first.id,
+        100,
+        preserve_data={"capture_elisions": {"applied": 1, "identities": "nope"}},
+    )
+    malformed_ids = transcript.build_llm_history()
+
+    assert len(_capture_images(plain)) == 2
+    assert len(_capture_images(malformed)) == 2
+    assert len(_capture_images(malformed_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_a_record_that_names_no_present_block(transcript):
+    """An address that matches nothing in the segment elides nothing."""
+    first = await transcript.append_message(
+        Message.user(
+            "only",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "S",
+        first.id,
+        10,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "9", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "1"
 
 
 @pytest.mark.asyncio
