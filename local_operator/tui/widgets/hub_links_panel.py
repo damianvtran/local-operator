@@ -216,14 +216,60 @@ class HubLinksPanel(Static):
         ``_selected``, the highlight, the window and the policy-write target
         disagree (the highlighted row was not the row `a`/`s` wrote). One order
         for every index is the fix.
+
+        D38: the reader's place is remembered by the SELECTED LINK, not by the
+        integer index. `_selected` points into a list that reorders when a link
+        is inserted above — so an index-only carry silently moved the highlight
+        to a different link, and the next `s`/`a` wrote THAT link. The anchor is
+        re-resolved after every install; if it vanished the index clamps to a
+        real neighbour, and an armed consent whose link is gone is DISARMED (it
+        can never write a link the user is no longer looking at).
         """
 
+        anchor = self._selection_anchor()
         self._rows = core.paint_order(core.rows_from_snapshot(snapshot))
+        self._restore_selection(anchor)
+        # D38: the armed consent is link_id-keyed; if its link is gone the prompt
+        # must not survive invisibly (ctrl+y would otherwise write nothing visible).
+        if self._consent_link_id is not None and not any(
+            row.link_id == self._consent_link_id for row in self._rows
+        ):
+            self._consent_link_id = None
+            self._consent_revision = None
         self._loading = False
         self._refreshing = False
         self._error = ""
         self.display = True
         self._repaint()
+
+    def _selection_anchor(self) -> tuple[str | None, str, str] | None:
+        """The selected row's IDENTITY (D38), stable across a reorder.
+
+        ``(link_id, kind, name)``: a legacy row has no link_id, so kind+name
+        stands in. ``None`` when nothing is selected.
+        """
+
+        row = self.selected_row
+        if row is None:
+            return None
+        return (row.link_id, row.kind, row.name)
+
+    def _restore_selection(self, anchor: tuple[str | None, str, str] | None) -> None:
+        """Re-resolve ``_selected`` from an anchor, clamping when it is gone."""
+
+        if anchor is None:
+            self._selected = min(self._selected, max(0, len(self._rows) - 1))
+            return
+        link_id, kind, name = anchor
+        for index, row in enumerate(self._rows):
+            if link_id is not None and row.link_id == link_id:
+                self._selected = index
+                return
+            if link_id is None and row.link_id is None and row.kind == kind and row.name == name:
+                self._selected = index
+                return
+        # The selected link is gone: clamp to the nearest valid position.
+        self._selected = min(self._selected, max(0, len(self._rows) - 1))
 
     def show_error(self, message: str) -> None:
         self._loading = False
@@ -469,6 +515,13 @@ class HubLinksPanel(Static):
         consent keys were clipped. The real budget is what the card may occupy
         (:func:`overlay.rows_above_dock`) less its own chrome, the consent block,
         and the padding — floored so a tiny screen still shows some body.
+
+        D36 SCOPE OF THE CLAIM: this fits the card above the dock for screens of
+        at least 24 rows and 60 columns. Below that floor the body keeps its
+        one-row minimum and the consent DECISION stays FULLY painted (lead, body
+        and both keys) — it deliberately covers the composer rather than clipping
+        the decision; `test_card_never_overlaps_the_dock` covers the fitting
+        range only.
         """
 
         available = overlay.rows_above_dock(self)
@@ -513,6 +566,12 @@ class HubLinksPanel(Static):
         while hi + 1 < len(counts) and used + counts[hi + 1] <= budget:
             hi += 1
             used += counts[hi]
+        # D37: never END the window on a section header with its rows below the
+        # cap — an empty-looking section. If the last admitted entry is a header
+        # past the selection, drop it.
+        while hi > selected and self._is_header(body[hi]):
+            used -= counts[hi]
+            hi -= 1
         while lo - 1 >= 0 and used + counts[lo - 1] <= budget:
             lo -= 1
             used += counts[lo]
@@ -716,21 +775,24 @@ class HubLinksPanel(Static):
             _t(_k.confirm_keys(confirm=_t(_k.hint_confirm()), cancel=_t(_k.hint_cancel()))),
             style=warn,
         )
-        # D26/D32: the escape route when a terminal swallows a control chord. The
-        # copy names the CLI verb and the `<id>` placeholder with
-        # `--auto-push true --confirm-public-egress` (round-5 D32: without the id
-        # the old copy was a dead end). A real id is a 64-char sha256, so a
-        # runnable line never fits; the id is shown on its OWN line so the
-        # command is completable by hand. Kept SEPARATE paragraphs and each
+        # D26/D32/D39: the escape route when a terminal swallows a control chord.
+        # The `or:` command line and the `link id` line are shown TOGETHER or not
+        # at all — a user must never see `<id>` with no way to obtain an id; when
+        # only the command line fits, a `lop hub links` pointer stands in. Each
         # emitted only when it fits unwrapped, so they can never break the D22
         # height budget or wrap the keys line.
         paras = [lead, body, keys]
         alt = _t(_k.confirm_alt())
+        id_line = _t(_k.confirm_id(id=(row.link_id or row.local_id)))
         if cell_len(alt) <= width:
-            paras.append(Text(alt, style=warn))
-            id_line = _t(_k.confirm_id(id=(row.link_id or row.local_id)))
             if cell_len(id_line) <= width:
+                paras.append(Text(alt, style=warn))
                 paras.append(Text(id_line, style=warn))
+            else:
+                hint = _t(_k.confirm_id_hint())
+                if cell_len(hint) <= width:
+                    paras.append(Text(alt, style=warn))
+                    paras.append(Text(hint, style=warn))
         # Wrap each paragraph to the content width; every produced line is a
         # real painted line, so the caller's height sum stays honest.
         out: list[Text] = []

@@ -663,14 +663,16 @@ async def test_non_printable_burst_key_does_not_engage(
 
 
 @pytest.mark.asyncio
-async def test_card_never_overlaps_the_dock(
+async def test_card_clears_the_dock_for_screens_of_at_least_24_rows_and_60_cols(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D28: the painted card's bottom edge never reaches a docked surface.
+    """D28 (D36 scope): the card clears the dock for >=24 rows and >=60 cols.
 
     Round-3's N3 header pull-back added a line AFTER the budget was spent, so a
     header-adorned window could paint one row past the screen and cover the
-    composer. Swept here at the sizes the finding named.
+    composer. Swept here at the sizes the finding named, which are all at or
+    above the fitting floor; BELOW the floor the consent decision stays fully
+    painted and covers the composer by design (see HubLinksPanel._body_budget).
     """
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -716,3 +718,195 @@ async def test_mid_section_window_keeps_its_section_title(
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
         assert "Skills" in painted, painted
         assert "skill-7" in painted, painted
+
+
+def _link(**over: Any) -> dict[str, Any]:
+    base = {
+        "kind": "agent",
+        "local_id": "a1",
+        "name": "coder",
+        "link_id": "L1",
+        "hub_source": "https://hub.test/v1",
+        "visibility": "public",
+        "tenant_name": None,
+        "policy": {"subscribe": True, "auto_push": False, "revision": "rev1"},
+        "eligibility": {"can_auto_push": False, "reason": "unsupported-precondition"},
+        "auto_will_apply": False,
+        "auto_will_push": False,
+        "pull": {"state": "idle", "enabled": True, "error_class": None},
+        "push": {"state": "idle", "enabled": False, "error_class": None},
+    }
+    base.update(over)
+    return base
+
+
+def _snap(*links: dict[str, Any]) -> dict[str, Any]:
+    return {"capability": "hub_links:1", "links": list(links)}
+
+
+@pytest.mark.asyncio
+async def test_selection_follows_the_link_across_a_reorder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D38: an insert above keeps the SAME link highlighted (not by index).
+
+    `_selected` is an int into a re-ordered list, so an index-only carry moved
+    the highlight to a different link on refresh, and the next `s`/`a` wrote
+    THAT link. The selection now follows the link_id.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel.display = True
+        panel.show_links(_snap(_link(name="alpha", link_id="A"), _link(name="crew", link_id="C")))
+        panel._selected = 1  # crew
+        await pilot.pause()
+        assert panel.selected_row is not None and panel.selected_row.link_id == "C"
+        # An agent is INSERTED ABOVE crew: paint order is alpha, bravo, crew.
+        panel.show_links(
+            _snap(
+                _link(name="alpha", link_id="A"),
+                _link(name="bravo", link_id="B"),
+                _link(name="crew", link_id="C"),
+            )
+        )
+        await pilot.pause()
+        row = panel.selected_row
+        assert (
+            row is not None and row.link_id == "C"
+        ), f"selection moved to {row and row.link_id!r}; it must stay on crew (C)"
+
+
+@pytest.mark.asyncio
+async def test_selection_clamps_and_highlights_a_real_row_when_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D38: removing the selected link clamps to a real neighbour (never None)."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel.display = True
+        panel.show_links(
+            _snap(
+                _link(name="alpha", link_id="A"),
+                _link(name="bravo", link_id="B"),
+                _link(name="crew", link_id="C"),
+            )
+        )
+        panel._selected = 2  # crew, the last
+        await pilot.pause()
+        # crew disappears.
+        panel.show_links(_snap(_link(name="alpha", link_id="A"), _link(name="bravo", link_id="B")))
+        await pilot.pause()
+        assert panel.selected_row is not None, "the selection must clamp to a real row"
+        assert panel.selected_row.link_id in ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_removing_the_armed_link_disarms_the_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D38: an armed consent whose link is gone is DISARMED (never invisible)."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel.display = True
+        panel.show_links(
+            _snap(
+                _link(name="alpha", link_id="A"),
+                _link(
+                    name="crew",
+                    link_id="C",
+                    eligibility={"can_auto_push": False, "reason": "unsafe-publication"},
+                ),
+            )
+        )
+        panel._selected = 1
+        panel._consent_link_id = "C"
+        panel._consent_revision = "rev1"
+        await pilot.pause()
+        # crew disappears: the consent must not survive invisibly.
+        panel.show_links(_snap(_link(name="alpha", link_id="A")))
+        await pilot.pause()
+        assert panel._consent_link_id is None, "the armed consent must be disarmed"
+        # ctrl+y is therefore inert.
+        panel.action_confirm_egress()
+        await pilot.pause()
+        assert panel._consent_link_id is None
+
+
+@pytest.mark.asyncio
+async def test_window_never_ends_on_an_orphan_section_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D37: the window must not end on a section header whose rows are below it.
+
+    8 agents then 8 skills at 80x24: the window can admit the `Skills` header as
+    its last line while the skills rows fall past the cap, showing an EMPTY
+    section. The trailing header is dropped.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel.display = True
+        links = [
+            _link(kind="agent", local_id=f"a{i}", name=f"agent-{i}", link_id=f"A{i}")
+            for i in range(8)
+        ]
+        links += [
+            _link(kind="skill", local_id=f"s{i}", name=f"skill-{i}", link_id=f"S{i}")
+            for i in range(8)
+        ]
+        panel.show_links(_snap(*links))
+        panel._selected = 7  # last agent
+        panel._repaint()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        # If `Skills` appears, at least one skill row must appear with it.
+        if "Skills" in painted:
+            assert any(f"skill-{i}" in painted for i in range(8)), painted
+
+
+@pytest.mark.asyncio
+async def test_tui_second_write_after_the_grant_uses_the_served_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: after ctrl+y mints the grant, `s` on the freshly served revision works.
+
+    The panel re-reads the inventory after the write, so the row carries the new
+    SERVED revision; that token must equal what ``update_policy`` recomputes or
+    the subscribe flip would be refused with "link policy changed".
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # arm
+        await pilot.pause()
+        await pilot.press("ctrl+y")  # mint the grant
+        await pilot.pause()
+        await pilot.pause()
+        # The app re-read the inventory; `s` now uses the freshly served revision.
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "link policy changed" not in painted, painted
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is False, "the subscribe flip must persist"
+    assert values["auto_push"] is True

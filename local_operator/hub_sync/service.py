@@ -1075,7 +1075,14 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 }
             )
             continue
-        policy = pol.link_policy_for(values, identity.link_id, identity.kind)
+        # F1: serve the GRANT-AWARE revision — the same digest ``update_policy``
+        # recomputes. ``policy.revision(identity)`` omitted the egress grant from
+        # the digest (grant-unaware), so once a public link held a grant every
+        # later write that used the served revision 409'd ("link policy changed")
+        # on CLI, desktop and TUI alike. ``read_policy`` is that same grant-aware
+        # path, so the served CAS token and the recomputed token cannot drift.
+        snapshot = pol.read_policy(values, identity)
+        policy = snapshot.policy
         links.append(
             {
                 "link_id": identity.link_id,
@@ -1087,10 +1094,7 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "visibility": identity.visibility,
                 "tenant_id": identity.tenant_id,
                 "tenant_name": _tenant_name(values, identity),
-                "policy": {
-                    **policy.to_json(),
-                    "revision": policy.revision(identity),
-                },
+                "policy": snapshot.to_json(),
                 "eligibility": _eligibility(ctx, identity, policy, values, record, doc),
                 "auto_will_apply": _auto_will_apply(item, policy, ctx, now),
                 "auto_will_push": _auto_will_push(

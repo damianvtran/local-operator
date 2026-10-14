@@ -385,6 +385,15 @@ def _grant_written(root: Path, link_id: str) -> bool:
     return link_id in (hub.get("public_egress_grants") or {})
 
 
+def _policy_values(root: Path, link_id: str) -> dict[str, Any]:
+    """The persisted per-link policy subtree (N1: assert the refusal wrote nothing)."""
+
+    from local_operator.config import ConfigManager
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return dict((hub.get("links") or {}).get(link_id) or {})
+
+
 def test_cli_can_mint_the_first_public_grant_with_confirm(rig, capsys) -> None:
     """The cross-surface fix: the REAL CLI can create a public link's first grant.
 
@@ -412,6 +421,8 @@ def test_cli_refuses_when_an_earlier_gate_fails_even_with_consent(rig, capsys) -
     assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
     assert "not eligible for this origin" in capsys.readouterr().out
     assert not _grant_written(root, link_id)
+    # N1: the refusal must not have flipped auto_push either.
+    assert _policy_values(root, link_id)["auto_push"] is False
 
 
 def test_cli_refuses_mixed_lineage_with_consent(rig, capsys) -> None:
@@ -422,3 +433,25 @@ def test_cli_refuses_mixed_lineage_with_consent(rig, capsys) -> None:
     assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
     assert "not eligible for this origin" in capsys.readouterr().out
     assert not _grant_written(root, link_id)
+    # N1: the refusal must not have flipped auto_push either.
+    assert _policy_values(root, link_id)["auto_push"] is False
+
+
+def test_cli_second_write_after_the_grant_uses_the_served_revision(rig, capsys) -> None:
+    """F1: `hub link set` works AGAIN after the grant (served revision must match).
+
+    The command reads the current revision from the inventory when none is given;
+    with the grant-unaware served token the second edit 409'd on every public
+    link that held a grant.
+    """
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root)
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 0
+    capsys.readouterr()
+    # The user's second edit: no explicit revision, so the SERVED one is used.
+    assert _set(root, link_id, subscribe=False) == 0
+    out = capsys.readouterr().out
+    assert "changed" not in out, out
+    values = _policy_values(root, link_id)
+    assert values["subscribe"] is False and values["auto_push"] is True

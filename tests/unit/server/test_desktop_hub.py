@@ -388,6 +388,13 @@ def _grant_written(root: Path, link_id: str) -> bool:
     return link_id in (hub.get("public_egress_grants") or {})
 
 
+def _auto_push_persisted(root: Path, link_id: str) -> bool:
+    """N1: the persisted auto_push value (a refusal must leave it False)."""
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return bool(((hub.get("links") or {}).get(link_id) or {}).get("auto_push"))
+
+
 async def _revision(client: Any, link_id: str) -> str:
     payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
     return next(row["policy"]["revision"] for row in payload if row["link_id"] == link_id)
@@ -409,6 +416,7 @@ async def test_desktop_patch_mints_the_first_public_grant_only_with_consent(api)
     )
     assert refused.status_code == 422, refused.text
     assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
     # WITH confirm: 200 and the grant persisted.
     ok = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
@@ -438,6 +446,8 @@ async def test_desktop_patch_refuses_when_an_earlier_gate_fails_even_with_consen
     )
     assert refused.status_code == 422, refused.text
     assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
+    assert _auto_push_persisted(root, link_id) is False
 
 
 async def test_desktop_patch_refuses_mixed_lineage_with_consent(api):
@@ -455,3 +465,43 @@ async def test_desktop_patch_refuses_mixed_lineage_with_consent(api):
     )
     assert refused.status_code == 422, refused.text
     assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
+
+
+async def test_desktop_second_write_after_the_grant_uses_the_served_revision(api):
+    """F1: after a grant is minted, the NEXT write on the SERVED revision succeeds.
+
+    The served revision omitted the egress grant from the digest while
+    ``update_policy`` compared the grant-aware one, so the first write minted the
+    grant and EVERY later write (here: a subscribe flip) 409'd "link policy
+    changed; reload before saving" — forever, on all three surfaces.
+    """
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    minted = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert minted.status_code == 200, minted.text
+    assert _grant_written(root, link_id)
+    # SECOND write, with the revision the inventory serves AFTER the grant.
+    second = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            subscribe=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert second.status_code == 200, second.text
+    stored = _policy_values_desktop(root, link_id)
+    assert stored["subscribe"] is False and stored["auto_push"] is True
+
+
+def _policy_values_desktop(root: Path, link_id: str) -> dict[str, Any]:
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return dict((hub.get("links") or {}).get(link_id) or {})

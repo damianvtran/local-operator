@@ -248,5 +248,10 @@
     "role": "link identifier",
     "tone": "plain, precise",
     "note": "The 64-char link id, shown so the escape-route command can be completed by hand; an opaque identifier, not a secret."
+  },
+  "tui.hub_links.confirm.id_hint": {
+    "role": "escape route pointer",
+    "tone": "plain, precise",
+    "note": "Shown alongside the escape-route command when the real link id does not fit on a line, so the user still has a way to obtain it. Names the `lop hub links` inventory command."
   }
 }

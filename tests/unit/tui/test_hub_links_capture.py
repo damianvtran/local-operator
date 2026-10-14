@@ -53,6 +53,26 @@ if "LOCAL_OPERATOR_SCRATCHPAD" not in os.environ:  # pragma: no cover - env guar
     )
 
 
+def _snap_link(name: str) -> dict[str, Any]:
+    """A minimal snapshot link row (the shape ``rows_from_snapshot`` reads)."""
+
+    return {
+        "kind": "agent",
+        "local_id": name,
+        "name": name,
+        "link_id": name.upper()[:1] + name[1:],
+        "hub_source": "https://hub.test/v1",
+        "visibility": "public",
+        "tenant_name": None,
+        "policy": {"subscribe": True, "auto_push": False, "revision": "rev1"},
+        "eligibility": {"can_auto_push": False, "reason": "unsupported-precondition"},
+        "auto_will_apply": False,
+        "auto_will_push": False,
+        "pull": {"state": "idle", "enabled": True, "error_class": None},
+        "push": {"state": "idle", "enabled": False, "error_class": None},
+    }
+
+
 def _seed_link(
     root: Path,
     *,
@@ -205,6 +225,29 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 await pilot.press("tab")
                 await pilot.pause()
                 await pilot.press("escape")
+                await pilot.pause()
+            elif contact_sheet == "reorder":
+                # D38: select the SECOND link, then install a snapshot with an
+                # agent INSERTED ABOVE — the highlight must stay on the same
+                # link (crew), not the same index (which would be bravo).
+                app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
+                panel = app._hub_links_panel()
+                if panel is not None:
+                    panel._selected = 1  # crew
+                    panel._repaint()
+                    await pilot.pause()
+                    panel.show_links(
+                        {
+                            "capability": "hub_links:1",
+                            "links": [
+                                _snap_link("alpha"),
+                                _snap_link("bravo"),
+                                _snap_link("crew"),
+                            ],
+                        }
+                    )
                 await pilot.pause()
             elif contact_sheet and contact_sheet.startswith("select-index:"):
                 # D27/D35: open the overlay and select an EXPLICIT index, so a
@@ -881,3 +924,106 @@ async def test_capture_tab_esc_frame(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     svg = OUT / "tab-then-esc.svg"
     assert svg.exists() and "<svg" in svg.read_text()[:200]
+
+
+async def test_capture_round6_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frames round-6 asked for (D37/D38/D39).
+
+    * D37: 8 agents + 8 skills at 80x24, selection on the last agent, so a
+      trailing `Skills` header with no rows would show as an empty section.
+    * D38: the same link highlighted after an insert-above (selection follows the
+      link, not the index).
+    * D39: the consent escape route where `<id>` fits but the id line does not
+      (the `lop hub links` pointer stands in).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    many = [
+        dict(
+            kind="agent",
+            local_id=f"a{i}",
+            name=f"agent-{i}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        for i in range(8)
+    ] + [
+        dict(
+            kind="skill",
+            local_id=f"s{i}",
+            name=f"skill-{i}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        for i in range(8)
+    ]
+    # D37: the orphan-header state at 80x24 with the last agent selected.
+    await _capture(
+        "orphan-header-80x24",
+        size=(80, 24),
+        contact_sheet="select-index:7",
+        links=many,
+    )
+    # D38: the selection follows the link across a reorder (reorder sheet).
+    await _capture(
+        "selection-follows-link",
+        size=(100, 30),
+        contact_sheet="reorder",
+        links=[
+            dict(
+                kind="agent",
+                local_id="a1",
+                name="alpha",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            ),
+            dict(
+                kind="agent",
+                local_id="a2",
+                name="crew",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            ),
+        ],
+    )
+    # D39: an id too long for the line ⇒ the `lop hub links` pointer stands in.
+    await _capture(
+        "consent-id-pointer",
+        size=(80, 30),
+        contact_sheet="consent",
+        links=[
+            dict(
+                kind="agent",
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+                attest_revision_cas=True,
+            )
+        ],
+    )
+
+    for name in ("orphan-header-80x24", "selection-follows-link", "consent-id-pointer"):
+        svg = OUT / f"{name}.svg"
+        assert svg.exists() and "<svg" in svg.read_text()[:200], name

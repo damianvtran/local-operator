@@ -42,6 +42,10 @@ def confirm_id(*, id: str) -> Msg:
     return Msg("tui.hub_links.confirm.id", {"id": id})
 
 
+def confirm_id_hint() -> Msg:
+    return Msg("tui.hub_links.confirm.id_hint", {})
+
+
 def confirm_keys(*, confirm: str, cancel: str) -> Msg:
     return Msg("tui.hub_links.confirm.keys", {"confirm": confirm, "cancel": cancel})
 

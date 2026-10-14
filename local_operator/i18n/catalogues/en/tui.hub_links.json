@@ -48,5 +48,6 @@
   "tui.hub_links.refusal.resolve_first": "Resolve this link's source before acting on it.",
   "tui.hub_links.confirm.alt": "or: lop hub link set <id> --auto-push true --confirm-public-egress",
   "tui.hub_links.refusal.revision_moved": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest.",
-  "tui.hub_links.confirm.id": "link id {id}"
+  "tui.hub_links.confirm.id": "link id {id}",
+  "tui.hub_links.confirm.id_hint": "see `lop hub links` for the link id"
 }
