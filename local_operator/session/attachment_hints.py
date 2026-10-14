@@ -68,6 +68,33 @@ A block the render replaced with a notice carries no bytes and earns no note;
 a store that has been pruned by hand degrades the same way — the note simply
 does not appear for that image.
 
+THE BOUNDARY (world-root sessions)
+----------------------------------
+An episode session runs inside a WORLD ROOT: ``SessionSpec.world_root`` is
+installed as the session's ``confinement_root``, and the controller store --
+the path this note names -- is BY CONSTRUCTION outside it (the SDK refuses a
+layout whose store roots sit inside the world). The measured cost of ignoring
+that boundary: a confined model read the note, believed
+"read or edit the file directly", and spent a tool call on a path its own
+confinement must refuse (``tools/confinement.py``; the refusal is correct and
+the wasted call was not). The pixels were already in the message; the FALSE
+promise was the only thing the note added.
+
+So the hint is boundary-aware: when ``world_root`` is set and the store file
+is NOT inside it, the note keeps every fact the model can act on (mime, byte
+count, digest, and the do-not-search instruction) and drops the controller
+path and the read/edit promise the session cannot keep. The inline image is
+untouched. Reachability is judged the way the tools judge it -- on the
+RESOLVED path, so a symlink out of the world is outside it -- and an
+unresolvable path counts as outside, mirroring
+``ToolConfinement.path_denial(resolvable=False)``.
+
+Constraints, stated: ``world_root=None`` (every ordinary exec/TUI/mobile/
+server session) renders BYTE-IDENTICAL output to before this parameter
+existed, and that arm resolves nothing; no filesystem allowlist is widened,
+nothing is copied or written and no provider- or task-specific rule enters
+this module.
+
 COST, STATED
 ------------
 One base64-decode, one sha256 and one digest-verified store read per image per
@@ -84,9 +111,12 @@ model never having to search.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
 from local_operator.harness.types import ImageContent, Message, TextContent
 from local_operator.session.attachments import AttachmentStore
+from local_operator.tools.confinement import ToolConfinement
 
 #: Suffix on a hinted copy's id. The sibling of ``harness/replay_bound.py``'s
 #: ``~rb``: the token-estimate memo is keyed on ``message.id``, and these
@@ -106,8 +136,23 @@ _MULTI_OPEN = (
     "no filesystem search is needed:\n"
 )
 
+#: Confined world, store file NOT inside it: the note keeps the facts the
+#: model can act on (mime/size/digest, and the do-not-search instruction) and
+#: drops the controller path plus the read/edit promise the session's own
+#: tools would refuse -- see the module docstring's boundary section.
+_CONFINED_SINGLE_OPEN = (
+    "[image attachment — inline pixels only; it is not available as a file "
+    "in this workspace (do not search for one):\n"
+)
+_CONFINED_MULTI_OPEN = (
+    '[image attachments — entries marked "no workspace file" are inline '
+    "pixels only and cannot be read or edited (do not search for them):\n"
+)
 
-def with_attachment_hints(messages: list[Message]) -> list[Message]:
+
+def with_attachment_hints(
+    messages: list[Message], *, world_root: str | Path | None = None
+) -> list[Message]:
     """``messages``, with a stored-location note after each message's images.
 
     Returns a NEW list. A message that earns no note — every non-user role,
@@ -117,12 +162,23 @@ def with_attachment_hints(messages: list[Message]) -> list[Message]:
     is replaced by a copy carrying an extra trailing ``TextContent``; the
     original message is never mutated (see the module docstring).
 
+    ``world_root`` is the session's installed world boundary (its
+    ``confinement_root``; ``None`` for every ordinary session, whose render is
+    BYTE-IDENTICAL to before this parameter existed). Set, an image whose
+    store file is not inside the boundary keeps its truthful facts and the
+    do-not-search instruction but loses the controller path and the read/edit
+    promise the confined tools would refuse — see the module docstring's
+    boundary section. The inline image is never touched, on either arm.
+
     Deterministic by construction: the note is a pure function of the block's
-    bytes and the store's own naming rule, so two builds of the same request
-    produce byte-identical text and the provider's prompt-cache prefix stays
-    stable across turns.
+    bytes, the store's own naming rule and the session's boundary, so two
+    builds of the same request produce byte-identical text and the provider's
+    prompt-cache prefix stays stable across turns.
     """
     store = AttachmentStore()
+    # The boundary is resolved ONCE per render, the way the tools resolve it
+    # (``ToolConfinement.at``); the per-image check below is then pure.
+    boundary = ToolConfinement.at(world_root) if world_root and str(world_root).strip() else None
     out: list[Message] = []
     for message in messages:
         if message.role != "user":
@@ -135,38 +191,68 @@ def with_attachment_hints(messages: list[Message]) -> list[Message]:
             # nobody asked it to edit.
             out.append(message)
             continue
-        lines = [
-            line
+        rows = [
+            row
             for block in message.content
             if isinstance(block, ImageContent)
-            if (line := _block_line(store, block)) is not None
+            if (row := _block_row(store, block, boundary)) is not None
         ]
-        if not lines:
+        if not rows:
             out.append(message)
             continue
-        opening = _SINGLE_OPEN if len(lines) == 1 else _MULTI_OPEN
-        note = opening + "\n".join(lines) + "]"
+        if all(full for _text, full in rows):
+            opening = _SINGLE_OPEN if len(rows) == 1 else _MULTI_OPEN
+        else:
+            opening = _CONFINED_SINGLE_OPEN if len(rows) == 1 else _CONFINED_MULTI_OPEN
+        note = opening + "\n".join(text for text, _full in rows) + "]"
         out.append(_hinted_copy(message, note))
     return out
 
 
-def _block_line(store: AttachmentStore, block: ImageContent) -> str | None:
-    """The note's line for ``block``, or ``None`` when it earns none.
+def _block_row(
+    store: AttachmentStore, block: ImageContent, boundary: ToolConfinement | None
+) -> tuple[str, bool] | None:
+    """The note's line for ``block``, and whether it advertises a real path.
 
     ``None`` is a normal outcome, never an error: a payload-less block, an
     undecodable payload, and content the store does not hold all land here,
     and the caller's contract is to leave that image unmentioned rather than
-    to write or to name a path that dangles.
+    to write or to name a path that dangles. The boolean is ``False`` exactly
+    when the boundary makes the store file unreachable, which swaps in the
+    reduced line (facts kept, path and read/edit promise dropped).
     """
     if not block.data:
         return None
     ref = store.locate(block.data, block.mime_type)
     if ref is None:
         return None
+    path = store.path_for(ref.digest)
+    if boundary is None or _reachable(boundary, path):
+        return (
+            f"- {path} ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest})",
+            True,
+        )
     return (
-        f"- {store.path_for(ref.digest)} "
-        f"({block.mime_type}, {ref.bytes} bytes; digest {ref.digest})"
+        f"- ({block.mime_type}, {ref.bytes} bytes; digest {ref.digest}; no workspace file)",
+        False,
     )
+
+
+def _reachable(boundary: ToolConfinement, path: Path) -> bool:
+    """Whether the session's confined tools could reach ``path``.
+
+    Judged on the RESOLVED path, exactly as ``ToolConfinement`` judges tool
+    calls (seatbelt compares vnodes; the file tools compare resolved paths —
+    ``tools/confinement.py``), so a symlink that leaves the world is outside
+    it here too. An unresolvable path counts as outside: "cannot be shown
+    inside" is a denial, mirroring ``ToolConfinement.path_denial``'s
+    ``resolvable=False`` arm.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return False
+    return boundary.contains(resolved)
 
 
 def _hinted_copy(message: Message, note: str) -> Message:
