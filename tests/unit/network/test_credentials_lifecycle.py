@@ -167,3 +167,78 @@ def test_counter_exhaustion_refuses_rather_than_wraps():
     with pytest.raises(MeshRefusal) as exc:
         L.derive(prev, KEY, SCOPE, L.NativeFacts(present=True, row_updated_at=2.0))
     assert exc.value.code == "lifecycle_counter_exhausted"
+
+
+# ---------------------------------------------------------------------------
+# Writer must never produce a file its own reader rejects (review M1)
+# ---------------------------------------------------------------------------
+
+
+def _fill_observations(lc: L.LifecycleStore, count: int, *, scope_pad: str = "") -> None:
+    """Seed ``count`` distinct high-water rows in one write, as repeated observes would."""
+    with lc.locked():
+        doc = lc.load()
+        for i in range(count):
+            doc.high_water[("dev-a", KEY, f"{scope_pad}s{i}")] = (1, 1)
+        lc._save(doc)
+
+
+def test_distinct_scope_refs_cannot_make_the_file_unreadable(tmp_path):
+    lc = L.LifecycleStore(NET, root=tmp_path)
+    _fill_observations(lc, L.MAX_ROWS - 1)
+    assert lc.observe(L.Observation("dev-a", KEY, "last-fit", 1, 1)).applied
+    before = lc.path.read_bytes()
+    # The table is now exactly full: a NEW ident is refused by name, file untouched.
+    res = lc.observe(L.Observation("dev-a", KEY, "one-too-many", 1, 1))
+    assert (res.applied, res.reason) == (False, L.OBSERVED_TABLE_FULL)
+    assert lc.path.read_bytes() == before
+    reopened = L.LifecycleStore(NET, root=tmp_path)
+    assert reopened.status() == "ok"
+    replay = reopened.observe(L.Observation("dev-a", KEY, "last-fit", 1, 1))
+    assert replay.reason == L.OBSERVED_REPLAY
+
+
+def test_long_scope_refs_cannot_exceed_the_file_bound(tmp_path):
+    lc = L.LifecycleStore(NET, root=tmp_path)
+    pad = "x" * 240
+    refused = None
+    for i in range(L.MAX_ROWS):
+        res = lc.observe(L.Observation("dev-a", KEY, f"{pad}{i:05d}", 1, 1))
+        if not res.applied:
+            refused = res
+            break
+    assert refused is not None and refused.reason == L.OBSERVED_TABLE_FULL
+    assert lc.path.stat().st_size <= L.MAX_FILE_BYTES
+    assert L.LifecycleStore(NET, root=tmp_path).status() == "ok"
+
+
+def test_full_table_still_applies_updates_to_existing_idents(tmp_path):
+    lc = L.LifecycleStore(NET, root=tmp_path)
+    _fill_observations(lc, L.MAX_ROWS)
+    # A withdraw / forward step on an ident that already has a row is never blocked.
+    res = lc.observe(L.Observation("dev-a", KEY, "s7", 2, 3))
+    assert res.applied and (res.login_chain_revision, res.material_generation) == (2, 3)
+    assert L.LifecycleStore(NET, root=tmp_path).status() == "ok"
+    # An unchanged-counter restrictive re-apply is a replay (the announce handler
+    # still applies it), and writes nothing.
+    before = lc.path.read_bytes()
+    assert lc.observe(L.Observation("dev-a", KEY, "s7", 2, 3)).reason == L.OBSERVED_REPLAY
+    assert lc.path.read_bytes() == before
+
+
+def test_owner_counters_table_is_capped_too(tmp_path):
+    lc = L.LifecycleStore(NET, root=tmp_path)
+    with lc.locked():
+        doc = lc.load()
+        for i in range(L.MAX_ROWS):
+            facts = L.NativeFacts(present=True, row_updated_at=1.0)
+            doc.rows[(KEY, f"s{i}")] = L.derive(None, KEY, f"s{i}", facts)
+        lc._save(doc)
+    before = lc.path.read_bytes()
+    with pytest.raises(MeshRefusal) as exc:
+        lc.record_native(KEY, "brand-new", L.NativeFacts(present=True, row_updated_at=1.0))
+    assert exc.value.code == "lifecycle_table_full"
+    assert lc.path.read_bytes() == before
+    # Existing rows still move (logout of an existing scope is never blocked).
+    assert lc.record_native(KEY, "s3", L.NativeFacts(present=False)).state == L.STATE_ABSENT
+    assert L.LifecycleStore(NET, root=tmp_path).status() == "ok"
