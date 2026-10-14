@@ -188,7 +188,7 @@ _UPDATE_REPORT_SCHEMA = "update.report.v1"
 #: failure (already current, absent, unaddressable from here, or deliberately
 #: left stopped); ``failed`` = a repair was attempted and did not complete;
 #: ``unsupervised`` = the mobile daemon runs with no LaunchAgent to bounce.
-DaemonStatusKind = Literal["refreshed", "already", "failed", "unsupervised"]
+DaemonStatusKind = Literal["refreshed", "already", "failed", "unsupervised", "pending"]
 
 #: The line the refresh CHILD prints before it repairs each daemon, and the prefix
 #: the parent drops from a healthy run's output.
@@ -2209,9 +2209,10 @@ def _install_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
 def _admit_install() -> None:
     """A census is admission evidence, NOT exclusion of future busy transitions.
 
-    No force escape hatch: an unreadable namespace refuses just like a busy one.
-    Run before preparation and again under the promotion transaction. Immutable
-    generations and the cooperating-writer mutex do not waive this policy.
+    Mutable/in-place installers alone use this admission under the root
+    transaction BEFORE their first write. No force escape hatch: an unreadable
+    namespace refuses just like a busy one. Immutable preparation/promotion owns
+    another tree and retains old roots; it must not call this whole-fleet gate.
     """
     from local_operator.session.runtime import registry
     from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
@@ -2430,7 +2431,8 @@ def _reuse_exact_current(built: PublicationEvidence | None) -> Path | None:
     except UpdateError:
         return None
     with install_transaction.transaction(stable_root(), operation="reuse exact artifact"):
-        _admit_install()
+        # Reuse changes no imported tree: busy runtimes keep their own immutable
+        # roots. Fresh artifact/current fencing, not fleet idleness, admits this.
         if (
             current_generation() == current
             and generation_version(current) == built.target
@@ -2502,7 +2504,9 @@ def _register_candidate(
     token: str, target: str, mode: str, source_identity: str = ""
 ) -> tuple[Path, str, str]:
     with install_transaction.transaction(stable_root(), operation="register candidate"):
-        _admit_install()
+        # Preparation owns a distinct generation and cannot rewrite a runtime's
+        # imports. An unreadable/busy fleet therefore does not block registration;
+        # duplicate-attempt and current-root identity checks remain authoritative.
         baseline = str(current_generation() or "")
         for candidate in generations_dir().iterdir() if generations_dir().is_dir() else ():
             record = install_transaction.read_record(candidate / install_transaction.ATTEMPT_NAME)
@@ -2532,7 +2536,9 @@ def _register_candidate(
 def _check_promotion(
     generation: Path, nonce: str, baseline: str, target: str, mode: str, note: str
 ) -> None:
-    _admit_install()
+    # A pointer commit affects future starts, never the immutable trees held by
+    # existing runtimes. Keep all ownership/fresh-current/stale-candidate fences
+    # below; the mutable installer alone needs the whole-fleet idle admission.
     if generation.parent.resolve() != generations_dir().resolve() or generation.is_symlink():
         raise UpdateError("candidate does not belong to this install root; nothing was promoted")
     candidate_version = generation_version(generation)
@@ -2608,6 +2614,9 @@ def _discard_candidate(generation: Path, nonce: str) -> None:
             if current_generation() == generation.resolve():
                 return
             record = install_transaction.read_record(generation / install_transaction.ATTEMPT_NAME)
+            if record and record.get("ever_exposed"):
+                # Current/rollback absence cannot prove a runtime never saw B.
+                return
             if record and record.get("nonce") == nonce and record.get("pid") == os.getpid():
                 install_transaction.finish_attempt(generation, nonce)
                 _remove_tree(generation)
@@ -3412,6 +3421,18 @@ def install_into_generation(
     generation, nonce, baseline = _register_candidate(
         token, version, mode, commit or (str(source) if source is not None else "")
     )
+    # The public immutable primitive is shared by default CLI, snapshot, mesh
+    # and the verified controller. Tie recovery to THIS candidate, not a latest
+    # timestamp that could belong to a concurrent newer operation.
+    try:
+        operation = install_transaction.start_operation(
+            stable_root(), baseline=baseline, target=version, route=mode,
+        )
+        operation.advance("preparing", candidate=str(generation))
+        install_transaction.link_operation(operation, generation)
+    except install_transaction.InstallTransactionError as exc:
+        _discard_candidate(generation, nonce)
+        raise UpdateError(f"could not persist update recovery: {exc}") from exc
     # The pin and --refresh-package are PyPI-index defences, so they ride the
     # PyPI shape only: a source install resolves the tree it was handed.
     argv = installer_argv(InstallKind.UV_TOOL, version=version if source is None else "")
@@ -3427,11 +3448,14 @@ def install_into_generation(
     except OSError as exc:
         # A missing ``uv``, an unwritable generations dir: the caller gets one
         # refusal sentence, not a traceback out of a spawn it did not make.
+        operation.advance("failed", failure=type(exc).__name__)
         _discard_candidate(generation, nonce)
         raise UpdateError(f"could not run uv: {exc}") from exc
-    except BaseException:
+    except BaseException as exc:
+        operation.advance("failed", failure=type(exc).__name__)
         _discard_candidate(generation, nonce)
         raise
+    operation.advance("prepared", candidate=str(generation))
     try:
         with _promotion_transaction(generation, version, mode, built):
             try:
@@ -3472,12 +3496,11 @@ def install_into_generation(
                     origin=origin,
                     note=note,
                 )
-                # The flip is INSIDE this handler so a refusal from the stable root
-                # (``EACCES``, ``ENOSPC``) arrives as the one sentence the callers print
-                # instead of a bare ``OSError``, and so a built tree nobody can reach is
-                # not left behind (review round 1, R-9). Safe to remove on failure:
-                # ``flip_pointer`` either renamed the pointer or raised before it did,
-                # never both.
+                # Ordinary pointer errors remain actionable, but publication
+                # starts a retention boundary BEFORE the write. Even a failed
+                # flip/rollback cannot prove no concurrent runtime observed B;
+                # its owned attempt stays protected instead of being deleted.
+                install_transaction.preserve_publication(generation, nonce)
                 try:
                     flip_pointer(generation)
                 except OSError as exc:
@@ -3485,11 +3508,12 @@ def install_into_generation(
                         f"could not point current at {generation.name}: {exc}"
                     ) from exc
             except BaseException:
-                # Nothing has been flipped, so this tree is nobody's but ours. A
-                # ``kill -9`` cannot reach here — which is exactly what
-                # ``prune_generations``' marker-age rule is for.
-                _remove_tree(generation)
+                # A pointer operation could expose B before a later refusal or
+                # rollback. Only the owned discard guard may reclaim a candidate
+                # that never reached publication; unknown/exposed roots stay.
+                _discard_candidate(generation, nonce)
                 raise
+            operation.advance("promoted", current=str(generation))
             install_transaction.finish_attempt(generation, nonce)
             _written, not_written = write_stable_launchers(generation)
             if not_written:
@@ -6211,6 +6235,7 @@ def perform_upgrade(
     commit: str = "",
     ref: str = "",
     on_prune: Callable[["PrunePlan"], None] | None = None,
+    on_promoted: Callable[[Path], None] | None = None,
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
@@ -6272,30 +6297,18 @@ def perform_upgrade(
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
-        install_into_generation(
+        promoted = install_into_generation(
             source, version=target, commit=commit, ref=ref, target_mode="latest"
         )
-        # Retention, not tidiness: a generation is a whole venv, so a machine
-        # that never pruned would grow by one per release. The policy is
-        # structural (see ``prune_generations``) and best-effort — the upgrade
-        # has already succeeded, and a caller that cannot read the record
-        # directory must not be told otherwise.
-        try:
-            plan = prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
-        except Exception:  # noqa: BLE001 — pruning never fails an upgrade
-            logger.debug("generation prune failed", exc_info=True)
-        else:
-            # THE CALLER SAYS IT, not this function: the CLI has already printed
-            # ``installed``/``current install:`` by the time it can, so the
-            # removal lands where it belongs — after the lines that explain it —
-            # instead of as a bare timestamped record above them. ``on_prune`` is
-            # how the two front ends share the sentence (design review D4); with
-            # no caller listening, the log file is still the record.
-            if on_prune is not None:
-                on_prune(plan)
-            else:
-                for line in prune_notice_lines(plan):
-                    logger.info("%s", line)
+        if on_promoted is not None:
+            on_promoted(promoted)
+        # Rolling promotion must retain EVERY previous runtime/resource tree.
+        # Discovery/argv/open-file absence is not a lifetime-pin proof: an old
+        # process may load an asset later with no handle open now. Automatic GC
+        # stays frozen, including on unreadable census, rather than weakening
+        # install admission or assuming that a successful pointer swap retires A.
+        # Explicit maintenance keeps its own guarded policy; this tail never
+        # invokes it or the historical on_prune observer.
         return target
     argv, image = installer_invocation(
         detected,
@@ -6913,6 +6926,21 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     as its own notice with a token, before relaunching; both halves keep their
     standalone bounds, so that composition is unchanged by this stage.
     """
+
+    if _is_generation_install():
+        # Immutable success is not permission to bounce supervisors that may own
+        # wake/monitor/browser/mobile/mesh work. Only the API's positively proved
+        # local-work contract is moved by services_stage below; other units stay
+        # running/pending until their own continuity contract is available.
+        names = ("browser bridge", "tunnel", "wakes supervisor", "network relay", "mobile")
+        return [DaemonRefresh(
+            "supervised daemons",
+            warnings=(
+                "supervised services remain pending; no verified rolling handoff "
+                "capability (none restarted)",
+            ),
+            statuses=tuple(DaemonStatus(name, "pending") for name in names),
+        )]
     deadline = time.monotonic() + _STAGE_DEADLINE_S
     results: dict[str, DaemonRefresh] = {}
 
@@ -7717,7 +7745,15 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
 
     before = _live_serve_records()
     try:
-        refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
+        if _is_generation_install():
+            from local_operator.services import reload_serve_daemons
+
+            refreshes = (
+                reload_serve_daemons(rolling=True)
+                if wait_s is None else reload_serve_daemons(wait_s=wait_s, rolling=True)
+            )
+        else:
+            refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
             f"warning: the installed services could not be moved onto the new build: {exc}; "
@@ -7749,7 +7785,103 @@ def _run_services_tail(*, services: bool) -> StageReport:
     return StageReport(daemons=_collect_daemon_statuses(refreshes))
 
 
-def _emit_update_report(*, install_version: str, target: str, stage: StageReport | None) -> None:
+def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any]:
+    """Loaded/serving/pending are measurements, never aliases for current."""
+    from local_operator import services
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    current = current_generation()
+    image = _generation_install_root(current) if current is not None else None
+    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
+    measured = True
+    for root in _config_roots():
+        try:
+            before = _entry_names(root, "run")
+            rows = registry.scan(
+                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+            )
+            after = _entry_names(root, "run")
+            unreadable, _note = _verdict_from_listing(root / "run", before, after, len(rows))
+            measured = measured and not unreadable
+            for record, state in rows:
+                if state == "stale":
+                    continue
+                pinned = getattr(record, "install_root", "")
+                if state != "live" or not pinned or image is None:
+                    counts["unknown"] += 1
+                elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
+                    counts["unknown"] += 1
+                elif Path(pinned).resolve() != image.resolve():
+                    counts["known_old_busy" if record.busy else "known_old_idle"] += 1
+        except Exception:  # noqa: BLE001 — unknown never becomes []/zero
+            measured = False
+    serving: list[dict[str, Any]] = []
+    serving_measured = True
+    try:
+        from local_operator.server import registry as serve_registry
+        from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
+
+        serving_rows = []
+        for root in _config_roots():
+            before = _entry_names(root, SERVE_RUN_DIRNAME)
+            rows = serve_registry.scan(root, reap=False)
+            after = _entry_names(root, SERVE_RUN_DIRNAME)
+            unreadable, _note = _verdict_from_listing(
+                root / SERVE_RUN_DIRNAME, before, after, len(rows)
+            )
+            serving_measured = serving_measured and not unreadable
+            serving_rows.extend((record, state) for record, state in rows if state != "stale")
+        if not serving_rows:
+            # Empty discovery does not prove no pre-protocol API is serving.
+            serving_measured = False
+        for record, state in serving_rows:
+            reading = services.probe_address(record)
+            healthy = state == "live" and reading.verdict == services.SERVING and not reading.detail
+            matches = (
+                healthy
+                and image is not None
+                and Path(record.prefix).resolve() == image.resolve()
+            )
+            serving.append(
+                {
+                    "pid": record.pid,
+                    "instance": record.instance_id,
+                    "serving_version": record.version if healthy else "",
+                    "loaded_root": record.prefix if healthy else "",
+                    "state": "current" if matches else "pending",
+                    "reason": (
+                        ""
+                        if matches
+                        else reading.detail or "old serving build or unproved handoff"
+                    ),
+                }
+            )
+    except Exception:  # noqa: BLE001 — failed inventory is explicit
+        serving_measured = False
+    pending = [{"name": item.name, "state": "pending",
+                "reason": "unit presence/serving identity and rolling continuity are unproved"}
+               for item in stage.daemons if item.status == "pending"]
+    return {"contract": "rolling-no-kill-v1", "mode": "rolling-immutable",
+            "promoted": {
+                "generation": str(promoted or ""),
+                "version": generation_version(promoted),
+            },
+            "now_current": {
+                "generation": str(current or ""),
+                "version": generation_version(current),
+            },
+            "core_installed": promoted is not None and generation_version(promoted) != "",
+            # Unsupported supervisor units / old12 FIRST activation are not an
+            # empty authoritative census. Never announce overall COMPLETE.
+            "central_services_complete": False,
+            "serving_measured": serving_measured, "services": serving + pending,
+            "runtimes": {"measured": measured,
+                         **{key: value if measured else None for key, value in counts.items()}}}
+
+
+def _emit_update_report(*, install_version: str, target: str, stage: StageReport | None,
+                        promoted_generation: Path | None = None) -> None:
     """Emit the ONE machine-readable line at exit — additive to the sentences.
 
     THE LINE IS A CONTRACT (2026-09-30 design): the desktop app parses it to
@@ -7774,6 +7906,7 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
             "version": target if status.status in ("refreshed", "already") else "",
         }
         for status in report.daemons
+        if status.status != "pending"
     ]
     payload = {
         "update_report": {
@@ -7793,6 +7926,20 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
             "daemons": daemons,
         }
     }
+    if _is_generation_install() or promoted_generation is not None:
+        # Keep the legacy FOUR-status vocabulary. New callers require the rolling
+        # contract; empty legacy rows cannot prove central-services completion.
+        rolling = _rolling_receipt(promoted_generation, report)
+        payload["update_report"]["rolling"] = rolling
+        if promoted_generation is not None:
+            operation = install_transaction.operation_for_generation(promoted_generation)
+            if operation is not None:
+                # Receipt persistence belongs to the promoted candidate's intent,
+                # even when newer current C now serves. Pending is recoverable,
+                # never an invented all-central complete verdict.
+                operation.advance("partial", current=rolling["now_current"]["generation"],
+                                  receipts=rolling["services"])
+                payload["update_report"]["operation_id"] = operation.identifier
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
@@ -7829,14 +7976,14 @@ def _generation_upgrade(
     roll: bool = True,
     before_version: str = "",
     via: str = "snapshot",
+    promoted_generation: Path | None = None,
 ) -> int:
-    """The tail every successful install shares: report, prune, refresh, succeed.
+    """The tail successful installs share: report, retain roots, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
-    ``installed`` line and then runs the same tail. The prune notice comes from
-    :func:`prune_notice_lines`, the one renderer both front ends use, and it prints
-    AFTER ``current install:`` — the removal reported where it belongs rather than
-    as a bare record above the lines that explain it (design review D4).
+    ``installed`` line and then runs the same tail. Automatic collection is frozen
+    on BOTH paths: committing B does not retire the package/dependency/resource
+    roots that still-running A processes may read later.
 
     ``services=False`` (``lop update --no-services``) stops after the supervised
     daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
@@ -7853,13 +8000,12 @@ def _generation_upgrade(
     between the services tail and the report line.
     """
     _print_current_generation()
-    for line in prune_notice_lines(
-        prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
-    ):
-        print(line)
+    # Match perform_upgrade's no-collection tail. A snapshot/controller caller
+    # must not silently reintroduce deletion after immutable promotion succeeds.
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
-    _emit_update_report(install_version=install_version, target=target, stage=stage)
+    _emit_update_report(install_version=install_version, target=target, stage=stage,
+                        promoted_generation=promoted_generation)
     return total
 
 
@@ -8217,11 +8363,13 @@ def update_command(
     print(f"local-operator {result.installed} (latest is {result.latest})")
     print(f"upgrading via {installer_label(kind)}…")
     pruned: list[str] = []
+    promoted: list[Path] = []
     try:
         installed = perform_upgrade(
             target=result.latest,
             kind=kind,
             on_prune=lambda plan: pruned.extend(prune_notice_lines(plan)),
+            on_promoted=promoted.append,
         )
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
@@ -8239,5 +8387,6 @@ def update_command(
         print(line)
     stage = _run_services_tail(services=services)
     _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
-    _emit_update_report(install_version=installed, target=result.latest, stage=stage)
+    _emit_update_report(install_version=installed, target=result.latest, stage=stage,
+                        promoted_generation=promoted[0] if promoted else None)
     return 0

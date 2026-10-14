@@ -1800,6 +1800,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "newer versions; the refresh flags take precedence."
         ),
     )
+    # The isolated verified controller has UNKNOWN/PIP kind. These explicit
+    # destination arguments authorize ONLY its canonical immutable protocol;
+    # ordinary update/install-kind guards are not widened or overridden.
+    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail"):
+        update_parser.add_argument(f"--controller-{name}", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -14833,6 +14838,24 @@ def main() -> int:
                 return invalid
             return mcp_command(args)
         elif args.subcommand == "update":
+            is_controller = (
+                getattr(args, "controller_root", None) is not None
+                or getattr(args, "controller_tail", None) is not None
+            )
+            if is_controller:
+                from local_operator.update_bootstrap import (
+                    BootstrapError,
+                    controller,
+                    controller_tail,
+                )
+
+                try:
+                    if getattr(args, "controller_root", None) is not None:
+                        return controller(args)
+                    return controller_tail(args)
+                except (BootstrapError, OSError, ValueError) as exc:
+                    print(f"rolling update: {exc}", file=sys.stderr)
+                    return 1
             # Lazy: ``update`` imports httpx. ``import local_operator.cli``
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command

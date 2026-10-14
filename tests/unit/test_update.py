@@ -1307,8 +1307,13 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
         "check_latest",
         _check_latest_double("0.2.0", "0.2.0", False),
     )
+    # A generation install now moves its serve daemons through the rolling
+    # reload request (its own no-kill contract), not the legacy restart_services
+    # path. The regression's INTENT is unchanged: the caller that performed the
+    # upgrade must not be refused, and the fleet must be asked to move.
     monkeypatch.setattr(
-        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+        "local_operator.services.reload_serve_daemons",
+        lambda **k: ran.append("ran") or [],
     )
     assert update.update_command() == 0
     assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
@@ -4834,12 +4839,47 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
+def test_perform_upgrade_never_collects_previous_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PyPI tail, like the shared snapshot tail, must never collect A."""
+    collections: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    generation = tmp_path / "owned-generation"
+    generation.mkdir()
+    # Match the real positional-source call, while observing the tail's intent;
+    # this is not installer/publication/signature proof.
+    installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+
+    def install(source: str | Path | None, **kwargs: Any) -> Path:
+        installs.append((source, kwargs))
+        return generation
+
+    monkeypatch.setattr(update_mod, "install_into_generation", install)
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
+    assert update_mod.perform_upgrade(
+        target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
+    ) == "0.70.19"
+    assert installs == [
+        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+    ]
+    assert collections == [] and notices == []
+
+
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: None)
+    # Automatic collection is frozen: promotion does not retire loaded A roots.
+    # Recording calls (rather than raising in a best-effort prune) detects even
+    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    collections: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
     monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: ())
     monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: [])
     monkeypatch.setattr(
@@ -4862,6 +4902,7 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         )
         == 0
     )
+    assert not collections
     assert [item if isinstance(item, str) else item[0] for item in order] == [
         "services",
         "roll",

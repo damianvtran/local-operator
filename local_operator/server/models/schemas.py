@@ -895,6 +895,10 @@ class HealthCheckResponse(BaseModel):
         default="",
         description="How that install was made: uv-tool, pipx, pip, editable or unknown",
     )
+    rolling_reload_contract: str = Field(
+        default="",
+        description="Positive daemon-owned request/scheduler continuity contract; empty is unknown",
+    )
 
 
 class WebsocketConnectionType(str, Enum):
