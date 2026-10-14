@@ -161,3 +161,91 @@ def test_observation_after_a_refused_resolve_stays_pending(rig):
         rig.root, P, "available", owner=rig.own.device_id
     )
     assert receipt is not None and receipt.state == "pending" and not receipt.usable
+
+
+# -- relay routing: a device that owns nothing still receives announcements --------
+
+
+def _no_broker_handler(rig: Any) -> Any:
+    from local_operator.network.credentials.owner import MeshCredentialBroker
+
+    return MeshCredentialBroker.relay_handler(_server(rig))
+
+
+def _announce_frame(rig: Any, kind: str = "lifecycle_announce") -> dict[str, Any]:
+    return {
+        "op": "net_broker",
+        "kind": kind,
+        "req": 7,
+        "from_device": rig.own.device_id,
+        "owner_device": rig.own.device_id,
+        "recipient_device": rig.peer.device_id,
+        "entries": [
+            {
+                "credential_key": P,
+                "account_scope_ref": SCOPE,
+                "state": "withdrawn",
+                "material_generation": 1,
+                "login_chain_revision": 1,
+            }
+        ],
+    }
+
+
+def test_a_device_that_owns_nothing_acks_a_lifecycle_announce(rig):
+    # The recipient owns no credential, so ``broker_for_relay`` is None; the
+    # announcement must still be applied (it is addressed to exactly this device).
+    link = SimpleNamespace(device_id=rig.own.device_id, network_id=N, epoch=1)
+    detail = _no_broker_handler(rig)(link, _announce_frame(rig))
+    assert detail["kind"] == "ack" and detail["entries"][0]["applied"] is True
+    assert _hw(rig) == {(rig.own.device_id, P, SCOPE): (1, 1)}
+
+
+@pytest.mark.parametrize("kind", ["grant", "lifecycle_read", "lifecycle_ack", "lifecycle_x"])
+def test_other_kinds_on_a_device_that_owns_nothing_keep_the_refusal(rig, kind):
+    from local_operator.network.types import MeshRefusal
+
+    link = SimpleNamespace(device_id=rig.own.device_id, network_id=N, epoch=1)
+    with pytest.raises(MeshRefusal) as excinfo:
+        _no_broker_handler(rig)(link, _announce_frame(rig, kind))
+    assert excinfo.value.code == "not_implemented"
+    assert _hw(rig) == {}
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        None,
+        {"detail": "ack"},
+        {"detail": {"kind": "grant", "access_token": "[redacted]"}},
+        {"detail": {"kind": "ack", "entries": [{"note": "x" * 17000}]}},
+        {"detail": {"kind": "ack", "entries": ["not-an-object"]}},
+        {"detail": {"kind": "ack", "entries": [{}] * 9}},
+        {"detail": {"kind": "ack", "entries": {"a": 1}}},
+        {"detail": {"kind": "something-else"}},
+    ],
+)
+def test_a_malformed_lifecycle_reply_detail_is_refused(reply):
+    with pytest.raises(ValueError):
+        L.checked_reply_detail(reply)
+
+
+def test_a_well_formed_lifecycle_reply_detail_is_returned():
+    ack = {"kind": "ack", "entries": [{"credential_key": P, "applied": True}]}
+    assert L.checked_reply_detail({"op": "ack", "detail": ack}) is ack
+
+
+def test_the_authorizer_admits_a_lifecycle_announce_only_with_broker_credential():
+    # The routing above relies on the transport's gate, so pin that gate: a recipient
+    # admits the frame iff the SENDER holds ``broker_credential`` on its member row.
+    from tests.unit.network.test_authorizer import link, make
+
+    frame = {"op": "net_broker", "kind": "lifecycle_announce", "req": 1}
+    authorizer, _audit = make()
+    assert authorizer.check(link(capabilities={"broker_credential"}), frame).capability == (
+        "broker_credential"
+    )
+    from local_operator.network.types import Refusal
+
+    with pytest.raises(Refusal):
+        authorizer.check(link(capabilities={"view"}), frame)

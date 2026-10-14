@@ -287,6 +287,19 @@ class MeshCredentialBroker:
                     from local_operator.network.credentials import sync as sync_mod
 
                     return sync_mod.member_announce(server, link, frame)
+                # THE LIFECYCLE HALF IS THE SAME CASE: ``lifecycle_announce`` is
+                # addressed to a RECIPIENT, and a recipient that holds no credential
+                # (the borrower-only device) is exactly who receives one. Behind the
+                # refusal it could never apply a withdrawal. Authorisation is
+                # unchanged: ``authorizer`` already gated this ``net_broker`` frame on
+                # the SENDER's ``broker_credential`` capability in THIS device's member
+                # row for it (types.OP_CAPABILITY), whatever its kind.
+                if str((frame or {}).get("kind") or "") == "lifecycle_announce":
+                    from local_operator.network.credentials.lifecycle import (
+                        member_lifecycle_announce,
+                    )
+
+                    return member_lifecycle_announce(server, link, frame)
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -373,9 +386,9 @@ class MeshCredentialBroker:
         elif kind == "lifecycle_ack":
             detail = self.lifecycle_ack(link, frame)
         elif kind == "lifecycle_announce":
-            # Owner -> recipient: this device is the RECIPIENT of the metadata. The
-            # relay's pre-broker branch (a device that owns nothing) is wired with the
-            # capability slice, not here.
+            # Owner -> recipient: this device is the RECIPIENT of the metadata. A
+            # device that owns nothing reaches the same function through
+            # ``relay_handler``'s pre-broker branch.
             from local_operator.network.credentials import lifecycle as lifecycle_mod
 
             detail = lifecycle_mod.member_lifecycle_announce(self._server, link, frame)

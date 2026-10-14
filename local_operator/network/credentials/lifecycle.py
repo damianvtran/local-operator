@@ -552,6 +552,35 @@ def _announce_error(code: str, key: str, message: str) -> dict[str, Any]:
     return {"kind": "error", "code": code, "key": key, "message": message}
 
 
+def checked_reply_detail(reply: Any) -> dict[str, Any]:
+    """The ``detail`` of a lifecycle request's reply, validated, or ``ValueError``.
+
+    WHY: a reply is a PEER's bytes. The metadata-only bounds (size, depth, no
+    secret-named keys) that guard an inbound frame guard an answer the same way —
+    otherwise a hostile or buggy recipient could hand the owner an oversized or
+    credential-shaped ``detail`` that the sender then logs or acts on. Anything that
+    is not a plain ``ack``/``error``/``lifecycle_snapshot`` object, or whose
+    ``entries`` are not a bounded list of objects (or a count), is refused,
+    never repaired; the caller leaves the work for the next tick.
+    """
+    from local_operator.network.credentials.types import validate_lifecycle_frame
+
+    detail = reply.get("detail") if isinstance(reply, dict) else None
+    if not isinstance(detail, dict):
+        raise ValueError("lifecycle reply carries no detail object")
+    validate_lifecycle_frame(detail)
+    kind = detail.get("kind")
+    if kind not in ("error", "ack", "lifecycle_snapshot"):
+        raise ValueError("lifecycle reply detail has a kind this protocol does not answer with")
+    entries = detail.get("entries")
+    if isinstance(entries, list):
+        if len(entries) > MAX_ENTRIES or not all(isinstance(item, dict) for item in entries):
+            raise ValueError("lifecycle reply entries are not a bounded list of objects")
+    elif entries is not None and not isinstance(entries, int):
+        raise ValueError("lifecycle reply entries are neither a list nor a count")
+    return detail
+
+
 def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any]:
     """Serve a ``lifecycle_announce`` (owner -> recipient). Returns a ``detail`` object.
 
