@@ -212,20 +212,54 @@ def _acceptor_factory(listener: socket.socket, protocol_factory: Callable[[], An
     return build
 
 
-def _scheduler_occurrence_exclusions(record: "dict[str, Any] | None") -> "list[str]":
-    """Occurrence IDs the successor must not re-dispatch.
+#: How long a `running` occurrence may be honoured before its birth is
+#: re-checked. Only the birth-mismatch can reclassify it; age ALONE never does.
+OCCURRENCE_STALE_S = 30 * 60.0
 
-    A wrote these at commit: scheduler ``/`` relay work that was mid-flight on A.
-    B skips them until each records durable completion, so the swap never
-    double-dispatches a scheduled job or a peer message.
+
+def suppressed_occurrences(
+    occurrences: "dict[str, dict[str, Any]] | None",
+    *,
+    now: float | None = None,
+    same_birth: "Callable[[str], bool] | None" = None,
+) -> "tuple[set[str], set[str]]":
+    """Split occurrence ids into (suppress, unreadable).
+
+    The contract, in one place because two callers (scheduler, relay) share it:
+
+    * ``None`` (unreadable/missing/unknown shape) ⇒ suppress NOTHING and report
+      the set as unreadable. Unknown is not proven still running; a bounded,
+      reported duplicate beats a permanently stalled schedule, and this matches
+      the repo's rule that an unreadable probe must not decide the action.
+    * an entry that is present and non-terminal ⇒ SUPPRESS that id only.
+    * an entry present but terminal ⇒ never suppress.
+    * a ``running`` entry older than :data:`OCCURRENCE_STALE_S` is reclassified
+      ONLY when its recorded birth no longer matches a live process; age alone
+      never reclassifies.
+
+    Callers must re-read the map at each dispatch decision rather than caching
+    the result: the suppression lifts the moment a terminal entry lands.
     """
 
-    if not record:
-        return []
-    inherited = record.get("handoff", {}).get("inherited")
-    if not isinstance(inherited, list):
-        return []
-    return [item for item in inherited if isinstance(item, str)]
+    import time as _time
+
+    if occurrences is None:
+        return set(), {"<unreadable>"}
+    stamp = _time.time() if now is None else now
+    suppress: set[str] = set()
+    for occurrence_id, entry in occurrences.items():
+        if entry.get("state") != "running":
+            continue
+        recorded_at = entry.get("recorded_at")
+        stale = isinstance(recorded_at, (int, float)) and (stamp - recorded_at) > OCCURRENCE_STALE_S
+        birth = entry.get("birth")
+        if stale and same_birth is not None and isinstance(birth, str):
+            # The recorded producer is gone; the entry is not live evidence any
+            # more. Reclassify for suppression ONLY on a proved birth mismatch.
+            if not same_birth(birth):
+                continue
+        suppress.add(occurrence_id)
+    return suppress, set()
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +380,8 @@ __all__ = [
     "fenced_units",
     "pending_units",
     "receive_listener",
+    "suppressed_occurrences",
     "transferable_units",
     "unit",
     "_acceptor_factory",
-    "_scheduler_occurrence_exclusions",
 ]
