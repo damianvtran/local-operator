@@ -620,7 +620,17 @@ class SendTargetCard(Container):
 
     def _refresh_copy(self) -> None:
         """Repaint chrome and binding descriptions, not the recipient/filter state."""
-        self._bindings = SendTargetCard._merged_bindings.copy()
+        # ``DOMNode`` declares ``_merged_bindings`` as ``ClassVar[BindingsMap |
+        # None]`` — it is unset until ``__init_subclass__`` runs, so the type the
+        # analyzer sees is Optional even though it is always populated by the time
+        # a card is mounted. Guard the None arm the way ``transcript.py`` does: a
+        # card that somehow ran before its bindings merged keeps its own declared
+        # list rather than the parent's, which is the safe direction (the refresh
+        # then still rebinds the translated descriptions instead of raising).
+        merged = SendTargetCard._merged_bindings
+        self._bindings = (
+            merged if merged is not None else BindingsMap(SendTargetCard.BINDINGS)
+        ).copy()
         if not self.is_mounted:
             return
         self.query_one(".projects-send-title", Static).update(_t(copy.send_title()))

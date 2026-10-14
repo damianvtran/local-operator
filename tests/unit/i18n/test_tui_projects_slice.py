@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from textual.widgets import Input
 
 from local_operator.i18n import catalogues, resolve, runtime, text
 from local_operator.i18n.keys import tui_projects as copy
@@ -58,7 +59,13 @@ def test_real_card_chrome_matches_golden() -> None:
     card = send.SendTargetCard([])
     widgets = list(card.compose())
     assert str(widgets[0].render()) == _en("title")
-    assert widgets[2].placeholder == _en("filter")
+    # ``compose`` yields the title and rule as ``Static`` before the filter, so the
+    # filter is the third widget. Assert its concrete type first: pyright types the
+    # list as ``Widget``, and ``placeholder`` lives on ``Input`` only, so the type
+    # check needs the narrowing that the runtime already guarantees here.
+    filter_widget = widgets[2]
+    assert isinstance(filter_widget, Input)
+    assert filter_widget.placeholder == _en("filter")
     assert str(widgets[-1].render()) == _en("legend")
     assert [
         b.description for bindings in card._bindings.key_to_bindings.values() for b in bindings
@@ -97,7 +104,9 @@ def test_backend_locale_refreshes_constants_bindings_and_dynamic_receipts(corpus
     assert send.pending_line(target) == "FR " + _en("pending", handle="◆ abc")
     assert card._bindings.key_to_bindings["enter"][0].description == "FR Choose"
     assert send.SendTargetCard([])._bindings.key_to_bindings["enter"][0].description == "FR Choose"
-    assert list(card.compose())[2].placeholder == "FR " + _en("filter")
+    fr_filter = list(card.compose())[2]
+    assert isinstance(fr_filter, Input)
+    assert fr_filter.placeholder == "FR " + _en("filter")
     text.set_active_locale("en")
     assert card._bindings.key_to_bindings["enter"][0].description == "Choose"
 
