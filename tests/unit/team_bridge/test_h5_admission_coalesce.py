@@ -177,11 +177,15 @@ async def test_reads_pass_paused_and_read_only_but_mutations_refuse() -> None:
     runtime.admission = "disabled"
     runtime.admission_note = "read_only"
     assert admission_refusal(runtime, is_read=True) is None
-    assert admission_refusal(runtime, is_read=False)["code"] == "bridge_read_only"
+    refusal = admission_refusal(runtime, is_read=False)
+    assert refusal is not None
+    assert refusal["code"] == "bridge_read_only"
     runtime.admission = "paused"
     runtime.admission_note = ""
     assert admission_refusal(runtime, is_read=True) is None
-    assert admission_refusal(runtime, is_read=False)["code"] == "bridge_paused"
+    refusal = admission_refusal(runtime, is_read=False)
+    assert refusal is not None
+    assert refusal["code"] == "bridge_paused"
     for state in ("signin", "pending"):
         runtime.admission = state
         assert admission_refusal(runtime, is_read=True) is not None

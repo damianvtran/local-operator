@@ -88,6 +88,18 @@ def _owner(**overrides) -> OwnerSnapshot:
     return cast(OwnerSnapshot, SimpleNamespace(**values))
 
 
+def _read(ledger, owner, message_id: str = MESSAGE_ID) -> dict[str, Any]:
+    """The ledger row, refusing a miss.
+
+    ``read`` returns ``dict | None``: a miss is a state these tests assert
+    around, so the narrowing lives here instead of a subscript the checker has
+    to guess about. None of these call sites expects the row to be absent.
+    """
+    row = ledger.read(owner, message_id)
+    assert row is not None
+    return row
+
+
 def _seed_store(tmp_path, *, kind: str = "request", expires: str = "") -> Store:
     """A REAL store whose schema came from ``_init``; rows seeded by SQL.
 
@@ -369,6 +381,7 @@ def test_rebound_owner_scope_refuses_with_zero_enqueue(
     # The refusal lands under the mutated owner's OWN namespace (endpoint moves
     # the key; credential/generation stay inside it) — never a rebind.
     row = AskIssuance(tmp_path).read(bound, MESSAGE_ID)
+    assert row is not None
     assert row["state"] == STATE_UNRECOVERABLE
     assert row["reason"] == expected
 
@@ -387,7 +400,7 @@ def test_rebound_designation_refuses_with_zero_enqueue(tmp_path, _no_enqueue) ->
         stub, stub.bridge_runtime, store, _owner(), _meta(), MESSAGE_ID, DREF, LOCAL_ROW_ID
     )
     assert _no_enqueue == []
-    assert AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
+    assert _read(AskIssuance(tmp_path), _owner())["state"] == STATE_UNRECOVERABLE
 
 
 def test_a_prepared_or_fenced_envelope_never_raises_an_ask(tmp_path, _no_enqueue) -> None:
@@ -400,7 +413,7 @@ def test_a_prepared_or_fenced_envelope_never_raises_an_ask(tmp_path, _no_enqueue
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "handoff_not_authorized"
+    assert _read(ledger, _owner())["reason"] == "handoff_not_authorized"
     # FENCED: terminal for the handoff — an opaque-ref replay cannot reopen it.
     store2 = _seed_store(tmp_path / "fenced")
     _stamp(store2)
@@ -411,7 +424,7 @@ def test_a_prepared_or_fenced_envelope_never_raises_an_ask(tmp_path, _no_enqueue
     )
     assert _no_enqueue == []
     ledger2 = AskIssuance(tmp_path / "fenced")
-    assert ledger2.read(_owner(), MESSAGE_ID)["reason"] == "handoff_not_authorized"
+    assert _read(ledger2, _owner())["reason"] == "handoff_not_authorized"
 
 
 def test_a_successor_claim_refuses_the_stored_binding(tmp_path, _no_enqueue) -> None:
@@ -434,8 +447,8 @@ def test_a_successor_claim_refuses_the_stored_binding(tmp_path, _no_enqueue) -> 
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "claim_successor"
+    assert _read(ledger, _owner())["state"] == STATE_UNRECOVERABLE
+    assert _read(ledger, _owner())["reason"] == "claim_successor"
 
 
 def test_two_exact_asks_for_the_same_message_hold_instead_of_duplicating(
@@ -490,6 +503,7 @@ def test_two_exact_asks_for_the_same_message_hold_instead_of_duplicating(
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
     row = ledger.read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["state"] == STATE_HELD
     assert row["reason"] == "multiple_exact_asks"
 
@@ -503,8 +517,8 @@ def test_forged_request_kind_on_a_stored_note_refuses(tmp_path, _no_enqueue) -> 
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "stored_kind_not_request"
+    assert _read(ledger, _owner())["state"] == STATE_UNRECOVERABLE
+    assert _read(ledger, _owner())["reason"] == "stored_kind_not_request"
 
 
 def test_changed_hints_refuse_despite_the_copied_genuine_digest(tmp_path, _no_enqueue) -> None:
@@ -525,8 +539,8 @@ def test_changed_hints_refuse_despite_the_copied_genuine_digest(tmp_path, _no_en
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "display_context_mismatch"
+    assert _read(ledger, _owner())["state"] == STATE_UNRECOVERABLE
+    assert _read(ledger, _owner())["reason"] == "display_context_mismatch"
 
 
 def test_missing_legacy_envelope_is_visible_unrecoverable(tmp_path, _no_enqueue) -> None:
@@ -537,8 +551,8 @@ def test_missing_legacy_envelope_is_visible_unrecoverable(tmp_path, _no_enqueue)
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "no_original_envelope"
+    assert _read(ledger, _owner())["state"] == STATE_UNRECOVERABLE
+    assert _read(ledger, _owner())["reason"] == "no_original_envelope"
 
 
 def test_expired_request_refuses(tmp_path, _no_enqueue) -> None:
@@ -559,8 +573,8 @@ def test_expired_request_refuses(tmp_path, _no_enqueue) -> None:
     )
     assert _no_enqueue == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_UNRECOVERABLE
-    assert ledger.read(_owner(), MESSAGE_ID)["reason"] == "request_expired"
+    assert _read(ledger, _owner())["state"] == STATE_UNRECOVERABLE
+    assert _read(ledger, _owner())["reason"] == "request_expired"
 
 
 def test_the_valid_stamp_enqueues_through_the_real_validator(tmp_path, _no_enqueue) -> None:
@@ -577,7 +591,7 @@ def test_the_valid_stamp_enqueues_through_the_real_validator(tmp_path, _no_enque
     assert kwargs["scope"]["generation"] == "7"
     assert kwargs["scope"]["session_id"] == "s1"
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_RAISED
+    assert _read(ledger, _owner())["state"] == STATE_RAISED
 
 
 def test_unavailable_lookup_holds_instead_of_enqueueing(tmp_path, monkeypatch) -> None:
@@ -603,7 +617,7 @@ def test_unavailable_lookup_holds_instead_of_enqueueing(tmp_path, monkeypatch) -
     )
     assert calls == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_HELD
+    assert _read(ledger, _owner())["state"] == STATE_HELD
 
 
 def test_found_exact_ask_terminalizes_without_a_second_enqueue(tmp_path, monkeypatch) -> None:
@@ -656,5 +670,6 @@ def test_found_exact_ask_terminalizes_without_a_second_enqueue(tmp_path, monkeyp
     assert calls == []  # found-exact ⇒ terminalized, never a second ask
     ledger = AskIssuance(tmp_path)
     row = ledger.read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["state"] == STATE_RAISED
     assert row["ask_id"] == str(outcome["details"]["ask_id"])
