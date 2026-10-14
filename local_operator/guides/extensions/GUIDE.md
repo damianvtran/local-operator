@@ -62,6 +62,28 @@ A skill you create is readable immediately. The first `read skill://<name>` that
 
 Only the skill name and description enter the system context; `SKILL.md` enters after `read skill://my-skill`, and reference files enter only after their own reads.
 
+## Skills on the Agent Hub
+
+A managed skill can be linked to an Agent Hub origin the same way an agent or team is. Linked skills install under `<config_dir>/skills/<alias>` and are discovered through the same root list above — the active profile's managed root is injected ahead of the home and ecosystem roots, so an overridden config directory resolves its own skills. The manifest is strict UTF-8 text — a `SKILL.md` plus optional `references/`, `scripts/` and `assets/` — with bounded size (64 files, 200 KiB per file, 1 MiB total); a binary or oversized file is refused by name, never silently dropped. Scripts are inert: a pull never executes them and never sets an executable mode.
+
+## Subscriptions and the policy of a link
+
+Every link to a hub item — agent, team or skill — carries **two independent policies**, both defaulting to `subscribe: true`, `auto_push: false`:
+
+- **subscribe** governs unattended *inbound* updates (the pull side). Off, updates still appear as available and you apply them yourself.
+- **auto_push** governs unattended *outbound* publication. It is **off by default**; enabling it requires the server to positively attest its atomic revision-CAS (plus, for a public origin, a deliberate egress consent). Until a deployed server supplies that attestation the inventory reports the origin as not eligible rather than faking it.
+
+A manual pull or check always works regardless of either policy. List every link, healthy or not, and edit one policy:
+
+```bash
+local-operator hub links                 # every linked agent, team and skill with source, scope and policy
+local-operator hub links --kind skill    # filter by kind
+local-operator hub link set <link-id> --subscribe false    # unattended inbound off
+local-operator hub link set <link-id> --auto-push true     # outbound on (needs eligibility)
+```
+
+`hub link set` writes through the coordinated config writer under a policy-revision check (a stale revision is refused rather than clobbering a concurrent edit); omit `--expected-revision` to read the current one first, and add `--confirm-public-egress` to consent to publishing authored changes to a public origin. One local artifact has ONE writable origin: linking the same skill to a second source is a separate local alias/copy, not an in-place relink. `hub links` lists an identity-less legacy link under `unresolved` (with reason `source-unresolved`) rather than inventing a source for it.
+
 ## Create an executable plugin with MCP
 
 Implement a standard MCP server over stdio or HTTP/SSE, give every tool a narrow schema and useful description, then register it:

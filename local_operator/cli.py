@@ -700,9 +700,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     hub_links.add_argument("--kind", choices=["agent", "team", "skill"], default=None)
     hub_links.add_argument("--json", action="store_true", help="Emit the desktop links payload")
-    hub_link = hub_subparsers.add_parser(
+    hub_link_group = hub_subparsers.add_parser(
         "link",
         help="Edit one hub link's independent policy",
+    )
+    hub_link_subparsers = hub_link_group.add_subparsers(dest="hub_link_command", required=True)
+    hub_link = hub_link_subparsers.add_parser(
+        "set",
+        help="Set this link's subscribe and/or auto_push policy",
         parents=[parent_parser],
     )
     hub_link.add_argument("link_id", help="The link id from `lop hub links`")
@@ -14924,7 +14929,9 @@ def main() -> int:
             if args.hub_command == "links":
                 return hub_links_command(args, base_dir)
             if args.hub_command == "link":
-                return hub_link_set_command(args, base_dir)
+                if args.hub_link_command == "set":
+                    return hub_link_set_command(args, base_dir)
+                parser.error(f"Invalid hub link command: {args.hub_link_command}")
             parser.error(f"Invalid hub command: {args.hub_command}")
         elif args.subcommand == "mobile":
             return mobile_command(args)

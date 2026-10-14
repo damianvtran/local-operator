@@ -244,9 +244,11 @@ def test_hub_links_and_link_set_parse(parser) -> None:
     links = parser.parse_args(["hub", "links", "--kind", "agent", "--json"])
     assert links.hub_command == "links" and links.kind == "agent" and links.json
 
-    setp = parser.parse_args(["hub", "link", "abc", "--subscribe", "false", "--auto-push", "true"])
-    assert setp.hub_command == "link" and setp.link_id == "abc"
-    assert setp.subscribe == "false" and setp.auto_push == "true"
+    setp = parser.parse_args(
+        ["hub", "link", "set", "abc", "--subscribe", "false", "--auto-push", "true"]
+    )
+    assert setp.hub_command == "link" and setp.hub_link_command == "set"
+    assert setp.link_id == "abc" and setp.subscribe == "false" and setp.auto_push == "true"
 
 
 def test_hub_links_command_lists_a_local_link(rig, capsys) -> None:
