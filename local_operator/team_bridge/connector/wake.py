@@ -33,6 +33,7 @@ provenance-marked.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,6 +42,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from local_operator.harness.message_types import (
+    BRIDGE_META_MAX_BYTES,
     DISPLAY_CONTEXT_BOUNDS,
     TEAM_BRIDGE_MESSAGE_TYPE,
     display_context_digest as canonical_display_digest,
@@ -98,8 +100,11 @@ def _producer_fence(store: Any, owner: Any, access: Any, settings: Any) -> str:
         return "owner_changed"
     if int(live.enrollment_generation) != int(getattr(owner, "enrollment_generation", -1)):
         return "owner_changed"
+    # TB-14: a MISSING credential id is not "no pin to check" — an access
+    # object that cannot name its credential row cannot be pinned to the
+    # owner's committed row, so it fails closed exactly like a changed one.
     credential = getattr(access, "credential_id", None)
-    if credential is not None and int(credential) != int(getattr(owner, "credential_id", -2)):
+    if credential is None or int(credential) != int(getattr(owner, "credential_id", -2)):
         return "credential_changed"
     if store.owner_consent_receipt(owner) is None:
         return "consent_revoked"
@@ -234,6 +239,7 @@ def build_bridge_meta(
     body_sha256: str,
     delivery_ref: str = "",
     display_digest: str = "",
+    fields: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """The bounded LOCATOR for one screened wake (H5 F3; closed key set).
 
@@ -242,12 +248,14 @@ def build_bridge_meta(
     SAME five normalized fields the producer hashed into ``display_digest``
     (sender_label included, since S-9 requires every hashed field to travel),
     and the receiver RECOMPUTES that digest over exactly these received fields
-    before using any of them.
+    before using any of them. ``fields`` lets the producer pass the
+    BYTE-FITTED display context (TB-03) so the carriage and the digest agree;
+    omitted, the fields are derived here as before.
     """
 
-    fields = _display_fields(item)
     if fields is None:
-        fields = {}
+        computed = _display_fields(item)
+        fields = computed if computed is not None else {}
     return {
         "v": "1",
         "delivery_ref": str(delivery_ref),
@@ -262,6 +270,63 @@ def build_bridge_meta(
         "organization": fields.get("organization", ""),
         "excerpt": fields.get("excerpt", ""),
     }
+
+
+def _excerpt_bytes(text: str) -> int:
+    """The excerpt's exact serialized length inside the block (TB-03).
+
+    The carriage serializes with ``ensure_ascii=True``: one CJK character is
+    six bytes (``\\uXXXX``), a quote or newline two — character counts are the
+    wrong unit for the 2 KiB budget.
+    """
+
+    return len(json.dumps(text, ensure_ascii=True)) - 2
+
+
+def _block_bytes(block: Mapping[str, Any]) -> int:
+    """The block's encoded length in its exact wire form (TB-03)."""
+
+    return len(
+        json.dumps(dict(block), ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+    )
+
+
+def _fitted_display_context(
+    item: Mapping[str, Any], *, message_id: str, body_sha256: str, delivery_ref: str = ""
+) -> tuple[dict[str, str] | None, str | None]:
+    """The display fields + digest, excerpt TRIMMED until the block fits.
+
+    TB-03 (PR #2378): the budget is measured in ENCODED BYTES on the wire
+    form, and the trim happens BEFORE the ``read`` ACK so a request the
+    carriage cannot compose is never falsely acknowledged. The digest is
+    computed over the TRIMMED fields — producer and receiver normalize the
+    same bytes, so a trimmed excerpt cannot turn into a mismatch refusal.
+    """
+
+    fields = _display_fields(item)
+    if fields is None:
+        return None, None
+    excerpt = fields.get("excerpt", "")
+    # The fixed part is every other field (the digest is a constant-length
+    # placeholder — its VALUE cannot move the byte count).
+    probe = build_bridge_meta(
+        item,
+        message_id=message_id,
+        body_sha256=body_sha256,
+        delivery_ref=delivery_ref,
+        display_digest="0" * 64,
+        fields={**fields, "excerpt": ""},
+    )
+    budget = BRIDGE_META_MAX_BYTES - _block_bytes(probe)
+    while excerpt and _excerpt_bytes(excerpt) > budget:
+        over = _excerpt_bytes(excerpt) - budget
+        per = max(1, _excerpt_bytes(excerpt) // max(1, len(excerpt)))
+        drop = max(1, -(-over // per))
+        excerpt = excerpt[: len(excerpt) - drop]
+    fitted = {**fields, "excerpt": excerpt}
+    return fitted, canonical_display_digest(fitted)
 
 
 def _display_context_digest(item: Mapping[str, Any]) -> str | None:
@@ -544,15 +609,24 @@ async def handle_message_available(
         # screened note carries no envelope and therefore no ask authority.
         bridge_meta: dict[str, Any] | None = None
         if str(getattr(ref, "message_type", "") or "") == "request":
-            display_digest = _display_context_digest(item)
-            if display_digest is None:
+            # The delivery ref is minted HERE (once) so the byte fit prices
+            # the EXACT block the envelope will carry (TB-03) — the envelope
+            # write below uses this same ref instead of minting its own.
+            delivery_ref = f"dref_{uuid.uuid4().hex}"
+            fitted, display_digest = _fitted_display_context(
+                item,
+                message_id=message_id,
+                body_sha256=digest,
+                delivery_ref=delivery_ref,
+            )
+            if fitted is None or display_digest is None:
                 # Canonically-unboundable display context (unknown/oversized
                 # field): the human could not be shown a tamper-evident ask.
                 return {"action": "hold", "message_id": message_id, "code": "display_context_invalid"}
             try:
                 envelope = store.write_screened_request_delivery(
                     owner,
-                    delivery_ref=f"dref_{uuid.uuid4().hex}",
+                    delivery_ref=delivery_ref,
                     message_id=message_id,
                     designated_session=designation,
                     display_digest=display_digest,
@@ -594,6 +668,7 @@ async def handle_message_available(
                 body_sha256=digest,
                 delivery_ref=str(envelope["delivery_ref"]),
                 display_digest=str(envelope["display_digest"]),
+                fields=fitted,
             )
             try:
                 bridge_meta = validate_bridge_meta(bridge_meta)
@@ -706,6 +781,14 @@ async def handle_message_available(
             # run_forever would only back off into the same refusal forever.
             logger.warning("bridge: carriage refused the locator", exc_info=True)
             return {"action": "hold", "message_id": message_id, "code": "bridge_meta_invalid"}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # TB-04: the read ACK is already committed — any post-ACK failure
+            # must surface as a typed HOLD (the loop persists a durable retry
+            # for it), never escape into run_forever's blind backoff.
+            logger.warning("bridge: delivery failed after the read ACK", exc_info=True)
+            return {"action": "hold", "message_id": message_id, "code": "delivery_failed"}
         if bridge_meta is not None:
             try:
                 store.mark_delivery_phase(owner, str(bridge_meta["delivery_ref"]), "delivered")

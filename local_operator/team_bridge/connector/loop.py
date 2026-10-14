@@ -151,6 +151,30 @@ async def retry_due_holds(
     return {"due": len(due), "outcomes": outcomes}
 
 
+def _persist_hold_backoff(store: Any, owner: Any, message_id: str, code: str) -> None:
+    """Write/advance a durable ``screening_holds`` row for a held outcome.
+
+    TB-04 + sec MINOR-1 (PR #2378): feed consumption is once-only (TB-01), so
+    the re-drive path for a held item is the native holds schedule — the same
+    bounded doubling gap ``retry_due_holds`` uses. A fenced owner is left to
+    the next live pass; the counter map is the same scheduling aid.
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    attempts = _RETRY_ATTEMPTS.get(message_id, 0)
+    gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+    try:
+        store.persist_hold(
+            owner, message_id, str(code)[:64] or "hold", retry_at=_time.time() + gap
+        )
+    except StoreRefused:
+        pass  # fenced owner: the next live pass owns the row
+    _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
+
+
 async def run_iteration(
     owner: Any,
     *,
@@ -196,16 +220,26 @@ async def run_iteration(
     plan = plan_feed_refs(refs)
     handled: list[dict[str, Any]] = []
     for message_id in plan.deliveries:
-        handled.append(
-            await handle_message_available(
-                owner,
-                message_id,
-                config_dir=config_dir,
-                auth_store=auth_store,
-                access=access,
-                settings=settings,
-            )
+        outcome = await handle_message_available(
+            owner,
+            message_id,
+            config_dir=config_dir,
+            auth_store=auth_store,
+            access=access,
+            settings=settings,
         )
+        handled.append(outcome)
+        if outcome.get("action") == "hold":
+            # TB-04: a hold after consumption gets a DURABLE retry row — the
+            # screening_holds schedule is the re-drive path now that refs are
+            # consumed once-only, so a stuck delivery is never silently lost.
+            _persist_hold_backoff(store, owner, message_id, str(outcome.get("code") or "hold"))
+    # TB-01: ONCE-ONLY consumption — the drained refs were just handled
+    # (deliveries) or are state hints the drain itself consumes; deleting them
+    # here is what stops the quadratic re-wake/ACK growth across polls and
+    # restarts. A crash before this point replays the batch (at-least-once);
+    # the receiver's own dedupe absorbs the replay.
+    store.delete_feed_refs(owner, refs)
     resync = bool(batch["resync"]) or bool(store.sync_state(owner)["pending_resync"])
     walk: dict[str, Any] | None = None
     if resync:

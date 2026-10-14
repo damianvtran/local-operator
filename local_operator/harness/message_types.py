@@ -433,6 +433,9 @@ def display_context_digest(fields: Mapping[str, Any]) -> str | None:
     ).hexdigest()
 
 #: Bound for the whole serialized block (the carriage's 2 KiB cap).
+#: Measured in ENCODED BYTES on the wire form (``ensure_ascii=True``): one
+#: CJK character costs six bytes there, quotes/newlines two — a character
+#: count is the wrong unit (TB-03, PR #2378).
 BRIDGE_META_MAX_BYTES = 2048
 
 
@@ -463,7 +466,14 @@ def validate_bridge_meta(raw: Any) -> dict[str, Any]:
         normalized[name] = value
     if str(normalized.get("v") or "") not in ("1", "v1"):
         raise ValueError("bridge_meta is missing its version tag")
-    if len(json.dumps(normalized, separators=(",", ":"), sort_keys=True)) > BRIDGE_META_MAX_BYTES:
+    if (
+        len(
+            json.dumps(
+                normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+        )
+        > BRIDGE_META_MAX_BYTES
+    ):
         raise ValueError("bridge_meta exceeds the 2 KiB bound")
     return normalized
 

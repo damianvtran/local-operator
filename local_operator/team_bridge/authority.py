@@ -109,7 +109,9 @@ def authority_fence(runtime: Any) -> dict[str, str] | None:
         if not session_id or store.designated_session_for(owner) != session_id:
             return _owner_changed()
         return None
-    except (StoreRefused, sqlite3.Error, OSError):
+    except (StoreRefused, sqlite3.Error, OSError, UnicodeDecodeError):
+        # TB-12: a decode error is store/config damage in the fence's terms —
+        # fail closed (feature_off semantics via owner_changed), never escape.
         return _owner_changed()
 
 

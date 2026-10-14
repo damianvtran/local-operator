@@ -4246,11 +4246,27 @@ async def _drain_inbox_into(handle: object) -> int:
                 # The internal bridge LOCATOR (H5 F3) rides the same probe
                 # discipline: only a live spool row carries one, only a
                 # handle whose literal signature takes it receives it, and
-                # the serving boundary re-validates before anything forwards
-                # it. Rows an older build wrote have no key and read as {} —
-                # never forwarded, never treated as authority.
+                # the drain (TB-09) AND the serving boundary validate before
+                # anything forwards it. Rows an older build wrote have no key
+                # and read as {} — never forwarded, never treated as
+                # authority.
                 if receives_bridge_meta(handle):
-                    fields["bridge_meta"] = getattr(line, "bridge_meta", {}) or None
+                    candidate = getattr(line, "bridge_meta", {}) or None
+                    if candidate is not None:
+                        # TB-09: the drain hop validates the locator ITSELF — a
+                        # malformed block is dropped here (the row still
+                        # delivers as a plain peer message) so no downstream
+                        # hop can be asked to trust it.
+                        from local_operator.harness.message_types import validate_bridge_meta
+
+                        try:
+                            candidate = validate_bridge_meta(candidate)
+                        except ValueError:
+                            logger.warning(
+                                "spool drain: invalid bridge_meta dropped", exc_info=True
+                            )
+                            candidate = None
+                    fields["bridge_meta"] = candidate
                 await receive(line.text, **fields)
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
