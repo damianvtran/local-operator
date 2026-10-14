@@ -162,25 +162,18 @@ def test_both_ends_serve_the_readiness_op(request: pytest.FixtureRequest) -> Non
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES
 
 
-def test_credential_lifecycle_is_not_advertised_before_its_receiver_ships() -> None:
-    """The capability must stay off the wire until the receiver that serves it ships.
-
-    An advertisement without a handler is a promise a peer can make a request
-    against and get a not-implemented refusal for — the unsafe false promise the
-    reviewer blocked on #2379, against the repo precedent that every capability
-    ships together with its receiver. The constant is kept so the transport slice
-    lands by adding one tuple entry; the pin here is what keeps it unadvertised.
-    """
+def test_credential_lifecycle_is_advertised_once_with_its_receiver_and_sender() -> None:
+    """Advertisement is now backed by the no-broker receiver and gated tick sender."""
     assert wire.CREDENTIAL_LIFECYCLE_V1 == "credential-lifecycle-v1"
-    assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 0
+    assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 1
 
 
 def test_an_advertised_lifecycle_frame_is_answered_by_name(tmp_path: Path) -> None:
     """THE OTHER HALF OF THE ADVERTISEMENT: a lifecycle frame is not a build fault.
 
-    The capability is advertised BEFORE its sender exists, so no lifecycle frame
-    should arrive yet — but when one does (a newer peer, a hand-driven probe), the
-    broker must answer it BY NAME rather than fall through to the ``internal``
+    The sender and receiver now ship together, but an UNKNOWN lifecycle kind
+    (from a newer peer) must still be answered BY NAME rather than falling through
+    to the ``internal``
     else-branch, which reads as a broken owner build. The pin is the code, not the
     sentence: ``internal`` here would make the advertisement a false promise.
     """

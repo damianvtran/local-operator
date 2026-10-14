@@ -385,3 +385,60 @@ def test_install_registers_the_tick_step_once():
     L.install()
     L.install()
     assert definitions._tick_steps().count(L.lifecycle_tick_step) == 1  # noqa: SLF001
+
+
+def test_every_advertised_op_capability_has_a_registered_handler(rig):
+    from local_operator.network import relay, wire
+    from local_operator.network.credentials import owner
+    from local_operator.network.types import OP_CAPABILITY
+
+    # Keep the classification exhaustive: a new advertised op feature cannot silently
+    # inherit the pure-feature exception and promise an unimplemented receiver.
+    handlers = {
+        "mesh-net-v1": "net_catalog",
+        "session-mobility-v1": "net_session_move",
+        "credential-broker-v1": "net_broker",
+        wire.CREDENTIAL_LIFECYCLE_V1: "net_broker",
+        "peer-readiness-v1": "net_readiness",
+        "mcp-defs-v1": "net_mcp_defs",
+        "mesh-update-v1": "net_update",
+        "peer-journal-source-v1": "net_session_history",
+    }
+    pure_features = {
+        # Reserved pool feature: no compute-pool op or dispatch contract exists yet.
+        "compute-pool-v1",
+        # Pair-offer is handled during the handshake, before op dispatch exists.
+        "pair-offer-v1",
+        # Compression changes record encoding, not the set of dispatchable ops.
+        "zlib-records-v1",
+    }
+    assert set(wire.LINK_CAPABILITIES) == set(handlers) | pure_features
+    server = relay.RelayServer(root=rig.root, identity=rig.own)
+    for capability, op in handlers.items():
+        assert op in OP_CAPABILITY, capability
+        assert callable(server._handlers.get(op)), capability  # noqa: SLF001
+    assert owner.broker_for_relay(_server(rig)) is None
+    L.install()
+    from local_operator.network import definitions
+
+    assert L.lifecycle_tick_step in definitions._tick_steps()  # noqa: SLF001
+
+
+def test_new_and_old_peers_negotiate_lifecycle_without_changing_finite_grants(rig):
+    from local_operator.network import wire
+    from tests.unit.network.test_credentials_consent import grant
+
+    _seed(rig)
+    advertised = list(wire.LINK_CAPABILITIES)
+    old_advertised = [cap for cap in advertised if cap != wire.CREDENTIAL_LIFECYCLE_V1]
+    old_peer = _Wire(set(wire.negotiate_capabilities(advertised, old_advertised)), _echo_applied)
+    old_server = _owner_server(rig, old_peer)
+    assert L.lifecycle_tick_step(old_server, rig.peer.device_id) == "skipped:peer_lacks_lifecycle"
+    assert old_peer.frames == []
+    # The established broker path still mints a finite grant without any lifecycle
+    # negotiation: feature absence is not absence of login or permission.
+    assert grant(rig)["kind"] == "grant"
+    new_peer = _Wire(set(wire.negotiate_capabilities(advertised, advertised)), _echo_applied)
+    new_server = _owner_server(rig, new_peer)
+    assert L.lifecycle_tick_step(new_server, rig.peer.device_id) == "delivered"
+    assert [frame["kind"] for frame in new_peer.frames] == ["lifecycle_announce"]

@@ -111,10 +111,14 @@ LOCAL_PREFIX_LEN = 4  # uint32_be length prefix on every record
 #: Link feature strings. A feature is used only when BOTH sides advertise it;
 #: absent means "old peer" and unknown is ignored, which is what lets a new
 #: capability ship without moving either protocol version.
+#: Advertised together with its receiver and sender: an old peer negotiates
+#: neither and receives no lifecycle kinds; its finite-grant path is unchanged.
+CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
     "credential-broker-v1",
+    CREDENTIAL_LIFECYCLE_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
@@ -143,14 +147,6 @@ PEER_JOURNAL_SOURCE_V1 = "peer-journal-source-v1"
 #: had to compose. Named here so the tuple above, the slice's ask condition
 #: and the tests read ONE spelling of the string.
 PEER_READINESS_V1 = "peer-readiness-v1"
-#: The credential-lifecycle capability, named here so the LATER transport slice
-#: (the receiver that serves lifecycle frames) advertises it. It is deliberately
-#: NOT in ``LINK_CAPABILITIES`` yet: a capability must be advertised together
-#: with the receiver that serves it, because an advertisement without a handler
-#: is a promise the peer can make a request against and get a refusal for
-#: (reviewer finding on #2379). Kept as a constant so the receiver slice lands by
-#: adding one tuple entry against this one spelling.
-CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
 #: The MCP server-definition sync's capability (``mcpdefs.py``). Advertised by
 #: every build that ships ``net_mcp_defs``; a sender checks it BEFORE its first
 #: request, so an old peer never has to compose a not-implemented refusal it
