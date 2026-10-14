@@ -126,9 +126,16 @@ def _seed_link(
         item.update(state=state, error_class=error, last_checked_at="2026-10-14T00:00:00Z")
         if attest_revision_cas:
             # A positively-attested atomic revision-CAS: the service's eligibility
-            # precondition, seeded here so the consent frame reaches the
-            # public-egress prompt rather than the named refusal.
-            doc.setdefault("server", {})["revision_cas"] = True
+            # precondition, seeded here (per SOURCE, the link's own) so the consent
+            # frame reaches the public-egress prompt rather than the named refusal.
+            entry = (
+                doc.setdefault("server", {})
+                .setdefault("sources", {})
+                .setdefault(identity.hub_source, {})
+            )
+            entry["revision_cas"] = 1
+            if kind == "skill":
+                entry["skills"] = 1
 
     st.StatusStore(root).mutate(fold)
     return identity

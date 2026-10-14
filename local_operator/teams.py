@@ -945,7 +945,12 @@ def _strip_if_str(value: Any) -> Any:
     return value.strip() if isinstance(value, str) else value
 
 
-def hub_team_document(team: Team, *, agent_registry: Any | None = None) -> dict[str, Any]:
+def hub_team_document(
+    team: Team,
+    *,
+    agent_registry: Any | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """The published team document for a local ``Team`` (design §1.6).
 
     One way and complete: every field the hub stores is one the local model
@@ -1007,6 +1012,17 @@ def hub_team_document(team: Team, *, agent_registry: Any | None = None) -> dict[
             "hosting": _strip_if_str(suggestion.hosting),
             "model": _strip_if_str(suggestion.model),
         }
+    if overrides:
+        # The hub_sync outbound projection overrides exactly the five CONTENT
+        # keys with the merged text; name/version/model_suggestion stay owned by
+        # the row, because a merge must never rename or re-version a published
+        # listing. Anything else is refused by name, then the ONE preflight below
+        # still validates the assembled document.
+        allowed = {"description", "manager", "members", "instructions", "project"}
+        for key in overrides:
+            if key not in allowed:
+                raise TeamDocumentError(key, "cannot be overridden by a merge projection")
+        document.update({key: overrides[key] for key in overrides})
     _preflight_hub_team_document(document)
     return document
 

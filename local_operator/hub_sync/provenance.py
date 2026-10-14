@@ -409,6 +409,15 @@ def write_baseline(config_dir: Path, record: BaselineRecord) -> Path:
             outbound=record.outbound or current.outbound,
             lineage=current.lineage if record.lineage == "unknown" else record.lineage,
             local_alias=record.local_alias or current.local_alias,
+            # The last known revision is ancestry, not content: a helper that does
+            # not carry one (legacy stamping) must not erase the fallback expected
+            # revision a later conditional write uses. A caller that integrated a
+            # NEWER remote passes its fresh revision explicitly and wins here.
+            remote_revision=(
+                record.remote_revision
+                if record.remote_revision is not None
+                else current.remote_revision
+            ),
         )
     if type(record.scope_known) is not bool or (
         record.legacy_subscribe_hint is not None and type(record.legacy_subscribe_hint) is not bool

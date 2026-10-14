@@ -9,7 +9,12 @@ import httpx
 import pytest
 
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
-from local_operator.hub_sync.outbox import AsyncDispatcher, Outbox, OutboxRecord
+from local_operator.hub_sync.outbox import (
+    PUSH_MAX_ATTEMPTS,
+    AsyncDispatcher,
+    Outbox,
+    OutboxRecord,
+)
 
 
 def _stored(out: Outbox, operation_id: str) -> OutboxRecord:
@@ -97,3 +102,73 @@ def budget_now() -> float:
     import time
 
     return time.monotonic()
+
+
+# -- begin_attempt: the push-side state machine (backoff, replay, dead-letter) -----------
+
+
+def test_begin_attempt_backs_off_after_a_failure_and_resumes_past_the_window(
+    tmp_path: Path,
+) -> None:
+    out = Outbox(tmp_path)
+    first = out.begin_attempt("op1", kind="agent", local_id="a1")
+    assert first is not None and first.attempts == 1 and first.replay is None
+    out.settle(
+        "op1",
+        generation=first.generation,
+        error_class="hub-error",
+        next_retry_at="2999-01-01T00:00:00Z",
+    )
+    # Inside the window: no attempt is handed out (and no attempt is burned).
+    assert out.begin_attempt("op1", kind="agent", local_id="a1") is None
+    # A done record restarts the counter (a new authored change), and settlement
+    # from the OLD generation stays fenced out.
+    assert out.settle("op1", generation=first.generation, result={"revision": "x"}) is False
+
+
+def test_begin_attempt_past_the_backoff_window_fences_and_counts(tmp_path: Path) -> None:
+    out = Outbox(tmp_path)
+    first = out.begin_attempt("op1", kind="agent", local_id="a1")
+    assert first is not None
+    out.settle(
+        "op1",
+        generation=first.generation,
+        error_class="hub-error",
+        next_retry_at="2000-01-01T00:00:00Z",
+    )
+    second = out.begin_attempt("op1", kind="agent", local_id="a1")
+    assert second is not None and second.attempts == 2
+    stale = out.settle("op1", generation=first.generation, result={"revision": "old"})
+    assert stale is False  # the late worker from attempt 1 cannot settle
+
+
+def test_begin_attempt_dead_letters_at_the_cap(tmp_path: Path) -> None:
+    out = Outbox(tmp_path)
+    region = None
+    for _ in range(PUSH_MAX_ATTEMPTS):
+        region = out.begin_attempt("op1", kind="agent", local_id="a1")
+        assert region is not None
+        assert out.settle("op1", generation=region.generation, error_class="hub-error")
+    assert region is not None and region.attempts == PUSH_MAX_ATTEMPTS
+    assert out.begin_attempt("op1", kind="agent", local_id="a1") is None  # dead-lettered
+
+
+def test_a_reconciliation_without_a_stored_intent_cannot_replay(tmp_path: Path) -> None:
+    """The replay order is: store the intent, THEN go uncertain; without it, skip."""
+
+    out = Outbox(tmp_path)
+    first = out.begin_attempt("op1", kind="agent", local_id="a1")
+    assert first is not None
+    # The PRODUCTION order: the verbatim intent is persisted while pending (right
+    # after the preview bought its pin), and only an uncertain outcome follows.
+    assert out.store_intent("op1", first.generation, {"document": {"a": 1}})
+    assert out.mark_pending_reconciliation("op1", generation=first.generation)
+    resumed = out.begin_attempt("op1", kind="agent", local_id="a1")
+    assert resumed is not None and resumed.generation == first.generation
+    assert resumed.replay == {"document": {"a": 1}}  # verbatim, same generation
+    # A record that went uncertain WITHOUT an intent cannot be replayed...
+    out2 = Outbox(tmp_path / "other")
+    second = out2.begin_attempt("op1", kind="agent", local_id="a1")
+    assert second is not None
+    assert out2.mark_pending_reconciliation("op1", generation=second.generation)
+    assert out2.begin_attempt("op1", kind="agent", local_id="a1") is None

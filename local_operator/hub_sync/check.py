@@ -87,6 +87,34 @@ class ItemCheck:
     #: The confirmed link id when the baseline carries an identity (None for a
     #: legacy unknown-origin link). The runner keys per-link policy on it.
     link_id: str | None = None
+    #: The OPAQUE remote revision (ETag token, quotes included) the fetched
+    #: document was read at, when the response carried one. This is the value a
+    #: conditional push must send as If-Match: it is what the merge derived from.
+    #: None when the fetch path cannot expose one (the legacy agent zip pull),
+    #: which makes a push fall back to the recorded baseline revision or refuse.
+    remote_revision: str | None = None
+    #: The server's ``sync_contract`` from this response, when present. Its
+    #: observation is what makes a source's revision-CAS capability ATTESTED (the
+    #: status store records it per source; eligibility reads that record).
+    sync_contract: Mapping[str, Any] | None = None
+
+
+def _remote_meta(document: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
+    """``(revision, sync_contract)`` from a hub detail/preview result, tolerantly.
+
+    The revision token is copied VERBATIM (it is an opaque ETag including its
+    quotes); the sync contract is passed through only when it is a mapping. Both
+    are additive response facts -- an older server that omits them yields
+    ``None``s, which the push side treats as unverifiable (refuse, never an
+    unconditional write).
+    """
+
+    revision = document.get("revision")
+    contract = document.get("sync_contract")
+    return (
+        str(revision) if isinstance(revision, str) and revision else None,
+        contract if isinstance(contract, Mapping) else None,
+    )
 
 
 def _status_of(error: BaseException) -> int | None:
@@ -427,6 +455,7 @@ def check_hub_teams(
         remote_name = str(document.get("name") or "")
         if remote_name and remote_name != meta.name:
             note = "remote-renamed"
+        revision, sync_contract = _remote_meta(document)
         checks.append(
             ItemCheck(
                 "team",
@@ -447,6 +476,8 @@ def check_hub_teams(
                 base=record.fields if known else None,
                 link_id=record.identity.link_id if record.identity is not None else None,
                 detail=note,
+                remote_revision=revision,
+                sync_contract=sync_contract,
             )
         )
     return checks
@@ -571,6 +602,7 @@ def check_hub_skills(
         known = record.recorded_by != prov.UNKNOWN_BASELINE
         base_fp = prov.fingerprint_fields("skill", record.fields) if known else None
         classification = classify(base_fp, local_fp, remote_fp, baseline_known=known)
+        revision, sync_contract = _remote_meta(document)
         checks.append(
             ItemCheck(
                 "skill",
@@ -590,6 +622,8 @@ def check_hub_skills(
                 remote=remote,
                 base=record.fields if known else None,
                 link_id=record.identity.link_id if record.identity is not None else None,
+                remote_revision=revision,
+                sync_contract=sync_contract,
             )
         )
     return checks

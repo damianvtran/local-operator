@@ -430,14 +430,19 @@ class HubSyncRunner:
     ) -> None:
         """Push authored changes for links whose auto_push is ON and push is due.
 
-        A push needs an OUTBOUND RECEIPT (A/P); without one it is a first
+        ELIGIBILITY IS RECOMPUTED HERE, from the CURRENT baseline/config/status,
+        through the SAME service rule the inventory and the policy PATCH use -- a
+        hand-edited ``auto_push: true``, a revoked attestation or a deleted
+        public egress grant is a NAMED persisted skip, not a wire attempt. A push
+        also needs an OUTBOUND RECEIPT (A/P); without one it is a first
         publication, which is a deliberate action and never unattended. The whole
         phase is best-effort: a transport error is recorded on the item and never
-        crashes the tick. ``push_item`` itself settles the no-op before any spend.
+        crashes the tick.
         """
-        transporter = self._push_transport(ctx)
-        if transporter is None or grace:
+        if grace:
             return
+        from local_operator.hub_sync.provenance import read_baseline
+
         for c in checks:
             policy = policies.get(c.link_id) if c.link_id else None
             if policy is None or not policy.auto_push:
@@ -445,40 +450,101 @@ class HubSyncRunner:
             item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
             if not st.push_due(item, settings.interval_min) or not st.auto_apply_due(item):
                 continue
+            record = await asyncio.to_thread(read_baseline, ctx.config_dir, c.kind, c.local_id)
+            eligibility = await asyncio.to_thread(svc.push_eligibility, ctx, record)
+            if not eligibility.get("can_auto_push"):
+                await asyncio.to_thread(
+                    self._mark_push_skipped,
+                    ctx,
+                    c,
+                    str(eligibility.get("reason") or "unsupported-precondition"),
+                )
+                continue
+            transporter, refused = self._push_transport(ctx, record)
+            if transporter is None:
+                await asyncio.to_thread(self._mark_push_skipped, ctx, c, refused or "no-credential")
+                continue
             try:
-                await self._push_one(ctx, c, transporter, report)
+                await self._push_one(ctx, c, record, transporter, report)
             except Exception:  # noqa: BLE001 - a push must never kill the tick
                 logger.debug("hub push for %s %s failed", c.kind, c.local_id, exc_info=True)
 
-    def _push_transport(self, ctx: svc.HubSyncContext) -> Any:
-        """A configured push transport, or None when no credential/base is available."""
+    def _push_transport(
+        self, ctx: svc.HubSyncContext, record: Any
+    ) -> tuple[Any | None, str | None]:
+        """A per-LINK push transport, or ``(None, named reason)`` when unavailable.
 
-        from local_operator.providers.radient_credentials import (
-            configured_radient_base_url,
-        )
+        The destination is the link's own identity, not a global default: the
+        client comes from the SAME per-tenant selector the check/pull path uses
+        (publishing is a person's act, so even a public link needs the signed-in
+        client), the base is that client's configured base, and the base is
+        POSITIVELY verified against the link's recorded ``hub_source`` before any
+        credential could leave -- a mismatch is refused, never followed.
+        """
 
+        from local_operator.hub_sync.identity import LinkError, normalize_source
+
+        if record is None or record.identity is None:
+            return None, "baseline-unknown"
+        identity = record.identity
         try:
-            base = configured_radient_base_url(self._cm)
-        except Exception:  # noqa: BLE001 - no configured hub is simply no push
-            return None
-        if not base:
-            return None
+            # A non-None tenant selects the signed-in client from the shared
+            # selector (its docstring blesses any string, even ""); a public link
+            # publishes unauthored only if there is no login at all, in which
+            # case the selector answers None and the push is skipped.
+            client = ctx.client_for_tenant(identity.tenant_id if identity.tenant_id else "")
+        except Exception:  # noqa: BLE001 - a selector failure is simply no transport
+            return None, "no-credential"
+        if client is None:
+            return None, "no-credential"
+        try:
+            base = str(client.base_url).rstrip("/")
+            headers = dict(client.bearer_headers())
+        except Exception:  # noqa: BLE001 - an unauthorized client cannot publish
+            return None, "no-credential"
+        try:
+            if normalize_source(base) != identity.hub_source:
+                return None, "origin-conflict"
+        except LinkError:
+            return None, "origin-conflict"
         from local_operator.hub_sync.outbox import AsyncDispatcher
         from local_operator.hub_sync.push import HttpPushTransport
 
-        return HttpPushTransport(AsyncDispatcher(), base, {})
+        return (
+            HttpPushTransport(
+                AsyncDispatcher(),
+                kind=identity.kind,
+                hub_id=record.hub_id,
+                base_url=base,
+                headers=headers,
+                visibility=identity.visibility,
+                tenant_id=identity.tenant_id,
+            ),
+            None,
+        )
 
     async def _push_one(
-        self, ctx: svc.HubSyncContext, c: Any, transporter: Any, report: TickReport
+        self,
+        ctx: svc.HubSyncContext,
+        c: Any,
+        record: Any,
+        transporter: Any,
+        report: TickReport,
     ) -> None:
         """Project and push one item; record the outcome (never raises to the tick)."""
 
-        from local_operator.hub_sync.provenance import read_baseline
         from local_operator.hub_sync.push import push_item
 
-        record = read_baseline(ctx.config_dir, c.kind, c.local_id)
         if record is None or record.outbound is None:
-            return  # no outbound receipt: first publication is a deliberate action
+            # No outbound receipt: first publication is a deliberate action, not
+            # an unattended one -- and the skip is PERSISTED so the surface can
+            # explain why an enabled auto-push is not publishing.
+            self._mark_push_skipped(ctx, c, "no-outbound-receipt")
+            return
+        # The revision the merge derives from: the CHECK-time remote revision when
+        # the fetch exposed one, else the last accepted receipt revision. The
+        # transport refuses an EMPTY one; there is no unconditional-write path.
+        expected = c.remote_revision or record.remote_revision
         budget = OperationBudget.start("automatic", self._operation_id(c), 1)
         outcome = await push_item(
             kind=c.kind,
@@ -487,31 +553,77 @@ class HubSyncRunner:
             accepted=record.outbound.accepted_fields,
             current_local=c.local or {},
             remote_latest=c.remote or {},
+            expected_revision=expected,
             transport=transporter,
             outbox=Outbox(ctx.config_dir),
             operation_id=self._operation_id(c),
             budget=budget,
+            document_builder=self._document_builder(ctx, c),
         )
         report.skipped = None
-        self._record_push(ctx, c, outcome)
+        await asyncio.to_thread(self._record_push, ctx, c, outcome)
+
+    def _document_builder(self, ctx: svc.HubSyncContext, c: Any) -> Any:
+        """The per-kind wire-document builder the push closes over (one per attempt)."""
+
+        def build(fields: Mapping[str, Any]) -> Mapping[str, Any]:
+            from local_operator.hub_sync.adapters import publish_document
+
+            return publish_document(c.kind, ctx.config_dir, c.local_id, fields)
+
+        return build
 
     @staticmethod
     def _operation_id(c: Any) -> str:
         return f"push-{c.kind}-{c.local_id}"
 
-    def _record_push(self, ctx: svc.HubSyncContext, c: Any, outcome: Any) -> None:
-        """Stamp ``last_pushed_at`` on an accepted push so the interval advances."""
+    def _mark_push_skipped(self, ctx: svc.HubSyncContext, c: Any, reason: str) -> None:
+        """Persist WHY this link's push did not run, on the item (survives restarts)."""
 
-        if outcome.state != "pushed":
-            return
         key = st.item_key(c.kind, c.local_id)
 
         def fold(doc: dict[str, Any]) -> None:
             item = doc.get("items", {}).get(key)
             if item is not None:
-                item["last_pushed_at"] = st.now_iso()
+                st.mark_push_skipped(item, reason)
 
         ctx.store().mutate(fold)
+
+    def _record_push(self, ctx: svc.HubSyncContext, c: Any, outcome: Any) -> None:
+        """Stamp ``last_pushed_at`` on an accepted push; persist a skip otherwise.
+
+        On success the outbound RECEIPT is advanced first (A = the local input
+        that was sent, P = the server-returned canonical document, revision =
+        the accepted opaques ETag): without that, every later attempt would
+        derive from a stale pair and the QA-observed "receipt stayed r1 while the
+        server moved to r2" class of bug returns.
+        """
+
+        key = st.item_key(c.kind, c.local_id)
+        if outcome.state == "pushed":
+            result = outcome.accepted
+            accepted_doc = result.get("accepted_document") if isinstance(result, Mapping) else None
+            if isinstance(accepted_doc, Mapping):
+                svc.record_outbound_receipt(
+                    ctx,
+                    c.kind,
+                    c.local_id,
+                    accepted=accepted_doc,
+                    current_local=c.local or {},
+                    revision=outcome.revision,
+                    operation_id=str(result.get("operation_id") or "") or None,
+                )
+
+            def fold(doc: dict[str, Any]) -> None:
+                item = doc.get("items", {}).get(key)
+                if item is not None:
+                    item["last_pushed_at"] = st.now_iso()
+                    st.clear_push_skipped(item)
+
+            ctx.store().mutate(fold)
+            return
+        if outcome.reason:
+            self._mark_push_skipped(ctx, c, str(outcome.reason))
 
     def _first_run_grace(self, ctx: svc.HubSyncContext) -> bool:
         """True exactly once per config root: the first tick after upgrade never auto-applies."""

@@ -635,6 +635,20 @@ class RadientClient:
             headers["Content-Type"] = content_type
         return headers
 
+    def bearer_headers(self) -> Dict[str, str]:
+        """The default JSON headers this client authenticates with, or raises.
+
+        PUBLIC for the one caller outside this module that must speak the hub's
+        write routes through ITS OWN dispatcher (hub_sync's abortable push
+        transport, which cannot use this client's blocking ``requests`` calls):
+        reusing this method keeps the credential and the client-identity headers
+        in ONE place instead of a second spelling that could drift from every
+        other request this client sends. Raises ``RuntimeError`` for an
+        un-authorized client (there is nothing to publish with).
+        """
+
+        return self._get_headers(content_type="application/json", require_api_key=True)
+
     def _credential_values(self) -> List[str]:
         """This client's credential values, for removal from anything surfaced.
 

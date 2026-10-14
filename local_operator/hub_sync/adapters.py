@@ -253,6 +253,57 @@ class SkillAdapter(_SharedIdentity):
         SkillDocument.from_json(dict(fields))
 
 
+def publish_document(
+    kind: Kind, config_dir: Path, local_id: str, fields: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Build the WIRE publication document for one kind from its merged fields.
+
+    ONE place maps (local row + canonical merged fields) onto the server's frozen
+    document family, so the runner, a route and the CLI cannot publish three
+    slightly different documents for the same item:
+
+    * agent -> the version-1 instruction-set document, built by the SAME
+      ``instruction_set_fields`` + ``build_instruction_set_document`` the publish
+      routes use, with the merged ``instructions``/``description`` supplied as
+      validated overrides (name/kind/version/tags come from the row);
+    * team -> the team document from ``hub_team_document`` with the merged five
+      content keys applied as overrides, re-preflighted against the hub's rules;
+    * skill -> the strict manifest itself (the canonical fields ARE the document).
+
+    Raises the underlying refusal (``KeyError`` for a missing local row, the
+    client's ``InstructionSetError``, ``TeamDocumentError``, or ``LinkError``)
+    for the caller to map onto a named push refusal.
+    """
+
+    if kind == "agent":
+        from local_operator.agents import AgentRegistry, instruction_set_fields
+        from local_operator.clients.radient import (
+            build_instruction_set_document,
+            validate_document_overrides,
+        )
+
+        registry = AgentRegistry(config_dir)
+        row = registry.get_agent(local_id)
+        overrides = validate_document_overrides(
+            {key: fields[key] for key in ("instructions", "description") if key in fields}
+        )
+        return build_instruction_set_document(**instruction_set_fields(registry, row, overrides))
+    if kind == "team":
+        from local_operator.agents import AgentRegistry, agents_store_present
+        from local_operator.teams import TeamRegistry, hub_team_document
+
+        registry = TeamRegistry(config_dir)
+        row = registry.get_team(local_id)
+        agent_registry = AgentRegistry(config_dir) if agents_store_present(config_dir) else None
+        overrides = {
+            key: fields[key]
+            for key in ("description", "manager", "members", "instructions", "project")
+            if key in fields
+        }
+        return hub_team_document(row, agent_registry=agent_registry, overrides=overrides)
+    raise LinkError("unsupported-kind", f"{kind} publication is not implemented")
+
+
 _ADAPTERS: dict[str, KindAdapter] = {
     "agent": AgentAdapter(),
     "team": TeamAdapter(),

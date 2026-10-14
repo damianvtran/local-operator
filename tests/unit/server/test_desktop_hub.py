@@ -382,7 +382,8 @@ def _seed_public_link(
             svc.HubSyncContext(
                 config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
             ),
-            {"revision_cas": True},
+            {"revision_cas": 1},
+            source=source,
         )
     return identity.link_id
 

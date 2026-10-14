@@ -74,7 +74,16 @@ def _seed_link(
         )
         item.update(state="up-to-date", error_class=None, last_checked_at="2026-10-14T00:00:00Z")
         if attest_revision_cas:
-            doc.setdefault("server", {})["revision_cas"] = True
+            # A per-SOURCE attestation (bumped `skills` too when this is a skill
+            # link): eligibility reads the entry for the link's own hub_source.
+            entry = (
+                doc.setdefault("server", {})
+                .setdefault("sources", {})
+                .setdefault(identity.hub_source, {})
+            )
+            entry["revision_cas"] = 1
+            if kind == "skill":
+                entry["skills"] = 1
 
     st.StatusStore(root).mutate(fold)
     return identity

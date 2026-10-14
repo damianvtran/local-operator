@@ -404,6 +404,27 @@ def mark_updating(item: dict[str, Any], now: datetime | None = None) -> None:
     item["updating_since"] = _iso(now or datetime.now(timezone.utc))
 
 
+def mark_push_skipped(item: dict[str, Any], reason: str, now: datetime | None = None) -> None:
+    """Persist WHY an outbound push was skipped, durably and with a name.
+
+    A skip is not an inbound failure: the item's pull state, error class and
+    retry schedule are untouched. The named reason is what an operator reads to
+    understand why an enabled auto-push is not publishing (no capability
+    attestation, an unsafe public origin, no CAS revision, retries exhausted,
+    ...). Stored beside the item so it survives daemon restarts.
+    """
+
+    item["push_blocked_reason"] = str(reason)
+    item["push_blocked_at"] = _iso(now or datetime.now(timezone.utc))
+
+
+def clear_push_skipped(item: dict[str, Any]) -> None:
+    """Drop a stale skip mark after an eligible attempt actually ran."""
+
+    item.pop("push_blocked_reason", None)
+    item.pop("push_blocked_at", None)
+
+
 def record_failure(
     item: dict[str, Any],
     error_class: str,

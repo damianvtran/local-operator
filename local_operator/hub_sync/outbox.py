@@ -51,6 +51,23 @@ logger = logging.getLogger(__name__)
 SCHEMA = 1
 LOCK_WAIT_S = 2.0
 
+#: Push-side retry policy: a failing push is NOT retried every tick (each retry
+#: costs a paid preview), so a failed attempt schedules the next one with
+#: exponential backoff and the operation is DEAD-LETTERED after this many
+#: attempts. A dead-lettered record is skipped with a named status until a
+#: deliberate act (a new manual publication) resets it.
+PUSH_MAX_ATTEMPTS = 5
+PUSH_RETRY_BASE_S = 900.0
+PUSH_RETRY_MAX_S = 21600.0
+
+
+def push_backoff_seconds(attempts: int) -> float:
+    """Exponential backoff for attempt N (1-based), capped at six hours."""
+
+    exponent = max(0, int(attempts) - 1)
+    return min(PUSH_RETRY_BASE_S * (2**exponent), PUSH_RETRY_MAX_S)
+
+
 #: The outbox directory name under the hub root.
 OUTBOX_DIR = "outbox"
 
@@ -69,6 +86,18 @@ class OutboxRecord:
     updated_at: str
     result: Mapping[str, Any] | None = None
     error_class: str | None = None
+    #: How many attempts this operation has STARTED. A terminal ``done`` resets
+    #: it on the next begin; a ``failed`` record carries it into the backoff and
+    #: the dead-letter decision.
+    attempts: int = 0
+    #: When the next attempt may start (ISO). None = immediately eligible.
+    next_retry_at: str | None = None
+    #: The VERBATIM commit intent (document, preview pin, expected revision,
+    #: acknowledgements) written after a preview and BEFORE the commit dispatch.
+    #: A ``pending-reconciliation`` replay sends exactly these bytes again --
+    #: never a re-projection -- so an uncertain commit can never turn into a
+    #: fresh create or a second paid preview.
+    intent: Mapping[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -83,7 +112,24 @@ class OutboxRecord:
             "updated_at": self.updated_at,
             "result": dict(self.result) if self.result is not None else None,
             "error_class": self.error_class,
+            "attempts": self.attempts,
+            "next_retry_at": self.next_retry_at,
+            "intent": dict(self.intent) if self.intent is not None else None,
         }
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """The right to run ONE push attempt, plus its fencing generation.
+
+    ``replay`` is the stored verbatim intent when the previous attempt ended
+    UNCERTAIN (``pending-reconciliation``): the caller must resend exactly it,
+    never re-project. ``None`` means a normal (or fresh) attempt.
+    """
+
+    generation: int
+    attempts: int
+    replay: Mapping[str, Any] | None = None
 
 
 class Outbox:
@@ -169,6 +215,11 @@ class Outbox:
                 updated_at=str(raw.get("updated_at") or ""),
                 result=raw.get("result"),
                 error_class=raw.get("error_class"),
+                attempts=int(raw.get("attempts") or 0),
+                next_retry_at=(
+                    str(raw["next_retry_at"]) if raw.get("next_retry_at") is not None else None
+                ),
+                intent=raw.get("intent") if isinstance(raw.get("intent"), Mapping) else None,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -208,12 +259,17 @@ class Outbox:
         *,
         result: Mapping[str, Any] | None = None,
         error_class: str | None = None,
+        next_retry_at: str | None = None,
     ) -> bool:
         """Record the outcome, fenced by generation. False = rejected or skipped.
 
         FENCING: a worker whose ``generation`` is not the record's current
         generation is STALE (a newer attempt superseded it) and its settlement is
         discarded rather than overwriting the newer result.
+
+        ``next_retry_at`` is the push-side backoff schedule for a failed attempt
+        (``None`` = eligible immediately); the attempt count is carried so the
+        dead-letter decision has the full history.
         """
         with self._locked() as held:
             if not held:
@@ -221,8 +277,11 @@ class Outbox:
             record = self.read(operation_id)
             if record is None or record.generation != generation:
                 return False
-            if record.state != "pending":
-                return False  # already settled; replay is idempotent, not a rewrite
+            if record.state not in ("pending", "pending-reconciliation"):
+                # Already settled (or never started); a replay is idempotent, not
+                # a rewrite. A pending-reconciliation record IS settleable: its
+                # replay is the worker that owns that same generation.
+                return False
             settled = OutboxRecord(
                 operation_id=record.operation_id,
                 kind=record.kind,
@@ -234,9 +293,126 @@ class Outbox:
                 updated_at=now_iso(),
                 result=dict(result) if result is not None else None,
                 error_class=error_class,
+                attempts=record.attempts,
+                next_retry_at=next_retry_at if error_class else None,
+                intent=None,
             )
             self._atomic_write(settled)
         return True
+
+    def store_intent(self, operation_id: str, generation: int, intent: Mapping[str, Any]) -> bool:
+        """Persist the VERBATIM commit intent before the commit dispatch.
+
+        Written after a preview produced its pin/document and BEFORE the commit
+        leaves, so a crash or deadline in between leaves a replayable record: the
+        next attempt resends exactly these bytes (same pin, same body, same
+        expected revision) instead of re-projecting or paying a second preview.
+        """
+        with self._locked() as held:
+            if not held:
+                return False
+            record = self.read(operation_id)
+            if record is None or record.generation != generation or record.state != "pending":
+                return False
+            nxt = OutboxRecord(
+                operation_id=record.operation_id,
+                kind=record.kind,
+                local_id=record.local_id,
+                direction=record.direction,
+                generation=record.generation,
+                state=record.state,
+                created_at=record.created_at,
+                updated_at=now_iso(),
+                result=record.result,
+                error_class=record.error_class,
+                attempts=record.attempts,
+                next_retry_at=record.next_retry_at,
+                intent=dict(intent),
+            )
+            self._atomic_write(nxt)
+        return True
+
+    def begin_attempt(
+        self,
+        operation_id: str,
+        *,
+        kind: str,
+        local_id: str,
+        max_attempts: int = PUSH_MAX_ATTEMPTS,
+        now: str | None = None,
+    ) -> "Attempt | None":
+        """Start (or resume) an attempt; ``None`` = skip this tick.
+
+        The state machine, in ONE locked read-modify-write (``now`` and the
+        stored ``next_retry_at`` are compared as strings in the SAME
+        ``%Y-%m-%dT%H:%M:%SZ`` spelling):
+
+        * no record -> fresh enqueue, attempt 1;
+        * ``pending-reconciliation`` -> an UNCERTAIN prior attempt: resume with the
+          SAME generation and hand back its stored intent for a verbatim replay
+          (no new projection, no new preview); an intent-less legacy record is
+          skipped (``None``) rather than re-projected into a fresh create;
+        * ``done`` -> a NEW authored change: reset the attempt counter, fence the
+          old worker with a new generation;
+        * ``failed`` -> after ``next_retry_at`` and under the attempt cap, fence
+          and start the next attempt; over the cap -> skipped (``None``).
+        """
+        at = now or now_iso()
+        with self._locked() as held:
+            if not held:
+                raise TimeoutError("hub outbox lock busy")
+            record = self.read(operation_id)
+            if record is None:
+                record = OutboxRecord(
+                    operation_id=operation_id,
+                    kind=kind,
+                    local_id=local_id,
+                    direction="push",
+                    generation=1,
+                    state="pending",
+                    created_at=at,
+                    updated_at=at,
+                    attempts=1,
+                )
+                self._atomic_write(record)
+                return Attempt(generation=1, attempts=1)
+            if record.state == "pending-reconciliation":
+                if not isinstance(record.intent, Mapping):
+                    return None  # cannot replay what was never stored: dead-lettered
+                return Attempt(
+                    generation=record.generation,
+                    attempts=record.attempts,
+                    replay=record.intent,
+                )
+            if record.state == "pending":
+                # An abandoned attempt (crash between begin and settle): fence it.
+                attempts = record.attempts + 1
+                if attempts > max_attempts:
+                    return None
+                return self._begin(record, attempts=attempts, at=at)
+            if record.state == "done":
+                return self._begin(record, attempts=1, at=at)
+            # failed
+            if record.attempts >= max_attempts:
+                return None
+            if record.next_retry_at is not None and at < record.next_retry_at:
+                return None  # backoff window: skip this tick without burning an attempt
+            return self._begin(record, attempts=record.attempts + 1, at=at)
+
+    def _begin(self, record: OutboxRecord, *, attempts: int, at: str) -> "Attempt":
+        nxt = OutboxRecord(
+            operation_id=record.operation_id,
+            kind=record.kind,
+            local_id=record.local_id,
+            direction=record.direction,
+            generation=record.generation + 1,
+            state="pending",
+            created_at=record.created_at,
+            updated_at=at,
+            attempts=attempts,
+        )
+        self._atomic_write(nxt)
+        return Attempt(generation=nxt.generation, attempts=attempts)
 
     def mark_pending_reconciliation(self, operation_id: str, generation: int) -> bool:
         """Mark an UNCERTAIN outcome (aborted dispatch) for replay, fenced by generation.
@@ -245,6 +421,7 @@ class Outbox:
         is not settled as failed. The record stays replayable with the SAME
         operation id/pin/body; state ``pending-reconciliation`` distinguishes it
         from a fresh ``pending`` so a replay is never treated as a new create.
+        The stored ``intent`` (when present) is what makes the replay verbatim.
         """
         with self._locked() as held:
             if not held:
@@ -265,6 +442,9 @@ class Outbox:
                 updated_at=now_iso(),
                 result=record.result,
                 error_class=record.error_class,
+                attempts=record.attempts,
+                next_retry_at=record.next_retry_at,
+                intent=record.intent,
             )
             self._atomic_write(nxt)
         return True
@@ -289,6 +469,7 @@ class Outbox:
                 state="pending",
                 created_at=record.created_at,
                 updated_at=now_iso(),
+                attempts=record.attempts + 1,
             )
             self._atomic_write(nxt)
         return nxt.generation
@@ -332,19 +513,22 @@ class AsyncDispatcher:
         budget: OperationBudget,
         json_body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        params: Mapping[str, str] | None = None,
         stage: str = "commit",
     ) -> httpx.Response:
         """Dispatch one request under the budget; aborts the transfer on timeout.
 
         ``asyncio.wait_for`` around a genuinely async client call actually
         cancels the request (unlike cancelling ``to_thread`` over ``requests``),
-        so the deadline is real.
+        so the deadline is real. ``params`` carries the family's target query
+        params (visibility/tenant) exactly as the client's own publish helpers
+        spell them.
         """
         remaining = budget.require(stage)
         client = self._ensure()
         try:
             return await asyncio.wait_for(
-                client.request(method, url, json=json_body, headers=headers),
+                client.request(method, url, json=json_body, headers=headers, params=params),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:

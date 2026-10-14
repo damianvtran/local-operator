@@ -13,6 +13,7 @@ from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
+from local_operator.hub_sync.identity import LinkPolicy
 from local_operator.hub_sync.runner import HubSyncRunner, TickReport
 from local_operator.hub_sync.settings import HubSyncSettings
 from tests.unit.hub_sync.test_service import BASE, Hub, _pull_agent
@@ -282,15 +283,11 @@ async def test_pick_skips_a_both_off_link_and_orders_retry_first(rig) -> None:
 
 async def test_push_phase_skips_links_without_an_outbound_receipt(rig, monkeypatch) -> None:
     """A link with no (A,P) receipt is not pushed: first publication is deliberate."""
-    import dataclasses
-
-    runner, hub, agents, root, cm, _ = rig
-    from local_operator.hub_sync import provenance as prov
+    runner, _hub, _agents, root, cm, _ = rig
     from local_operator.hub_sync import push as push_mod
     from local_operator.hub_sync.check import ItemCheck
-    from local_operator.hub_sync.identity import LinkIdentity, LinkPolicy
 
-    ident = LinkIdentity("agent", "a1", "https://hub.test/v1", "public", None, "h1")
+    identity, _record = _seed_pushable(root, cm, receipt=False)
     calls: list[dict[str, Any]] = []
 
     async def fake_push_item(**kw):
@@ -298,30 +295,295 @@ async def test_push_phase_skips_links_without_an_outbound_receipt(rig, monkeypat
         return push_mod.PushOutcome("pushed")
 
     monkeypatch.setattr(push_mod, "push_item", fake_push_item)
-    monkeypatch.setattr(runner, "_push_transport", lambda ctx: object())
-    # A baseline with NO outbound receipt.
-    prov.write_baseline(
-        root, prov.make_record("agent", "a1", "h1", None, {"instructions": "x"}, "adopt")
+    transport_calls: list[int] = []
+    monkeypatch.setattr(
+        runner,
+        "_push_transport",
+        lambda ctx, record: (transport_calls.append(1) or object(), None),
     )
-    c = ItemCheck(
+    item = ItemCheck(
         "agent",
         "a1",
         "a",
         "h1",
         None,
         "available",
-        local={"instructions": "x"},
-        remote={},
+        local={"instructions": "l"},
+        remote={"instructions": "r"},
+        remote_revision='"rev-1"',
     )
-    c = dataclasses.replace(c, link_id=ident.link_id)
-    settings = HubSyncSettings.read_fresh(cm)
+    import dataclasses as dc
+
+    item = dc.replace(item, link_id=identity.link_id)
     await runner._push_due(
         await runner.context(),
-        [c],
-        {ident.link_id: LinkPolicy(True, True)},
-        settings,
+        [item],
+        {identity.link_id: LinkPolicy(True, True)},
+        HubSyncSettings.read_fresh(cm),
         False,
-        {},
+        st.StatusStore(root).load(),
         TickReport("timer"),
     )
-    assert calls == []  # no receipt -> not pushed
+    assert calls == []  # no receipt -> not pushed (the refusal precedes any outbox write)
+    # The refusal is PERSISTED with its name, so the surface can explain the skip.
+    assert _item(root, "agent:a1")["push_blocked_reason"] == "no-outbound-receipt"
+
+
+def _seed_pushable(
+    root: Path,
+    cm: ConfigManager,
+    *,
+    cas: bool = True,
+    grant_contract: int | None = 1,
+    receipt: bool = True,
+    source: str = "https://hub.test/v1",
+):
+    """A public agent link with identity, revision, policy, grant and (A,P) receipt.
+
+    This is the exact fact set ``_eligibility`` reads; each test then mutates ONE
+    of them to reach a distinct refusal (the three QA triggers plus the control).
+    """
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkIdentity
+    from local_operator.hub_sync.provenance import OutboundReceipt, fingerprint_snapshot
+
+    identity = LinkIdentity("agent", "a1", source, "public", None, "h1")
+    record = prov.make_record("agent", "a1", "h1", None, {"instructions": "x"}, "merge-pull")
+    import dataclasses as dc
+
+    local_fields = {"instructions": "l"}
+    record = dc.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage="clean",
+        scope_known=True,
+        outbound=(
+            OutboundReceipt(
+                local_fields=local_fields,
+                accepted_fields={"instructions": "a"},
+                # The stored receipt is validated on read (its fingerprint must
+                # match its captured fields), so the seed must be a REAL pair.
+                input_fingerprint=fingerprint_snapshot("agent", local_fields),
+                remote_revision='"rev-1"',
+                operation_id="op",
+            )
+            if receipt
+            else None
+        ),
+    )
+    prov.write_baseline(root, record)
+    hub_cfg: dict[str, Any] = {
+        "links": {identity.link_id: {"subscribe": True, "auto_push": True}},
+        "auto_update": {"agents": True, "teams": True},
+    }
+    if grant_contract is not None:
+        hub_cfg["public_egress_grants"] = {
+            identity.link_id: {"link_id": identity.link_id, "publication_contract": grant_contract}
+        }
+    cm.set_config_value("hub", hub_cfg)
+    if cas:
+        svc.record_server_capabilities(
+            svc.HubSyncContext(
+                config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
+            ),
+            {"revision_cas": 1},
+            source=source,
+        )
+    _seed_item(root)
+    return identity, record
+
+
+def _seed_item(root: Path, key: str = "agent:a1") -> None:
+    """The store item the push phase keys on (empty item gates are all "due")."""
+
+    def fold(doc: dict[str, Any]) -> None:
+        doc.setdefault("items", {})[key] = {"state": "up-to-date"}
+
+    st.StatusStore(root).mutate(fold)
+
+
+def _item(root: Path, key: str) -> dict[str, Any]:
+    return st.StatusStore(root).load()["items"][key]
+
+
+async def _push_due_once(runner, root, cm, identity, item, monkeypatch, *, fake_push_item=None):
+    """Drive ONE push phase for the seeded link; returns the recorded transport calls."""
+
+    from local_operator.hub_sync import push as push_mod
+
+    transport_calls: list[Any] = []
+    monkeypatch.setattr(
+        runner,
+        "_push_transport",
+        lambda ctx, record: (transport_calls.append(record) or object(), None),
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def default_fake(**kw):
+        calls.append(kw)
+        return push_mod.PushOutcome("pushed")
+
+    monkeypatch.setattr(push_mod, "push_item", fake_push_item or default_fake)
+    await runner._push_due(
+        await runner.context(),
+        [item],
+        {identity.link_id: LinkPolicy(True, True)},
+        HubSyncSettings.read_fresh(cm),
+        False,
+        st.StatusStore(root).load(),
+        TickReport("timer"),
+    )
+    return transport_calls, calls
+
+
+async def test_push_recomputes_eligibility_with_no_attestation(rig, monkeypatch) -> None:
+    """QA trigger 1: a hand-edited ``auto_push: true`` without an attestation never publishes."""
+    runner, _hub, _agents, root, cm, _ = rig
+    from local_operator.hub_sync.check import ItemCheck
+
+    identity, _record = _seed_pushable(root, cm, cas=False)
+    item = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "l"},
+        remote={"instructions": "r"},
+        remote_revision='"rev-1"',
+        link_id=identity.link_id,
+    )
+    transport_calls, push_calls = await _push_due_once(
+        runner, root, cm, identity, item, monkeypatch
+    )
+    assert transport_calls == [] and push_calls == []  # no outbox write, no commit
+    assert _item(root, "agent:a1")["push_blocked_reason"] == "unsupported-precondition"
+
+
+async def test_push_recomputes_eligibility_when_the_attestation_is_revoked(
+    rig, monkeypatch
+) -> None:
+    """QA trigger 2: an attestation that no longer holds skips with the same name."""
+    runner, _hub, _agents, root, cm, _ = rig
+    from local_operator.hub_sync.check import ItemCheck
+
+    identity, _record = _seed_pushable(root, cm)
+
+    # Simulate a revoked observation: the per-source entry drops to zero.
+    def fold(doc: dict[str, Any]) -> None:
+        doc["server"]["sources"]["https://hub.test/v1"] = {"revision_cas": 0, "skills": 0}
+
+    st.StatusStore(root).mutate(fold)
+    item = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "l"},
+        remote={"instructions": "r"},
+        remote_revision='"rev-1"',
+        link_id=identity.link_id,
+    )
+    transport_calls, push_calls = await _push_due_once(
+        runner, root, cm, identity, item, monkeypatch
+    )
+    assert transport_calls == [] and push_calls == []
+    assert _item(root, "agent:a1")["push_blocked_reason"] == "unsupported-precondition"
+
+
+async def test_push_skips_when_the_public_grant_is_deleted_or_bumped(rig, monkeypatch) -> None:
+    """QA trigger 3: a deleted or contract-bumped public grant is ``unsafe-publication``."""
+    runner, _hub, _agents, root, cm, _ = rig
+    from local_operator.hub_sync.check import ItemCheck
+
+    identity, _record = _seed_pushable(root, cm, grant_contract=None)
+    item = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "l"},
+        remote={"instructions": "r"},
+        remote_revision='"rev-1"',
+        link_id=identity.link_id,
+    )
+    _t, _p = await _push_due_once(runner, root, cm, identity, item, monkeypatch)
+    assert _item(root, "agent:a1")["push_blocked_reason"] == "unsafe-publication"
+
+    # Bump the grant's contract: the deliberate consent no longer covers this
+    # publication contract, so it is exactly as unsafe as a missing grant.
+    hub_cfg: dict[str, Any] = {
+        "links": {identity.link_id: {"subscribe": True, "auto_push": True}},
+        "auto_update": {"agents": True, "teams": True},
+        "public_egress_grants": {
+            identity.link_id: {"link_id": identity.link_id, "publication_contract": 2}
+        },
+    }
+    cm.set_config_value("hub", hub_cfg)
+    _t, _p = await _push_due_once(runner, root, cm, identity, item, monkeypatch)
+    assert _item(root, "agent:a1")["push_blocked_reason"] == "unsafe-publication"
+
+
+async def test_push_phase_reaches_the_wire_when_eligible(rig, monkeypatch) -> None:
+    """The control: the same fact set WITHOUT mutation publishes (push_item runs)."""
+    runner, _hub, _agents, root, cm, _ = rig
+    from local_operator.hub_sync.check import ItemCheck
+
+    identity, _record = _seed_pushable(root, cm)
+    item = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        None,
+        "available",
+        local={"instructions": "l"},
+        remote={"instructions": "r"},
+        remote_revision='"rev-1"',
+        link_id=identity.link_id,
+    )
+    transport_calls, push_calls = await _push_due_once(
+        runner, root, cm, identity, item, monkeypatch
+    )
+    assert len(transport_calls) == 1 and len(push_calls) == 1
+    # The accepted push advances the interval and clears a stale skip mark.
+    assert _item(root, "agent:a1").get("last_pushed_at") is not None
+    assert "push_blocked_reason" not in _item(root, "agent:a1")
+
+
+def test_push_transport_verifies_the_link_source(rig) -> None:
+    """A client whose base differs from the link's recorded source is refused."""
+    runner, _hub, _agents, root, cm, _ = rig
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    class _Client:
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+
+        def bearer_headers(self) -> dict[str, str]:
+            return {"Authorization": "Bearer tok"}
+
+    identity = LinkIdentity("agent", "a1", "https://hub.test/v1", "public", None, "h1")
+    record = prov.make_record("agent", "a1", "h1", None, {"instructions": "x"}, "merge-pull")
+    import dataclasses as dc
+
+    record = dc.replace(record, identity=identity)
+
+    def ctx_for(base: str) -> svc.HubSyncContext:
+        return svc.HubSyncContext(
+            config_dir=root, config_manager=cm, client_for_tenant=lambda _t: _Client(base)
+        )
+
+    transport, reason = runner._push_transport(ctx_for("https://other.test/v1"), record)
+    assert transport is None and reason == "origin-conflict"
+    transport, reason = runner._push_transport(ctx_for("https://hub.test/v1"), record)
+    assert transport is not None and reason is None
+    transport, reason = runner._push_transport(ctx_for("https://hub.test/v1/"), record)
+    assert transport is not None and reason is None  # trailing slash is not a mismatch

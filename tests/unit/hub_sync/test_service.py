@@ -677,3 +677,133 @@ def test_complementary_removal_large_shrink_applies_when_fully_covered(env) -> N
     merged = _text(agents, row.id)
     assert "## S4" in merged and "## S5" in merged
     assert "## S1" not in merged and "## S8" not in merged
+
+
+# -- per-source attestation, outbound receipt advancement (round-1 remediation) ---------
+
+
+def _org_record(root: Path, *, kind: str = "agent", source: str = "https://hub.test/v1"):
+    """A clean org link whose facts are all of ``_eligibility``'s preconditions."""
+
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    identity = LinkIdentity(kind, "a1", source, "org", "t1", "h1")  # type: ignore[arg-type]
+    if kind == "skill":
+        fields: dict[str, Any] = {
+            "document_version": 1,
+            "name": "skill-a",
+            "description": "d",
+            "files": [
+                {
+                    "path": "SKILL.md",
+                    # SKILL.md carries the skill's identity: the manifest name and
+                    # description must match this frontmatter exactly.
+                    "content": "---\nname: skill-a\ndescription: d\n---\n\n# Skill\n",
+                }
+            ],
+        }
+    else:
+        fields = {"instructions": "x"}
+    record = prov.make_record(
+        kind, "a1", "h1", "t1", fields, "merge-pull"  # type: ignore[arg-type]
+    )
+    record = dataclasses.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage="clean",
+        scope_known=True,
+        local_alias="skill-a" if kind == "skill" else None,
+    )
+    prov.write_baseline(root, record)
+    return identity, record
+
+
+def test_capability_attestation_is_scoped_to_its_source(env) -> None:
+    """An attestation observed on one API base never makes another base eligible."""
+
+    ctx, _hub, _agents, _t, root = env
+    identity, _record = _org_record(root)
+    svc.record_server_capabilities(ctx, {"revision_cas": 1}, source="https://other.test/v1")
+    assert svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1")) == {
+        "can_auto_push": False,
+        "reason": "unsupported-precondition",
+    }
+    svc.record_server_capabilities(ctx, {"revision_cas": 1}, source=identity.hub_source)
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1"))["can_auto_push"] is True
+    )
+
+
+def test_skill_eligibility_needs_the_skill_family_on_its_source(env) -> None:
+    """``revision_cas`` alone is not enough for a skill: the skill routes must be attested."""
+
+    ctx, _hub, _agents, _t, root = env
+    identity, _record = _org_record(root, kind="skill")
+    svc.record_server_capabilities(ctx, {"revision_cas": 1}, source=identity.hub_source)
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "skill", "a1"))["can_auto_push"] is False
+    )
+    svc.record_server_capabilities(
+        ctx, {"revision_cas": 1, "skills": 1}, source=identity.hub_source
+    )
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "skill", "a1"))["can_auto_push"] is True
+    )
+
+
+def test_record_outbound_receipt_advances_the_accepted_revision_only(env) -> None:
+    """An accepted push replaces (A,P) with the SERVER-returned pair; B is untouched.
+
+    QA's repro: the receipt stayed on ``r1`` after the server reached ``r2``, so a
+    later conditional write derived from a stale revision. The opaque accepted
+    ETag (not ``content_revision``) is what a later If-Match sends verbatim, and
+    the subscribed-off case must NOT look like an integrated inbound update.
+    """
+
+    ctx, _hub, _agents, _t, root = env
+    _identity, _record = _org_record(root)
+    svc.record_outbound_receipt(
+        ctx,
+        "agent",
+        "a1",
+        accepted={"instructions": "generalized"},
+        current_local={"instructions": "local sent"},
+        revision='"rev-2"',
+        operation_id="srv-op",
+    )
+    back = prov.read_baseline(root, "agent", "a1")
+    assert back is not None and back.outbound is not None
+    assert back.outbound.remote_revision == '"rev-2"'
+    assert back.outbound.local_fields == {"instructions": "local sent"}
+    assert back.outbound.accepted_fields == {"instructions": "generalized"}
+    assert back.outbound.operation_id == "srv-op"
+    # B (the inbound integrated baseline) is NOT advanced by a push.
+    assert back.remote_revision == '"rev-1"'
+
+
+def test_record_checks_folds_an_observed_sync_contract_for_its_source(env) -> None:
+    """The capability probe is the observed ``sync_contract`` of a REAL check response."""
+
+    ctx, _hub, _agents, _t, root = env
+    identity, _record = _org_record(root)
+    from local_operator.hub_sync.check import ItemCheck
+
+    c = ItemCheck(
+        "agent",
+        "a1",
+        "a",
+        "h1",
+        "t1",
+        "up-to-date",
+        remote_revision='"rev-1"',
+        sync_contract={"revision_cas": 1},
+    )
+    svc.record_checks(ctx, [c])
+    assert (
+        svc.push_eligibility(ctx, prov.read_baseline(root, "agent", "a1"))["can_auto_push"] is True
+    )
+    # The attestation landed under the link's OWN source, not a global flag.
+    doc = st.StatusStore(root).load()
+    assert "https://hub.test/v1" in doc["server"]["sources"]
+    assert identity.hub_source == "https://hub.test/v1"

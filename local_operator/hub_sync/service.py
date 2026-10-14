@@ -48,6 +48,7 @@ from local_operator.hub_sync import store as st
 from local_operator.hub_sync.identity import (
     PUBLICATION_CONTRACT,
     Kind,
+    LinkError,
     LinkIdentity,
     Visibility,
 )
@@ -235,6 +236,13 @@ def record_checks(
                 reason=c.reason,
                 detail=c.detail,
             )
+            # A response that carried the server's sync_contract is an OBSERVATION
+            # of the deployed source -- the only honest way the per-source
+            # capability attestation becomes true (see record_server_capabilities).
+            if c.sync_contract is not None:
+                record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+                if record is not None and record.identity is not None:
+                    _fold_capability(doc, c.sync_contract, record.identity.hub_source)
         if live is not None:
             st.prune_items(doc, live)
 
@@ -280,24 +288,29 @@ def resolve_source(
     """
     from local_operator.agents import hub_origin
 
+    # Typed refusal for a kind this surface does not resolve: resolving a NAME to
+    # a source+scope is implemented for agent/team rows only; a silent
+    # fallthrough routed skills through the teams registry.
+    if kind not in ("agent", "team"):
+        raise LinkError("unsupported-kind", f"{kind} links cannot be resolved by name")
+
     registry = ctx.agents() if kind == "agent" else ctx.teams()
+    row = registry.get_agent_by_name(name) if kind == "agent" else registry.get_team_by_name(name)
+    if row is None:
+        # BEFORE any field read: a missing row must be a 404-able LookupError,
+        # never an AttributeError from reading fields off None.
+        raise LookupError(f"no linked {kind} named {name!r}")
+    local_id = str(row.id)
     if kind == "agent":
-        row = registry.get_agent_by_name(name)
-        hub_id = hub_origin(row) if row is not None else None
-        local_id = str(row.id) if row is not None else None
-        fields = _local_fields_for(ctx, kind, row)
+        hub_id = hub_origin(row)
     else:
-        row = registry.get_team_by_name(name)
-        local_id = str(row.id) if row is not None else None
         # A team's remote id lives in its baseline record (a linked team HAS one),
         # never on the row itself.
-        linked = (
-            prov.read_baseline(ctx.config_dir, kind, local_id) if local_id is not None else None
-        )
+        linked = prov.read_baseline(ctx.config_dir, kind, local_id)
         hub_id = linked.hub_id if linked is not None else None
-        fields = _local_fields_for(ctx, kind, row)
-    if row is None or hub_id is None or local_id is None:
+    if hub_id is None:
         raise LookupError(f"no linked {kind} named {name!r}")
+    fields = _local_fields_for(ctx, kind, row)
 
     identity = LinkIdentity(kind, local_id, hub_source, visibility, tenant_id, hub_id)
     existing = prov.read_baseline(ctx.config_dir, kind, local_id)
@@ -607,11 +620,19 @@ def _write_team(ctx: HubSyncContext, c: chk.ItemCheck, report: ItemMergeReport) 
 
 
 def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -> None:
-    """B := the remote text just integrated (see ``merge`` docstring)."""
+    """B := the remote text just integrated (see ``merge`` docstring).
+
+    The record also carries the OPAQUE revision the remote was read at
+    (``c.remote_revision``) when the check exposed one: it is the fallback
+    expected token a later conditional write sends, and ``write_baseline``
+    preserves the last known one when a caller cannot supply a fresh value.
+    """
 
     if c.remote is None:
         return
     record = prov.make_record(c.kind, c.local_id, c.hub_id, c.tenant_id, c.remote, recorded_by)
+    if c.remote_revision:
+        record = replace(record, remote_revision=c.remote_revision)
     prov.write_baseline(ctx.config_dir, record)
 
 
@@ -1088,6 +1109,8 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
         # path, so the served CAS token and the recomputed token cannot drift.
         snapshot = pol.read_policy(values, identity)
         policy = snapshot.policy
+        eligibility = _eligibility(ctx, identity, policy, values, record, doc)
+        capability = _capability_auto_push(doc, identity)
         links.append(
             {
                 "link_id": identity.link_id,
@@ -1100,15 +1123,13 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "tenant_id": identity.tenant_id,
                 "tenant_name": _tenant_name(values, identity),
                 "policy": snapshot.to_json(),
-                "eligibility": _eligibility(ctx, identity, policy, values, record, doc),
+                "eligibility": eligibility,
                 "auto_will_apply": _auto_will_apply(item, policy, ctx, now),
-                "auto_will_push": _auto_will_push(
-                    item, policy, ctx, now, _eligibility(ctx, identity, policy, values, record, doc)
-                ),
+                "auto_will_push": _auto_will_push(item, policy, ctx, now, eligibility),
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
-                "pull": _direction_status(item, "pull", policy, now, _capability_auto_push(doc)),
-                "push": _direction_status(item, "push", policy, now, _capability_auto_push(doc)),
+                "pull": _direction_status(item, "pull", policy, now, capability),
+                "push": _direction_status(item, "push", policy, now, capability),
             }
         )
     links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
@@ -1135,47 +1156,91 @@ def _tenant_name(values: Mapping[str, Any], identity: LinkIdentity) -> str | Non
     return None
 
 
-def _capability_auto_push(doc: Mapping[str, Any]) -> bool:
-    """Whether the deployed server's atomic revision-CAS is POSITIVELY attested.
+def _attested(value: Any) -> int:
+    """Normalize an attestation value to 0/1 (ints from the wire, or a legacy bool)."""
 
-    A positive attestation, not a constant: a verification pass (run against the
-    deployed server) records ``content_revision`` + ``If-Match`` CAS support in
-    the status store, and this reads that persisted fact locally -- the inventory
-    is a local read and must never probe the network. Absent the attestation the
-    answer is honestly False, so an unattested server cannot be treated as if it
-    supported CAS. Enabling auto-push is a decision this gates; it never fakes the
-    capability.
+    if value is True:
+        return 1
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return 1
+    return 0
+
+
+def _capability_auto_push(doc: Mapping[str, Any], identity: LinkIdentity) -> bool:
+    """Whether THIS source's atomic revision-CAS is POSITIVELY attested.
+
+    A positive attestation, not a constant: an actual response from the deployed
+    server carried a ``sync_contract`` (recorded per SOURCE by
+    :func:`record_server_capabilities`), and this reads that persisted fact
+    locally -- the inventory is a local read and must never probe the network.
+
+    PER-SOURCE, not a global flag: a link re-pointed at another origin cannot
+    inherit an attestation observed elsewhere, and a SKILL link additionally
+    requires the skill family (``skills >= 1``) on ITS source, because a server
+    that speaks revision CAS for agents/teams but not the skill routes cannot
+    safely accept an unattended skill publication. Absent the attestation the
+    answer is honestly False; it never fakes the capability.
     """
 
     server = doc.get("server", {}) if isinstance(doc, Mapping) else {}
-    return bool(isinstance(server, Mapping) and server.get("revision_cas") is True)
+    sources = server.get("sources", {}) if isinstance(server, Mapping) else {}
+    attest = sources.get(identity.hub_source) if isinstance(sources, Mapping) else None
+    if not isinstance(attest, Mapping):
+        return False
+    if not _attested(attest.get("revision_cas")):
+        return False
+    if identity.kind == "skill" and not _attested(attest.get("skills")):
+        return False
+    return True
 
 
-def record_server_capabilities(ctx: HubSyncContext, capabilities: Mapping[str, Any]) -> None:
+def _fold_capability(doc: dict[str, Any], capabilities: Mapping[str, Any], source: str) -> None:
+    """Merge one observed ``sync_contract`` into the per-source attestation store.
+
+    Monotone per field: an observation can raise a source's attested contract,
+    never lower it, so a single old/limited response cannot revoke a capability
+    that a later full response proved. The legacy flat mirror is kept for any
+    older reader of ``server.revision_cas``.
+    """
+
+    revision_cas = _attested(capabilities.get("revision_cas"))
+    skills = _attested(capabilities.get("skills"))
+    server = doc.setdefault("server", {})
+    server["revision_cas"] = bool(revision_cas)
+    server["attested_at"] = prov.now_iso()
+    entries = server.setdefault("sources", {})
+    entry = entries.setdefault(str(source), {})
+    entry["revision_cas"] = max(int(entry.get("revision_cas") or 0), revision_cas)
+    entry["skills"] = max(int(entry.get("skills") or 0), skills)
+    entry["attested_at"] = prov.now_iso()
+
+
+def record_server_capabilities(
+    ctx: HubSyncContext, capabilities: Mapping[str, Any], *, source: str | None = None
+) -> None:
     """Persist a VERIFIED server capability attestation. PROBE-ONLY.
 
-    Called by exactly one kind of caller: the outbound probe that has actually
-    spoken to the deployed server and seen its atomic revision-CAS behaviour.
+    Called by callers that have actually spoken to the deployed server and seen
+    its ``sync_contract`` in a response: the outbound probe, and
+    :func:`record_checks` (which folds the contract carried by every real check
+    response, per link SOURCE).
 
     SECURITY INVARIANT: this must NEVER be reachable from a route, a UI action,
     a config key or a command. Attestation is a fact about the DEPLOYED server,
     so a local write is only honest when a request produced it; letting a client
     set ``revision_cas`` would let it SELF-GRANT publication eligibility, which
-    is the exact thing ``_eligibility`` exists to refuse. The persisted flag is
-    therefore read by the inventory and written solely by the probe -- there is
-    no request field for it anywhere. (Verified: this function has no route/CLI
-    caller; the probe is wired with the outbound surface.)
+    is the exact thing ``_eligibility`` exists to refuse. The persisted facts are
+    therefore read by the inventory and written solely by observation paths --
+    there is no request field for them anywhere.
 
-    The revision-CAS flag is the ONLY fact eligibility needs here; recording it
-    in the status store keeps the inventory a pure local read.
+    ``source`` keys the attestation PER SOURCE (the normalized credential-free
+    API base the response came from), so a link re-pointed at another origin
+    cannot inherit it. An omitted ``source`` still records the legacy flat flag
+    for older readers; new eligibility reads only the per-source entry.
     """
 
-    revision_cas = bool(capabilities.get("revision_cas") is True)
-
     def fold(doc: dict[str, Any]) -> None:
-        server = doc.setdefault("server", {})
-        server["revision_cas"] = revision_cas
-        server["attested_at"] = prov.now_iso()
+        _fold_capability(doc, capabilities, source or "")
 
     ctx.store().mutate(fold)
 
@@ -1197,7 +1262,7 @@ def _eligibility(
     grant bound to THIS link at the current publication-contract version. A
     reason is always present when the answer is no.
     """
-    if not _capability_auto_push(doc):
+    if not _capability_auto_push(doc, identity):
         return {"can_auto_push": False, "reason": "unsupported-precondition"}
     # SOURCE-SCOPED CAS ATTESTATION: eligibility is bound to this origin's
     # recorded revision, so a link re-pointed at another origin cannot inherit a
@@ -1244,6 +1309,56 @@ def _auto_will_push(
     if not policy.auto_push or not eligibility.get("can_auto_push"):
         return False
     return st.push_due(item, ctx.settings().interval_min, now) and st.auto_apply_due(item)
+
+
+def push_eligibility(ctx: HubSyncContext, record: prov.BaselineRecord | None) -> dict[str, Any]:
+    """The SHARED eligibility verdict for one link, from current local facts.
+
+    The runner recomputes this at PUBLISH time (never trusting a stale check or
+    the policy bit alone), through the SAME ``_eligibility`` the inventory and
+    the policy PATCH use, so a hand-edited ``auto_push: true``, a revoked
+    attestation, a deleted egress grant or a bumped publication contract can
+    never reach the wire: the refusal is a named, persisted status instead.
+    """
+
+    if record is None or record.identity is None:
+        return {"can_auto_push": False, "reason": "baseline-unknown"}
+    try:
+        values = ctx.config_manager.get_config().values
+    except Exception:  # noqa: BLE001 - an unreadable config is not an eligible link
+        values = {}
+    doc = ctx.store().load()
+    return _eligibility(ctx, record.identity, None, values, record, doc)
+
+
+def record_outbound_receipt(
+    ctx: HubSyncContext,
+    kind: Kind,
+    local_id: str,
+    *,
+    accepted: Mapping[str, Any],
+    current_local: Mapping[str, Any],
+    revision: str | None,
+    operation_id: str | None,
+) -> None:
+    """Advance the outbound receipt (A/P) after an ACCEPTED publication.
+
+    P is the ACTUAL server-returned canonical document and ``revision`` the
+    OPAQUE accepted ETag (``result['revision']``) -- the value the NEXT
+    conditional write sends as If-Match. The integrated inbound baseline B is
+    deliberately untouched: a push whose returned remote was never integrated
+    locally must not look integrated (subscribe-off links rely on this).
+    """
+
+    from local_operator.hub_sync import push as push_mod
+
+    record = prov.read_baseline(ctx.config_dir, kind, local_id)
+    if record is None:
+        return
+    receipt = push_mod.receipt_for(
+        kind, accepted, current_local, revision=revision, operation_id=operation_id
+    )
+    prov.write_baseline(ctx.config_dir, replace(record, outbound=receipt))
 
 
 def _direction_status(
