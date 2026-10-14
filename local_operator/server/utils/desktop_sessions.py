@@ -1361,13 +1361,17 @@ class DesktopSessionBridge:
         #: reconcile correction), published only after rechecking this bridge.
         self._source_wait_task: asyncio.Task[Any] | None = None
         #: Whether the LAST flight failed for the current wave. A failed wait
-        #: is not retried on every sweep, and ONLY a ``ready`` answer clears
-        #: this latch — ``unavailable``/``unsupported`` neither clear nor arm
-        #: it (arming is a later ``building`` once the latch is clear), which
-        #: is the "never retry per token render" rule in one boolean. A build
-        #: that outruns the lane's bound therefore settles through the
-        #: renderer's own re-read cadence, not through a poll of ours.
+        #: is not retried on every sweep. A current ``ready`` read recovers it;
+        #: source/connection changes or lost negotiation invalidate the old
+        #: wave rather than handing its failure to another source. A build
+        #: beyond the lane's bound answers ``unavailable`` on explicit retry
+        #: until actual readiness, never a dead promise of another wake.
         self._source_wait_failed = False
+        # A failed wave belongs to one source/connection, not the session ID:
+        # placement and attach reconnects can change while a stored hop awaits.
+        self._source_wait_owner = ""
+        self._source_wait_client: AttachClient | None = None
+        self._source_wait_wave = 0
         self.touched = time.monotonic()
         self.lock = asyncio.Lock()
         self.watch_lock = asyncio.Lock()
@@ -4161,6 +4165,7 @@ class DesktopSessionBridge:
                 "has_newer": None,
                 "journal_order_state": "unsupported",
             }
+        witness = self._source_witness()
         answer = await asyncio.to_thread(
             peer_source_read,
             self.root,
@@ -4170,7 +4175,13 @@ class DesktopSessionBridge:
             order_ids=order_ids,
             expected_generation=expected_generation,
         )
-        if not isinstance(answer, dict) or answer.get("peer_journal_source") is not True:
+        if (
+            not self._source_witness_current(witness)
+            or not isinstance(answer, dict)
+            or answer.get("peer_journal_source") is not True
+        ):
+            if self._source_witness_current(witness):
+                self._note_source_availability("unsupported")
             return {
                 "entries": [],
                 "has_more": False,
@@ -4178,9 +4189,57 @@ class DesktopSessionBridge:
                 "has_newer": None,
                 "journal_order_state": "unsupported",
             }
+        return self._source_answer(answer, witness)
+
+    def _source_witness(self) -> tuple[str, AttachClient | None, int]:
+        """Bind this wave to the current source and existing attach connection.
+
+        A stopped owner has no attach client; its owner ID still distinguishes
+        the stored source. No transport/cache is added to obtain this witness.
+        """
+        owner = str(getattr(self.remote_row, "owner_device", "") or "")
+        client = self._owner_connection()
+        if owner != self._source_wait_owner or client is not self._source_wait_client:
+            self._source_wait_owner = owner
+            self._source_wait_client = client
+            self._stand_down_source_wave()
+        return owner, client, self._source_wait_wave
+
+    def _source_witness_current(self, witness: tuple[str, AttachClient | None, int]) -> bool:
+        if self._closing:
+            return False
+        owner, client, wave = self._source_witness()
+        return owner == witness[0] and client is witness[1] and wave == witness[2]
+
+    def _stand_down_source_wave(self) -> None:
+        # Invalidate BEFORE cancellation: to_thread may finish after cancellation,
+        # and a stale success must not clear a newer source's failed-wave latch.
+        self._source_wait_wave += 1
+        self._source_wait_failed = False
+        if (
+            self._source_wait_task is not None
+            and self._source_wait_task is not asyncio.current_task()
+        ):
+            self._source_wait_task.cancel()
+        self._source_wait_task = None
+
+    def _source_answer(
+        self, answer: dict[str, Any], witness: tuple[str, AttachClient | None, int]
+    ) -> dict[str, Any]:
+        """Settle only the current negotiated wave, never manufacture facts.
+
+        The timeout already emitted its ONE reconcile event. Later explicit
+        reads may retry, but cannot promise progress without a live wave. Keep
+        bodies/cursors/ACK/proven coordinates byte-for-byte; only building's
+        availability vocabulary changes. A real ready read recovers the wave.
+        """
+        if not self._source_witness_current(witness):
+            return answer
         state = answer.get("journal_order_state")
         if isinstance(state, str):
             self._note_source_availability(state)
+        if state == "building" and self._source_wait_failed:
+            return {**answer, "journal_order_state": "unavailable"}
         return answer
 
     def _note_source_availability(self, state: str) -> None:
@@ -4188,13 +4247,16 @@ class DesktopSessionBridge:
 
         ``ready`` stands the wave down (a later rewrite may arm a new one);
         ``building`` arms ONE flight — coalesced while one is in flight, and
-        NOT re-armed after a failed wave until a ready answer arrives. Neither
-        ``unavailable`` nor ``unsupported`` arms anything: they are not "come
-        back in a moment" facts, and retrying them per render would be the
+        NOT re-armed after a failed wave until a ready answer arrives.
+        ``unsupported`` invalidates negotiation and its old flight; neither it
+        nor ``unavailable`` arms anything. Retrying per render would be the
         token poll this lane exists to remove.
         """
-        if state == "ready":
-            self._source_wait_failed = False
+        self._source_witness()
+        if self._closing:
+            return
+        if state in {"ready", "unsupported"}:
+            self._stand_down_source_wave()
             return
         if state != "building":
             return
@@ -4229,7 +4291,8 @@ class DesktopSessionBridge:
         """
         from local_operator.network.projection import peer_source_availability
 
-        device_id = str(getattr(self.remote_row, "owner_device", "") or "")
+        witness = self._source_witness()
+        device_id = witness[0]
         state: str | None = None
         try:
             if device_id:
@@ -4241,16 +4304,17 @@ class DesktopSessionBridge:
                 )
         except Exception:  # noqa: BLE001 — a failed wait is an honest not-ready
             state = None
-        if state != "ready":
-            self._source_wait_failed = True
-        if self._closing:
+        if not device_id or not self._source_witness_current(witness):
+            # Recheck BEFORE any latch write: a moved/reconnected/closed bridge,
+            # or a ready read that overtook this wait, owns a different wave.
             return
-        if not device_id or str(getattr(self.remote_row, "owner_device", "") or "") != device_id:
-            # PLACEMENT MOVED while the wait ran: this wake names a source the
-            # row no longer points at, so it is dropped rather than published.
+        if state == "unsupported":
+            # The relay rechecks grant/link/session after its wait. A refusal
+            # cannot become a supported-but-unavailable source at this door.
+            self._stand_down_source_wave()
             return
+        self._source_wait_failed = state != "ready"
         if state == "ready":
-            self._source_wait_failed = False
             self.publish("event", {"type": JOURNAL_ORDER_EVENT, "peer_source": True})
         else:
             self.publish(
@@ -4442,7 +4506,8 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
             )
-        building = False
+        source_state: str | None = None
+        source_witness = self._source_witness() if journal_order and peer_journal_source else None
         if journal_order and peer_journal_source:
             # A cold ready page installs the owner's domain in the renderer.
             # Once the facade hydrates, its uncoordinated wire window cannot
@@ -4466,15 +4531,16 @@ class DesktopSessionBridge:
             )
             if ordered.get("journal_order_state") == "ready" and ordered.get("journal_generation"):
                 return ordered
-            if ordered.get("journal_order_state") == "building":
+            if ordered.get("journal_order_state") == "building" or (
+                ordered.get("journal_order_state") == "unavailable" and self._source_wait_failed
+            ):
                 # BUILDING IS SETTLEABLE UNDER THE COMPLETE CONTRACT: the
                 # availability flight is the wake. The WIRE page stays the
                 # answer (its rows are the live truth and only ready owner
                 # truth may replace this window), but it carries the honest
-                # building state so the renderer holds its debt until the
-                # flight publishes.
-                building = True
-                self._note_source_availability("building")
+                # availability state. A failed wave is unavailable until an
+                # explicit read finds real readiness, not a promise of a wake.
+                source_state = str(ordered["journal_order_state"])
         page, has_more = _remote_page(rows, limit=limit)
         if not has_more and remote.history_before_token:
             # ONE OLDER PAGE PER CALL, not a drain: a reader that scrolls asks
@@ -4552,8 +4618,15 @@ class DesktopSessionBridge:
             answer["runs_state"] = "unsupported"
             answer["head_cut"] = False
         if journal_order:
-            if building:
-                answer["journal_order_state"] = "building"
+            if source_state is not None and source_witness is not None:
+                if self._source_witness_current(source_witness):
+                    answer["journal_order_state"] = (
+                        "unavailable"
+                        if source_state == "building" and self._source_wait_failed
+                        else source_state
+                    )
+                else:
+                    answer["journal_order_state"] = "unsupported"
             else:
                 answer.setdefault("journal_order_state", "unsupported")
         return answer
@@ -4637,6 +4710,7 @@ class DesktopSessionBridge:
         from local_operator.network.projection import peer_stored_history_page
 
         device_id = str(getattr(self.remote_row, "owner_device", "") or "")
+        witness = self._source_witness() if journal_order and peer_journal_source else None
         if device_id:
             ask_at = time.monotonic()
             page = await asyncio.to_thread(
@@ -4664,6 +4738,8 @@ class DesktopSessionBridge:
                     open_frame=open_frame,
                     served=page is not None,
                 )
+            if witness is not None and not self._source_witness_current(witness):
+                page = None
             if page is not None:
                 cut = self._cut_stored_page(page, before_id=before_id, through_id=through_id)
                 # ``ts_source: "entry"`` IS THIS SOURCE'S OWN FACT, and it is
@@ -4697,14 +4773,15 @@ class DesktopSessionBridge:
                     # the wake that settles it; a ready answer stands the wave
                     # down. LEGACY: unsupported, byte-identically to before this
                     # change, so the installed UI's peer pages are untouched.
-                    state = answer.get("journal_order_state")
-                    if peer_journal_source:
-                        self._note_source_availability(
-                            str(state) if isinstance(state, str) else "unsupported"
-                        )
+                    if witness is not None and answer.get("peer_journal_source") is True:
+                        answer = self._source_answer(answer, witness)
                     else:
+                        if witness is not None and self._source_witness_current(witness):
+                            self._note_source_availability("unsupported")
                         answer["journal_order_state"] = "unsupported"
                 return answer
+        if witness is not None and self._source_witness_current(witness):
+            self._note_source_availability("unsupported")
         answer = {
             "entries": [],
             "has_more": False,
