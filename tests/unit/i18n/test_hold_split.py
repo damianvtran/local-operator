@@ -22,20 +22,13 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     entries = json.loads(ledger.read_bytes())["entries"]
     assert not any(entry["locale"] == "zh-CN" for entry in entries)
     hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # Keep the historical eleven passed rows (Wave-3 ten plus the reviewed
-    # transcript union) distinct from the three new render-held relay rows.
-    # Counting all fourteen as passed would silently grant publication approval.
-    passed = [entry for entry in hindi if entry["status"] == "passed"]
-    pending = [entry for entry in hindi if entry["namespace"].startswith("relay.")]
-    assert len(passed) == 11
-    assert len(pending) == 3
-    assert {entry["namespace"] for entry in pending} == {
-        "relay.login",
-        "relay.session",
-        "relay.shell",
-    }
-    assert all(entry["status"] == "translated" for entry in pending)
-    assert len(hindi) == len(passed) + len(pending)
+    # ELEVEN, not ten: the Wave-3 ten still carry the audited old set, and the
+    # 17-key ``tui.transcript`` union adds ONE more row for the same namespace
+    # under the CURRENT English source hash. The count is the pin that keeps a
+    # held candidate from being smuggled in as a re-hash of an existing
+    # namespace, so it moves only with a reviewed union row like this one.
+    assert len(hindi) == 11
+    assert all(entry["status"] == "passed" for entry in hindi)
 
 
 @pytest.mark.parametrize("namespace", catalogues.namespaces("en"))

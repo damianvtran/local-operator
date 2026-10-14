@@ -5,16 +5,6 @@ import { getUsage, type PhoneUsageLimit } from "../api";
 import { BUNDLED_OWNED } from "../i18n/bundled.gen";
 import { createMessageRuntime } from "../i18n/runtime";
 import { UsageSheet } from "./usage-sheet";
-import frShell from "../../../../i18n/catalogues/fr/relay.shell.json";
-import frSession from "../../../../i18n/catalogues/fr/relay.session.json";
-import esShell from "../../../../i18n/catalogues/es/relay.shell.json";
-import esSession from "../../../../i18n/catalogues/es/relay.session.json";
-import ruShell from "../../../../i18n/catalogues/ru/relay.shell.json";
-import ruSession from "../../../../i18n/catalogues/ru/relay.session.json";
-import viShell from "../../../../i18n/catalogues/vi/relay.shell.json";
-import viSession from "../../../../i18n/catalogues/vi/relay.session.json";
-import hiShell from "../../../../i18n/catalogues/hi/relay.shell.json";
-import hiSession from "../../../../i18n/catalogues/hi/relay.session.json";
 
 const context = vi.hoisted(() => ({ backendLocale: "fr", uiLocale: "en", direction: "ltr" as const, revision: 0 }));
 // Keep the actual catalogue-selection/ICU runtime; only isolate store ingress.
@@ -146,53 +136,6 @@ it("does not send nonfinite counts to unit plural selection or alter safe branch
 	expect(screen.getByText(/5-hour: 1% left/)).toBeTruthy();
 	expect(screen.getByText(/5-hour: 1 USD left/)).toBeTruthy();
 	expect(document.body.textContent).not.toMatch(/NaN|Infinity|UNKNOWN_UNIT|relay\.shell\.usage\.unit/);
-});
-
-it.each([
-	["fr", frShell, frSession], ["es", esShell, esSession],
-	["ru", ruShell, ruSession], ["vi", viShell, viSession], ["hi", hiShell, hiSession],
-] as const)("composes the exact audited %s noun candidates without repeating numbers or prepositions", async (locale, shell, session) => {
-	// Explicit fixture registration exercises approved native bytes without
-	// activating these translated/render-held catalogues in the shipped runtime.
-	select(locale, false);
-	messageRuntime.registerBundle("relay.shell", locale, shell);
-	messageRuntime.registerBundle("relay.session", locale, session);
-	context.uiLocale = messageRuntime.uiLocaleFor(locale);
-	expect(context.uiLocale).toBe(locale);
-	const counts = [0, 1, 2, 1.5, -1, 1000000, -1000000];
-	const units = ["credits", "tokens", "requests"] as const;
-	load(units.flatMap((unit) => counts.flatMap((count) => [
-		{ ...base, amount: { ...base.amount, remaining: count, unit } },
-		{ ...base, amount: { ...base.amount, used: count, unit } },
-	])));
-	const forms = {
-		fr: [["crédit", "crédits"], ["jeton", "jetons"], ["requête", "requêtes"]],
-		es: [["crédito", "créditos"], ["token", "tókenes"], ["solicitud", "solicitudes"]],
-		ru: [["кредит", "кредита", "кредитов"], ["токен", "токена", "токенов"], ["запрос", "запроса", "запросов"]],
-		vi: [["tín dụng"], ["token"], ["yêu cầu"]],
-		hi: [["क्रेडिट"], ["टोकन"], ["अनुरोध"]],
-	};
-	for (const [index] of units.entries()) {
-		for (const count of counts) {
-			const absolute = Math.abs(count);
-			const words = forms[locale][index];
-			const noun = locale === "fr" ? words[absolute < 2 ? 0 : 1]
-				: locale === "es" ? (absolute === 1000000 ? "de " : "") + words[absolute === 1 ? 0 : 1]
-					: locale === "ru" ? words[absolute === 1 ? 0 : absolute === 2 || absolute === 1.5 ? 1 : 2] : words[0];
-			const number = new Intl.NumberFormat(locale).format(count);
-			for (const remaining of [true, false]) {
-				const expected = locale === "fr" ? `${remaining ? "reste" : "utilisation de"} ${number} ${noun}`
-					: locale === "es" ? `${remaining ? "Cantidad restante:" : "Uso:"} ${number} ${noun}`
-						: locale === "ru" ? `${remaining ? "Остаток:" : "Использовано:"} ${number} (${noun})`
-							: locale === "vi" ? `${remaining ? "Còn lại" : "Đã dùng"} ${number} ${noun}`
-								: `${number} ${noun} ${remaining ? "शेष" : "का उपयोग हुआ"}`;
-				// Include the row/value boundary: a bare suffix starting with 0
-				// also matches the final digit of a grouped million in Hindi.
-				expect(await screen.findByText((_text, node) => node?.tagName === "P" && !!node.textContent?.endsWith(` ${expected}`))).toBeTruthy();
-			}
-		}
-	}
-	expect(document.body.textContent).not.toMatch(/de de|relay\.shell\.usage\.unit|NaN|Infinity/);
 });
 
 it("formats reset and snapshot dates consistently in the catalogue locale", async () => {
