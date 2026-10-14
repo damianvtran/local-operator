@@ -26,7 +26,7 @@ import pytest
 from local_operator.harness.types import ToolContext
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.tools.builtin import execute_send
+from local_operator.tools.builtin import build_send_tool, execute_send
 from tests.unit.session.runtime.test_server import FakeHandle, _wait_record
 
 
@@ -97,6 +97,359 @@ def _context(**overrides: Any) -> ToolContext:
     }
     fields.update(overrides)
     return ToolContext(**fields)
+
+
+@pytest.mark.asyncio
+async def test_nine_same_turn_sends_make_one_real_peer_row_and_wake(tmp_path, monkeypatch):
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
+    from tests.unit.session.test_session_peer import _peer_rows
+
+    stream = ScriptedStream(
+        [[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")] for _ in range(9)]
+    )
+    session = make_session(tmp_path, stream)
+    registrant, _alias, handle = await _start_peer()
+    monkeypatch.setattr(handle, "receive_peer_message", session.receive_peer_message)
+    context = _context(send_turn_id="turn-one")
+    try:
+        results = []
+        for i in range(9):
+            results.append(
+                await execute_send(
+                    f"send-{i}",
+                    {"target": "peer-target", "message": "same note"},
+                    None,
+                    None,
+                    context,
+                )
+            )
+            await wait_for(lambda: not session._background_tasks and not session.is_streaming)
+        assert stream.requests
+        assert all(not result.is_error for result in results)
+        assert len(_peer_rows(session)) == 1
+        assert len(stream.requests) == 1
+        for result in results[1:]:
+            assert "delivery" not in result.details and "wake" not in result.details
+            assert result.details["original_receipt"]["details"]["delivery"]["state"] == "delivered"
+        ids = [
+            (result.details["original_receipt"]["details"] if i else result.details)["delivery"][
+                "message_id"
+            ]
+            for i, result in enumerate(results)
+        ]
+        assert len(set(ids)) == 1
+        assert [result.tool_call_id for result in results] == [f"send-{i}" for i in range(9)]
+        assert "duplicate suppressed" not in results[0].text
+        assert all(result.details["duplicate_suppressed"] for result in results[1:])
+    finally:
+        registrant.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("single_batch", [False, True])
+async def test_real_sender_attention_turn_reuses_receipts_but_next_turn_delivers(
+    tmp_path, monkeypatch, single_batch
+):
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
+    from tests.unit.session.test_session_peer import _peer_rows
+
+    def call(i, index=0) -> list[StreamEvent]:
+        return [
+            StreamToolCallDelta(
+                index=index,
+                id=f"call-{i}",
+                name="send",
+                argument_delta=json.dumps({"target": "peer-target", "message": "same host note"}),
+            ),
+            StreamEndEvent(stop_reason="toolUse"),
+        ]
+
+    finish: list[StreamEvent] = [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+    scripts = [call(i) for i in range(9)]
+    if single_batch:
+        scripts = [
+            [*[call(i, index=i)[0] for i in range(9)], StreamEndEvent(stop_reason="toolUse")]
+        ]
+    sender_stream = ScriptedStream(scripts + [finish, call(9), finish])
+    receiver_stream = ScriptedStream([finish, finish])
+    tool = build_send_tool(_context())
+    assert tool is not None
+    sender = make_session(tmp_path / "sender", sender_stream, tools=[tool], yolo=True)
+    receiver = make_session(tmp_path / "receiver", receiver_stream)
+    registrant, _alias, handle = await _start_peer()
+    monkeypatch.setattr(handle, "receive_peer_message", receiver.receive_peer_message)
+    try:
+        await sender.prompt("deliver the note")
+        await wait_for(lambda: not receiver._background_tasks and not receiver.is_streaming)
+        assert len(_peer_rows(receiver)) == len(receiver_stream.requests) == 1
+        assert len(sender_stream.requests) == len(scripts) + 1
+        assert (
+            sum("duplicate suppressed" in m.text for m in sender_stream.requests[-1].messages) == 8
+        )
+        await sender.prompt("deliver the same note in this new turn")
+        await wait_for(lambda: not receiver._background_tasks and not receiver.is_streaming)
+        assert len(_peer_rows(receiver)) == len(receiver_stream.requests) == 2
+    finally:
+        registrant.close()
+        await sender.dispose()
+        await receiver.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"message": "same note "},
+        {"wake": False},
+        {"now": True},
+        {"patience": "5m"},
+        {"repeat": True},
+    ],
+)
+async def test_changed_delivery_intent_still_dials(changed):
+    registrant, _alias, handle = await _start_peer()
+    context = _context(send_turn_id="intent-turn")
+    args = {"target": "peer-target", "message": "same note"}
+    try:
+        first = await execute_send("first", args, None, None, context)
+        second = await execute_send("second", {**args, **changed}, None, None, context)
+        assert not first.is_error and not second.is_error
+        assert len(handle.calls) == 2
+        assert first.details is not None and second.details is not None
+        assert first.details["delivery"]["message_id"] != second.details["delivery"]["message_id"]
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_new_turn_and_unscoped_hosts_do_not_reuse_receipts():
+    registrant, _alias, handle = await _start_peer()
+    args = {"target": "peer-target", "message": "same note"}
+    try:
+        for i, context in enumerate(
+            [
+                _context(send_turn_id="one"),
+                _context(send_turn_id="two"),
+                _context(),
+                _context(),
+            ]
+        ):
+            result = await execute_send(str(i), args, None, None, context)
+            assert not result.is_error
+        assert len(handle.calls) == 4
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_resolved_sid_not_raw_selector_owns_the_receipt():
+    from dataclasses import replace
+
+    registrant, alias, handle = await _start_peer()
+    context = _context(send_turn_id="recipient-turn")
+    try:
+        first = await execute_send(
+            "first",
+            {"target": "peer-target", "message": "note"},
+            None,
+            None,
+            context,
+        )
+        same = await execute_send(
+            "same",
+            {"session": alias.session_id, "message": "note"},
+            None,
+            None,
+            context,
+        )
+        assert same.details is not None
+        assert same.details["duplicate_suppressed"] is True
+        registry.publish(
+            replace(
+                alias,
+                session_id="other-recipient",
+                conversation_name="other-peer",
+            )
+        )
+        other = await execute_send(
+            "other",
+            {"session": "other-recipient", "message": "note"},
+            None,
+            None,
+            context,
+        )
+        assert not first.is_error and not other.is_error
+        assert len(handle.calls) == 2
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_send_allows_a_real_retry(monkeypatch):
+    registrant, _alias, handle = await _start_peer()
+    original = handle.receive_peer_message
+    attempts = []
+
+    async def refuse_once(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("refused before delivery")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(handle, "receive_peer_message", refuse_once)
+    context = _context(send_turn_id="retry-turn")
+    args = {"target": "peer-target", "message": "retry me"}
+    try:
+        failed = await execute_send("failed", args, None, None, context)
+        retried = await execute_send("retried", args, None, None, context)
+        cached = await execute_send("cached", args, None, None, context)
+        assert failed.is_error and not retried.is_error and not cached.is_error
+        assert len(attempts) == 2
+        assert cached.details is not None
+        assert cached.details["duplicate_suppressed"] is True
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["unconfirmed", "mailbox"])
+async def test_uncertain_local_outcomes_are_not_cached(monkeypatch, state):
+    from local_operator.mobile.peer_send import DeliveryOutcome
+
+    registrant, _alias, _handle = await _start_peer()
+    attempts = []
+
+    async def uncertain(*args, **kwargs):
+        attempts.append(True)
+        return DeliveryOutcome(
+            state, "uncertain", f"id-{len(attempts)}", "unknown", 1, "ack_lost", "live", "peer"
+        )
+
+    monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", uncertain)
+    context = _context(send_turn_id="uncertain-turn")
+    try:
+        for i in range(2):
+            result = await execute_send(
+                str(i),
+                {"target": "peer-target", "message": "note"},
+                None,
+                None,
+                context,
+            )
+            assert result.details is not None
+            assert result.details["partial_result"] is True
+        assert len(attempts) == 2
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_cached_send_does_not_rearm_patience(monkeypatch):
+    registrant, _alias, handle = await _start_peer()
+    armed = []
+
+    async def arm(*args, **kwargs):
+        armed.append(kwargs)
+        return " (wait armed)"
+
+    monkeypatch.setattr("local_operator.tools.builtin._arm_send_patience", arm)
+    context = _context(send_turn_id="patience-turn")
+    result = None
+    try:
+        for i in range(2):
+            result = await execute_send(
+                str(i),
+                {"target": "peer-target", "message": "note", "patience": "5m"},
+                None,
+                None,
+                context,
+            )
+            assert not result.is_error
+        assert len(handle.calls) == len(armed) == 1
+        assert result is not None
+        assert "no new delivery, wake or patience wait" in result.text
+    finally:
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_uncertainty_and_model_control_are_never_suppressed(monkeypatch):
+    calls = []
+    _fake_mesh(
+        monkeypatch, {"ok": False, "outcome": "lost", "session_id": "remote-id"}, rc=1, calls=calls
+    )
+    context = _context(send_turn_id="control-turn")
+    for i in range(2):
+        result = await execute_send(
+            str(i),
+            {"peer": PEER, "session": "remote-id", "message": "note"},
+            None,
+            None,
+            context,
+        )
+        assert result.is_error
+    assert len(calls) == 2
+    switches = []
+
+    async def switch(call_id, params, context):
+        from local_operator.tools.builtin import _text
+
+        switches.append(params.model)
+        return _text(call_id, "send", "model applied")
+
+    monkeypatch.setattr("local_operator.tools.builtin._execute_send_model", switch)
+    for i in range(2):
+        await execute_send(
+            str(i),
+            {"session": "local-id", "model": "provider/model"},
+            None,
+            None,
+            context,
+        )
+    assert len(switches) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["unknown-sender", "oversized-entry", "capacity"])
+async def test_confirmed_receipt_cache_bounds_fail_open(monkeypatch, kind):
+    registrant, _alias, handle = await _start_peer()
+    context = _context(
+        send_turn_id="bounded-turn", session_id="" if kind == "unknown-sender" else "sender"
+    )
+    monkeypatch.setattr(
+        "local_operator.tools.builtin._CONFIRMED_SEND_CACHE_MAX_ENTRIES", 2, raising=False
+    )
+    body = "x" * 16384 if kind == "oversized-entry" else "note"
+    try:
+        if kind == "capacity":
+            for i in range(3):
+                result = await execute_send(
+                    str(i), {"target": "peer-target", "message": f"note-{i}"}, None, None, context
+                )
+                assert not result.is_error
+            assert len(context.confirmed_send_receipts) == 2
+            result = await execute_send(
+                "again", {"target": "peer-target", "message": "note-2"}, None, None, context
+            )
+            assert not result.is_error and len(handle.calls) == 4
+        else:
+            for i in range(2):
+                result = await execute_send(
+                    str(i), {"target": "peer-target", "message": body}, None, None, context
+                )
+                assert not result.is_error
+            assert not context.confirmed_send_receipts
+            assert len(handle.calls) == 2
+    finally:
+        registrant.close()
 
 
 async def _last_peer_call(handle: _DetailHandle) -> dict[str, Any]:

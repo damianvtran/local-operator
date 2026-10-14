@@ -48,5 +48,40 @@
     "note": "The sender fallback when nothing identifies the peer. MUST stay the same vocabulary harness/comms.py uses for the same case: a reader meeting one in a transcript and one in a tool result must not read them as different states.",
     "role": "peer sender identity",
     "tone": "plain fallback"
+  },
+  "tui.transcript.group.messages": {
+    "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members. ",
+    "role": "quiet group summary",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.group.actions": {
+    "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+    "role": "quiet group summary",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.group.reply_requested": {
+    "note": "Requested agent intent only, not outstanding operator attention or an action count. Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+    "role": "quiet group summary",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.group.steered": {
+    "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals.",
+    "role": "quiet group summary",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.hub.reply_requested": {
+    "note": "Requested agent intent only, not outstanding operator attention or an action count. Header of an internal hub receipt; authored body and sender identity are not translated. ",
+    "role": "hub receipt header",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.hub.steered": {
+    "note": "Header of an internal hub receipt; authored body and sender identity are not translated. ",
+    "role": "hub receipt header",
+    "tone": "terse advisory"
+  },
+  "tui.transcript.hub.from": {
+    "note": "Header of an internal hub receipt; authored body and sender identity are not translated. ",
+    "role": "hub receipt header",
+    "tone": "terse advisory"
   }
 }

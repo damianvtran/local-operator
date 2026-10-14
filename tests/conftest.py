@@ -51,6 +51,12 @@ _AMBIENT_VARS = (
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
     "LOP_OPEN_TRACE",
+    # Managed ownership descriptors address real processes/resources. Inherited
+    # values can identify an operator's lease, not a fixture; scrub rather than
+    # declaring them harmless. Tests opt in with their OWN bound owner values.
+    "LOP_OWNED_LEASE_PATH",
+    "LOP_OWNED_OWNER_ID",
+    "LOP_OWNED_SOURCE_PIN",
     # The click ladder's launch rung looks for `local-operator-ui` on PATH,
     # which on a machine that has the app installed FINDS IT. A test that drives
     # `open_session` without doubling the rung therefore starts the operator's
@@ -577,6 +583,45 @@ def warm_tiktoken_encoding() -> None:
         _get_encoding()
     except Exception:  # noqa: BLE001 — warming is an optimisation, never a gate
         pass
+
+
+@pytest.fixture(autouse=True)
+def restore_active_locale() -> Iterator[None]:
+    """Give every worker's next test English copy, including cached constants.
+
+    The active locale is deliberately process-global: a live language switch
+    updates every resolver and registered module constant. That same lifetime
+    crosses test boundaries in xdist workers; fixing only known language tests
+    leaves the next app/config-driven mutator free to contaminate unrelated
+    English assertions (the marker receipt became ``1 image jointe`` in CI).
+
+    Use the public setter, not a scalar monkeypatch: restoring the locale alone
+    leaves constants materialised by refresh callbacks in the old language.
+    The monkeypatch fixture below makes its undo precede this teardown, so
+    refreshers read the real catalogue rather than a deleted fixture tree, and
+    test-only callbacks/eligibility patches cannot participate in the reset.
+    """
+    from local_operator.i18n import text
+
+    text.set_active_locale("en")
+    try:
+        yield
+    finally:
+        text.set_active_locale("en")
+
+
+@pytest.fixture
+def monkeypatch(restore_active_locale: None) -> Iterator[pytest.MonkeyPatch]:
+    """Keep pytest's standard patch API, but declare locale teardown ordering.
+
+    An autouse fixture alone does not guarantee this dependency: other autouse
+    fixtures already request monkeypatch. Declaring it here ensures pytest
+    unwinds ALL fixture-owned patches before running locale refresh callbacks,
+    even when a test fails. This context has the same undo semantics as pytest's
+    built-in fixture; it does not undo patches early from another finalizer.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
 
 
 @pytest.fixture(autouse=True)

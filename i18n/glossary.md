@@ -55,7 +55,7 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | prompt | translate | prompt · prompt · 提示词 · промпт · prompt · پرامپٹ · प्रॉम्प्ट |
 | compaction | translate | compactage · compactación · 压缩 · сжатие · nén · کمپریشن · संपीडन |
 | schedule | translate — tool/command names stay | planification · programación · 定时 · расписание · lịch · شیڈول · शेड्यूल |
-| monitor | translate — tool name stays | surveillance · monitorización · 监控 · мониторинг · giám sát · نگرانی · निगरानी |
+| monitor | translate — tool name stays | surveillance · monitorización · 监控 · мониторинг · giám sát · نگرانی · निगरानी / मॉनिटर⁷ |
 | relay | translate — identifiers stay | relais · relé · 中继 · ретранслятор · chuyển tiếp · ریلے · रिले |
 | usage | translate | utilisation · uso · 用量 · использование · lượng sử dụng · استعمال · उपयोग |
 | cost | translate | coût · coste⁴ · 费用 · стоимость · chi phí · لاگت · लागत |
@@ -63,8 +63,8 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | team | translate | équipe · equipo · 团队 · команда · nhóm · ٹیم · टीम |
 | skill | translate | compétence · habilidad · 技能 · навык · kỹ năng · مہارت · कौशल |
 | device | translate | appareil · dispositivo · 设备 · устройство · thiết bị · ڈیوائس · डिवाइस |
-| credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · —⁶ |
-| job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · —⁶ |
+| credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · क्रेडेंशियल |
+| job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · जॉब |
 
 1. `wake` in `ur`/`hi`: verb forms read best inside a sentence ("10 بجے
    جاگے گا", "10 बजे जागेगा"); for the noun label use the table's form. The
@@ -80,9 +80,14 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 5. `vi` telemetry: keep the English word — the native phrase ("đo lường từ
    xa") is long and absent from developer register. Recorded here as the
    per-locale decision.
-6. Wave-2 terms: fr/es renderings shipped in wave 1; ru/vi in wave 2 (see
-   their guides). The zh-CN/ur/hi cells stay `—` until their own waves record
-   renderings — do not invent them here.
+6. `credentials` and `job`: fr/es recorded renderings in wave 1; ru/vi in
+   wave 2; hi in wave 3 (see its guide). The zh-CN/ur cells stay `—` until
+   their waves record endorsed renderings; do not invent them here. Hindi uses
+   क्रेडेंशियल्स for the plural of क्रेडेंशियल.
+7. Hindi distinguishes watching/monitoring (निगरानी) from a stored monitor
+   object (मॉनिटर), not from the Latin tool name `monitor`. Child agents and
+   subagents consistently use उप-एजेंट; the abandoned child-only spelling is
+   not an exception. Other endorsed Hindi wave-3 calls live in the hi guide.
 
 ### Wave-2 kept-English set (all locales)
 
@@ -117,3 +122,40 @@ with its reason — the glossary row stays the default. A change here is a
 repo-artifact change: it does not need regenerating (it is not generated), but
 the translation ledger's freshness rule treats it as style-guide scope — a wave
 re-audits the terms it cites when either changes.
+
+## 5. Wave-3 audit binding and unfinished backfill
+
+These records distinguish complete semantic coverage from a clean remediation
+sample. A passed delta cannot fill an unreadable row in a required first pass.
+The ledger records namespace/source freshness; this note binds the narrower
+high-visibility coverage and the model that actually performed each round.
+
+- Hindi visibility: independent auditor `c96e3e71494b` (resumed
+  `5d81a4d40810`), `deepseek/deepseek-flash`, 2026-10-11, read all 30 welcome
+  and all 12 settings-error values, and scanned all 755 settings values.
+  Independent polish auditor `26037f4e1f23`, same model/date, passed the
+  9-value delta (welcome 1/settings 8); unchanged bytes identical per its
+  report. No unreadable semantic row was reported. The original pinned
+  `anthropic/claude-sonnet-5-5` was a fallback origin, not the audit model.
+- Populated Hindi exec: translator `4323561a8d6d` and independent auditor
+  `046b8b75715a` ran `openai/gpt-6.1-sol`, 2026-10-12. The audit covered all
+  17 values; runtime render samples passed. Superseded empty-source approvals
+  remain historical notes in the ledger, not current approvals.
+- `tui.analytics` and `wire.errors.desktop` were absent from the original
+  ten-namespace snapshot. Their Hindi backfill remains unfinished. Missing
+  groups use the existing wire-envelope English fallback; direct `text.tr`
+  retains its missing-group message-code behavior. This is not full-surface
+  localization or a runtime fallback/eligibility-policy change.
+- The complete Chinese candidate is excluded from this active Hindi-only PR
+  and preserved on remote-held
+  [`held/i18n-w3-zh-candidate-4773bb87`](https://github.com/damianvtran/local-operator/tree/held/i18n-w3-zh-candidate-4773bb87)
+  at `4773bb87fb71bf47209c9b7bc4a6a3e0ae0bf854`. Its slash audit remains
+  **50/51, NOT PASSED**; the candidate remains **HELD**. Future Chinese work
+  must use that preserved history and resolve its audit/provenance gates,
+  not treat removing only its failed group as approval of the other nine.
+- Hindi's required actual `anthropic/claude-sonnet-5-5` designer review remains
+  **UNPERFORMED**. No design sign-off or immediate release approval is claimed.
+
+Source: named independent audit reports retained by the wave-3 coordinator;
+provider fallbacks are disclosed in those reports. Runtime samples above do
+not establish full CLI/lifecycle or rendered-frame coverage.

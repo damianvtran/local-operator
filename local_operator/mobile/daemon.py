@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import copy
 import gzip
+import html
 import json
 import logging
 import os
@@ -59,7 +60,10 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.i18n import catalogues
 from local_operator.i18n.frames import config_frame_payload
+from local_operator.i18n.keys import relay_login
+from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
@@ -4515,7 +4519,7 @@ def build_app(daemon: MobileDaemon):
     async def login_page(request: Request) -> Response:
         if authed(request):
             return RedirectResponse("/", status_code=303)
-        return HTMLResponse(_LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()))
+        return HTMLResponse(await asyncio.to_thread(_render_login_html))
 
     async def login_submit(request: Request) -> Response:
         denied = cross_origin_mutation(request)
@@ -4525,9 +4529,7 @@ def build_app(daemon: MobileDaemon):
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
             return HTMLResponse(
-                _LOGIN_HTML.replace("__MARK_DATA_URI__", _mark_data_uri()).replace(
-                    "<!--ERROR-->", _LOGIN_ERROR
-                ),
+                await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
             )
         response = RedirectResponse("/", status_code=303)
@@ -4651,9 +4653,63 @@ def build_app(daemon: MobileDaemon):
             "unread": daemon.table.unread_block(),
             "capabilities": {
                 "features": _feature_flags(),
+                "i18n": {"catalogues": 1},
                 "stt": await stt_availability(),
             },
         }
+
+    async def api_i18n_catalogue(request: Request) -> Response:
+        """Public negotiation data, never session/user content or a core proxy.
+
+        The relay advertises this adapter separately from features.i18n: that
+        feature describes core's contract, not this app's routing table. Only
+        backend-owned wire namespaces may cross this seam; relay copy bundles
+        with its own client. Existing catalogue loaders own path validation.
+        """
+        from local_operator.i18n import catalogues, resolve
+        from local_operator.i18n.http import etag_matches
+
+        locale = request.path_params["locale"]
+        namespace = request.path_params["namespace"]
+        # Match core's public asset boundary, not language-preference inference:
+        # exact shipment and the operational switch precede hash/load/304, so
+        # held bytes cannot be activated by a conditional request either.
+        if (
+            not resolve.is_shipped(locale)
+            or resolve.eligible_locale(locale) != locale
+            or not namespace.startswith("wire.")
+        ):
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+
+        def load() -> tuple[str, dict[str, str]]:
+            return (
+                catalogues.catalogue_sha256(locale, namespace),
+                catalogues.load_catalogue(locale, namespace),
+            )
+
+        try:
+            sha, messages = await asyncio.to_thread(load)
+        except catalogues.CatalogueNotFound:
+            return JSONResponse(
+                {"detail": "Catalogue not found."}, status_code=404
+            )  # i18n: ignore protocol diagnostic
+        except catalogues.CatalogueInvalid as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=500)
+        headers = {"ETag": f'"{sha}"', "Cache-Control": "no-cache"}
+        if etag_matches(request.headers.get("if-none-match", ""), sha):
+            return Response(status_code=304, headers=headers)
+        # Same three-field CRUD envelope as core, without importing its
+        # Pydantic/FastAPI models into the independent Starlette daemon.
+        return JSONResponse(
+            {
+                "status": 200,
+                "message": "Catalogue retrieved.",  # i18n: ignore protocol diagnostic
+                "result": {"messages": messages, "content_sha256": sha},
+            },
+            headers=headers,
+        )
 
     async def api_sessions(request: Request) -> Response:
         denied = gate(request)
@@ -6720,6 +6776,19 @@ def build_app(daemon: MobileDaemon):
         # must not reach it as "there are none".
         return JSONResponse({"sessions": rows, "degraded": degraded})
 
+    async def api_usage(request: Request) -> Response:
+        # Pairing authorization precedes even the cached read. This endpoint
+        # exposes no account identities, vendor notes, ambient accounts or live
+        # provider probes; an empty cache is not a measured zero balance.
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            snapshot = await asyncio.to_thread(_cached_phone_usage)
+        except Exception:  # noqa: BLE001 — no raw store/vendor errors over the tunnel
+            return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
+        return JSONResponse(snapshot)
+
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
         their models, reusing the server's model listing so the phone and the
@@ -7308,6 +7377,7 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        Route("/api/i18n/catalogues/{locale:str}/{namespace:str}", api_i18n_catalogue),
         # The badge read (push/ack-sync S1): the same aggregate the list payload
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
@@ -7389,6 +7459,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/schedules", api_schedules),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/usage", api_usage),
         Route("/api/config/events", api_config_events),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
@@ -7626,6 +7697,118 @@ def _default_start_cwd() -> str:
     return str(Path.home())
 
 
+def _cached_phone_usage() -> dict[str, Any]:
+    """Minimum paired-phone display payload, never credentials or live usage.
+
+    The existing controller owns cache keys and normalized eligibility. Filtering
+    by persisted providers follows the model sheet's remote boundary; unknown
+    admission fails closed rather than advertising ambient accounts.
+    """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+
+    # The factory opens only read-only metadata handles. None requests the
+    # persisted-only inventory, never environment/runtime/config accounts.
+    controller = ProviderController.read_only_for_persisted_usage()
+    try:
+        snapshot = controller.cached_persisted_usage_reports_read_only(None)
+    finally:
+        try:
+            controller.close()
+        finally:
+            # The facade types its store as the narrow ControllerAuthStore
+            # Protocol (no close); this factory always builds the concrete
+            # AuthStore.open_read_only handle, which owns the connection.
+            cast(AuthStore, controller.auth_store).close()
+    # Empty/absent is successful; unreadable is not. Preserve immutable-read
+    # freshness instead of guessing it from individual report timestamps.
+    if snapshot.unavailable:
+        raise RuntimeError("cached usage unavailable")
+    import math
+
+    def finite(value: Any) -> float | None:
+        # Invalid numeric data is unavailable, never a fake zero or JSON NaN.
+        return (
+            value
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            else None
+        )
+
+    result: list[dict[str, Any]] = []
+    for report in snapshot.reports:
+        provider = report.provider
+        limits = []
+        for limit in report.limits:
+            amount = limit.amount
+            # fraction() is Optional; bind once so the comparison narrows.
+            fraction = amount.fraction()
+            # Names/details/identity are not required for quota display.
+            # Permit only normalized units; arbitrary vendor strings
+            # must not become remote account/credential disclosures.
+            unit = (
+                amount.unit
+                if amount.unit in {"credits", "usd", "percent", "tokens", "requests", "unknown"}
+                else "unknown"
+            )
+            limits.append(
+                {
+                    "amount": {
+                        "used": finite(amount.used),
+                        "limit": finite(amount.limit),
+                        "remaining": finite(amount.remaining),
+                        "used_fraction": finite(amount.used_fraction),
+                        "unit": unit,
+                    },
+                    "paid_fallback": limit.paid_fallback,
+                    "available": limit.available,
+                    "unlimited": limit.unlimited,
+                    "supersedes_tiers": limit.supersedes_tiers,
+                    "family_cap": bool(limit.tier),
+                    "shared": bool(limit.shared) and not bool(limit.tier),
+                    # Only exact canonical metadata can name a phone row. Unknown
+                    # vendor strings stay unknown, never become remote account copy.
+                    "window": {
+                        "5 hour": "5h",
+                        "five_hour": "5h",
+                        "5h": "5h",
+                        "7 day": "7d",
+                        "7d": "7d",
+                        "weekly": "7d",
+                        "1 month": "1mo",
+                        "monthly": "1mo",
+                        "lifetime": "lifetime",
+                    }.get(limit.window, "unknown"),
+                    "family": (
+                        limit.tier
+                        if limit.tier in {"opus", "sonnet", "fable", "zread"}
+                        else "unknown"
+                    ),
+                    "resets_at_ms": finite(limit.resets_at_ms),
+                    # Python owns the exact fraction-first eligibility.
+                    "payable": limit.paid_usable(),
+                    "exhausted": fraction is not None and fraction >= 1,
+                }
+            )
+        result.append(
+            {
+                "provider": provider,
+                "limits": limits,
+                "unavailable": report.usage_unavailable,
+                "fetched_at": report.fetched_at,
+            }
+        )
+    return {
+        "reports": result,
+        "source": "cached",
+        "may_be_stale": snapshot.may_be_stale,
+        "cached_at": snapshot.cached_at,
+    }
+
+
 def _provider_display_name(provider_id: str) -> str:
     """The registry's human name for ``provider_id`` (the id when it has none).
 
@@ -7770,7 +7953,9 @@ class _UnreadableAuthStore:
     def active_local_credential(self, provider: str, endpoint: str) -> Any:
         raise self._unavailable("active_local_credential")
 
-    async def get_oauth_access(self, provider: str) -> Any:
+    async def get_oauth_access(self, provider: str, *, read_only: bool = False) -> Any:
+        # ``read_only`` is accepted only to match ``ControllerAuthStore`` (the
+        # authoring catalogue passes it); this stand-in raises either way.
         raise self._unavailable("get_oauth_access")
 
     async def list_oauth_accesses(self, provider: str) -> list[Any]:
@@ -7779,7 +7964,8 @@ class _UnreadableAuthStore:
     def list_oauth_identities(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_identities")
 
-    async def get_api_key(self, provider: str) -> str | None:
+    async def get_api_key(self, provider: str, *, read_only: bool = False) -> str | None:
+        # Intentionally ignored, as in ``get_oauth_access`` above.
         raise self._unavailable("get_api_key")
 
 
@@ -7967,16 +8153,60 @@ def _list_models() -> list[dict[str, Any]]:
 #: a bad POST re-renders this page with the field refocused and cleared, and
 #: without a live region a screen-reader user was told nothing about the
 #: failed attempt (measured: `role` null, parent `aria-live` null).
-_LOGIN_ERROR = '<p class="error" role="alert">Wrong password.</p>'
+def _render_login_html(*, error: bool = False) -> str:
+    """Resolve at the request boundary, not import time or browser preferences.
+
+    The gate precedes the SPA/bootstrap and must work without JavaScript.
+    Escape catalogue output even in text nodes: translator-supplied markup must
+    never execute on the authentication surface. One-pass substitution prevents
+    translated text resembling a token from being substituted twice.
+    """
+    locale = resolve_language()
+    messages: dict[str, Msg] = {
+        "TITLE": relay_login.page_title(),
+        "PASSWORD": relay_login.password_label(),
+        "SUBMIT": relay_login.submit_label(),
+        "ERROR": relay_login.error_password(),
+    }
+    # Language-of-page describes the copy actually rendered, not preference.
+    # A shipped locale may lack this newly extracted namespace; select its
+    # English fallback once so assistive pronunciation and direction agree
+    # with every message. Never probe any locale the backend did not resolve.
+    try:
+        source = catalogues.load_catalogue(locale, "relay.login")
+        # A valid map can still be empty/partial. Include the refusal even on
+        # GET so a failed attempt cannot switch languages or silently mix
+        # English per-key fallback under non-English page metadata.
+        if not {message.code for message in messages.values()}.issubset(source):
+            locale = "en"
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        locale = "en"
+
+    def text(message: Msg) -> str:
+        return html.escape(render(message.code, message.params, locale=locale))
+
+    values = {
+        "LANG": html.escape(locale, quote=True),
+        "DIR": "rtl" if locale == "ur" else "ltr",
+        "MARK_DATA_URI": html.escape(_mark_data_uri(), quote=True),
+        "TITLE": text(messages["TITLE"]),
+        "PASSWORD": text(messages["PASSWORD"]),
+        "SUBMIT": text(messages["SUBMIT"]),
+        "ERROR": (
+            '<p class="error" role="alert">' + text(messages["ERROR"]) + "</p>" if error else ""
+        ),
+    }
+    return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
+
 
 _LOGIN_HTML = """<!doctype html>
-<html lang="en">
+<html lang="__LANG__" dir="__DIR__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110c">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>local operator — sign in</title>
+<title>__TITLE__</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login
      page is server-rendered so the auth gate has zero client-side surface,
@@ -8081,13 +8311,13 @@ _LOGIN_HTML = """<!doctype html>
     <img class="mark" src="__MARK_DATA_URI__" width="72" height="72" alt="">
     <h1>local operator</h1>
   </div>
-  <!--ERROR-->
+  __ERROR__
   <div class="field">
-    <label for="password">password</label>
+    <label for="password">__PASSWORD__</label>
     <input id="password" type="password" name="password"
            autocomplete="current-password" autofocus required>
   </div>
-  <button type="submit">sign in</button>
+  <button type="submit">__SUBMIT__</button>
 </form>
 <script>
   /* U2: clear private authenticated state (uncertain command envelopes and

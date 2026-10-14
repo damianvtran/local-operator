@@ -36,6 +36,90 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     return root, emitted
 
 
+def test_ts_key_map_reuses_icu_argument_types(i18n_generate) -> None:
+    output = i18n_generate._render_ts_key_map(
+        {
+            "wire.demo": {
+                "wire.demo.plain": "Plain",
+                "wire.demo.string": "Hello {name}",
+                "wire.demo.count": "{count, plural, one {# file} other {# files}}",
+                "wire.demo.number": "{amount, number}",
+                "wire.demo.date": "{when, date, short}",
+                "wire.demo.time": "{when, time, short}",
+                "wire.demo.select": "{mode, select, one {First} other {Other}}",
+            }
+        }
+    )
+    assert '"wire.demo.plain": undefined;' in output
+    assert '"name": string' in output
+    assert '"count": number' in output
+    assert '"amount": number' in output
+    assert '"when": Date | number' in output
+    assert '"mode": string' in output
+    assert "<K extends WithParams>(key: K, params: MessageParams[K]): string;" in output
+    assert "(key: WithoutParams): string;" in output
+    assert "bundledEnglish" not in output
+
+
+def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
+    generated, i18n_generate
+) -> None:
+    """The bundle is driven by the EXPLICIT owned list, not by whatever `relay.*`
+    files a fixture tree happens to hold.
+
+    ``relay.login`` is SSR-only (the daemon paints it before the SPA exists) and
+    ``wire.*`` is served, so neither may land in the client bundle. A fixture
+    that carries only those must emit an empty ``BUNDLED_OWNED`` — proving the
+    emission is namespace-list driven, not a glob over ``relay.*``.
+    """
+    root, emitted = generated
+    for namespace in ["relay.login", "wire.exec", "relay.demo"]:
+        (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
+    planned = i18n_generate._planned_files(emitted)
+    bundle = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"]
+    assert "export const BUNDLED_OWNED" in bundle
+    assert "relay.login" not in bundle and "wire.exec" not in bundle and "relay.demo" not in bundle
+    # The owned child namespace reaches it only through the explicit list.
+    (root / "en" / "relay.shell.json").write_text(
+        json.dumps({"relay.shell.list.empty": "no sessions running"})
+    )
+    with_shell = i18n_generate._planned_files(emitted)
+    shell_bundle = with_shell[
+        i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"
+    ]
+    assert '"relay.shell"' in shell_bundle and "no sessions running" in shell_bundle
+    assert "relay.login" not in shell_bundle and "wire." not in shell_bundle
+
+
+def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
+    """Drift/ownership pin against the COMMITTED tree (not a fixture).
+
+    The bundle that ships must be the explicit owned namespace, whole, and
+    nothing else — the client-side half of "no implicit wire prose bundled".
+    """
+    bundle = (REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts").read_text(
+        encoding="utf-8"
+    )
+    en = json.loads((REPO / "local_operator/i18n/catalogues/en/relay.shell.json").read_text())
+    namespace = "relay.shell"
+    assert '"relay.shell": {' in bundle
+    for key, message in en.items():
+        assert key.startswith(f"{namespace}.")
+        assert json.dumps(message) in bundle, key
+    assert "wire." not in bundle and "relay.login" not in bundle
+
+
+def test_ts_plan_only_owns_wire_and_relay_types(generated, i18n_generate) -> None:
+    root, emitted = generated
+    for namespace in ["wire.demo", "relay.demo", "tui.demo"]:
+        (root / "en" / f"{namespace}.json").write_text(json.dumps({f"{namespace}.label": "Label"}))
+    planned = i18n_generate._planned_files(emitted)
+    output = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/keys.gen.ts"]
+    assert "wire.demo.label" in output and "relay.demo.label" in output
+    assert "tui.demo.label" not in output
+    assert planned == i18n_generate._planned_files(emitted)
+
+
 def test_per_key_functions_are_emitted_with_typed_kwargs(generated, i18n_generate) -> None:
     root, emitted = generated
     (root / "en" / "demo.words.json").write_text(

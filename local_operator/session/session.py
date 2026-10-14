@@ -43,6 +43,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import string
 import tempfile
@@ -76,6 +77,7 @@ from local_operator.compaction.marker import (
     build_compaction_marker,
     render_compaction_marker,
     replayed_user_message,
+    with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate, ask_approval
@@ -241,6 +243,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session.attachment_hints import with_attachment_hints
 from local_operator.session.channel_spend import (
     CHANNEL_SPEND_CUSTOM_TYPE,
     CHANNEL_SPEND_VERSION,
@@ -301,6 +304,7 @@ from local_operator.session.spend import (
 )
 from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
+from local_operator.session.tool_readiness import ToolReadiness, ToolReadinessStatus
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -2970,6 +2974,18 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # BUSY-TURN CHECKPOINT LATCH (ready-successor handoff). A coordinator asks
+        # a BUSY runtime to move; ordinary retirement only ever fires on idle, so
+        # this is the one path that carries a mid-turn session across a swap. An
+        # empty phase means no request; the record rides the next turn-pair
+        # commit, and nothing here cancels the in-flight worker.
+        self._checkpoint_pending: bool = False
+        self._checkpoint_phase: str = ""
+        self._checkpoint_turn_id: str = ""
+        self._checkpoint_boot_build: str = ""
+        self._checkpoint_target_build: str = ""
+        self._checkpoint_completed_effects: list[dict[str, Any]] = []
+        self._checkpoint_inbox_ids: list[str] = []
         # THE JOURNAL IS THE FALLBACK EVIDENCE SOURCE, consulted only when the
         # attention import repaired nothing. Both describe the same kind of
         # event — a run whose owner went away mid-turn — so they must feed ONE
@@ -3987,6 +4003,17 @@ class Session:
         # latch both compare against that source, so their annotations must match
         # its arity or a comparison silently degrades.
         self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
+        #: The blocked group's IDENTITY latch: (phase, text, status) per blocked item,
+        #: WITHOUT the reason. Deliberately NOT reset per turn (see
+        #: ``_run_turn_pipeline``): a parked set earns exactly ONE reconciliation per
+        #: identity change, across turns, so an unchanged parked set is not re-asserted
+        #: on every wake or quiet end. An empty identity is a change too: it is recorded
+        #: on the silent returns, so an identical re-park is a new identity that earns
+        #: its pass. A reason-only rewrite is bookkeeping, not a new ask — it refreshes
+        #: the rendered assertion's expiry (the full fingerprint rides ``details``) but
+        #: never re-fires one. In-memory on purpose: a process restart re-asks once per
+        #: current set, which is the accepted limit.
+        self._blocked_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
         # The todo fingerprint that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
@@ -4630,6 +4657,30 @@ class Session:
         if shed:
             self._announce_frames_shed_once(shed)
         return rendered
+
+    def _render_for_request(self, messages: list[AgentMessage]) -> list[Message]:
+        """The request render: ``_render_history`` plus stored-attachment hints.
+
+        The composition every wire path shares — the turn loop goes through
+        THIS method (``convert_to_llm``), and ``_read_only_prompt`` (asides,
+        clearance, the compaction advisor) spells the same two calls inline,
+        through the same module symbols, because the pinned harness stub at
+        that seam mirrors those symbols only and routing it through this
+        method broke the aside-equals-turn equality test. The wiring suite
+        pins the two spellings byte-equal in production, which is what lets
+        the aside read the turn's provider cache. Deliberately NOT folded
+        into ``_render_history`` itself: that function also feeds the
+        compaction renders and the context counters, and a note that entered
+        the kept window a compaction commit seats would be persisted into the
+        transcript and paint as the user's own words
+        (``session/attachment_hints.py`` carries the whole argument).
+        """
+        # The boundary IS the session's installed confinement root
+        # (``SessionSpec.world_root`` seats it there); an unset session renders
+        # exactly as before this argument existed.
+        return with_attachment_hints(
+            self._render_history(messages), world_root=self._confinement_root
+        )
 
     def _wire_bytes_budget(self) -> int:
         """The resolved hard byte ceiling, or 0 when there is none.
@@ -5913,7 +5964,20 @@ class Session:
         # message, which is precisely where the cached prefix ends. Applying
         # the same deterministic function to the same messages is what keeps
         # the two identical; the turn's own seam is ``harness/loop.py``.
-        return blocks, bound_replay_payloads(self._render_history([*history, *turns]))
+        # Same composition as the turn's request (``_render_for_request``),
+        # hints included: the aside reads the turn's provider cache only while
+        # the two renders agree at every position ahead of the divergence.
+        # The composition is spelled INLINE rather than calling
+        # ``self._render_for_request`` so it reads through the same module
+        # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
+        # session mirrors exactly those, and routing through an instance method
+        # it cannot know about broke the aside-equals-turn equality it pins.
+        return blocks, bound_replay_payloads(
+            with_attachment_hints(
+                self._render_history([*history, *turns]),
+                world_root=self._confinement_root,
+            )
+        )
 
     @property
     def model(self) -> ModelSpec:
@@ -12395,6 +12459,81 @@ class Session:
         """
         return tuple(tool.name for tool in self._tools)
 
+    async def wait_for_tools(
+        self, required: Sequence[str], *, timeout_s: float = 30.0
+    ) -> ToolReadiness:
+        """Wait, bounded, until named tools are reachable; report honestly.
+
+        See :mod:`local_operator.session.tool_readiness` for the WHY and the
+        full contract. The short form: the SDK's own gate for callers that
+        must not race MCP's asynchronous discovery. Reads the LIVE enforced
+        inventory first (an already-reachable name -- built-in or connected --
+        returns ready WITHOUT waiting on unrelated servers), then, only when
+        something is still missing, awaits the owning session's existing
+        discovery settle ONCE, bounded. A timeout leaves discovery running
+        (``pending`` here, not a cancellation); a settled-but-absent name, a
+        typo, or a manager-less session reads ``missing``; a manager failure
+        never reads ready. Cancellation of the CALLER propagates and does not
+        disturb the discovery it was waiting on.
+        """
+
+        # Names are validated BEFORE any wait: a malformed request must not
+        # consume the bound (or pay a settle) before refusing. Dedup keeps the
+        # caller's order so `required`/`present`/`missing` partition exactly.
+        if isinstance(required, str) or not isinstance(required, Sequence):
+            raise ValueError("wait_for_tools requires a sequence of tool names, not a bare string")
+        names: list[str] = []
+        for name in required:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("every required tool name must be a non-empty string")
+            if name not in names:
+                names.append(name)
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("timeout_s must be a finite number >= 0")
+        required_names = tuple(names)
+
+        inventory = self.tool_inventory
+        present = tuple(name for name in required_names if name in inventory)
+        if len(present) == len(required_names):
+            return ToolReadiness(
+                status="ready",
+                required=required_names,
+                present=present,
+                missing=(),
+                discovery_settled=None,
+            )
+
+        manager = self.mcp_manager
+        settled: bool | None = None
+        if manager is not None:
+            try:
+                settled = await manager.wait_settled(timeout_s)
+            except Exception:  # noqa: BLE001 - a reduced manager must not read ready;
+                # CancelledError (BaseException) still propagates to the caller.
+                settled = None
+
+        inventory = self.tool_inventory
+        present = tuple(name for name in required_names if name in inventory)
+        missing = tuple(name for name in required_names if name not in inventory)
+        if not missing:
+            status: ToolReadinessStatus = "ready"
+        elif manager is None or settled is True:
+            # Nothing is going to add the name: settled discovery without it,
+            # or no discovery machinery at all. A typo or an excluded name
+            # lands here and never widens the inventory.
+            status = "missing"
+        else:
+            # Still in flight (timed out, or the manager failed mid-wait):
+            # honest pending, and a later fresh call may still read ready.
+            status = "pending"
+        return ToolReadiness(
+            status=status,
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=settled,
+        )
+
     @property
     def attached_profile_tools(self) -> tuple[str, ...]:
         """The ``tools:`` allow-list the attached role declares, or ``()``.
@@ -14461,6 +14600,32 @@ class Session:
             return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
+    async def _silent_end_is_a_failure(self) -> bool:
+        """Whether THIS run must not end silently -- the loop's recovery bit.
+
+        The quiet-end rule, INVERTED (see ``_quiet_end_refusal`` above), read
+        at the one place a turn's config is built: a run whose words someone
+        is waiting on -- a person asked or awaits, a notify wake -- is a run
+        where a wordless stop is a LOST ANSWER, and the loop recovers it with
+        one bounded re-ask (``LoopConfig.recover_wordless_stop``). Every
+        internal arrival -- peer, hub_message, job_result, session_state,
+        catch-up, a non-notify wake -- may end quietly, and the bare stop
+        stays its legitimate ending: those runs are exactly where an extra
+        provider call would be noise (the session cells that pin delivery,
+        wake and latch request counts measure this half).
+
+        The env kill switch is checked FIRST and turns the recovery off
+        entirely: it exists so the pre-quiet-turn world (where a plain stop
+        WAS the quiet path) needs no config edit to restore, and re-opening
+        an ending the switch re-legitimized would make one switch change two
+        behaviours.
+        """
+        from local_operator.tools import builtin
+
+        if not builtin.no_reply_enabled():
+            return False
+        return (await self._quiet_end_refusal()) is not None
+
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -15698,11 +15863,14 @@ class Session:
                 note_open(producer_command_id or "")
             except Exception:  # noqa: BLE001 — an instrument never fails a turn
                 logger.debug("could not open the turn journal row", exc_info=True)
-        # Re-arm the todo guardrail: a fresh user message may well be the answer
-        # a stalled list was waiting for, so the latch must not carry over. It is
-        # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
-        # post-compaction continuations of this SAME user turn, and re-arming
-        # there would re-nudge an unchanged list the model already declined.
+        # Re-arm the todo guardrail's PENDING branch: a fresh user message may
+        # well be the answer a stalled list was waiting for, so that latch must
+        # not carry over. It is reset HERE and not in `_run_turn` on purpose —
+        # `_run_turn` also runs post-compaction continuations of this SAME user
+        # turn, and re-arming there would re-nudge an unchanged list the model
+        # already declined. The BLOCKED latch is deliberately NOT reset here: it
+        # is cross-turn by design (see `_blocked_reminder_fingerprint`), so an
+        # unchanged parked set is not re-asserted on every wake or quiet end.
         self._todo_reminder_fingerprint = None
         # The project guardrail's latch and its worked-turn counter share this
         # site for twin reasons: the user's next message may be the update the
@@ -16186,7 +16354,11 @@ class Session:
                 # so a subagent's calls cannot contaminate this session's hint;
                 # see ``LoopConfig.get_context_tokens_hint``.
                 get_context_tokens_hint=lambda: self._context_tokens_hint,
-                convert_to_llm=self._render_history,
+                # The request render, not the bare one: the stored-location
+                # hints for the turn's images ride the wire from HERE and from
+                # ``_read_only_prompt`` — the same function, so the aside
+                # prefix cannot diverge (see ``_render_for_request``).
+                convert_to_llm=self._render_for_request,
                 stream_fn=marking_stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
@@ -16235,6 +16407,14 @@ class Session:
                 post_tool_hooks=self._run_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
+                # Whether a WORDLESS stop in this run is a failure the loop
+                # must recover: the quiet-end rule inverted, so a person-asked
+                # or notify run gets one bounded re-ask while an internal
+                # arrival (delivery, catch-up, a non-notify wake) keeps the
+                # bare-stop ending. Read here -- the one place a turn's config
+                # is built -- for the same reason the contract is: every
+                # consumer of this session gets the one answer.
+                recover_wordless_stop=await self._silent_end_is_a_failure(),
                 # This session's output contract (or None). Read here, at the one
                 # place a turn's config is built, so every consumer of this
                 # session — exec foreground, the detached worker, an SDK
@@ -17182,6 +17362,10 @@ class Session:
         # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
+            # This builder is the real per-turn host boundary, including child
+            # sessions. Repeated provider/tool batches share this one context;
+            # the next attention turn gets an empty receipt scope and new id.
+            send_turn_id=uuid.uuid4().hex,
             # The session's confinement root, when it has one: every local
             # tool's enforcement point reads this single answer (see
             # ``local_operator.tools.confinement``).
@@ -19435,34 +19619,58 @@ class Session:
 
         The work set is pending PLUS blocked, and the two are reconciled
         differently on purpose. Pending items may not be left running: they are
-        work the model is asked to resume or honestly resolve. Blocked items are
+        work the model is asked to resume or honestly resolve, and their latch
+        re-arms per turn (reset in ``_run_turn_pipeline``). Blocked items are
         unfinished too — parked on a user decision or an external service — and
         the failure this covers is a session that ended turns for ~14 hours over
         six blocked items while a pending-only guardrail saw an empty work set
-        and let every yield stand. So blocked items are now ACCOUNTED for at the
+        and let every yield stand. So blocked items are ACCOUNTED for at the
         same boundary: the reminder asks whether the condition still holds, whose
-        decision it is, and whether anything is armed to revisit it. The honest
-        stop is preserved — a blocked model may still finish its turn (the
-        paragraph asks it to account, never to invent progress), and, crucially,
-        it is not deferred forever by this hook: one accounting pass is all that
-        is owed (see the latch below). ``done`` and ``dropped`` stay out: they
-        are settled, and re-asserting them would feed the model a claim that is
-        false.
+        decision it is, and whether anything is armed to revisit it.
 
-        Fires only while the list is MOVING. A model that yields twice with a
-        byte-identical list is telling you it cannot proceed — usually it needs
-        a decision only the user can make — and nudging it again would burn the
-        loop's ``max_follow_up_continuations`` budget (its own, and the larger
-        one: 64 against the 8 the steering/aside producers share), end the turn
-        with a continuation-limit notice, and delay the user's answer by up to
-        that many model calls. That latch is also what keeps the blocked
+        The blocked reconciliation fires ONCE PER BLOCKED-IDENTITY CHANGE, on a
+        CROSS-TURN latch (``_blocked_reminder_fingerprint``, deliberately not
+        reset in ``_run_turn_pipeline``). The identity is
+        ``(phase, text, status)`` per blocked item, WITHOUT the reason: a
+        reason-only rewrite is the model re-checking a parked item — its own
+        bookkeeping, not a new ask — so it does not re-fire a reconciliation,
+        though it still expires the stale rendered assertion (the full
+        fingerprint, reason included, rides the reminder's ``details``; see
+        :meth:`_live_todo_reminders`). What this replaces is the measured
+        over-fire: a per-turn re-arm meant an operator session whose open work
+        was ALL blocked — 0 pending, 5-6 parked items — was re-asserted on every
+        turn (every peer wake, every quiet end); across two such sessions ~97 of
+        ~116 quiet-end attempts were overridden by continued model output.
+
+        The honest stop is preserved — a blocked model may still finish its turn
+        (the paragraph asks it to account, never to invent progress), and,
+        crucially, it is not deferred forever by this hook: one accounting pass
+        per identity change is all that is owed (see the latch above). ``done``
+        and ``dropped`` stay out: they are settled, and re-asserting them would
+        feed the model a claim that is false. The latch IS the mechanism — no
+        prompt text, classifier or new tool: a set new or changed since it was
+        last accounted earns one nudge; an unchanged one earns none.
+
+        Fires only while the list is MOVING — for pending, movement since the
+        per-turn re-arm; for blocked, movement of the identity since it was last
+        accounted. A model that yields twice with a byte-identical list is
+        telling you it cannot proceed — usually it needs a decision only the
+        user can make — and nudging it again would burn the loop's
+        ``max_follow_up_continuations`` budget (its own, and the larger one: 64
+        against the 8 the steering/aside producers share), end the turn with a
+        continuation-limit notice, and delay the user's answer by up to that
+        many model calls. That latch is also what keeps the blocked
         reconciliation bounded: blocking is MOVEMENT (it changes the
         fingerprint), so it earns exactly one nudge, and the byte-identical
         yield after the model accounts is released — one pass, not a loop. The
         larger budget is safe precisely because the latch above is what really
         bounds this producer — a chatty parent can no longer spend the allowance
-        a still-moving list needs. Any progress earns another nudge; a fresh
-        user turn re-arms the latch (see ``_run_turn_pipeline``).
+        a still-moving list needs.
+
+        Both latches are IN-MEMORY, and that is the accepted limit: a process
+        restart re-asks once per current set (the first yield after the restart
+        sees fresh latches), which re-founds the same one-pass bound rather than
+        opening a new over-fire path.
 
         The nudge it returns is a point-in-time assertion and stops being sent
         the moment the list moves — see :meth:`_live_todo_reminders`, which
@@ -19480,20 +19688,43 @@ class Session:
         pending = open_todos(self._session_id)
         blocked = blocked_todos(self._session_id)
         if not pending and not blocked:
+            # Nothing parked means the blocked identity IS the empty tuple, and
+            # THAT is still a fact to record: an identity change with nothing to
+            # ask about must still move the ledger, or a set that resolved to
+            # EMPTY and is re-parked identically later would read as "still
+            # accounted" and stay silent forever (round-1 F1).
+            self._blocked_reminder_fingerprint = ()
             return []
         fingerprint = todo_fingerprint(self._session_id)
-        if fingerprint == self._todo_reminder_fingerprint:
+        # The blocked group's IDENTITY — (phase, text, status), no reason — see the
+        # field comment beside `self._blocked_reminder_fingerprint`.
+        blocked_identity = tuple(x[:3] for x in fingerprint if x[2] == "blocked")
+        blocked_changed = blocked_identity != self._blocked_reminder_fingerprint
+        pending_fires = bool(pending) and fingerprint != self._todo_reminder_fingerprint
+        blocked_fires = bool(blocked_identity) and blocked_changed
+        if not (pending_fires or blocked_fires):
+            # An identity change with nothing to ask about — the set resolved to
+            # EMPTY — is still a change: record it here, or an identical set
+            # re-parked later would read as "still accounted" and stay silent
+            # forever (round-1 F1). A non-empty change fires above; the no-work
+            # return records the fully-empty case.
+            if blocked_changed:
+                self._blocked_reminder_fingerprint = blocked_identity
             return []
         self._todo_reminder_fingerprint = fingerprint
+        self._blocked_reminder_fingerprint = blocked_identity
         return [
             CustomMessage(
                 custom_type=TODO_REMINDER_MESSAGE_TYPE,
                 attribution="system",
-                # The fingerprint rides ALONG with the text: it is what the
-                # render path compares to decide the assertion is still true
-                # (see :meth:`_live_todo_reminders`).
+                # The fingerprint rides ALONG with the text: it is what the render
+                # path compares to decide the assertion is still true (see
+                # :meth:`_live_todo_reminders`). Each group's section renders only
+                # when that group is what fired.
                 details={
-                    "text": _todo_reminder_text(pending, blocked),
+                    "text": _todo_reminder_text(
+                        pending if pending_fires else [], blocked if blocked_fires else []
+                    ),
                     "fingerprint": fingerprint,
                 },
             )
@@ -19647,7 +19878,59 @@ class Session:
         except Exception:  # noqa: BLE001 — durability is best-effort
             logger.warning("could not persist turn progress", exc_info=True)
 
-    async def _persist_new_messages(self, messages: Sequence[AgentMessage]) -> None:
+    def request_checkpoint(
+        self,
+        *,
+        turn_id: str = "",
+        target_build: str = "",
+        boot_build: str = "",
+        phase: str = "resume",
+        completed_effects: "list[dict[str, Any]] | None" = None,
+        inbox_consumed_ids: "list[str] | None" = None,
+    ) -> bool:
+        """Latch a busy-turn checkpoint request; the RECORD lands on next commit.
+
+        A coordinator asking a BUSY runtime to move calls this: it latches the
+        request (never cancels the in-flight worker) and the coordinator's own
+        retirement admission refuses NEW work via ``_spool_for_successor``. The
+        durable record is written by :meth:`_persist_new_messages` inside the
+        next turn-pair commit — the verified fsync boundary — so the checkpoint
+        and the batch it describes are one atomic write.
+
+        ``phase`` is ``resume`` when the coordinator can carry the turn forward
+        and ``deferred`` when it cannot; a deferred request still records, it
+        just refuses to claim continuation. Returns False (and latches nothing)
+        for an unknown phase, or when the runtime is shutting down, so a bad
+        request never becomes a half-written record.
+        """
+        from local_operator.service_handoff import CHECKPOINT_PHASES
+
+        if phase not in CHECKPOINT_PHASES:
+            return False
+        if getattr(self, "_disposed", False) or getattr(self, "_disposing", False):
+            return False
+        self._checkpoint_phase = phase
+        self._checkpoint_turn_id = turn_id
+        self._checkpoint_target_build = target_build
+        self._checkpoint_boot_build = boot_build
+        self._checkpoint_completed_effects = list(completed_effects or [])
+        self._checkpoint_inbox_ids = list(inbox_consumed_ids or [])
+        self._checkpoint_pending = True
+        return True
+
+    def cancel_checkpoint(self) -> None:
+        """Drop a latched request whose window could not open.
+
+        A coordinator that latches a request and then fails to open the admission
+        window must leave nothing half-promised: the next turn-pair commit would
+        otherwise write a checkpoint for a move nobody is performing.
+        """
+        self._checkpoint_pending = False
+        self._checkpoint_phase = ""
+
+    async def _persist_new_messages(
+        self, messages: Sequence[AgentMessage], *, checkpoint_phase: str = ""
+    ) -> None:
         """Append every message not already in the transcript, in order.
 
         Idempotent by message id, which is what lets the mid-turn compaction
@@ -19655,12 +19938,40 @@ class Session:
         without the post-run persistence pass writing them a second time. The
         transcript stores a message under its OWN id, so "already stored" is
         an exact check rather than a heuristic.
+
+        ``checkpoint_phase`` rides the SAME atomic commit as this batch, so the
+        checkpoint and the pair it describes are never split: ``resume`` when a
+        coordinator asked this busy runtime to move (see
+        :meth:`request_checkpoint`) and the turn can be carried forward here;
+        ``deferred`` when work on this turn cannot be checkpointed (a provider
+        stream, a PTY, a native child, a non-idempotent effect). Empty means no
+        request is latched and nothing is written — ordinary turns are unchanged.
         """
+        # A latched checkpoint rides the NEXT commit that has no explicit phase:
+        # the coordinator asked for "checkpoint_at=committed-pair", so any pair
+        # boundary serves — the mid-turn gate as much as the settle tail. The
+        # record names the batch that has just become durable.
+        if not checkpoint_phase and self._checkpoint_pending:
+            checkpoint_phase = self._checkpoint_phase
         fresh = [
             message
             for message in messages
             if _is_persistable_message(message) and not self._transcript.has_entry(message.id)
         ]
+        checkpoint = None
+        if checkpoint_phase:
+            from local_operator.service_handoff import checkpoint_record
+
+            checkpoint = checkpoint_record(
+                session_id=self._session_id,
+                turn_id=self._checkpoint_turn_id,
+                committed_message_ids=[message.id for message in fresh],
+                boot_build=self._checkpoint_boot_build,
+                target_build=self._checkpoint_target_build,
+                completed_effects=list(self._checkpoint_completed_effects),
+                inbox_consumed_ids=list(self._checkpoint_inbox_ids),
+                phase=checkpoint_phase,
+            )
         # ARM THE RUN'S "PRODUCED SOMETHING" MARK (v3, 2026-09-30) on what is
         # about to become durable. The disposal's post-completion arm settles a
         # run neutrally only while this mark is unarmed, so it must record
@@ -19687,7 +19998,11 @@ class Session:
         # This list is a paired prefix at mid-turn gates and a closed run at
         # settlement. One durable commit preserves the same admission/fork
         # boundary while avoiding an fsync for every already-paired result.
-        await self._transcript.append_messages(fresh)
+        # A latched checkpoint rides THIS commit, so the record and its batch
+        # are never split (see `_persist_new_messages`).
+        await self._transcript.append_messages(fresh, checkpoint=checkpoint)
+        if checkpoint is not None:
+            self._checkpoint_pending = False
 
     async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
         """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
@@ -20074,6 +20389,41 @@ class Session:
                 "wire recovery band check failed; allowing the continuation", exc_info=True
             )
             return True
+
+    def _capture_elision_budget(self, compaction_api: Any, plan: _CompactionPlan) -> int | None:
+        """The byte ceiling capture elision targets at a pass, or ``None``.
+
+        The target is the SAME band the auto-continue gate measures against --
+        ``WIRE_RECOVERY_BAND`` x the resolved wire trigger -- because that is
+        the definition of "created real headroom" this package already uses: a
+        pass that lands there schedules its continuation, while one that
+        merely shaved a capture and is still over the trigger would re-fire
+        next turn (the dead-loop the band exists to prevent, restated in the
+        trigger's own units).
+
+        ``None`` when the byte trigger is disabled or the resolvers are
+        absent: a session that never opted into byte pressure keeps exactly
+        its token-only behaviour, and duck-typed test doubles that predate the
+        knob do no elision work at all. A ruler failure is ``None`` too -- the
+        band check's posture: it may never fail a pass.
+        """
+        resolve: Any = getattr(compaction_api, "resolve_wire_bytes_trigger", None)
+        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
+        if not callable(resolve) or band is None:
+            return None
+        try:
+            trigger = resolve(plan.settings)
+        except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
+            logger.debug("wire trigger resolution failed; capture elision skipped", exc_info=True)
+            return None
+        # isinstance, not int(): a duck-typed resolver can hand back anything,
+        # and the narrowing guard keeps a bad ruler value a clean ``None``
+        # while giving a type checker the same certainty the runtime check
+        # gives (an int() call on an opaque value is exactly the kind of
+        # silent coercion this package avoids).
+        if not isinstance(trigger, int) or trigger <= 0:
+            return None
+        return int(float(band) * trigger)
 
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
@@ -20889,6 +21239,44 @@ class Session:
                 preserved_user_turns = list(capped.turns)
                 preserved_turns_dropped = capped.genuine_dropped
                 preserved_turns_shed = capped.injections_dropped
+            # Capture elision, LIVE half: reclaim SUPERSEDED captures from the
+            # kept window until the recorded recovery band is met, and record
+            # the elided blocks' stable addresses on this pass's payload so
+            # replay re-elides EXACTLY them (``build_llm_history`` consumes
+            # the identities; both sides then send the same projection).
+            # Only captures carrying harness provenance are eligible: user
+            # uploads, unknown images and every stream's LATEST frame can
+            # never be elided, and the rung runs ONLY here, at a real pass --
+            # no per-turn churn -- and the source rows stay untouched because
+            # this is a projection, not an edit. The band is measured on the
+            # kept rows; the gate's own fresh render remains the authority on
+            # the whole request.
+            elided_captures: tuple[Any, ...] = ()
+            elision_budget = self._capture_elision_budget(compaction_api, plan)
+            if elision_budget is not None:
+                from local_operator.compaction.pruning import (
+                    capture_elision_entry,
+                    reclaim_captures_to_wire_budget,
+                )
+
+                elision_rows = [message for message in kept if isinstance(message, Message)]
+                if elision_rows:
+                    projected_rows, elided_captures = reclaim_captures_to_wire_budget(
+                        elision_rows, budget=elision_budget
+                    )
+                    if elided_captures:
+                        projected_iter = iter(projected_rows)
+                        kept = [
+                            next(projected_iter) if isinstance(message, Message) else message
+                            for message in kept
+                        ]
+                        preserve_data = with_capture_elision_frontier(
+                            preserve_data,
+                            tuple(
+                                capture_elision_entry(elision_rows, capture)
+                                for capture in elided_captures
+                            ),
+                        )
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,
@@ -22981,7 +23369,12 @@ class Session:
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
             return schedules
 
-    async def _aida_reconcile_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+    async def _aida_reconcile_rows(
+        self,
+        schedules: list[WakeSchedule],
+        *,
+        cadence_fired: WakeSchedule | None = None,
+    ) -> list[WakeSchedule]:
         """The engine's reconcile over one schedule list, notes journaled.
 
         Called from the persist (so a fire's automatic re-arm and every wake
@@ -23003,6 +23396,7 @@ class Session:
                 session_id=self._session_id,
                 class_reactive=self._class_reactive(),
                 attended=self._aida_greeting_may_land(),
+                cadence_fired=cadence_fired,
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -23012,6 +23406,10 @@ class Session:
             self._aida_pending_trigger_settle = result.settle
             return result.schedules
         except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            if cadence_fired is not None:
+                # Do not commit retirement without its successor: an accepted
+                # interval occurrence must remain retryable on engine failure.
+                raise
             logger.warning("aida: reconcile failed; leaving the list as given", exc_info=True)
             return schedules
 
@@ -23254,18 +23652,20 @@ class Session:
         spool, so a second retire cannot overwrite the pre-drain hook with the
         spool itself.
         """
-        # ``getattr`` like ``_wake_rearms`` below: the cell harnesses bind these
-        # methods one at a time, so a host can reach here without the hook the
-        # real session owns in ``__init__`` — and ``None`` is the honest thing
-        # to save for it.
+        # ``getattr`` like the send-resume hooks below: the cell harnesses bind
+        # these methods one at a time, so a host can reach here without the hook
+        # the real session owns in ``__init__`` — and ``None`` is the honest
+        # thing to save for it.
         previous = getattr(self, "_wake_deliver_hook", None)
         if previous != self._spool_wake_to_inbox:
             self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
-        #: One-shot schedules this drain swallowed, written to the index by
-        #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
-        #: ``__init__`` because a session that never drains never has any, and
-        #: the hook that fills it is installed on this same line.
-        self._wake_rearms: list[WakeSchedule] = []
+        # NO per-session re-arm queue any more. The one-shot a retiring fire
+        # owes the successor is RESERVED in the scheduler that owns the handle
+        # (``WakeScheduler.hold_pending``), so a create in this still-serving
+        # runtime cannot allocate the same id and be silently discarded when the
+        # queue was written (the replacement loss this change fixes). The
+        # reservation is what keeps the id occupied; there is no second
+        # authoritative list beside the scheduler's own owned view.
         self._wake_deliver_hook = self._spool_wake_to_inbox
 
     def resume_wakes_from_inbox(self) -> bool:
@@ -23391,15 +23791,22 @@ class Session:
         they know. ``fired_count`` is left alone — the delivery the successor
         makes IS this occurrence, and the count moves when it lands.
 
-        False when there is nowhere to queue it, so the caller spools the text
+        The reservation is made by the SCHEDULER (:meth:`WakeScheduler.hold_
+        pending`), which owns the handle: a held id stays in the scheduler's
+        owned view (``schedules``) so every creator's allocation/cap/cancel sees
+        it occupied, while staying out of the runnable rows the timer arms over.
+        That is the whole fix — there is no per-session queue to keep in step.
+
+        False when there is nowhere to reserve it, so the caller spools the text
         instead: the one outcome this path must not produce is an occurrence
         that exists neither as a schedule nor as a spooled reminder.
         """
-        queued = getattr(self, "_wake_rearms", None)
-        if queued is None:
+        scheduler = getattr(self, "_wake", None)
+        hold = getattr(scheduler, "hold_pending", None)
+        if not callable(hold):
             return False
         try:
-            queued.append(
+            held = hold(
                 due.schedule.model_copy(
                     update={
                         "next_due_at": int(time.time() * 1000),
@@ -23407,12 +23814,15 @@ class Session:
                         "until_at": None,
                         "limit": None,
                     }
-                )
+                ),
+                reason="drain",
             )
         except Exception:  # noqa: BLE001 — the caller falls back to the spool
             logger.warning(
                 "wake %s could not be re-armed for the successor", due.schedule.id, exc_info=True
             )
+            return False
+        if not held:
             return False
         logger.info(
             "session runtime: wake %s re-armed for the successor (its fire retired the schedule)",
@@ -23443,22 +23853,31 @@ class Session:
         Never raises: a runtime that has already stopped admitting work must not
         be held by a failed handover, and the failure is loud because it means a
         wake the user is waiting on is now only in the log.
+
+        The atomic strict write is the SCHEDULER's (:meth:`WakeScheduler.handover_
+        pending`): it holds the existing write lock, persists the complete owned
+        view through this session's writer, and releases the holds ONLY once that
+        write landed — a failed append retains ownership and reports zero so a
+        retry is possible and a create in the meantime still sees the ids taken.
+        This method adds the session-level best-effort exit logging around it.
         """
-        pending = list(getattr(self, "_wake_rearms", []) or [])
-        if not pending:
+        scheduler = getattr(self, "_wake", None)
+        hand_over = getattr(scheduler, "handover_pending", None)
+        if not callable(hand_over):
             return 0
-        self._wake_rearms = []
-        superseded = {schedule.id for schedule in pending}
-        live = [schedule for schedule in self._wake.schedules if schedule.id not in superseded]
+        # ``getattr`` erases the method's type, so the ``cast`` restores the one
+        # thing the call site needs to type-check: that the probed capability is
+        # awaitable. It changes nothing at runtime — the same probe, the same
+        # best-effort ``except`` below (this path must never hold the exit).
+        hand_over = cast("Callable[[], Awaitable[int]]", hand_over)
         try:
-            await self._persist_wake_schedules([*live, *pending])
+            handed = int(await hand_over())
         except Exception:  # noqa: BLE001 — the exit must not wait on a handover
-            logger.warning(
-                "could not hand %d draining wake(s) to a successor", len(pending), exc_info=True
-            )
+            logger.warning("could not hand draining wake(s) to a successor", exc_info=True)
             return 0
-        logger.info("session runtime: handed %d draining wake(s) to the successor", len(pending))
-        return len(pending)
+        if handed:
+            logger.info("session runtime: handed %d draining wake(s) to the successor", handed)
+        return handed
 
     def _prepare_missed_wake_catchup(self) -> None:
         """Snapshot the overdue schedules load() just adopted and compose the
@@ -23506,6 +23925,13 @@ class Session:
         # into the message (review round 2, R7); the leftover load-time fires
         # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        if getattr(self, "_aida_duty", False):
+            # Keep the original row, not the scheduler's grace-shifted copy.
+            # This is spent only when the existing catch-up take accepts it.
+            self._aida_cadence_catchup = next(
+                (m["schedule"] for m in missed if m["schedule"].id == "aida-cadence"),
+                None,
+            )
         # The swallow bookkeeping starts here: every folded row still OWES its
         # load-time fire (the pump re-armed each to now + grace), and the shim
         # must swallow each exactly once — see _deliver_wake_catchup.
@@ -23616,6 +24042,9 @@ class Session:
         # now + grace) stay covered by ``_resume_catchup_phantoms``, consumed
         # one fire at a time — so a same-batch fire arriving after this take
         # is still swallowed, while an occurrence one interval later is not.
+        if getattr(self, "_aida_duty", False) and "aida-cadence" in self._resume_catchup_ids:
+            self._aida_cadence_delivered = getattr(self, "_aida_cadence_catchup", None)
+            self._aida_cadence_catchup = None
         self._resume_catchup_ids = set()
         return message
 
@@ -23733,25 +24162,17 @@ class Session:
         that failed to install costs nothing that was not already lost (the
         live session still fires its own wakes).
 
-        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` queues the
-        one-shot that replaces a schedule its fire retired, and the caller that
-        queues it IS the scheduler's deliver hook — so the persist the pump
-        runs immediately after that delivery is this method, and merging the
-        queue here is what makes the occurrence durable in the same breath as
-        the fire (review round 2, MINOR 1). Queuing it for the exit left it in
-        memory for as long as the drain's wait, which is deliberately unbounded
-        — the work it is waiting for is this change's own premise — so a socket
-        ``stop``, a SIGTERM, a dispose or a crash in that window lost the
-        occurrence with no schedule left to retry it (the pump had already
-        persisted the retire). The exit write stays as the retry: an id already
-        in the queue is dropped from the list being written, so merging is
-        idempotent, and until the queue is cleared nothing that comes through
-        here can drop it.
+        A DRAIN'S RE-ARM RIDES THIS WRITE. ``_spool_wake_to_inbox`` reserves the
+        one-shot that replaces a schedule its fire retired in the scheduler's
+        owned view (``WakeScheduler.hold_pending``), and the caller that reserves
+        it IS the scheduler's deliver hook — so the persist the pump runs
+        immediately after that delivery is this method, and the owned view it is
+        handed already contains the held row: the occurrence is durable in the
+        same breath as the fire (review round 2, MINOR 1). The exit handover
+        (``WakeScheduler.handover_pending``) stays as the retry, and it is now the
+        scheduler that owns both the reservation and its release, so there is no
+        per-session queue to merge here and no id supersession to apply.
         """
-        pending = list(getattr(self, "_wake_rearms", []) or [])
-        if pending:
-            superseded = {schedule.id for schedule in pending}
-            schedules = [*[s for s in schedules if s.id not in superseded], *pending]
         # AIDA'S ENGINE WRITES HERE, and nowhere else while this session is
         # live: the reconcile applies the pause/disable hold, ensures the
         # single cadence row (this is how a fired one-shot is re-armed for
@@ -23767,12 +24188,62 @@ class Session:
         # precedent), and a host that never ran ``Session.__init__`` has no
         # aida flag — absent means "not her session", which is the same answer
         # every other non-Aida caller gets.
+        cadence_fired = None
         if getattr(self, "_aida_duty", False):
-            schedules = await self._aida_reconcile_rows(schedules)
+            from local_operator.aida import proactive
+
+            accepted = getattr(self, "_aida_cadence_delivered", None)
+            previous = self._transcript.latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+            previous_rows = (
+                previous.payload.get("details", {}).get("schedules", []) if previous else []
+            )
+            # Absence/cancel alone never spends a phase. An accepted occurrence
+            # must also match the authoritative retired arm, so an unrelated
+            # same-id replacement cannot spend an old delivery's receipt.
+            if not any(row.id == proactive.CADENCE_ID for row in schedules):
+                previous_cadence = next(
+                    (
+                        WakeSchedule.model_validate(raw)
+                        for raw in previous_rows
+                        if raw.get("id") == proactive.CADENCE_ID
+                    ),
+                    None,
+                )
+                if accepted is not None and previous_cadence is not None:
+                    if (
+                        accepted.request_id == previous_cadence.request_id
+                        and accepted.created_at == previous_cadence.created_at
+                        and (
+                            proactive.cadence_phase(accepted) is not None
+                            or proactive.policy(self._config_dir).interval_hours
+                        )
+                    ):
+                        cadence_fired = accepted
+                if (
+                    cadence_fired is None
+                    and previous_cadence is not None
+                    and proactive.cadence_phase(previous_cadence) is not None
+                ):
+                    # An unaccepted removal (including a stale same-id receipt)
+                    # cannot consume the authoritative replacement's owed phase.
+                    schedules = [*schedules, previous_cadence]
+            schedules = await self._aida_reconcile_rows(schedules, cadence_fired=cadence_fired)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
+        if getattr(self, "_aida_duty", False):
+            from local_operator.aida import proactive
+
+            # The next row's origin+due is now committed atomically. The state
+            # mirror is recoverable if it fails; clear a receipt only after this
+            # append, never on a failed persist or merely on a config/event turn.
+            if cadence_fired is not None:
+                self._aida_cadence_delivered = None
+            try:
+                proactive.remember_cadence(self._config_dir, schedules)
+            except Exception:  # noqa: BLE001 — the transcript remains authority
+                logger.warning("aida: cadence mirror failed after persist", exc_info=True)
         # A persist that follows a delivery stamps `last_fired_at`. The
         # scheduler's pump delivers and THEN persists the advanced list, so
         # the flag set at delivery is still standing here; consuming it (not
@@ -24671,9 +25142,10 @@ class Session:
           ``/model default`` change, an agent profile edit, a ``--hosting``
           flag). The new selection owes the user a fresh start on the model
           they actually chose, not a detour recorded against the old one.
-        - the fallback selector equals the current selection → the user
-          adopted the fallback as their model; a pin would be a no-op that
-          still repainted the band with a spurious fallback marker.
+        - the fallback selector equals the current selection AND its effort
+          is absent/identical → the user adopted the route; a pin would be a
+          no-op that still repainted the band with a spurious fallback marker.
+          A distinct depth or explicit reset is still a real same-model route.
 
         Restores quietly (no event, no notice): construction runs before any
         front end subscribes, so hosts read ``effective_model`` when they build
@@ -24693,10 +25165,14 @@ class Session:
         persisted_primary = str(details.get("primary") or "")
         if persisted_primary and persisted_primary != current:
             return
-        if selector == current:
-            return
         raw_effort = active.get("effort")
         effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        # Match the chain expansion's selector+effort identity, not just the
+        # model: a same-selector reset/different depth must re-pin on resume.
+        # Compare configured intent rather than resolved target defaults; auto
+        # may resolve to the primary's fixed depth but still clears its override.
+        if selector == current and effort in (None, self._model.reasoning_effort):
+            return
         raw_reason = details.get("reason")
         if isinstance(raw_reason, str) and raw_reason:
             # Older rows predate the key; a restored session keeps the reason
@@ -24935,6 +25411,10 @@ class Session:
         )
         if getattr(self, "_aida_duty", False):
             self._stamp_aida_greeting_delivered(due)
+            if due.schedule.id == "aida-cadence":
+                # Aida-only accepted occurrence, consumed by the existing persist
+                # boundary after retirement. No generic fire/dedup behavior changes.
+                self._aida_cadence_delivered = due.schedule
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
@@ -26983,6 +27463,12 @@ class Session:
             # attribution the queue exists to avoid. Before the hooks, so the event
             # stream is still live when it goes out.
             await self._flush_queued_notices()
+            # The same canonical owner teardown serves agent and subagent
+            # sessions. Console cleanup is completed-only; quitting a turn must
+            # never terminate a live prompt, REPL or background PTY.
+            from local_operator.ui_console.backend import cleanup_owner_completed
+
+            await cleanup_owner_completed(self._session_id, self._config_dir)
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

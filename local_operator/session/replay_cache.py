@@ -73,8 +73,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.page_cache import retained_bytes
-from local_operator.session.transcript import TRANSCRIPT_FILENAME
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.session.transcript import (
+    TRANSCRIPT_FILENAME,
+    read_replay_suffix,
+    replay_entries,
+    usages_since_newest_shrink,
+)
+from local_operator.session.usage_seed import seed_reported_usage
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +294,119 @@ def publish_replay(key: ReplayKey, **values: Any) -> ColdReplay:
     return ColdReplay(messages=messages, retained=retained, **values)
 
 
+def build_cold_replay(
+    directory: str | Path,
+    *,
+    key: "ReplayKey | None",
+    want_checkpoint: bool,
+    through_id: str | None,
+    strict_cut: bool,
+) -> ColdReplay:
+    """One cold parse of the journal, published under its file version.
+
+    WORKER-THREAD ONLY (the caller wraps it in ``asyncio.to_thread``), and THE
+    SINGLE PLACE a cold read is built, so the cached and uncached paths cannot
+    drift and no second implementation can grow beside it. Two callers reach it
+    today and both read the identical key/publish terms directly beneath:
+
+    * the attach-time reader on every cold open
+      (``AttachedSession._read_transcript``), which passes its own ``key``, and
+    * the startup preheat's materialization of the newest journals
+      (:func:`~local_operator.session.index_prewarm.warm_replay_cache`), which
+      builds a key from its OWN directory argument and passes no runtime — this
+      read needs no runtime, which is the whole reason a preheat can run at
+      core start without spawning one.
+
+    The key is taken by the CALLER before this read is scheduled, so there is no
+    second stat at the START — re-statting there would only measure a different
+    moment. The read IS re-checked against a fresh key before publishing (the
+    re-stat below), which is the other end of the read and the one that matters;
+    on a moved file the answer is still returned, uncached. ``key is None`` (an
+    absent journal) leaves the read uncached, which is what the empty-history
+    contract needs.
+    """
+    directory = Path(directory)
+    checkpoint_types = (FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()
+    opportunistic = (SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()
+    # NO SECOND STAT: the key was taken by the caller before this read was
+    # scheduled, and taking it again here would only measure a different moment.
+    # What matters is the OTHER end of the read — see the re-check below.
+    suffix = read_replay_suffix(
+        directory,
+        through_id=through_id,
+        # TWO types out of ONE pass, and the distinction between the two is
+        # load-bearing (review R1-2): the checkpoint is REQUIRED (the stop
+        # condition may wait for it), the spend record is OPPORTUNISTIC — a
+        # pre-ledger journal legitimately has none, and requiring it made this
+        # read the whole file on every cold open of exactly the sessions that
+        # have a checkpoint.
+        checkpoint_types=checkpoint_types,
+        opportunistic_types=opportunistic,
+    )
+    cut = through_id
+    if cut is not None and not suffix.through_present and not strict_cut:
+        # Older owners used best-effort cursors; preserve that fallback only for
+        # legacy full replay, never the negotiated window cut. ``through_present``
+        # is false only after the reader reached the file START without meeting
+        # the cursor, so this is the same "id is not in the journal" the
+        # whole-file parse saw.
+        cut = None
+    # The accounting fallback rides the SAME read, from the rows already in hand:
+    # the suffix reader stops only once the newest shrink and its kept window are
+    # buffered, so every post-shrink message row — and therefore every still-valid
+    # usage receipt — is in ``suffix.entries``. One parse, one pass, no extra I/O
+    # on a file that reaches 103 MB.
+    #
+    # NOT seeded when a cursor CUTS this read: the cut discards rows above the
+    # cursor from the replay below, so a receipt from those rows describes a
+    # window this viewer is not showing — and a second implementation of the cut
+    # rule here is exactly the second-boundary defect the shared scan exists to
+    # prevent.
+    seed_usage = (
+        seed_reported_usage(usages_since_newest_shrink(suffix.entries))
+        if want_checkpoint and cut is None
+        else None
+    )
+    # Resolve externalized media against the store that OWNED this journal
+    # (``<config>/attachments``), derived from the session directory rather than
+    # from this reader's environment — the sidebar's saved-preview reader and
+    # this cold replay both know the config dir that owns the transcript, and
+    # only the co-located root is the writer's root by construction (#694).
+    messages = replay_entries(
+        suffix.entries,
+        store_for_transcript_dir(directory),
+        through_id=cut,
+    )
+    values = {
+        "checkpoint": suffix.checkpoint,
+        "checkpoints": suffix.checkpoints,
+        "order": suffix.checkpoint_order,
+        "seed_usage": seed_usage,
+        "bytes_read": suffix.bytes_read,
+    }
+    if key is None:
+        return ColdReplay(messages=tuple(messages), retained=0, **values)
+    # RE-STAT AFTER THE READ, and publish only for the version still on disk. An
+    # append that lands mid-read leaves this answer describing the journal as it
+    # was when the read STARTED, which is the version ``key`` names — but
+    # ``_write_entries``' rollback (``os.truncate`` + a restored mtime for a
+    # bookkeeping batch) can bring that exact ``(ino, size, mtime_ns)`` back with
+    # different bytes, so an entry stored for it could be served over a journal it
+    # does not describe. One stat closes that: if the file moved on, the caller
+    # still gets this answer and nothing is cached under a key that no longer
+    # names it.
+    fresh = replay_key(
+        directory,
+        through_id=through_id,
+        strict_cut=strict_cut,
+        checkpoint_types=checkpoint_types,
+        opportunistic_types=opportunistic,
+    )
+    if fresh != key:
+        return ColdReplay(messages=tuple(messages), retained=0, **values)
+    return publish_replay(key, messages=messages, **values)
+
+
 async def load_cold_replay(
     key: ReplayKey | None,
     build: Callable[[], Coroutine[Any, Any, ColdReplay]],
@@ -320,6 +442,7 @@ __all__ = [
     "REPLAY_CACHE_BYTES",
     "REPLAY_CACHE_ENTRIES",
     "ReplayKey",
+    "build_cold_replay",
     "cached_replay",
     "load_cold_replay",
     "publish_replay",

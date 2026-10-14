@@ -65,6 +65,7 @@ from typing import (
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
     JOURNAL_ORDER_EVENT,
+    PEER_JOURNAL_SOURCE_CAPABILITY,
 )
 
 if TYPE_CHECKING:
@@ -2143,6 +2144,8 @@ class RuntimeServer:
         #: so the boot snapshot cannot drift toward the disk value it is
         #: compared against.
         self._boot_build = build
+        from local_operator.session.model_admission import native_chat_provider_ids
+
         self._record = SessionRecord(
             pid=os.getpid(),
             kind=kind,  # type: ignore[arg-type]
@@ -2249,6 +2252,15 @@ class RuntimeServer:
                     if getattr(handle, "journal_order_supported", False)
                     else []
                 )
+                # THE COMPLETE PEER-SOURCE STRING, same gate shape: advertised
+                # only by a build whose runtime serves the complete vocabulary
+                # (an attaching peer declares it only against this string, and
+                # its absence keeps every peer order request off the attach).
+                + (
+                    [PEER_JOURNAL_SOURCE_CAPABILITY]
+                    if getattr(handle, "peer_journal_source_supported", False)
+                    else []
+                )
                 # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
                 # rather than advertised unconditionally: the reader of this
                 # string (the mobile stream) must never send the fields to an
@@ -2289,6 +2301,7 @@ class RuntimeServer:
             # The heartbeat republishes this same dataclass, so the stamp
             # rides every rewrite without a second code path.
             version=build.version,
+            native_provider_ids=native_chat_provider_ids(),
             source_ref=build.source_ref,
             # The tree THIS runtime imports from. Under the generation layout a
             # process belongs to exactly one generation and the record is where
@@ -2784,7 +2797,13 @@ class RuntimeServer:
             logger.debug("stop announcement did not reach viewers before the teardown")
 
     async def announce_retiring(
-        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+        self,
+        reason: str,
+        *,
+        to: str = "",
+        draining: bool = False,
+        leaving: str = "",
+        checkpoint_id: str = "",
     ) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
@@ -2880,16 +2899,28 @@ class RuntimeServer:
             await asyncio.wrap_future(
                 asyncio.run_coroutine_threadsafe(
                     self._announce_retiring_on_loop(
-                        reason, to=to, draining=draining, leaving=leaving
+                        reason,
+                        to=to,
+                        draining=draining,
+                        leaving=leaving,
+                        checkpoint_id=checkpoint_id,
                     ),
                     loop,
                 )
             )
             return
-        await self._announce_retiring_on_loop(reason, to=to, draining=draining, leaving=leaving)
+        await self._announce_retiring_on_loop(
+            reason, to=to, draining=draining, leaving=leaving, checkpoint_id=checkpoint_id
+        )
 
     async def _announce_retiring_on_loop(
-        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+        self,
+        reason: str,
+        *,
+        to: str = "",
+        draining: bool = False,
+        leaving: str = "",
+        checkpoint_id: str = "",
     ) -> None:
         """The retiring announcement, on the runtime's own loop.
 
@@ -2924,6 +2955,12 @@ class RuntimeServer:
             "from": self._boot_build.label(),
             "to": to,
             "draining": bool(draining),
+            # The checkpoint a successor may resume from, or "" — the
+            # ready-to-resume signal for a coordinator driving a busy-turn
+            # move. Additive on the wire like ``draining``: an older viewer
+            # ignores the unknown key, and "" is exactly "no readable resume
+            # record", which never advertises a continuation that cannot happen.
+            "checkpoint_id": checkpoint_id,
             # The trigger's own words, for the sentence a viewer paints: see the
             # ``leaving`` paragraph above. ``""`` means THIS FRAME NAMED NO
             # TRIGGER — it is what every runtime older than this key sends, this
@@ -3746,7 +3783,7 @@ class RuntimeServer:
             if conn.bind_token != token:
                 return
             payload = update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-            self._relay_frontend_to(conn, payload)
+            self._relay_frontend_to(conn, payload, token)
 
         return on_update
 
@@ -3973,6 +4010,12 @@ class RuntimeServer:
                     # bind's, when it lands) return early instead of relaying a
                     # second copy of every delta into this connection.
                     conn.bind_token += 1
+                    # Retire buffered edges in the SAME synchronous step. The
+                    # replacement atomic join's snapshot covers the old attempt;
+                    # replaying its pending q after replacement sync q is a gap.
+                    # Do this BEFORE joining: a new attempt's q+1 suffix must
+                    # survive the unchanged sync-then-pending flush below.
+                    conn.frontend_pending.clear()
                     # ...and its subscription is released as it lands. Registered
                     # BEFORE the off-loop call, not after: the released callback is
                     # attached to ``bind_task`` either way, and doing it first means
@@ -7048,7 +7091,17 @@ class RuntimeServer:
 
             # 6. RETIRE.
             self._queued_move_stage = "retiring"
-            await self.announce_retiring("moved", to=to_name)
+            # READY-TO-RESUME, published WITH the retirement so the coordinator
+            # learns the move is ready in the same frame the session declares
+            # it is leaving for. The value is the checkpoint id a successor may
+            # resume from, or "" when there is no readable resume record — a
+            # deferred/absent checkpoint must NOT advertise readiness, so the
+            # coordinator does not claim a continuation that cannot happen.
+            ready = ""
+            ready_probe = getattr(self._handle, "ready_to_resume", None)
+            if callable(ready_probe):
+                ready = await self._handle_call_on_session_loop(ready_probe)
+            await self.announce_retiring("moved", to=to_name, checkpoint_id=ready or "")
             self._retirement_committed = True
             # THE RETIREMENT SUPERSEDES THE LATCH: past the announcement the
             # session is LEAVING, so an ``end_retire`` would be wrong — the
@@ -8100,17 +8153,24 @@ class RuntimeServer:
 
     # -- v5 frontend state relay ----------------------------------------------
 
-    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any]) -> None:
+    def _relay_frontend_to(self, conn: _ClientConn, data: dict[str, Any], token: int) -> None:
         loop = self._loop
         if loop is None or self._closed.is_set():
             return
         try:
-            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data)
+            loop.call_soon_threadsafe(self._relay_frontend_to_on_loop, conn, data, token)
         except RuntimeError:
             pass
 
-    def _relay_frontend_to_on_loop(self, conn: _ClientConn, data: dict[str, Any]) -> None:
-        if id(conn.writer) not in self._clients:
+    def _relay_frontend_to_on_loop(
+        self, conn: _ClientConn, data: dict[str, Any], token: int
+    ) -> None:
+        # Producer validation is only an optimization: retirement can occur
+        # after call_soon_threadsafe queued this delivery. Keep its CAPTURED
+        # generation, never stamp the current one onto an abandoned edge.
+        # This complements clearing pending at handoff: neither alone retires
+        # both the already scheduled and the already buffered old updates.
+        if conn.bind_token != token or id(conn.writer) not in self._clients:
             return
         from local_operator.session.frontend_state import filter_update_trajectories
 

@@ -100,6 +100,12 @@ class JudgeStream:
                     await self.judge_gate.wait()
                 if answer:
                     yield StreamTextDelta(delta=answer)
+            else:
+                # An ordinary turn answers in prose: a wordless stop on a
+                # person-asked run is re-asked once (wordless-stop recovery),
+                # which would add a request and a persisted row these cells
+                # count (``turn_calls``, ``_user_messages``).
+                yield StreamTextDelta(delta="done")
             yield StreamEndEvent(stop_reason="stop")
 
         return gen()

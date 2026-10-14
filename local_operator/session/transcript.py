@@ -185,6 +185,19 @@ ENTRY_PRUNE = "prune"
 #: turn the user would recognise — and it is reachable only for a runtime that
 #: ended a turn without persisting a message, since every ordinary turn writes
 #: its own message rows in the same pass.
+#: The busy-turn checkpoint record (see `service_handoff` / the checkpoint
+#: contract). It is BOOKKEEPING, not a conversation row: a checkpoint is a
+#: record ABOUT the session and must not advance the activity clock, or a
+#: mid-turn rollover would re-rank the session as freshly worked. Declared here,
+#: above the bookkeeping set that lists it, so the set can name it.
+CHECKPOINT_CUSTOM_TYPE = "busy_turn_checkpoint_v1"
+
+#: The phase vocabulary for a checkpoint record. ``resume`` means the successor
+#: may carry the turn forward from the committed batch; ``deferred`` means the
+#: work could not be checkpointed and the successor must NOT claim to continue
+#: it (provider streams, PTY, native children, non-idempotent effects).
+CHECKPOINT_PHASES = ("resume", "deferred")
+
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -207,6 +220,10 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
         # ``stt.sidecar`` drift rule: this module does not import the writer).
         "video_job_v1",
+        # A busy-turn handoff checkpoint is a record ABOUT the session (see
+        # ``CHECKPOINT_CUSTOM_TYPE``): its write must not read as operator
+        # activity, or a mid-turn rollover would keep the session ranked fresh.
+        CHECKPOINT_CUSTOM_TYPE,
     }
 )
 
@@ -2005,6 +2022,7 @@ class Transcript:
         *,
         producer_command_id: str | None = None,
         preserve_mtime: bool = False,
+        checkpoint: dict[str, Any] | None = None,
     ) -> list[TranscriptEntry]:
         """Durably commit an ordered message batch with one fsync.
 
@@ -2016,10 +2034,17 @@ class Transcript:
         ``preserve_mtime`` is forwarded to :meth:`_write_entries`, which holds
         the rule; it is opt-in so every existing call site keeps moving the
         activity clock exactly as it did.
+
+        ``checkpoint`` rides the SAME atomic write as the pair it describes (see
+        :data:`CHECKPOINT_CUSTOM_TYPE`): a busy-turn handoff must never expose a
+        checkpoint whose committed batch is not yet durable, or one whose durable
+        batch has no checkpoint — both are the split this argument exists to
+        prevent. It is written AFTER the message rows in the batch, so a reader
+        that scans backward for the newest checkpoint sees it.
         """
         if producer_command_id is not None and len(messages) != 1:
             raise ValueError("producer admission requires exactly one message")
-        if not messages:
+        if not messages and checkpoint is None:
             return []
 
         def build() -> list[TranscriptEntry]:
@@ -2030,6 +2055,15 @@ class Transcript:
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
                 rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            if checkpoint is not None:
+                rows.append(
+                    TranscriptEntry(
+                        uuid.uuid4().hex,
+                        time.time(),
+                        ENTRY_CUSTOM,
+                        {"custom_type": CHECKPOINT_CUSTOM_TYPE, "details": checkpoint},
+                    )
+                )
             return rows
 
         return await self._commit(build, preserve_mtime=preserve_mtime)
@@ -3548,6 +3582,367 @@ def _replay_row(
     return message
 
 
+def read_indexed_raw_rows(
+    directory: Path,
+    index: Any,
+    ids: list[str],
+    *,
+    max_bytes: int = 512 * 1024,
+) -> dict[str, Any] | None:
+    """PROTOTYPE bounded raw read, NOT an arbitrary settled-body projector.
+
+    The same index's offsets and ordinals share a source witness. A complete
+    line/identity check and FD/path recheck refuse rewrites while reading. This
+    does not detect preserved-stat external mutation or discover prune/call/
+    injection dependencies; callers must not label these raw bodies projected.
+    None means source unavailable, never an absence partition.
+    """
+    if (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise ValueError("bounded raw ids required")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("positive byte budget required")
+    source = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
+    path = directory / "transcript.jsonl"
+    rows, missing, remaining, unavailable = [], [], [], []
+    used = 0
+
+    def witness(st: Any) -> tuple[int, int, float]:
+        return st.st_ino, st.st_size, st.st_mtime
+
+    try:
+        with path.open("rb") as handle:
+            if witness(os.fstat(handle.fileno())) != source:
+                return None
+            for id_ in dict.fromkeys(ids):
+                span = index.journal_ranges.get(id_)
+                if span is None:
+                    missing.append(id_)
+                    continue
+                start, end = span
+                if (
+                    type(start) is not int
+                    or type(end) is not int
+                    or not 0 <= start < end <= source[1]
+                ):
+                    return None
+                if end - start > max_bytes:
+                    unavailable.append(id_)
+                    continue
+                if end - start > max_bytes - used:
+                    remaining.append(id_)
+                    continue
+                handle.seek(start)
+                raw = handle.read(end - start)
+                if len(raw) != end - start or not raw.endswith(b"\n"):
+                    return None
+                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                if entry is None or entry.id != id_:
+                    return None
+                rows.append(entry)
+                used += len(raw)
+            if witness(os.fstat(handle.fileno())) != source or witness(path.stat()) != source:
+                return None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return {
+        "rows": rows,
+        "missing": missing,
+        "remaining": remaining,
+        "unavailable": unavailable,
+        "bytes": used,
+    }
+
+
+def project_indexed_source_subset(
+    directory: Path,
+    index: Any,
+    ids: list[str],
+    *,
+    expected_generation: str,
+    through_id: str | None = None,
+    raw_budget: int = 512 * 1024,
+    encoded_budget: int | None = None,
+) -> dict[str, Any] | None:
+    """Bounded settled-body getter, NOT metadata bootstrap or viewport adoption.
+
+    Structural inverses were built once in the SAME index. Complete ordinary
+    call units and effective prune identities are discovered before one FD read;
+    no whole-file replay, selected Transcript, payload cache or new domain.
+    Unsupported/intrinsically huge units are terminal, aggregate debt has a
+    SMALLER-ID retry. None is unavailable, never invented absence. Publication
+    still needs the caller's session/view/body-owed fences. No public flag/DTO.
+    """
+    from bisect import bisect_right
+
+    from local_operator.network.relay import (
+        SESSION_HISTORY_REPLY_BUDGET_BYTES,
+        session_history_reply_bytes,
+    )
+    from local_operator.session.transcript_index import source_projection_fact
+
+    if (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise ValueError("at most 512 raw ids of 1..128 characters required")
+    if not expected_generation or expected_generation != index.journal_generation:
+        return None
+    if type(raw_budget) is not int or not 0 < raw_budget <= 512 * 1024:
+        raise ValueError("raw budget must be 1..512 KiB")
+    budget = SESSION_HISTORY_REPLY_BUDGET_BYTES if encoded_budget is None else encoded_budget
+    if type(budget) is not int or not 0 < budget <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        raise ValueError("invalid encoded frame budget")
+    original = list(dict.fromkeys(ids))
+    requested = set(original)
+    views = index.source_views
+    if not views.origins_complete:
+        return None
+    cut = len(index.source_projection_facts) - 1
+    if through_id is not None:
+        if through_id not in views.by_id or through_id in views.duplicates:
+            return None
+        cut = views.by_id[through_id]["seq"]
+    if bisect_right(views.unknown_identity_seqs, cut):
+        return None
+    compaction_at = bisect_right(views.compaction_seqs, cut) - 1
+    low, preserved, governing_unknown = 0, frozenset(), False
+    if compaction_at >= 0:
+        governing = views.compactions[compaction_at]
+        preserved = views.preserved_sets[governing["seq"]]
+        kept = governing.get("first_kept_entry_id")
+        if kept is None:
+            low = governing["seq"] + 1
+        elif kept not in views.by_id or kept in views.duplicates or views.by_id[kept]["seq"] > cut:
+            governing_unknown = True
+        else:
+            low = views.by_id[kept]["seq"]
+        governing_unknown |= bool(governing.get("flags"))
+    global_unknown = governing_unknown or bool(bisect_right(views.global_unknown_seqs, cut))
+    opaque_causal = bool(bisect_right(views.opaque_causal_seqs, cut))
+
+    def eligible(key: str) -> bool:
+        fact = views.by_id.get(key)
+        return bool(
+            1 <= len(key) <= 128
+            and fact
+            and key not in views.duplicates
+            and key not in preserved
+            and fact["seq"] <= cut
+            and not (set(fact.get("flags", [])) - {"injection"})
+            and fact["source_class"] in {"plain_message", "custom_message"}
+        )
+
+    def discover(root: str) -> tuple[set[str], set[str], int] | None:
+        members, prune_ids, todo, discovered = set(), set(), [root], {root}
+        while todo:
+            key = todo.pop()
+            if key in members:
+                continue
+            if not eligible(key):
+                return None
+            fact = views.by_id[key]
+            members.add(key)
+            calls = fact.get("call_ids", []) + (
+                [fact["result_call_id"]] if fact.get("result_call_id") else []
+            )
+            if calls and opaque_causal:
+                return None
+            for call in calls:
+                owners, results = views.owners.get(call, []), views.results.get(call, [])
+                if len(owners) != 1 or not results or len(results) > 512:
+                    return None
+                peers = set(owners + results)
+                if len(discovered | prune_ids | peers) > 512:
+                    return None
+                todo.extend(peers - discovered)
+                discovered.update(peers)
+            prunes = views.prunes.get(key, [])
+            effective = bisect_right(views.prune_seqs.get(key, []), cut) - 1
+            if effective >= 0:
+                prune = prunes[effective]
+                if (
+                    prune["id"] in views.duplicates
+                    or not 1 <= len(prune["id"]) <= 128
+                    or prune.get("flags")
+                ):
+                    return None
+                prune_ids.add(prune["id"])
+            if len(discovered | prune_ids) > 512:
+                return None
+        keys = members | prune_ids
+        member_seqs = [views.by_id[key]["seq"] for key in members]
+        if member_seqs and min(member_seqs) < low <= max(member_seqs):
+            return None
+        size = sum(index.journal_ranges[key][1] - index.journal_ranges[key][0] for key in keys)
+        return (members, prune_ids, size) if size <= raw_budget else None
+
+    status = {key: "remaining" for key in original}
+    units, covered = [], set()
+    for key in original:
+        if key not in views.by_id:
+            status[key] = "missing"
+        elif global_unknown:
+            status[key] = "unavailable"
+        elif key not in covered:
+            unit = discover(key)
+            if unit is None:
+                status[key] = "unavailable"
+            else:
+                units.append(unit)
+                covered.update(unit[0])
+    # A giant/blocked earlier request cannot monopolize later small units.
+    units.sort(key=lambda unit: (unit[2], min(unit[0])))
+    selected, admitted, used = set(), [], 0
+    for members, prunes, size in units:
+        keys = members | prunes
+        new = keys - selected
+        extra = sum(index.journal_ranges[key][1] - index.journal_ranges[key][0] for key in new)
+        if len(requested | selected | keys) > 512 or used + extra > raw_budget:
+            continue
+        admitted.append((members, prunes))
+        selected.update(keys)
+        used += extra
+    raw = read_indexed_raw_rows(
+        directory,
+        index,
+        sorted(selected, key=lambda key: index.journal_rows[key]),
+        max_bytes=raw_budget,
+    )
+    if raw is None or raw["missing"] or raw["remaining"] or raw["unavailable"]:
+        return None
+    rows = {row.id: row for row in raw["rows"]}
+    # The source-derived facts must also agree with the freshly read bodies.
+    # Cache validation alone is not body/causal authority at admission.
+    for key, row in rows.items():
+        fresh_fact = source_projection_fact(
+            {"id": key, "type": row.type, "payload": row.payload}, index.journal_rows[key]
+        )
+        if fresh_fact != views.by_id[key]:
+            return None
+    entries, companions, dependency_ids, coordinates = {}, {}, set(), {}
+
+    def envelope(
+        states: dict[str, str],
+        bodies: dict[str, Any],
+        deps: dict[str, Any],
+        dep_ids: set[str],
+        coords: dict[str, int],
+    ) -> dict[str, Any]:
+        return {
+            "state": "ready",
+            "journal_generation": index.journal_generation,
+            "entries": sorted(bodies.values(), key=lambda body: body["journal_seq"]),
+            "dependency_entries": sorted(deps.values(), key=lambda body: body["journal_seq"]),
+            "source_dependency_ids": sorted(dep_ids),
+            "journal_ordinals": coords,
+            **{
+                kind: [key for key in original if states[key] == kind]
+                for kind in ("present", "missing", "unavailable", "remaining")
+            },
+        }
+
+    for members, prunes in admitted:
+        roots = members & requested
+        notices = collect_prunes([rows[key] for key in prunes])
+        bodies, safe = {}, True
+        for key in sorted(members, key=lambda item: index.journal_rows[item]):
+            row = rows[key]
+            content = row.payload.get("content", [])
+            if not isinstance(content, list) or any(
+                isinstance(block, dict)
+                and ATTACHMENT_KEY in block
+                and block.get("kind") not in ATTACHMENT_KINDS
+                for block in content
+            ):
+                safe = False
+                break
+            message = _replay_row(row, None, notices)
+            if message is None:
+                safe = False
+                break
+            bodies[key] = {
+                "id": key,
+                # The stored row's OWN entry time — the wire row's ``ts``.
+                "ts": row.ts,
+                "journal_seq": index.journal_rows[key],
+                # Keep the writer's discriminator explicit beside the typed
+                # body; a custom dump alone can parse as a default-user Message.
+                "kind": (
+                    CUSTOM_KIND_CUSTOM
+                    if isinstance(message, CustomMessage)
+                    else CUSTOM_KIND_MESSAGE
+                ),
+                "message": message.model_dump(mode="json"),
+            }
+        if not safe:
+            status.update({key: "unavailable" for key in roots})
+            continue
+        unit_deps = (members - requested) | prunes
+        unit_coords = {key: index.journal_rows[key] for key in members}
+        isolated = {
+            "state": "ready",
+            "journal_generation": index.journal_generation,
+            "entries": [bodies[key] for key in sorted(roots)],
+            "dependency_entries": [bodies[key] for key in sorted(members - roots)],
+            "source_dependency_ids": sorted((members | prunes) - roots),
+            "journal_ordinals": unit_coords,
+            "present": sorted(roots),
+            "missing": [],
+            "unavailable": [],
+            "remaining": [],
+        }
+        # Same original partition is retained: metadata alone cannot be truncated.
+        if session_history_reply_bytes(0, isolated) > budget:
+            status.update({key: "unavailable" for key in roots})
+            continue
+        candidate_status = {**status, **{key: "present" for key in roots}}
+        candidate_entries = {**entries, **{key: bodies[key] for key in roots}}
+        candidate_companions = {**companions, **{key: bodies[key] for key in members - requested}}
+        candidate_dependencies = dependency_ids | unit_deps
+        candidate_coordinates = {**coordinates, **unit_coords}
+        candidate = envelope(
+            candidate_status,
+            candidate_entries,
+            candidate_companions,
+            candidate_dependencies,
+            candidate_coordinates,
+        )
+        if session_history_reply_bytes(0, candidate) <= budget:
+            status, entries, companions = candidate_status, candidate_entries, candidate_companions
+            dependency_ids, coordinates = candidate_dependencies, candidate_coordinates
+    retry, retry_keys, retry_bytes = [], set(), 0
+    for members, prunes, size in units:
+        roots = {key for key in members & requested if status[key] == "remaining"}
+        keys = members | prunes
+        if roots and len(retry_keys | keys) <= 512 and retry_bytes + size <= raw_budget:
+            retry.extend(sorted(roots))
+            retry_keys.update(keys)
+            retry_bytes += size
+    result = envelope(status, entries, companions, dependency_ids, coordinates)
+    result.update(
+        retry_ids=list(dict.fromkeys(retry)),
+        retry_smaller_batch=bool(retry) and set(retry) != requested,
+        read_ids=list(rows),
+        read_bytes=raw["bytes"],
+    )
+    try:
+        st = (directory / "transcript.jsonl").stat()
+    except OSError:
+        return None
+    if (st.st_ino, st.st_size, st.st_mtime) != (
+        index.sig.get("inode"),
+        index.sig.get("size"),
+        index.sig.get("mtime"),
+    ):
+        return None
+    return result if session_history_reply_bytes(0, result) <= budget else None
+
+
 def replay_entries(
     entries: Sequence[TranscriptEntry],
     attachments: AttachmentStore | None,
@@ -3617,11 +4012,14 @@ def replay_entries(
         if entries[i].type == ENTRY_COMPACTION:
             compaction_index = i
             break
+    # Bound on ALL paths, not inside a later gate: the replay block below
+    # re-reads the record, and a loop-bound-only binding is both a type
+    # checker complaint and a real foot-gun if the gates ever diverge.
+    compaction = entries[compaction_index] if compaction_index is not None else None
 
     start = 0
     prefix: list[AgentMessage] = []
-    if compaction_index is not None:
-        compaction = entries[compaction_index]
+    if compaction is not None:
         prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
         # re-injected VERBATIM right after the marker, so the user's own
@@ -3686,7 +4084,7 @@ def replay_entries(
         start = context_cut_index(entries)
 
     prunes = collect_prunes(entries)
-    out: list[AgentMessage] = list(prefix)
+    kept: list[AgentMessage] = []
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
             continue
@@ -3696,8 +4094,36 @@ def replay_entries(
         notice = prunes.get(entry.id)
         if notice is not None and isinstance(message, Message):
             _apply_prune(message, notice)
-        out.append(message)
-    return out
+        kept.append(message)
+    if compaction is not None:
+        # Reapply the epoch's capture-elision record to the KEPT window. The
+        # live pass elided superseded captures from the projection it sent
+        # and recorded their stable addresses (producer scope, stream,
+        # revision) on the compaction payload; source rows and attachment
+        # blobs stayed untouched, so replay elides EXACTLY those blocks.
+        # Deliberately NOT a count re-derived here: a later turn can
+        # retro-supersede a capture the pass protected, so re-deriving a
+        # first-N over the resumed segment would drop a block the live
+        # session kept and resurrect one it elided (reviewer round 1, C1).
+        # A record without identities (every pre-elision record) changes
+        # nothing here, and a malformed one degrades to no elision rather
+        # than a guess.
+        from local_operator.compaction.marker import capture_elision_identities
+
+        identities = capture_elision_identities(compaction.payload)
+        if identities:
+            from local_operator.compaction.pruning import apply_capture_elisions
+
+            projected, _elided = apply_capture_elisions(
+                [message for message in kept if isinstance(message, Message)],
+                identities=identities,
+            )
+            projected_iter = iter(projected)
+            kept = [
+                next(projected_iter) if isinstance(message, Message) else message
+                for message in kept
+            ]
+    return list(prefix) + kept
 
 
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:

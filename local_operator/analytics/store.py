@@ -116,6 +116,43 @@ _WAL_RETRY_BACKOFF_S = 0.05
 #: thread.
 _BUSY_TIMEOUT_MS = 5000
 
+#: Worst-case in-process time, in seconds, for ONE write call on this store
+#: (``record_batch`` and its siblings) to settle — either commit or give up
+#: and return its drop — while another connection holds the write lock.
+#: Derived from the constants above rather than measured, so it moves when
+#: they do:
+#:
+#: * the write phase: ``_WRITE_RETRIES`` attempts, each allowed a full
+#:   ``busy_timeout`` inside SQLite, plus the backoffs slept between them
+#:   (multipliers 1..``_WRITE_RETRIES - 1``);
+#: * the open phase that precedes it: the same retry count calling
+#:   ``_connect``, each attempt allowed the same busy wait (plus the WAL
+#:   transition's own backoff loop, whose statement fails fast rather than
+#:   waiting out the busy handler — see ``_set_wal``) and the same backoffs
+#:   between attempts.
+#:
+#: This exists because a TEST barrier once waited only 5 s for such a write:
+#: a probe with the lock held elsewhere watched ``unfinished_tasks`` frozen
+#: at 1 (item already dequeued, writer blocked INSIDE the write) for the
+#: whole 5 s, after which the barrier reported a healthy write as failed —
+#: and the write then completed the moment the lock released. Any barrier
+#: whose patience is shorter than this ceiling manufactures that failure,
+#: so consumers (``recorder.flush_for_test``) derive their default from
+#: here instead of naming a number of their own. It deliberately excludes
+#: statement execution itself and thread scheduling; callers add a small
+#: margin for those rather than widening this.
+_WRITE_RETRY_BACKOFF_TOTAL_S = _WRITE_RETRY_BACKOFF_S * _WRITE_RETRIES * (_WRITE_RETRIES - 1) / 2
+_WAL_RETRY_BACKOFF_TOTAL_S = _WAL_RETRY_BACKOFF_S * _WAL_RETRIES * (_WAL_RETRIES - 1) / 2
+WRITE_SETTLE_CEILING_S = (
+    # Write phase: retried attempts, each waiting out one busy timeout.
+    _WRITE_RETRIES * (_BUSY_TIMEOUT_MS / 1000.0)
+    + _WRITE_RETRY_BACKOFF_TOTAL_S
+    # Open phase: retried connects, each with the same busy wait, the WAL
+    # loop's backoffs, and the backoffs between open attempts.
+    + _WRITE_RETRIES * ((_BUSY_TIMEOUT_MS / 1000.0) + _WAL_RETRY_BACKOFF_TOTAL_S)
+    + _WRITE_RETRY_BACKOFF_TOTAL_S
+)
+
 #: HOW BIG A WAL FILE MAY BE LEFT ON DISK. 16 MiB, and the reasoning is a
 #: measurement rather than a round number.
 #:

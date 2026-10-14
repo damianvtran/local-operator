@@ -68,6 +68,16 @@ def copied_mesh(request: pytest.FixtureRequest) -> Any:
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME))
+    # "Delivered" has two halves written by two parties in sequence: the member
+    # stores the copy, THEN acks, THEN the owner's broker records the ack row. The
+    # removal/wipe paths under test derive their work FROM that owner-side row
+    # (`deliver_removal_endings` returns `copies: 0` with no row), so returning at
+    # the first half raced them with a margin of zero: CI saw `member rm` print no
+    # ending sentence at all ("timed out" / "could NOT be confirmed" both absent).
+    # Reproduced by delaying the owner's `record_ack` 0.5 s: 4 cells failed.
+    assert net_fixtures.wait_for(
+        lambda: (SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) is not None)
+    ), "the owner never recorded the member's ack of the delivered copy"
     return mesh
 
 
@@ -531,7 +541,9 @@ def test_a_re_share_after_a_wipe_delivers_again(copied_mesh: Any) -> None:
     assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
     assert net_fixtures.wait_for(lambda: _ledger_wiped(mesh))
 
-    assert _lop_network("credential", "share", KEY, "--with", mesh.b.identity.name) == 0
+    from tests.unit.network.finite_recovery import restore_finite
+
+    restore_finite(mesh.a.root, KEY, mesh.b.identity.name)
     pulled = _pull(SimpleNamespace(b=mesh.b, borrower=mesh.member))
     assert KEY in pulled.get("changed", []), pulled
     code = sync.credentials_sync_step(mesh.a, mesh.member)
@@ -539,5 +551,15 @@ def test_a_re_share_after_a_wipe_delivers_again(copied_mesh: Any) -> None:
     assert net_fixtures.wait_for(
         lambda: _member_has(mesh.b.root, SECRET_NAME)
     ), "a re-shared copy stayed undelivered"
+    # The member applying the copy and the OWNER's ledger recording its ack are two
+    # writes in sequence (apply, then the ack frame, then the owner's broker). Until
+    # the second lands the row is still the earlier WIPE ending, so reading it right
+    # after the first raced the ack with a margin of zero (CI: "a live copy must not
+    # read wiped" on two main commits). Waiting for the row to leave `wiped` is
+    # discriminating -- it starts wiped -- and the assertion below still pins that
+    # it ends up as a live row.
+    assert net_fixtures.wait_for(
+        lambda: not _ledger_wiped(mesh)
+    ), "the owner's ledger never left the wiped ending after the re-share"
     row = SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) or {}
     assert not row.get("wiped"), "a live copy must not read wiped"

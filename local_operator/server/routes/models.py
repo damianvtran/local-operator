@@ -33,6 +33,7 @@ from local_operator.model.registry import (
     xai_models,
 )
 from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.controller import PICKER_TTL_S, ProviderController
 from local_operator.providers.local import (
     LOCAL_PROVIDER_IDS,
     local_api_key,
@@ -330,13 +331,57 @@ async def list_models(
                 # no synchronous HTTP may block the FastAPI event loop.
                 models.extend(await asyncio.to_thread(local_entries, provider_detail.id))
             elif provider_detail.id == "openai":
-                for model_name, model_info in openai_models.items():
+                # Settings' authoring list must see the same native inventory as
+                # composer/TUI. A bare get_api_key loses OAuth kind and account
+                # scope, sends subscription tokens to the public API, and lets
+                # the API cache impersonate a different account's catalogue.
+                controller = ProviderController(provider_auth_store, config_manager.config_dir)
+                api_key, is_oauth, account_id = await controller.listing_credential(
+                    "openai", read_only=True
+                )
+                rows, status = await asyncio.to_thread(
+                    available_models,
+                    "openai",
+                    api_key=api_key,
+                    is_oauth=is_oauth,
+                    account_id=account_id,
+                    ttl_s=PICKER_TTL_S,
+                )
+                for row in rows:
+                    # Discovery owns native/API cache isolation, stale fallback,
+                    # and subscription pruning. Project its answer without a
+                    # second lookup or invented day-zero capabilities/prices.
+                    fallback = openai_models.get(row.id) or ModelInfo(
+                        id=row.id, name=row.name or row.id, description="Model listed by OpenAI"
+                    )
+                    info = info_from_discovered_model("openai", row.id, row, fallback)
+                    if is_oauth:
+                        # Public API limits are not the subscription's limits.
+                        # The native parser records each quoted context limit
+                        # separately; silence, including an empty/offline static
+                        # fallback, must not resurrect the registry's budget.
+                        native_limits = status not in {"static", "unauthenticated"} and (
+                            row.default_context_window or row.max_context_window
+                        )
+                        info = info.model_copy(
+                            update={
+                                "context_window": (
+                                    (row.context_window or None) if native_limits else None
+                                ),
+                                "default_context_window": (
+                                    row.default_context_window if native_limits else None
+                                ),
+                                "max_context_window": (
+                                    row.max_context_window if native_limits else None
+                                ),
+                            }
+                        )
                     models.append(
                         ModelEntry(
-                            id=model_name,
-                            name=model_info.name,
+                            id=row.id,
+                            name=info.name,
                             provider=provider_detail.id,
-                            info=model_info,
+                            info=info,
                         )
                     )
             elif provider_detail.id == "alibaba":

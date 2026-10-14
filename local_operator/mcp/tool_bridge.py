@@ -17,9 +17,12 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from local_operator.harness.intent import INTENT_FIELD, apply_intent_schema
 from local_operator.harness.types import (
     AgentTool,
+    CapturedFrame,
     Content,
     ImageContent,
     TextContent,
@@ -263,6 +266,98 @@ def _block_image(block: Any) -> tuple[ImageContent | None, str | None]:
     return None, placeholder
 
 
+#: MCP ``_meta`` key under which a producer may attach its own bounded capture
+#: claim (``{"stream_id": ..., "revision_id": ...}``) to an image block. The
+#: claim carries ONLY the producer's own stream/revision strings; the
+#: authority-bearing producer scope is stamped by the harness from the actual
+#: call site (see :func:`capture_producer_scope`), so a block claiming an
+#: identity of its own changes nothing. An old reader can ignore the key and
+#: still receives the image; readers that never see the key get images exactly
+#: as before it existed.
+CAPTURE_CLAIM_META_KEY = "local_operator/capture"
+
+#: Upper bound for the harness-composed producer scope. A composition past it
+#: refuses the stamp outright rather than getting truncated into a colliding
+#: identity: an unstamped image is PROTECTED, the safe direction.
+_CAPTURE_SCOPE_MAX = 256
+
+
+def capture_producer_scope(server_name: str, mcp_tool_name: str, session_id: str) -> str | None:
+    """Compose the harness-stamped producer scope for one MCP server+tool.
+
+    Identity comes from the ORIGIN pair -- the actual configured server and
+    its tool name -- never the collision-suffixed agent-visible label
+    (:func:`create_mcp_tool_name` output can carry a ``_2`` suffix while the
+    origin pair cannot) and never anything a producer supplied. The owning
+    session is part of the scope so a fork or a copied transcript can never
+    let one conversation's producer supersede another's captures.
+
+    Returns ``None`` when a component is missing or the result exceeds the
+    bound: the caller then stamps nothing, which keeps images PROTECTED.
+    """
+    if not session_id or not server_name or not mcp_tool_name:
+        return None
+    scope = f"mcp:{session_id}:{server_name}:{mcp_tool_name}"
+    if len(scope) > _CAPTURE_SCOPE_MAX:
+        return None
+    return scope
+
+
+def _capture_claim_of(block: Any) -> tuple[str, str] | None:
+    """One image block's producer claim, or ``None`` when it cannot be used.
+
+    Both wire shapes are read: dict rows (``_meta``, with ``meta`` as the
+    by-name dump spelling) and SDK models (``.meta``). Anything missing,
+    mistyped or outside the id contract returns ``None`` and the caller
+    stamps nothing -- malformed metadata means PROTECTED, not a guess. The
+    ids are validated by constructing the value object itself so there is
+    exactly ONE definition of the bounds.
+    """
+    if isinstance(block, dict):
+        meta = block.get("_meta", block.get("meta"))
+    else:
+        meta = getattr(block, "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    claim = meta.get(CAPTURE_CLAIM_META_KEY)
+    if not isinstance(claim, dict):
+        return None
+    stream_id = claim.get("stream_id")
+    revision_id = claim.get("revision_id")
+    if not isinstance(stream_id, str) or not isinstance(revision_id, str):
+        return None
+    try:
+        # A probe scope: only the id bounds are under test here; identity is
+        # the harness's to stamp, never the claim's to state.
+        CapturedFrame(stream_id=stream_id, revision_id=revision_id, producer_scope="probe")
+    except ValidationError:
+        return None
+    return stream_id, revision_id
+
+
+def _with_capture_claim(
+    image: ImageContent, block: Any, producer_scope: str | None
+) -> ImageContent:
+    """Stamp harness-scoped capture provenance when the producer claimed one.
+
+    No scope (the caller had no real producer identity) or no valid claim
+    means the image keeps ``captured_frame=None`` -- exactly what compaction
+    reads as PROTECTED, so every failure mode here degrades to retention.
+    """
+    if producer_scope is None:
+        return image
+    claim = _capture_claim_of(block)
+    if claim is None:
+        return image
+    return image.model_copy(
+        update={
+            "captured_frame": CapturedFrame(
+                stream_id=claim[0], revision_id=claim[1], producer_scope=producer_scope
+            )
+        }
+    )
+
+
 def _without_redundant_content_text(server_result: dict[str, Any]) -> dict[str, Any]:
     """Retain protocol metadata while dropping text already held by the spill.
 
@@ -295,6 +390,8 @@ def format_mcp_result(
     tool_call_id: str = "",
     tool_name: str = "",
     context: ToolContext | None = None,
+    *,
+    producer_scope: str | None = None,
 ) -> ToolResult:
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
@@ -307,6 +404,16 @@ def format_mcp_result(
 
     ``result`` is the SDK model on every live call path; the raw-dict branch
     covers servers whose payload never went through SDK validation.
+
+    ``producer_scope`` is the harness-stamped identity of the ACTUAL producer
+    (server+tool origin plus owning session -- see
+    :func:`capture_producer_scope`). When given, an image block carrying a
+    valid bounded capture claim in its ``_meta`` is stamped with
+    :class:`~local_operator.harness.types.CapturedFrame` provenance so
+    compaction may later reclaim SUPERSEDED captures; without it, or without
+    a claim, the image stays unannotated and therefore PROTECTED. The
+    bookkeeping never reaches a provider: encoders build image parts from
+    data/mime explicitly.
     """
     blocks: Sequence[ContentBlock] | Sequence[dict[str, Any]]
     server_result: dict[str, Any] | None
@@ -326,7 +433,7 @@ def format_mcp_result(
         image, placeholder = _block_image(block)
         if placeholder is not None:
             if image is not None:
-                images.append(image)
+                images.append(_with_capture_claim(image, block, producer_scope))
             else:
                 parts.append(placeholder)
             continue

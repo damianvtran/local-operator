@@ -293,6 +293,38 @@ class TextContent(BaseModel):
     text: str = ""
 
 
+class CapturedFrame(BaseModel):
+    """Harness-stamped provenance for one producer-owned capture.
+
+    WHY THIS EXISTS. Compaction pressure must be able to reclaim SUPERSEDED
+    captures without ever risking a user upload, an unknown image, or the
+    newest frame of any stream — but today every image block is
+    indistinguishable, so no selection is possible at all. This value is the
+    minimal discriminator: which producing stream and revision a capture
+    belongs to, and which producer scope may supersede it.
+
+    WHAT IT IS NOT. Not authority, and never trusted as one: these fields are
+    stamped by the HARNESS at the actual producer seam, scoped to the real
+    producer identity — a server's own stream/revision claim rides inside
+    that scope, and a producer-supplied copy of either identity is ignored.
+    A malicious producer can therefore only supersede its OWN earlier
+    captures; it can never label a user, unknown, or other-producer image
+    disposable. Absence is not an error either — absent or malformed
+    metadata means PROTECTED, so a bad claim degrades to retention, not to
+    lost content.
+
+    Shape: bounded opaque IDs only (no vocabulary that could drift), compared
+    by exact string. Frozen: a capture identity is a fact about the past, and
+    in-place mutation is how two readers would disagree about it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stream_id: str = Field(min_length=1, max_length=256)
+    revision_id: str = Field(min_length=1, max_length=256)
+    producer_scope: str = Field(min_length=1, max_length=256)
+
+
 class ImageContent(BaseModel):
     """An image block. ``data`` is base64-encoded bytes of ``mime_type``.
 
@@ -317,6 +349,37 @@ class ImageContent(BaseModel):
     data: str = ""
     mime_type: str = "image/png"
     marker: int | None = Field(default=None, exclude=True)
+    #: Harness-stamped capture provenance (see :class:`CapturedFrame`).
+    #: ``None`` for every image without producer-stamped identity — user
+    #: uploads, unknown images, legacy rows — which is exactly the set
+    #: compaction must treat as PROTECTED.
+    #:
+    #: Serialization contract: while unset, EVERY dump omits the key entirely
+    #: (``_omit_absent_capture``, below), so absent metadata leaves wire,
+    #: transcript and context-hash bytes exactly as they were — not a new
+    #: null field. When present, the value travels on durable rows so replay
+    #: can reproduce the same projection. Provider encoders build their
+    #: image parts from ``data``/``mime_type`` explicitly and therefore
+    #: never emit this bookkeeping object, exactly as they never emit
+    #: ``marker``.
+    captured_frame: CapturedFrame | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_capture(self, handler: Any, info: Any) -> Any:
+        """Omit ``captured_frame`` from every dump while it is unset.
+
+        Mirrors the ``_omit_absent_core_source``/``_omit_disabled_drag``
+        pattern rather than a field-level ``exclude_if`` so the guarantee
+        holds at EVERY dump site (plain dumps included, not only the
+        ``exclude_defaults`` ones), which is what the byte-identical
+        absent-metadata contract needs. Only THIS key's unset is dropped;
+        ``marker`` keeps its own ``exclude=True`` rule.
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("captured_frame") is None:
+            data.pop("captured_frame", None)
+        return data
 
 
 class AudioContent(BaseModel):
@@ -905,13 +968,35 @@ class AgentToolUpdate(BaseModel):
 class WakeSchedulerProtocol(Protocol):
     """The slice of a wake scheduler the ``wake`` tool drives.
 
-    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The
-    tool only ever reads the current list and writes a replacement, so the
+    Implemented by :class:`local_operator.harness.wake.WakeScheduler`. The tool
+    only ever reads the current list and writes a replacement, so the
     arming/timer half of the scheduler stays out of the contract.
     """
 
     @property
-    def schedules(self) -> Sequence[WakeSchedule]: ...
+    def schedules(self) -> Sequence[WakeSchedule]:
+        """The complete OWNED view: runnable rows plus held (pending) ones.
+
+        A held handle is a schedule this runtime still owns — its successor
+        one-shot has not been handed over yet — so its id is taken. Every
+        caller that asks "which ids exist / are free?" (the tool's
+        create/cancel/edit, the cap count, the desktop owner helpers, the video
+        check-wake) must read THIS, never a runnable-only list, or a create can
+        allocate a handle a draining fire already reserved and be discarded when
+        the handover lands. What the timer may actually run is the scheduler's
+        own affair (:attr:`armed_schedules` on the concrete class); a reader that
+        wants "what can fire here" rather than "what exists" must ask for it.
+        """
+        ...
+
+    #: OPTIONAL capability, deliberately NOT a member of this protocol: a host
+    #: that cannot report a live reservation (a read-only snapshot facade, a
+    #: reduced test host) must stay a valid ``WakeSchedulerProtocol`` rather than
+    #: fail ``isinstance``. ``tools.builtin`` probes it with ``getattr`` and reads
+    #: the empty set when it is absent — the honest "no live phase known" answer,
+    #: never a fabricated ``pending`` flag. The concrete ``WakeScheduler`` and any
+    #: cross-process view that mirrors it implement it as
+    #: ``()->frozenset[str]`` returning the ids held for the successor.
 
     async def update(self, schedules: list[WakeSchedule]) -> None: ...
 
@@ -1300,6 +1385,16 @@ class ToolContext(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     cwd: str = "."
+    #: Explicit host-owned attention-turn identity. No value means the host has
+    #: not opted into confirmed send reuse; never infer a turn from a call id
+    #: or the session's lifetime. Hosts create a fresh context/scope per turn.
+    send_turn_id: str | None = Field(default=None, frozen=True)
+    #: Only confirmed local deliveries live here, never in process-global or
+    #: persistent storage. Off wire and isolated from another attention turn.
+    #: Key: turn, sender SID, resolved target SID, exact body, mode, wake, patience.
+    confirmed_send_receipts: dict[tuple[str, str, str, str, str, bool, int | None], ToolResult] = (
+        Field(default_factory=dict, exclude=True, repr=False)
+    )
     #: This session's own ``scratchpad://`` root (``<session dir>/scratchpad``),
     #: absolute, or ``None`` on a host with no session directory. The scratchpad
     #: is scratch the AGENT owns: ``read``/``write``/``edit`` take
@@ -2884,6 +2979,17 @@ class LoopConfig(BaseModel):
     #: effects (a push, an MR write) mid-flight. ``None`` leaves the behaviour
     #: exactly as it was: only the abort signal ends a turn early.
     graceful_cancel_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Whether THIS run's ending on a WORDLESS stop -- a ``stop`` whose message
+    #: carried no text and no tool calls -- is a failure the loop must recover
+    #: with one bounded re-ask (``MAX_WORDLESS_STOP_RECOVERIES``). The session
+    #: computes it from the quiet-end rule, INVERTED
+    #: (``Session._silent_end_is_a_failure``): a run whose words someone is
+    #: waiting on (a person asked or awaits, a notify wake) must not end in
+    #: silence, while every internal arrival -- peer, hub_message, job_result,
+    #: session_state, catch-up, a non-notify wake -- may end quietly, and for
+    #: those the bare stop stays its legitimate ending. Off by default: a
+    #: direct embedder keeps today's ending exactly.
+    recover_wordless_stop: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )
@@ -3499,6 +3605,20 @@ class ChatRequest(BaseModel):
     #: was meant to shrink keeps growing. Auto-naming is the opposite case and
     #: sets ``isolated`` instead — see below.
     replayable: bool = False
+    #: This call is a recovery re-ask for a turn an interrupted stream aborted,
+    #: and it must go out on the SAME provider/model that actually served the
+    #: attempt it continues.
+    #:
+    #: Transport policy like ``replayable`` above. It makes ``SessionStreamFn``
+    #: skip the route-REWRITING machinery (quota-preflight activation, sticky
+    #: and fallback routing) so nothing re-points the call, while every HARD
+    #: constraint still applies: an exhausted quota, a disabled route or an
+    #: auth failure stops the recovery with its own reason instead of moving
+    #: the call to another credential or model. ``stream_with_failover`` reads
+    #: it as single-attempt/no-fallback. It is deliberately NOT ``isolated``:
+    #: errand cache/quota/account semantics stay intact -- see that field's
+    #: six-point list for why the two must not be conflated.
+    same_route_retry: bool = False
     #: This call is DECORATION running alongside a user turn, and it must not be
     #: able to change anything the turn depends on.
     #:
@@ -3776,6 +3896,25 @@ class StreamEndEvent(BaseModel):
     #: marker (``content_filter``, ``refusal``, ``SAFETY``…) is still visible,
     #: so they must put it here; downstream only ever sees the normalized stop.
     error: str | None = None
+    #: A bare ``error`` finish with no refusal prose and no hard error object --
+    #: the provider ended the stream mid-answer without saying why. Set ONLY on
+    #: the shape ``providers/clients.py`` classifies there. It is a bounded
+    #: ELIGIBILITY for the loop's interruption continuation (see
+    #: ``MAX_CONNECTIVITY_CONTINUATIONS``), NOT a claim that the cause was the
+    #: network nor that the failure is transient -- neither is knowable from
+    #: the wire. Defaults False, so every other end shape keeps the existing
+    #: terminal behaviour byte-for-byte until the loop decides otherwise.
+    retryable_interruption: bool = False
+    #: Effective API selector of the attempt that produced a MARKED end.
+    #: FAULT-ONLY: stamped by ``providers/failover.py`` on the forwarded end
+    #: (the frame that already holds the per-attempt ``spec``) and the value
+    #: the interrupted-turn recovery pins its re-ask to. It names the
+    #: ATTEMPTED API route -- never a claim about the underlying provider,
+    #: quantization or checkpoint behind it -- and ``None`` means UNKNOWN, in
+    #: which case the recovery REFUSES rather than guessing the route from the
+    #: request's model (after a sticky handoff or driver fallback the request
+    #: can name A while B served the failure).
+    attempted_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):

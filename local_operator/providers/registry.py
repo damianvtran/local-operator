@@ -451,6 +451,15 @@ def _anthropic_env_key() -> str | None:
 
 
 PROVIDER_REGISTRY: list[ProviderDefinition] = [
+    # Separate namespace, with NO ambient/legacy Meta keys: a subscription
+    # denial must never convert into a successful PAYG request.
+    ProviderDefinition(
+        id="meta-muse",
+        name="Muse Code",
+        search_aliases=("muse", "wonder", "spark", "meta"),
+        login=_lazy_login("local_operator.providers.oauth.meta_muse", "login_meta_muse"),
+        base_url="https://api.meta.ai/v1",
+    ),
     ProviderDefinition(
         id="openai",
         search_aliases=(
@@ -1207,6 +1216,7 @@ SUBSCRIPTION_LOGIN_FLAVOURS: frozenset[str] = frozenset(
     {
         "openai",
         "openai-device",
+        "meta-muse",
         "xai-oauth",
         "zai",
         "zai-oauth",

@@ -871,6 +871,17 @@ HOST_OWNED_LIVE_SECTIONS = {
     "speech",
     "static",
     "mesh_updates",
+    # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
+    # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
+    # nothing in ``Session`` reads the ``console`` block, so a probe in this file
+    # would watch nothing move. The live half is the host's own watcher:
+    # ``src/main/console/index.ts`` registers ``watchQuickSend(... onConfigChange:
+    # () => registry.setPolicy(readConsolePolicy(...)))``, so a config.yml write
+    # reaches a RUNNING app without terminating any surface — which is exactly what
+    # LIVE promises. That live apply lives in the desktop app's suite
+    # (``scripts/console-host.test.mjs``: the registry's admission against
+    # ``policy.maxLive``/``userReserved``), the same split ``desktop`` uses.
+    "console",
 }
 
 

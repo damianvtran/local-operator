@@ -74,6 +74,30 @@ class FakePool:
         return self.reason
 
 
+class FakeHubSync:
+    """The three hooks ``rolling_contract`` and ``blocker`` require of ``hub_sync``.
+
+    The rolling contract is published only when EVERY real hook exists, and the
+    inventory read treats an absent/unsupported hub as "handoff deferred". A
+    capability test therefore needs a hub that carries the three hooks, so the
+    assertion lands on the reload's own decision rather than on the contract gate.
+    """
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason
+        self.begun = 0
+        self.ended = 0
+
+    def begin_reload(self) -> None:
+        self.begun += 1
+
+    def end_reload(self) -> None:
+        self.ended += 1
+
+    def reload_blocker(self) -> str | None:
+        return self.reason
+
+
 def _app(
     *,
     fd: int | None = 7,
@@ -87,6 +111,30 @@ def _app(
             "desktop_sessions": pool,
         }
     )
+
+
+def _capable_app(
+    *,
+    fd: int | None = 7,
+    announced: tuple[str, int] | None = ("127.0.0.1", 53421),
+    pool: Any = None,
+    hub: Any = None,
+) -> FakeApp:
+    """An app whose state satisfies the rolling contract that ``perform`` gates on.
+
+    The branch added the loop-local admission fence and the local-work inventory
+    as a PREREQUISITE of a reload: ``perform`` refuses unless ``rolling_contract``
+    names the loaded API, and ``blocker`` reads the fence and the counter. A test
+    that drives ``perform`` or ``drain`` over a bare ``_app`` is therefore testing
+    the contract's refusal, not the drain — this provides the cells those readers
+    expect (fence armed, counter zero, a hub with the three hooks and, unless
+    supplied, no scheduler).
+    """
+    app = _app(fd=fd, announced=announced, pool=pool)
+    setattr(app.state, serve_reload.FENCE_ATTR, True)
+    setattr(app.state, serve_reload.REQUESTS_ATTR, 0)
+    setattr(app.state, "hub_sync", hub if hub is not None else FakeHubSync())
+    return app
 
 
 @pytest.fixture
@@ -180,28 +228,40 @@ async def test_drain_returns_immediately_when_no_runtime_is_being_started(
     A loaded app holds a relay and a watch lease for as long as a window is open,
     so a drain that waited for those would never return on the machine this
     exists for. ``reload_blocker`` reports neither, which is what this asserts.
+
+    Driven over ``_capable_app``: the branch made the drain read the loop-local
+    admission inventory (fence armed, counter zero, a hub carrying the contract
+    hooks) BEFORE it consults the pool, so a bare app drains into a refusal
+    instead of the pool read this test is about. The inventory cells are the
+    fixture for the drain, not the subject of it.
     """
     pool = FakePool(None)
-    await _watch(_app(pool=pool)).drain()
+    await _watch(_capable_app(pool=pool)).drain()
     assert pool.reads == 1
 
 
 @pytest.mark.asyncio
-async def test_a_probe_that_answers_with_a_non_string_is_not_a_blocker(
-    install: dict[str, Any],
+async def test_an_unreadable_desktop_probe_defers_rather_than_execs(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """serve-reload review round 7, R7-4: the `isinstance` arm, exercised.
+    """A probe that answers with something that is not a string is UNREADABLE.
 
-    `reload_blocker` returns ``str | None`` everywhere in the tree today, so this arm
-    exists for the version of it that is edited later to return, say, an enum — and
-    untested code that only runs when somebody else changes their mind is code that
-    ships broken. The rule it encodes is the one the absent and raising probes
-    already follow: an UNREADABLE probe may not be the reason a daemon stays on a
-    stale build. A truthy non-string is unreadable, not a blocker.
+    This is the direction serve-reload review round 7, R7-4 wrote the `isinstance`
+    arm for, but the INVENTORY contract the branch added REVERSES its verdict: an
+    unreadable probe is now a reason to DEFER, not a None that lets the reload
+    proceed. ``blocker`` reports "desktop reload safety probe is unreadable" and
+    the reload stays on the loaded build, matching the module's fail-closed rule —
+    the daemon cannot prove no runtime is spawning, so it may not exec.
+
+    (The old assertion — "not a blocker" — was correct while the drain's whole
+    predicate was the pool. It is stale now that the pool read shares the module
+    with an admission inventory whose unknown must not authorize a cut.)
     """
+    monkeypatch.setattr(serve_reload, "DRAIN_BUDGET_S", 0.0)
     pool = FakePool(None)
     pool.reason = 7  # type: ignore[assignment]  # the whole point: not a string
-    await _watch(_app(pool=pool)).drain()
+    with pytest.raises(serve_reload.ReloadRefusal, match="probe is unreadable"):
+        await _watch(_capable_app(pool=pool)).drain()
     assert pool.reads == 1
 
 
@@ -218,17 +278,25 @@ async def test_drain_refuses_after_the_budget_and_names_the_term(
     monkeypatch.setattr(serve_reload, "DRAIN_POLL_S", 0.01)
     pool = FakePool("a runtime being started for session abc")
     with pytest.raises(serve_reload.ReloadRefusal, match="a runtime being started"):
-        await _watch(_app(pool=pool)).drain()
+        await _watch(_capable_app(pool=pool)).drain()
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_drain_probe_is_not_a_reason_to_wait(install: dict[str, Any]) -> None:
-    """A probe that raises must not be the reason a reload never happens.
+async def test_a_raising_drain_probe_defers_rather_than_execs(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that raises is unreadable inventory, and unreadable always defers.
 
-    Same rule ``retire.in_flight`` states for its own probes, in the direction
-    that keeps the daemon alive rather than the one that keeps it stale.
+    ``retire.in_flight`` treats a raising probe as "not evidence about work" and
+    lets its drain pass; the branch's inventory contract is the OTHER fail-closed
+    direction for the reload: an unreadable inventory cannot prove no daemon-owned
+    request is in flight, so the reload stays on the loaded build instead of
+    exec'ing over work it cannot see. The outer ``except`` in ``blocker`` reports
+    "unreadable inventory" and the drain refuses on the budget.
     """
-    await _watch(_app(pool=FakePool(raises=True))).drain()
+    monkeypatch.setattr(serve_reload, "DRAIN_BUDGET_S", 0.0)
+    with pytest.raises(serve_reload.ReloadRefusal, match="inventory is unreadable"):
+        await _watch(_capable_app(pool=FakePool(raises=True))).drain()
 
 
 @pytest.mark.asyncio
@@ -424,7 +492,7 @@ def test_a_spawn_that_arrives_during_the_smoke_is_still_waited_for(
     spawn arriving during the smoke: with only the first drain, this test's
     `_exec` would be reached and would fail.
     """
-    reloader = _watch(_app(fd=19))
+    reloader = _watch(_capable_app(fd=19))
     answers = {"n": 0}
 
     def blocker() -> str | None:

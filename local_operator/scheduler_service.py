@@ -123,6 +123,12 @@ class SchedulerService:
         verbosity_level: VerbosityLevel,
         job_manager: JobManager,
         event_broker: "EventBroker | None" = None,
+        # Three positional arguments, matching every caller and the injected
+        # test lambdas: (occurrence_id, state, terminal). The earlier two-arg
+        # annotation was narrower than the calls, which pyright reports at the
+        # call site.
+        occurrence_recorder: "Callable[[str, str, str], None] | None" = None,
+        occurrence_suppressor: "Callable[[], set[str]] | None" = None,
     ) -> None:
         self.agent_registry = agent_registry
         self.config_manager = config_manager
@@ -136,9 +142,25 @@ class SchedulerService:
         # streams would open and keepalive forever; publishing here gives them
         # the same terminal contract as async chat jobs (review B-2).
         self.event_broker = event_broker
+        # OCCURRENCE INHERITANCE wiring (ready-successor handoff). The scheduler
+        # does not know the install root or the operation id; whoever constructs
+        # it for a capable generation injects these, so the durable writes go
+        # through install_transaction without this module importing it. Both
+        # default to None, which makes the feature INERT for every ordinary
+        # scheduler — the spec's "no record => feature inert" rule.
+        self._record_occurrence = occurrence_recorder
+        self._suppressed_occurrences = occurrence_suppressor
+        #: Re-read of suppressed ids happens per dispatch decision (never cached),
+        #: so suppression lifts the moment a terminal entry lands.
+        self._inherited_occurrences: set[str] = set()
 
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._run_tasks: set[asyncio.Task[Any]] = set()
+        # Normal APScheduler dispatch and replay triggers share this loop-local
+        # fence. A trigger already dispatched at pause remains tracked/blocked,
+        # making reload defer rather than losing an unrecorded scheduled run.
+        self._reload_admission = asyncio.Event()
+        self._reload_admission.set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -513,6 +535,46 @@ class SchedulerService:
     # Run execution (new engine, in-process)
     # ------------------------------------------------------------------
 
+    def begin_reload(self) -> None:
+        """Pause new timer dispatch without cancelling any owned run."""
+        self._reload_admission.clear()
+        self.scheduler.pause()
+
+    def end_reload(self) -> None:
+        """A deferred/failed handoff resumes the SAME scheduler and waiting runs."""
+        self._reload_admission.set()
+        self.scheduler.resume()
+
+    def reload_blocker(self) -> str | None:
+        active = sum(not task.done() for task in self._run_tasks)
+        return f"{active} scheduler-owned run(s)" if active else None
+
+    def _mark_occurrence(self, occurrence_id: str, state: str, terminal: str = "") -> None:
+        """Durable occurrence marker, best-effort and never fatal to a run.
+
+        A handoff's exactly-once depends on the ``running`` write landing before
+        the run starts and the ``terminal`` write at completion. Neither write
+        may take the scheduler down: an unwritable record leaves the feature inert
+        (no suppression), which is the bounded, reported direction.
+        """
+        recorder = self._record_occurrence
+        if recorder is None:
+            return
+        try:
+            recorder(occurrence_id, state, terminal)
+        except Exception:  # noqa: BLE001 — a marker must never kill a run
+            logger.debug("occurrence marker %s failed", state, exc_info=True)
+
+    def _suppressed_now(self) -> set[str]:
+        """Re-read the suppressed set each call; unreadable => suppress nothing."""
+        reader = self._suppressed_occurrences
+        if reader is None:
+            return set()
+        try:
+            return set(reader())
+        except Exception:  # noqa: BLE001 — unknown is not proven still running
+            return set()
+
     def _spawn_trigger(self, agent_id_str: str, schedule_id_str: str, prompt: str) -> None:
         """Trigger a run now, non-blocking (used by load-time replays)."""
         task = asyncio.create_task(
@@ -535,7 +597,25 @@ class SchedulerService:
         on success, and records outcomes in the job manager. NEVER raises:
         a failing run must not kill the scheduler loop.
         """
+        # APScheduler invokes this coroutine DIRECTLY, bypassing _spawn_trigger.
+        # Track at its real entry before the first await, including admission
+        # waiters; replay-only tracking would falsely declare ordinary runs idle.
+        task = asyncio.current_task()
+        if task is not None:
+            self._run_tasks.add(task)
         try:
+            await self._reload_admission.wait()
+            # EXACT-ONCE across a swap: an occurrence inherited from the
+            # predecessor is left to the predecessor unless this id was not
+            # mid-flight there. Suppression is re-read here, at the dispatch
+            # decision, never cached.
+            if schedule_id_str in self._suppressed_now():
+                logger.info(
+                    f"Scheduled run {schedule_id_str} inherited from a successor "
+                    "handoff; deferring to avoid a duplicate occurrence."
+                )
+                return
+            self._mark_occurrence(schedule_id_str, "running")
             await self._trigger_agent_task_inner(agent_id_str, schedule_id_str, prompt)
         except asyncio.CancelledError:
             logger.info(
@@ -561,6 +641,9 @@ class SchedulerService:
                 f"schedule {schedule_id_str}: {str(e)}",
                 exc_info=True,
             )
+        finally:
+            if task is not None:
+                self._run_tasks.discard(task)
 
     async def _trigger_agent_task_inner(
         self, agent_id_str: str, schedule_id_str: str, prompt: str
@@ -879,6 +962,21 @@ class SchedulerService:
         result: Optional[dict[str, Any]] = None,
     ) -> None:
         """Record the status in the job ledger and publish it to the SSE broker."""
+        # OCCURRENCE INHERITANCE terminal marker. ``job_id`` IS the schedule id
+        # for scheduler runs (legacy contract), so the durable record can key on
+        # the same id the successor inherits. PROCESSING is the running write;
+        # COMPLETED/FAILED/CANCELLED are the three terminal outcomes. A marker
+        # failure never fails the run.
+        terminal = {
+            JobStatus.PROCESSING: None,
+            JobStatus.COMPLETED: "done",
+            JobStatus.FAILED: "failed",
+            JobStatus.CANCELLED: "cancelled",
+        }.get(status)
+        if terminal is None:
+            self._mark_occurrence(job_id, "running")
+        else:
+            self._mark_occurrence(job_id, "terminal", terminal)
         try:
             await self.job_manager.update_job_status(job_id, status, result)
         except KeyError:

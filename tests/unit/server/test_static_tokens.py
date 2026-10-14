@@ -550,7 +550,9 @@ async def test_the_sign_door_classifies_crafted_tokens_to_the_stable_401(
         headers={local_tokens.ACCESS_TOKEN_HEADER: shape},
     )
     assert response.status_code == 401
-    assert response.json()["detail"] == "A local access token or desktop bearer is required."
+    assert (
+        response.json()["detail"]["text"] == "A local access token or desktop bearer is required."
+    )
 
 
 @pytest.mark.asyncio
@@ -607,7 +609,9 @@ async def test_sign_refuses_without_any_credential(test_app_client, configured):
         "/v1/static/sign", json={"route": "images", "path": "/tmp/x.png"}
     )
     assert response.status_code == 401
-    assert "access token" in response.json()["detail"]
+    assert (
+        response.json()["detail"]["text"] == "A local access token or desktop bearer is required."
+    )
 
 
 @pytest.mark.asyncio

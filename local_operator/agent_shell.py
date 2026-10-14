@@ -116,7 +116,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -218,17 +218,24 @@ def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
     tool call started" — and the codebase has places where a session, not an
     agent, opens a conversation for its user: the TUI's own restart
     (:func:`local_operator.reexec.replace_self`), ``/fork``'s new window
-    (``tui/app.py``) and BOTH rungs of a notification click
+    (``tui/app.py``), BOTH rungs of a notification click
     (``tui/resume_click.py``: the terminal, and the desktop app beside it,
     which is long-lived and would pass the claim on to everything it later
-    spawns). Each passes the session's environment to a child
-    that runs `lop --resume`, and each is a user gesture, so that child must not
-    inherit the parent's answer.
+    spawns), and the SERVE entry point a daemon is started from
+    (``cli.serve_command`` — see :func:`drop_agent_shell_marker_from_environ`).
+    Each passes an environment that a child or the process itself will use to
+    open a conversation, and each is a user gesture (or a hosting plane), so
+    that environment must not carry the parent's answer.
 
     Measured consequence of not doing it (review round 1, F1): `/fork` and the
     click open a window that dies on the refusal whenever the session they were
     running in was itself started from an agent's shell — which is exactly what
     a QA session driving the real TUI is.
+
+    This is the copy-returning form. :func:`drop_agent_shell_marker_from_environ`
+    is the same rule applied in place, for the one caller (``lop serve``) that
+    owns the process's own ``os.environ`` rather than a child's copy; the marker
+    SET stays defined here so the two cannot drift.
     """
     merged = dict(env)
     merged.pop(AGENT_SHELL_ENV, None)
@@ -241,6 +248,43 @@ def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
     # rewrite a caller's environment beyond the question being answered.
     merged.pop(MAY_DELEGATE_ENV, None)
     return merged
+
+
+def drop_agent_shell_marker_from_environ(env: MutableMapping[str, str] | None = None) -> None:
+    """Remove the agent-shell markers from a PROCESS's OWN environment, in place.
+
+    The copy-returning :func:`without_agent_shell_marker` answers a caller that
+    is about to hand an environment to a CHILD (a re-exec, a spawn). This is the
+    one caller that instead owns the process it is already in: ``lop serve``
+    (``cli.serve_command``), which turns THIS process into the daemon the
+    operator's front ends talk to. A daemon is a HOSTING PLANE, not a chat the
+    agent opened — the ``bash`` tool's markers describe the command that started
+    this process, and they must not survive into the sessions the daemon later
+    mints for the operator's own desktop, phone or TUI, which is what stamped
+    every New Chat ``agent-shell`` and hid it from the sidebar.
+
+    IN PLACE, and ``os.environ`` by default, because the marker is read by
+    :func:`agent_shell_opened_run` at session-build time from ``os.environ``: a
+    returned copy the caller forgot to apply would leave the leak exactly where
+    it was. Mutating the live mapping (``clear`` + ``update`` on the SAME
+    object) keeps any reference already taken to ``os.environ`` correct.
+
+    ALL THREE names, unlike the child-facing helper, and the third is the
+    difference rather than an oversight: :data:`ALLOW_NESTED_SESSION_ENV` is the
+    documented escape a HARNESS or a QA run sets to drive the real CLI, and here
+    it is inherited tempter — a daemon started from an agent's shell that kept
+    the escape would waive the refusal for the operator's OWN chats and stamp
+    them ``agent-shell``, the very bug this fixes. The child-facing helper keeps
+    it (see its docstring); a hosting plane must not.
+
+    The set is single-sourced by reusing :func:`without_agent_shell_marker` for
+    the two names IT defines, rather than re-spelling them here.
+    """
+    target = os.environ if env is None else env
+    stripped = without_agent_shell_marker(target)
+    target.clear()
+    target.update(stripped)
+    target.pop(ALLOW_NESTED_SESSION_ENV, None)
 
 
 def harness_child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:

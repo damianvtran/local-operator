@@ -32,6 +32,7 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Literal, Sequence, TypeVar
 
 from local_operator.hub_sync import service as svc
@@ -52,8 +53,8 @@ MAX_ITEMS_PER_TICK = 50
 CHECK_CONCURRENCY = 2
 #: Ceiling on a whole tick's CHECK phase. Each request already has its own socket
 #: timeout (``check.REQUEST_TIMEOUT_S``); this is the belt for a hang those cannot
-#: see. A check is read-only, so abandoning its worker threads is safe — unlike an
-#: apply, which is never abandoned mid-write.
+#: see. Timed-out read-only waiters may abandon the result, but the actual worker
+#: lifetime remains tracked: a timeout cannot grant reload permission.
 CHECK_PHASE_TIMEOUT_S = 300.0
 #: Interval jitter, +-10 %.
 INTERVAL_JITTER = 0.10
@@ -100,11 +101,68 @@ class HubSyncRunner:
         self._reported: set[tuple[str, str]] = set()
         self._last_credential: str | None = None
         self.last_tick: TickReport | None = None
+        # A cancelled HTTP waiter or timed-out check does NOT stop a worker
+        # thread. Private shielded futures remain owned until actual completion,
+        # independently of the runner lock's state; reload never infers idle
+        # merely from a released asyncio.Lock or an abandoned request task.
+        self._reload_admission = asyncio.Event()
+        self._reload_admission.set()
+        self._dispatches: set[asyncio.Task[Any]] = set()
+        self._offloads: set[asyncio.Future[Any]] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
     def stop(self) -> None:
         self._stop.set()
+
+    def begin_reload(self) -> None:
+        """Park future timer/manual dispatch; preserve the same runner/due state."""
+        self._reload_admission.clear()
+
+    def end_reload(self) -> None:
+        """A refused handoff resumes the old runner, without cancelling work."""
+        self._reload_admission.set()
+
+    def reload_blocker(self) -> str | None:
+        dispatches = sum(not task.done() for task in self._dispatches)
+        workers = sum(not future.done() for future in self._offloads)
+        if dispatches or workers or self._lock.locked():
+            return f"hub work is active ({dispatches} dispatches, {workers} worker offloads)"
+        return None
+
+    async def _offload(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        worker = asyncio.get_running_loop().run_in_executor(None, partial(fn, *args, **kwargs))
+        self._offloads.add(worker)
+
+        def finished(future: asyncio.Future[Any]) -> None:
+            self._offloads.discard(future)
+            if not future.cancelled():
+                future.exception()  # Observe an abandoned waiter's error too.
+
+        worker.add_done_callback(finished)
+        return await asyncio.shield(worker)
+
+    async def _dispatch(self, operation: Callable[[], Any]) -> Any:
+        async def serialized() -> Any:
+            while True:
+                await self._reload_admission.wait()
+                async with self._lock:
+                    # Reload may have fenced while this dispatch waited on the
+                    # existing lock. Never admit it using the earlier gate read.
+                    if not self._reload_admission.is_set():
+                        continue
+                    return await operation()
+
+        task = asyncio.create_task(serialized())
+        self._dispatches.add(task)
+
+        def finished(dispatch: asyncio.Task[Any]) -> None:
+            self._dispatches.discard(dispatch)
+            if not dispatch.cancelled():
+                dispatch.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     async def _sleep(self, seconds: float) -> bool:
         """Sleep, waking early on stop. True = stopped."""
@@ -162,8 +220,8 @@ class HubSyncRunner:
     # -- one tick ---------------------------------------------------------------------
 
     async def tick(self, *, reason: Literal["timer", "startup", "manual"] = "timer") -> TickReport:
-        async with self._lock:
-            return await self._tick_locked(reason)
+        await self._reload_admission.wait()
+        return await self._dispatch(lambda: self._tick_locked(reason))
 
     async def _tick_locked(self, reason: str) -> TickReport:
         report = TickReport(reason=reason)
@@ -174,17 +232,17 @@ class HubSyncRunner:
             self._last_credential = ctx.credential
 
         settings = HubSyncSettings.read_fresh(self._cm)
-        links = await asyncio.to_thread(list_links, ctx.agents(), ctx.teams())
+        links = await self._offload(list_links, ctx.agents(), ctx.teams())
         if not links:
             report.skipped = "no-linked-items"
-            await asyncio.to_thread(self._record_tick, ctx, report)
+            await self._offload(self._record_tick, ctx, report)
             self.last_tick = report
             return report
 
         doc = ctx.store().load()
         picked = self._pick(links, doc)
         lease = st.RunnerLease(ctx.config_dir)
-        if not await asyncio.to_thread(lease.acquire):
+        if not await self._offload(lease.acquire):
             report.skipped = "lease-held"
             self.last_tick = report
             return report
@@ -200,7 +258,7 @@ class HubSyncRunner:
                 return report
             report.checked = len(checks)
             report.available = sum(1 for c in checks if c.verdict == "available")
-            grace = await asyncio.to_thread(self._first_run_grace, ctx)
+            grace = await self._offload(self._first_run_grace, ctx)
             for c in checks:
                 if c.verdict != "available":
                     continue
@@ -208,7 +266,7 @@ class HubSyncRunner:
                 item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
                 if not auto or not st.auto_apply_due(item):
                     continue
-                result = await asyncio.to_thread(svc.apply_one, ctx, c, auto=True)
+                result = await self._offload(svc.apply_one, ctx, c, auto=True)
                 report.reports.append(result)
                 if result.applied:
                     report.applied += 1
@@ -216,8 +274,8 @@ class HubSyncRunner:
                     report.failed += 1
                     self._summarise_failure(c, result.error_class)
         finally:
-            await asyncio.to_thread(lease.release)
-        await asyncio.to_thread(self._record_tick, ctx, report)
+            await self._offload(lease.release)
+        await self._offload(self._record_tick, ctx, report)
         self.last_tick = report
         return report
 
@@ -250,13 +308,13 @@ class HubSyncRunner:
         async def one(kind: str) -> None:
             async with gate:
                 results.extend(
-                    await asyncio.to_thread(
+                    await self._offload(
                         svc.check_items, ctx, kinds=(kind,), only_ids=ids, record=False
                     )
                 )
 
         await asyncio.gather(one("agent"), one("team"))
-        await asyncio.to_thread(svc.record_checks, ctx, results)
+        await self._offload(svc.record_checks, ctx, results)
         return results
 
     def _first_run_grace(self, ctx: svc.HubSyncContext) -> bool:
@@ -307,9 +365,13 @@ class HubSyncRunner:
         in-process callers. Nothing here swallows an exception: the caller maps it.
         """
 
-        async with self._lock:
+        await self._reload_admission.wait()
+
+        async def operation() -> T:
             ctx = await self._context()
-            return await asyncio.to_thread(fn, ctx)
+            return await self._offload(fn, ctx)
+
+        return await self._dispatch(operation)
 
     async def check_now(
         self, *, kind: Literal["agent", "team", "all"] = "all", names: Sequence[str] | None = None

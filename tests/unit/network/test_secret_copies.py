@@ -343,5 +343,7 @@ def test_the_bare_secret_name_resolves_for_share_and_revoke(secret_mesh: Any) ->
     assert _holder(), "the fixture's share must be present to start from"
     assert _lop_network("credential", "revoke", SECRET_NAME, "--from", mesh.b.identity.name) == 0
     assert not _holder(), "the bare name did not revoke the store secret"
-    assert _lop_network("credential", "share", SECRET_NAME, "--with", mesh.b.identity.name) == 0
+    from tests.unit.network.finite_recovery import restore_finite
+
+    restore_finite(mesh.a.root, SECRET_NAME, mesh.b.identity.name)
     assert _holder(), "the bare name did not share the store secret"

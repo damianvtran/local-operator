@@ -11,8 +11,10 @@ assertions across a real process boundary.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -105,7 +107,12 @@ def _reset(episode_id: str, task_id: str, tmp_path: Path, secrets: Any = ()) -> 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("OSWORLD_EVAL_MODEL_API_KEY", "OSWORLD_USER_SIM_API_KEY"):
+    for name in (
+        "OSWORLD_EVAL_MODEL_API_KEY",
+        "OSWORLD_USER_SIM_API_KEY",
+        "GITLAB_PRIVATE_TOKEN",
+        "GITLAB_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
     # The judge model settings the adapter may write (raw or normalised):
     # cleared per test so "was it written?" assertions stay order-independent.
@@ -209,6 +216,124 @@ async def test_the_judge_key_takes_the_documented_env_path_and_is_scrubbed_on_cl
     assert not any(v in _MARKERS[:2] for v in os.environ.values())
     await adapter.close(CloseParams(operation_id=f"close-{episode_id}", episode_id=episode_id))
     assert "OSWORLD_EVAL_MODEL_API_KEY" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# gitlab fixture token (R-2.026)
+# ---------------------------------------------------------------------------
+
+# The pinned gitlab controller reads GITLAB_URL and GITLAB_PRIVATE_TOKEN
+# through ``os.getenv`` AT MODULE IMPORT (upstream
+# ``desktop_env/controllers/gitlab.py:19-23``). This stand-in mirrors that read
+# shape -- and the controller import the derivation keys on -- without
+# importing the vendor package (absent in unit tests), so what the test
+# measures is the DELIVERY ORDER: the token installed before the task module is
+# ever imported. The guarded import keeps the source honest to the derivation;
+# the module-level reads are the import-time read under test.
+_IMPORT_TIME_CONTROLLER = """
+import os
+
+try:  # the derivation keys on this import; the vendor is absent in unit tests
+    from desktop_env.controllers import gitlab  # noqa: F401
+except ModuleNotFoundError:
+    pass
+
+GITLAB_URL = os.environ["GITLAB_URL"]
+GITLAB_PRIVATE_TOKEN = os.environ["GITLAB_PRIVATE_TOKEN"]
+
+
+class Task003:
+    id = "task_gitlab_import"
+    instruction = "Merge the MR."
+    config = [{"type": "launch", "app": "chrome"}]
+    evaluator = {"func": "check_gitlab_state"}
+    token_seen = GITLAB_PRIVATE_TOKEN
+"""
+
+_FAILING_CONTROLLER = (
+    _IMPORT_TIME_CONTROLLER + '\n\nraise RuntimeError("synthetic controller failure")\n'
+)
+
+_GITLAB_INFRA = _INFRA + (
+    ScopedInfraValue(name="GITLAB_URL", purpose="benchmark_compute", value="https://gitlab.test"),
+)
+
+
+def _import_task_module(path: Path, task_id: str) -> Any:
+    """Import the task module exactly as the first vendor import would.
+
+    ``vendor_bridge.instantiate_task`` needs ``desktop_env`` (absent in unit
+    tests, by design), so this drives the module-level execution it performs
+    with ``importlib`` directly -- the same first import of the task file,
+    which is where the controller's import-time read happens. The module name
+    mirrors the vendor loader's (``osworld_task_``, diagnostics.py).
+    """
+
+    spec = importlib.util.spec_from_file_location(f"osworld_task_{task_id}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_the_gitlab_fixture_token_is_installed_before_the_controller_import(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The ordering the controller's import-time read demands.
+
+    Without the channel the requirements seam refused this family outright
+    (``UndeliverableRequirement``); with it, the token must be in the worker
+    environment BEFORE the task module -- whose import reads it -- is ever
+    imported, or the read is a silent no-op and the guest dies mid-setup.
+    """
+
+    workspace = _workspace(tmp_path, {"task_gitlab_import": _IMPORT_TIME_CONTROLLER}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _GITLAB_INFRA)
+    assert "GITLAB_PRIVATE_TOKEN" not in os.environ  # nothing installed yet
+    secrets = _AWS_SECRETS + (
+        ResolvedSecret(name="GITLAB_PRIVATE_TOKEN", value="marker-gitlab-token"),
+    )
+    await adapter.reset_start(_reset(episode_id, "task_gitlab_import", tmp_path, secrets))
+    assert provider.allocated is True
+    module = _import_task_module(
+        workspace / "tasks" / "task_gitlab_import.py", "task_gitlab_import"
+    )
+    assert module.GITLAB_PRIVATE_TOKEN == "marker-gitlab-token"
+    assert module.Task003.token_seen == "marker-gitlab-token"
+    # The documented env path is for the worker's controller only: the AWS
+    # credentials still never take it, and the marker appears in no argv.
+    assert not any(marker in value for marker in _MARKERS[:2] for value in os.environ.values())
+    assert "marker-gitlab-token" not in " ".join(sys.argv)
+    await adapter.close(CloseParams(operation_id=f"close-{episode_id}", episode_id=episode_id))
+    assert "GITLAB_PRIVATE_TOKEN" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_a_controller_failing_at_import_is_still_scrubbed_on_close(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Failure AFTER the install: close must scrub anyway.
+
+    The consuming import is exactly where a broken guest dies; the token it was
+    handed must not survive the episode in the worker environment.
+    """
+
+    workspace = _workspace(tmp_path, {"task_gitlab_failing": _FAILING_CONTROLLER}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _GITLAB_INFRA)
+    secrets = _AWS_SECRETS + (
+        ResolvedSecret(name="GITLAB_PRIVATE_TOKEN", value="marker-gitlab-token"),
+    )
+    await adapter.reset_start(_reset(episode_id, "task_gitlab_failing", tmp_path, secrets))
+    assert os.environ["GITLAB_PRIVATE_TOKEN"] == "marker-gitlab-token"
+    with pytest.raises(RuntimeError, match="synthetic controller failure"):
+        _import_task_module(workspace / "tasks" / "task_gitlab_failing.py", "task_gitlab_failing")
+    await adapter.close(CloseParams(operation_id=f"close-{episode_id}", episode_id=episode_id))
+    assert "GITLAB_PRIVATE_TOKEN" not in os.environ
 
 
 # ---------------------------------------------------------------------------

@@ -77,6 +77,33 @@ async def test_update_when_current_does_not_reexec() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_still_publishing_names_publishing_not_a_fault() -> None:
+    """UX round 2, U-N1: the TUI arm of the pending sentence, pinned.
+
+    The CLI arm is pinned in test_update.py; this is the same VersionCheck
+    driven through the real /update command, so a regression in
+    ``_run_update``'s branch cannot pass the suite silently.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest=None, behind=False, pending_version="0.28.0")
+    with patch("local_operator.update.check_latest", return_value=check):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one("Editor")
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(40):
+                await pilot.pause()
+                if any("still publishing" in text for text in _notices(app)):
+                    break
+            notices = _notices(app)
+            assert any("0.28.0" in text and "still publishing" in text for text in notices)
+            assert not any("could not reach PyPI" in text for text in notices)
+            assert app.return_code != REEXEC_CODE
+
+
+@pytest.mark.asyncio
 async def test_update_success_exits_75() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)

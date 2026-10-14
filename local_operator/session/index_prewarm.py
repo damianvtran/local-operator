@@ -42,6 +42,19 @@ EACH JOURNAL'S SCAN IS THE EXISTING ONE. ``transcript_index.start_refresh`` is
 single-flight per session, so a user who opens a journal while its warm is in
 flight JOINS that scan (``started=False``) instead of paying a second one — the
 warm can only ever remove work, never add it to the open path.
+
+IT ALSO PREHEATS THE COLD REPLAY, for the symptom those two caches do not touch:
+the FIRST read of a large, not-yet-cached conversation pays a whole-suffix parse
+(323-480 ms measured on a 6.7 MB journal — the operator's "cold switch into a big
+conversation"). That read needs NO runtime (the cold facade is a viewer over the
+journal), and its result lands in the process-local replay cache
+(:mod:`local_operator.session.replay_cache`), which is EMPTY at every core start —
+so the journals a user opens first after a restart are exactly the ones paying the
+parse. The replay pass therefore runs beside the index pass, over the same newest
+journals, through the SAME ``build_cold_replay``/``load_cold_replay`` the reader
+uses, so a later open is a cache hit and an open that races the preheat JOINS it
+rather than double-parsing. It is bounded by the replay cache's own entry bound
+(:data:`PREWARM_REPLAYS`) and guarded by the same disk/load checks.
 """
 
 from __future__ import annotations
@@ -52,8 +65,17 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+from local_operator.session.replay_cache import (
+    REPLAY_CACHE_ENTRIES,
+    build_cold_replay,
+    cached_replay,
+    load_cold_replay,
+    replay_key,
+)
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
     build_anchor,
     read_anchor,
@@ -63,12 +85,28 @@ from local_operator.session.tail_anchor import (
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 from local_operator.session.transcript_index import probe_index, start_refresh
 
+if TYPE_CHECKING:
+    # The return annotation of ``_cold_replay_key`` names it, so it must be BOUND for
+    # pyflakes/pyright — a quoted annotation alone still trips F821 when the name is
+    # never imported. ``TYPE_CHECKING``-only keeps the import off the runtime path:
+    # this module is built at core startup and the name is used in annotations alone.
+    from local_operator.session.replay_cache import ReplayKey
+
 logger = logging.getLogger(__name__)
 
 #: How many journals one warm covers. 32 is #2102's figure and the reason is its
 #: own measurements: ~277 MB of journals and ~25 MB of cache, which is a working
 #: set (the sessions a user moves between) rather than a population backfill.
 PREWARM_JOURNALS = 32
+
+#: How many journals one REPLAY preheat materializes. The SMALLER of the index
+#: queue's working set and the replay cache's own entry bound, because a replay
+#: entry is the expensive one: it pins a whole conversation's replayed messages
+#: (the cache refuses one over ``REPLAY_CACHE_BYTES``). Materializing more than the
+#: cache can hold would evict the early entries to make room for the late ones —
+#: the queue spending its pass thrashing the LRU instead of warming a working set.
+#: Reusing the cache's own bound keeps the preheat and the cache ONE policy.
+PREWARM_REPLAYS = min(PREWARM_JOURNALS, REPLAY_CACHE_ENTRIES)
 
 #: Free-space floor for the warm, in bytes (2 GiB). Deliberately much higher than
 #: ``store_failures.FULL_VOLUME_FLOOR_BYTES``, which answers "can the store still
@@ -228,6 +266,67 @@ def sessions_needing_warm(root: str | Path, *, limit: int = PREWARM_JOURNALS) ->
     return candidates
 
 
+def sessions_needing_replay(root: str | Path, *, limit: int = PREWARM_REPLAYS) -> list[str]:
+    """The ``limit`` newest journals whose cold replay THIS PROCESS has not cached.
+
+    A DIFFERENT QUESTION FROM :func:`sessions_needing_warm`, and it must be asked
+    separately rather than by reusing that selection. That one asks whether a
+    journal's ON-DISK caches are current, and a store warmed once answers "yes"
+    for the journals a user is most likely to open — the exact set the replay pass
+    exists for. The replay cache is PROCESS-LOCAL and empty at every core start
+    (see :mod:`local_operator.session.replay_cache`), so its question is "is this
+    key in THIS process's cache", and the newest journals answer it by the same
+    mtime order the index pass uses.
+
+    The key is built exactly as the reader builds it for a cold open
+    (``want_checkpoint`` -- a checkpoint is REQUIRED, the spend record
+    OPPORTUNISTIC -- no cursor, non-strict cut), so a materialized entry is the
+    one that open will look up. A journal whose ``replay`` is already cached is
+    skipped: re-materializing it would be a second parse for a hit, and
+    ``load_cold_replay`` would answer from memory anyway.
+
+    SYNCHRONOUS and it stats/keys every journal, so its caller runs it in a thread
+    (``asyncio.to_thread``), for the reason :func:`sessions_needing_warm` states.
+    """
+    sessions_dir = Path(root) / "sessions"
+    try:
+        entries = list(sessions_dir.iterdir())
+    except OSError:
+        return []
+    journals: list[tuple[float, str]] = []
+    for entry in entries:
+        try:
+            stat = (entry / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            continue
+        journals.append((stat.st_mtime, entry.name))
+    journals.sort(reverse=True)
+    candidates: list[str] = []
+    for _mtime, session_id in journals:
+        if len(candidates) >= limit:
+            break
+        key = _cold_replay_key(sessions_dir / session_id)
+        if key is not None and cached_replay(key) is None:
+            candidates.append(session_id)
+    return candidates
+
+
+def _cold_replay_key(directory: Path) -> "ReplayKey | None":
+    """The key a cold open of ``directory`` looks up, or ``None`` when absent.
+
+    ONE SPELLING, shared by the selection above and the preheat below, so the two
+    cannot disagree about which read they are preparing -- and so a later edit
+    cannot make the pass preheat a key no reader asks for.
+    """
+    return replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+
+
 def start_session_warm(root: str | Path, session_id: str) -> bool:
     """Warm ONE session's index now — the per-session path — and return at once.
 
@@ -360,6 +459,109 @@ async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -
         started += 1 if was_started else 0
         await asyncio.sleep(0)
     logger.debug("index prewarm started %d refresh(es)", started)
+    # THE REPLAY PASS RAINS LAST and on purpose: the index scan is bounded and cheap
+    # (single-digit to tens of ms) while the replay parse is the heavy one, so the
+    # cheap work lands first and a host that turns busy mid-startup still got its
+    # indexes even if the replays are dropped. Neither pass is ever on a request's
+    # time; both reuse the existing single-flights.
+    try:
+        await warm_replay_cache(root, limit=min(limit, PREWARM_REPLAYS))
+    except Exception:  # noqa: BLE001 — the preheat is an optimisation, never the answer
+        logger.debug("replay prewarm unavailable", exc_info=True)
+    return started
+
+
+async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -> int:
+    """Materialize up to ``limit`` journals' cold replays; returns how many landed.
+
+    THE COMPANION PASS TO :func:`warm_index_cache`, over the SAME newest journals,
+    for the cost that pass does not touch: the first read of a large conversation
+    parses its journal end to end (323-480 ms on 6.7 MB), and the parser only ever
+    reads from the newest compaction forward — so the replay is a small window that
+    a later open either pays once or finds already in
+    :mod:`local_operator.session.replay_cache`. The cache is process-local and empty
+    at every core start, so a warm here is what makes the first click after a
+    restart a hit rather than a parse.
+
+    NO RUNTIME IS SPAWNED AND NONE IS NEEDED. The cold replay is a read of durable
+    rows (:func:`replay_cache.build_cold_replay`), the same one the desktop's cold
+    facade pays on its first read; nothing here dials an owner. It writes exactly
+    what a reader would have written, under the same key, so a subsequent open is a
+    hit.
+
+    SEQUENTIAL and BOUNDED, for :func:`warm_index_cache`'s reasons: one parse at a
+    time keeps the loop responsive while the daemon serves HTTP, and
+    ``await asyncio.sleep(0)`` between journals gives the loop its turn. The DISK
+    guard is asked ONCE, at the top (:func:`warm_index_cache` asks it the same way,
+    through the same :func:`skip_reason`): disk pressure is the one condition under
+    which the pass must not write at all, so a full volume stops the whole pass
+    before the first journal. The LOAD guard is re-checked between journals, so a
+    host that turns busy mid-pass keeps whatever is warm and drops the rest.
+
+    A FAILED JOURNAL NEVER FAILS THE PASS. One unreadable or oversize journal is
+    logged and skipped: the queue has no one waiting on it and the reader that later
+    opens that session pays its own parse exactly as it does today.
+    """
+    reason = skip_reason(root)
+    if reason is not None:
+        logger.debug("replay prewarm skipped (%s)", reason)
+        return 0
+    candidates = await asyncio.to_thread(sessions_needing_replay, root, limit=limit)
+    already_busy = pace_reason()
+    if already_busy is not None:
+        candidates = candidates[:1]
+        logger.debug("replay prewarm degraded (%s): one journal this pass", already_busy)
+    sessions_dir = Path(root) / "sessions"
+    started = 0
+    # OLDEST-FIRST, so the NEWEST journal is materialized LAST and therefore
+    # survives the cache's LRU. ``sessions_needing_replay`` returns newest-first
+    # (the order a user is most likely to open); inserting in that order would make
+    # the newest the OLDEST entry the byte bound evicts first — measured: 8
+    # materializations against a 48 MiB bound kept the OLDEST 3 and evicted the
+    # newest, so the open that mattered still paid its parse. The selection order is
+    # what the reader wants; the insertion order is what the bound wants, and they
+    # are deliberately opposite.
+    for position, session_id in enumerate(reversed(candidates)):
+        later = pace_reason() if position else None
+        if later is not None:
+            logger.debug("replay prewarm dropped after %d journals (%s)", started, later)
+            break
+        directory = sessions_dir / session_id
+        key = await asyncio.to_thread(_cold_replay_key, directory)
+        if key is None:
+            continue
+        # ``load_cold_replay`` IS the reader's own single-flight: a user who opens
+        # this session while its preheat is in flight JOINS this task instead of
+        # starting a second parse, and a key already materialized is answered from
+        # memory (the selection above skips those, so in practice this starts the
+        # read). The parse itself is threaded, like the reader's.
+        try:
+            replay = await load_cold_replay(
+                key,
+                lambda directory=directory, key=key: asyncio.to_thread(
+                    build_cold_replay,
+                    directory,
+                    key=key,
+                    want_checkpoint=True,
+                    through_id=None,
+                    strict_cut=False,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — one unreadable journal must not end the preheat
+            logger.debug("replay prewarm failed for %s", session_id, exc_info=True)
+            await asyncio.sleep(0)
+            continue
+        # COUNT ONLY WHAT THE CACHE ACTUALLY HOLDS. ``publish_replay`` REFUSES an
+        # over-budget entry by returning it with ``retained == 0`` rather than
+        # storing it, so the read still answers but nothing landed — counting that
+        # as a materialization would over-report a cache the bound kept empty, on
+        # exactly the large journals the number is watched for. A stored entry (fresh
+        # or the rare already-cached hit the selection did not skip) carries its
+        # retained size, which is why the test is ``> 0`` and not "no exception".
+        if replay.retained > 0:
+            started += 1
+        await asyncio.sleep(0)
+    logger.debug("replay prewarm materialized %d replay(s)", started)
     return started
 
 

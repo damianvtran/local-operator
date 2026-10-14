@@ -1,0 +1,295 @@
+{
+  "algorithm": "rarest-public-category primary strata; Hamilton proportional quotas; enforce minimum-one by transfer from largest quota excess; seeded SHA256 tie and within-stratum order; round-robin seeded stratum execution order",
+  "benchmark_release": "osworld-v2.1",
+  "population_size": 82,
+  "primary_strata": {
+    "conflict_disambiguation": {
+      "population": 11,
+      "quota": 3,
+      "selected": [
+        "043",
+        "080",
+        "072"
+      ]
+    },
+    "cross_source_reasoning": {
+      "population": 4,
+      "quota": 1,
+      "selected": [
+        "077"
+      ]
+    },
+    "dynamic_environment": {
+      "population": 6,
+      "quota": 1,
+      "selected": [
+        "065"
+      ]
+    },
+    "human_in_the_loop": {
+      "population": 5,
+      "quota": 1,
+      "selected": [
+        "026"
+      ]
+    },
+    "implicit_state_inference": {
+      "population": 1,
+      "quota": 1,
+      "selected": [
+        "082"
+      ]
+    },
+    "multi_item_state_tracking": {
+      "population": 11,
+      "quota": 3,
+      "selected": [
+        "021",
+        "031",
+        "029"
+      ]
+    },
+    "multimodal_editing": {
+      "population": 20,
+      "quota": 5,
+      "selected": [
+        "104",
+        "042",
+        "092",
+        "054",
+        "106"
+      ]
+    },
+    "streaming_interaction": {
+      "population": 5,
+      "quota": 1,
+      "selected": [
+        "048"
+      ]
+    },
+    "tutorial_following": {
+      "population": 15,
+      "quota": 3,
+      "selected": [
+        "058",
+        "002",
+        "056"
+      ]
+    },
+    "visual_spatial_precision": {
+      "population": 4,
+      "quota": 1,
+      "selected": [
+        "063"
+      ]
+    }
+  },
+  "protocol_readiness": "unverified; no substitutions on readiness failure; requires preflight separate from this selection",
+  "public_code_commit": "3d778a3c9a34a079316f70df023b166700445792",
+  "public_label_coverage": {
+    "conflict_disambiguation": {
+      "population": 28,
+      "selected": 7
+    },
+    "cross_source_reasoning": {
+      "population": 33,
+      "selected": 9
+    },
+    "dynamic_environment": {
+      "population": 9,
+      "selected": 3
+    },
+    "human_in_the_loop": {
+      "population": 5,
+      "selected": 1
+    },
+    "implicit_state_inference": {
+      "population": 35,
+      "selected": 8
+    },
+    "multi_item_state_tracking": {
+      "population": 30,
+      "selected": 6
+    },
+    "multimodal_editing": {
+      "population": 24,
+      "selected": 7
+    },
+    "streaming_interaction": {
+      "population": 5,
+      "selected": 1
+    },
+    "tutorial_following": {
+      "population": 18,
+      "selected": 3
+    },
+    "visual_spatial_precision": {
+      "population": 38,
+      "selected": 11
+    }
+  },
+  "repetitions": "must be frozen before launch; candidate does not imply repeats or official ranking",
+  "run_order": [
+    "082",
+    "048",
+    "026",
+    "065",
+    "043",
+    "058",
+    "077",
+    "104",
+    "021",
+    "063",
+    "080",
+    "002",
+    "042",
+    "031",
+    "072",
+    "056",
+    "092",
+    "029",
+    "054",
+    "106"
+  ],
+  "sample_size": 20,
+  "schema_version": 1,
+  "seed": "lop-osworld-v2.1-offline82-cohort20-v1",
+  "selection_manifest_digest": "ee5f560d416961df1259caf5eecb25b456724fea97292ba96cc7a7c9eabc369e",
+  "source_policy": "pinned public ID and challenge-category JSON only; no task instructions/solutions/evaluators/progress/credential/readiness filtering",
+  "source_sha256": {
+    "conflict_disambiguation.json": "197f676c9895561d0674b24120f3e80119c82b63aca243ef49cc4f7c9b96d252",
+    "cross_source_reasoning.json": "6c4491a3dc23d26285bc9187e5275eeb86ccde1a676469f56102a2e679df4b33",
+    "dynamic_environment.json": "f3a5ce10f71293b93a697ddc7323cffc9f7fcb7be5469d867055fd274e40bd95",
+    "human_in_the_loop.json": "fed170e8678528ea5a1a9fbed00fc38576a0e364f84496b82065f63a012f39ba",
+    "implicit_state_inference.json": "f9d96bc77be5938e2d3e16b034183ad7b49e35ad3ac6be16d504d1c3a9c880b8",
+    "multi_item_state_tracking.json": "d242a1346218fb62c71cb919bb7ae025b040e2015afce591b586edb9610c0e9e",
+    "multimodal_editing.json": "94b6ee47115fd94b29f563ddb8d60c32b137451b80d1b8251c7259e4c4390745",
+    "streaming_interaction.json": "a0e694a2420074f52f1009c80f1ea2707f1ef00550468d1cf9e3706b50d83ca2",
+    "test_v2.json": "7f2c0f531d035dd6f5886c492b96739534385f8e5369e4c764295ad52bf6e7f4",
+    "test_v2_offline_no_internet.json": "a14975fe0972530993d634d380ba574ecbd19b730d14716a392efe02faa62257",
+    "tutorial_following.json": "19daa90471d891ea84583ced180ca30cd57d15d6abab7191a3b9cff354613b6f",
+    "visual_spatial_precision.json": "301aff20097b2b4fd9e1956eac6d925941257b01cd11405550a8850f4621d5a3"
+  },
+  "status": "candidate_not_launch_authorization",
+  "task_id_shape": "official three-digit IDs; runner task_ prefix is serialization only",
+  "task_public_labels": {
+    "002": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "multi_item_state_tracking",
+      "tutorial_following"
+    ],
+    "021": [
+      "multi_item_state_tracking",
+      "visual_spatial_precision"
+    ],
+    "026": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "dynamic_environment",
+      "human_in_the_loop",
+      "implicit_state_inference"
+    ],
+    "029": [
+      "implicit_state_inference",
+      "multi_item_state_tracking"
+    ],
+    "031": [
+      "cross_source_reasoning",
+      "multi_item_state_tracking"
+    ],
+    "042": [
+      "multimodal_editing",
+      "visual_spatial_precision"
+    ],
+    "043": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "multi_item_state_tracking"
+    ],
+    "048": [
+      "dynamic_environment",
+      "implicit_state_inference",
+      "streaming_interaction",
+      "visual_spatial_precision"
+    ],
+    "054": [
+      "multimodal_editing",
+      "visual_spatial_precision"
+    ],
+    "056": [
+      "multimodal_editing",
+      "tutorial_following",
+      "visual_spatial_precision"
+    ],
+    "058": [
+      "multimodal_editing",
+      "tutorial_following",
+      "visual_spatial_precision"
+    ],
+    "063": [
+      "visual_spatial_precision"
+    ],
+    "065": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "dynamic_environment",
+      "implicit_state_inference"
+    ],
+    "072": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "implicit_state_inference"
+    ],
+    "077": [
+      "cross_source_reasoning",
+      "visual_spatial_precision"
+    ],
+    "080": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "implicit_state_inference"
+    ],
+    "082": [
+      "implicit_state_inference"
+    ],
+    "092": [
+      "multimodal_editing",
+      "visual_spatial_precision"
+    ],
+    "104": [
+      "multimodal_editing",
+      "visual_spatial_precision"
+    ],
+    "106": [
+      "conflict_disambiguation",
+      "cross_source_reasoning",
+      "implicit_state_inference",
+      "multi_item_state_tracking",
+      "multimodal_editing",
+      "visual_spatial_precision"
+    ]
+  },
+  "tasks": [
+    "002",
+    "021",
+    "026",
+    "029",
+    "031",
+    "042",
+    "043",
+    "048",
+    "054",
+    "056",
+    "058",
+    "063",
+    "065",
+    "072",
+    "077",
+    "080",
+    "082",
+    "092",
+    "104",
+    "106"
+  ]
+}

@@ -731,7 +731,7 @@ def test_a_failed_install_carries_the_installers_own_output(
 
     The generation route runs through ``_CapturedInstall`` when no test runner
     is injected; the classic arm's own capture is covered by its argv cell and
-    the label cell above. Pinned at the subprocess seam, never a real uv.
+    the label cell above. Pinned at the shared owned-runner seam, never a real uv.
     """
     from local_operator import update as update_mod
 
@@ -740,12 +740,13 @@ def test_a_failed_install_carries_the_installers_own_output(
     _concrete_member(monkeypatch, current="0.0.1")
     monkeypatch.setattr(meshupdate, "check_published", lambda version: (True, ""))
 
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "error: No space left on device (os error 28)"
+    from local_operator import install_transaction
 
-    monkeypatch.setattr(meshupdate.subprocess, "run", lambda *a, **kw: _Proc())
+    def _captured_failure(argv: Any, *, on_output: Any, **kwargs: Any) -> int:
+        on_output("error: No space left on device (os error 28)")
+        return 1
+
+    monkeypatch.setattr(install_transaction, "run_installer", _captured_failure)
 
     def _fake_install(source: Any = None, version: str = "", runner: Any = None) -> None:
         assert runner is not None
@@ -1187,15 +1188,17 @@ def test_the_roll_starts_only_after_the_install_sweep_and_reengage(
     assert log == ["install", "sweep", "reengage", "roll"], log
 
 
-def test_the_tail_runs_under_the_pass_lock(
+def test_the_tail_releases_the_shared_install_transaction(
     devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """m5: the lock covers the WHOLE pass — the sweep dials with the lock held.
+    """Service convergence must not monopolize root while newer builds prepare.
 
-    A second flock on a second descriptor fails while the pass holds its own,
-    so a revert to the install-scoped lock (tail unlocked) turns this red.
+    Candidate registration/promotion own the common root transaction; the mesh
+    tail is convergence, not another install, and runs after release.
     """
     import fcntl
+
+    from local_operator import update
 
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
@@ -1208,7 +1211,7 @@ def test_the_tail_runs_under_the_pass_lock(
         return meshupdate.METHOD_GENERATION
 
     monkeypatch.setattr(meshupdate, "install_build", _install)
-    lock_path = server_a.root / "network" / "update.lock"
+    lock_path = update.stable_root() / "install.lock"
     held: list[bool] = []
 
     def _sweep(root: Any, *, budget: Any = None) -> tuple[list[Any], str]:
@@ -1229,7 +1232,7 @@ def test_the_tail_runs_under_the_pass_lock(
     monkeypatch.setattr(meshupdate, "roll_services_after_reply", lambda: None)
     detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
     assert detail["state"] == "done", detail
-    assert held == [True], held
+    assert held == [False], held
 
 
 def test_the_tail_degrades_when_the_slow_budget_is_nearly_spent(

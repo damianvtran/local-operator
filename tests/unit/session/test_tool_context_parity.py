@@ -282,6 +282,19 @@ def _session_for(tmp_path, transcript_dir) -> Session:
     )
 
 
+def test_send_receipts_have_explicit_per_turn_host_scope(tmp_path) -> None:
+    session = _session_for(tmp_path, tmp_path / "sessions" / "scope-test")
+    first = session._build_tool_context()
+    next_turn = session._build_tool_context()
+    assert first.send_turn_id and next_turn.send_turn_id
+    assert first.send_turn_id != next_turn.send_turn_id
+    assert first.confirmed_send_receipts is not next_turn.confirmed_send_receipts
+    # Eval's request-owned bridge shallow-copies context, not attention scope.
+    assert first.model_copy().confirmed_send_receipts is first.confirmed_send_receipts
+    assert "confirmed_send_receipts" not in first.model_dump()
+    assert ToolContext().send_turn_id is None
+
+
 def test_scratchpad_dir_follows_the_transcript_directory(tmp_path) -> None:
     """``scratchpad://`` resolves under the session's OWN directory, so the value
     is derived per turn rather than accepted as a constructor argument — a

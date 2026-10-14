@@ -26,7 +26,7 @@ from lop_osworld_v2_adapter.providers.base import (
     GUEST_TYPE_MS_PER_CHAR,
 )
 
-from local_operator.computer_input import paste_text_source
+from local_operator.computer_input import drag_source, paste_text_source
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.protocol import (
     ActionBatch,
@@ -34,6 +34,7 @@ from local_operator.evaluation.protocol import (
     ClickAction,
     ComputerAction,
     DoubleClickAction,
+    DragAction,
     FinishAction,
     FrameGeometry,
     KeyAction,
@@ -63,11 +64,15 @@ MAX_TYPE_CHARS = int(
 # Admission is independent of neutral data parsing and runs for the ENTIRE
 # batch before a provider sees any statement, so a click cannot precede a
 # silently lossy Unicode TypeAction. The adapter metadata uses this same surface.
+# ``drag=True`` is advertised here because this adapter ships the guest helper
+# and its release tests; a backend without that translator must leave it false
+# and will then refuse drag batches at admission.
 ACTION_SURFACE = ActionSurface(
     paste_text=True,
     type_text_mode="ascii",
     ask_user=True,
     max_type_chars=MAX_TYPE_CHARS,
+    drag=True,
 )
 
 # Our named keys (protocol._NAMED_KEYS) -> pyautogui key names. pyautogui
@@ -132,8 +137,8 @@ def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None
     caller, which needs the batch context) and ``AskUserAction`` (handled by
     ``ask_user_exchange``, not the guest).
 
-    ``geometry`` is required for pointer actions (click/double_click/scroll)
-    and ignored for the rest.
+    ``geometry`` is required for pointer actions (click/double_click/scroll/
+    drag) and ignored for the rest.
     """
 
     if isinstance(action, ClickAction):
@@ -147,6 +152,16 @@ def compile_action(action: ComputerAction, geometry: FrameGeometry | None = None
         # button is Literal["left"] by type (protocol.py:408): no translation
         # needed, and emitting it explicitly documents the closure.
         return f"pyautogui.click(x={nx}, y={ny}, clicks=2, interval=0.1, button='left')"
+
+    if isinstance(action, DragAction):
+        assert geometry is not None
+        # BOTH endpoints map through the SAME geometry, exactly as every other
+        # pointer action: a hand-rolled second conversion here is the
+        # divergence the module docstring forbids. The statement is the shared
+        # guest helper; the adapter never touches a pointer itself.
+        start = _native_point(geometry, action.start_x, action.start_y)
+        end = _native_point(geometry, action.end_x, action.end_y)
+        return drag_source(start[0], start[1], end[0], end[1], action.button, action.duration_ms)
 
     if isinstance(action, PasteTextAction):
         return paste_text_source(action.text, [_key_name(key) for key in action.keys])

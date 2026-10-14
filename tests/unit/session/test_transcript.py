@@ -12,7 +12,9 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    CapturedFrame,
     CustomMessage,
+    ImageContent,
     Message,
     TextContent,
     ToolCall,
@@ -99,6 +101,59 @@ def test_the_stt_transcript_type_matches_the_sidecar_writer():
     from local_operator.stt.sidecar import STT_TRANSCRIPT_CUSTOM_TYPE as writer
 
     assert STT_TRANSCRIPT_CUSTOM_TYPE == writer == "stt_transcript_v1"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
+    """A busy-turn checkpoint is durable WITH the batch it describes.
+
+    The whole point of the checkpoint argument is that there is never a
+    committed batch without a checkpoint, so the row count before and after is
+    exactly one write; the cold reader sees the record on disk.
+    """
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        read_latest_custom,
+    )
+
+    assistant = Message.assistant("did the thing")
+    tool_result = Message.user("tool result")
+    checkpoint = {
+        "session_id": "s",
+        "turn_id": "t",
+        "committed_message_ids": [assistant.id, tool_result.id],
+        "completed_effects": [{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+        "pending_effect": {},
+        "phase": "resume",
+    }
+    rows = await transcript.append_messages([assistant, tool_result], checkpoint=checkpoint)
+    # Two message rows plus exactly one checkpoint row, one atomic write.
+    assert len(rows) == 3 and rows[-1].payload["custom_type"] == CHECKPOINT_CUSTOM_TYPE
+    assert len(transcript.path.read_text().splitlines()) == 3
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    # ``read_latest_custom`` is ``dict | None`` (it answers None when no row of
+    # that type exists). The old form relied on a bare subscript that pyright
+    # rejects; the assert pins non-None so the reads below narrow.
+    assert on_disk is not None
+    assert on_disk["committed_message_ids"] == [assistant.id, tool_result.id]
+    assert on_disk["phase"] == "resume"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_only_write_is_allowed_and_is_bookkeeping(transcript):
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        is_bookkeeping_entry,
+        read_latest_custom,
+    )
+
+    rows = await transcript.append_messages(
+        [], checkpoint={"session_id": "s", "turn_id": "t", "phase": "deferred"}
+    )
+    assert len(rows) == 1 and is_bookkeeping_entry(rows[0])
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    assert on_disk is not None, "the bookkeeping row must be durable on disk"
+    assert on_disk["phase"] == "deferred"
 
 
 @pytest.mark.asyncio
@@ -1023,6 +1078,149 @@ async def test_latest_custom_backward_scan(transcript):
     await transcript.append_custom("other", {"v": 99})
     assert transcript.latest_custom("wake_schedules") == {"v": 2}
     assert transcript.latest_custom("missing") is None
+
+
+def _captured_frame(*, stream: str, revision: str) -> CapturedFrame:
+    return CapturedFrame(stream_id=stream, revision_id=revision, producer_scope="mcp:sess:cam")
+
+
+def _capture_images(history) -> list[ImageContent]:
+    return [
+        block
+        for message in history
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_reapplies_the_capture_elision_frontier(transcript):
+    """The recorded frontier elides the SAME superseded captures on resume."""
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "SUMMARY",
+        first.id,
+        100,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "1", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1, "the superseded capture stays elided on resume"
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "2"
+
+
+@pytest.mark.asyncio
+async def test_resume_without_or_with_malformed_frontier_changes_nothing(transcript):
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction("SUMMARY", first.id, 100)  # no frontier
+    plain = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY2", first.id, 100, preserve_data={"capture_elisions": {"applied": -1}}
+    )
+    malformed = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY3",
+        first.id,
+        100,
+        preserve_data={"capture_elisions": {"applied": 1, "identities": "nope"}},
+    )
+    malformed_ids = transcript.build_llm_history()
+
+    assert len(_capture_images(plain)) == 2
+    assert len(_capture_images(malformed)) == 2
+    assert len(_capture_images(malformed_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_a_record_that_names_no_present_block(transcript):
+    """An address that matches nothing in the segment elides nothing."""
+    first = await transcript.append_message(
+        Message.user(
+            "only",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "S",
+        first.id,
+        10,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "9", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "1"
 
 
 @pytest.mark.asyncio

@@ -237,9 +237,10 @@ def provider_rows(provider: str, config: Path) -> list[Any]:
     try:
         store = open_store(config)
         if store is None:
-            return []
+            return _encrypted_provider_rows(config, provider=provider)
         try:
-            return list(store.list_credentials(provider))
+            rows = list(store.list_credentials(provider))
+            return rows or _encrypted_provider_rows(config, provider=provider)
         finally:
             close_quietly(store)
     except Exception:  # noqa: BLE001 — an unreadable store is "no credential here"
@@ -389,12 +390,41 @@ def credential_here(key: str, config: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _encrypted_provider_rows(config: Path, *, provider: str = "") -> list[Any]:
+    """Keyless provider descriptors via the trusted reserved-namespace seam.
+
+    These are inventory descriptors, NOT persisted auth rows and never OAuth
+    identities. Keep generic secret enumeration closed to LOP_PROVIDER_: only
+    registry-declared provider names can become offers. No bearer is exported.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.providers.registry import (
+        credential_file_names,
+        credential_provider_id,
+        known_provider_ids,
+        stored_provider_env_keys,
+    )
+
+    names = stored_provider_env_keys(config)
+    providers = {
+        credential_provider_id(candidate)
+        for candidate in known_provider_ids()
+        if names.intersection(credential_file_names(candidate))
+    }
+    return [
+        SimpleNamespace(provider=candidate, credential_type="api_key", data={})
+        for candidate in sorted(providers)
+        if not provider or candidate == credential_provider_id(provider)
+    ]
+
+
 def _strict_provider_rows(config: Path) -> list[Any]:
     """Every credential row, or ``[]`` when no store exists — raising when it exists
     and cannot be read (see :class:`OfferEnumerationError`)."""
     database = config / "auth.db"
     if not database.exists():
-        return []
+        return _encrypted_provider_rows(config)
     try:
         from local_operator.network import readiness as readiness_mod
 
@@ -402,7 +432,11 @@ def _strict_provider_rows(config: Path) -> list[Any]:
         if store is None:  # pragma: no cover — exists() said otherwise; belt and braces
             return []
         try:
-            return list(store.list_credentials(None))
+            rows = list(store.list_credentials(None))
+            present = {row.provider for row in rows}
+            return rows + [
+                row for row in _encrypted_provider_rows(config) if row.provider not in present
+            ]
         finally:
             close_quietly(store)
     except Exception as exc:  # noqa: BLE001 — the caller distinguishes this from "no store"

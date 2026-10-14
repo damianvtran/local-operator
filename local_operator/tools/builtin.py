@@ -5531,6 +5531,130 @@ def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
     return ""
 
 
+#: How many ancestors :func:`_internal_url_for_path` may climb looking for a
+#: ``SKILL.md``/``GUIDE.md`` body (R5). The resource layout is shallow
+#: (``<root>/<name>/...``, grouped libraries add a level or two); sixteen
+#: covers every real layout with margin while bounding the per-read stat
+#: cost and the stray-ancestor shaping surface. See that function's docstring.
+_INTERNAL_URL_ANCESTOR_LIMIT = 16
+
+
+def _internal_url_for_path(path: Path) -> str | None:
+    """The ``skill://``/``guide://`` URL a filesystem path IS, or ``None``.
+
+    WHY THIS EXISTS (Fix A, measured 2026-10): the internal-URL branch shapes
+    an 82 KB skill to ~7 KB (head + complete heading outline), but the same
+    bytes reached by their on-disk path bypassed shaping entirely. The file
+    path is the instinctive spelling — transcripts show agents reading
+    ``~/.claude/skills/<name>/SKILL.md`` directly after a shaped
+    ``skill://`` read, paying the 8 KiB clamp instead of the outline and,
+    worse, losing the outline's guarantee that every operative heading stays
+    visible. Deriving the URL here lets the filesystem branch reuse the
+    internal shape instead of growing a second one.
+
+    The name comes from the body file's own frontmatter (``name:``) when it
+    declares one, falling back to the resource directory name — the same
+    fallback discovery uses. An ancestor walk bounded to
+    :data:`_INTERNAL_URL_ANCESTOR_LIMIT` levels finds the body file for a
+    reference file; reference files map to ``<url>/<relative path>`` so the
+    shaped footer advertises the same expansion the resolver would serve.
+
+    WHY the bound (R5): the resource layout is ``<root>/<name>/...`` — a
+    body file lives in the resource directory itself or a shallow grouping
+    parent, never arbitrarily deep. An unbounded walk to ``/`` would pay two
+    stats per level on every qualifying read and, worse, let a stray
+    ``SKILL.md``/``GUIDE.md`` in any distant ancestor (home dir, repo root)
+    silently shape — and skill/guide-exempt — an unrelated ``.md`` read
+    beneath it. Sixteen levels covers grouped libraries
+    (``<root>/<group>/<name>/references/...``) with wide margin while keeping
+    that stray-ancestor surface small; it does not eliminate it, so callers
+    must not treat a hit as proof of membership — only as the naming the
+    on-disk layout claims.
+
+    WHY case-insensitive matching (R3): detection folds case, so the body
+    file actually FOUND on disk (its real path, exactly as listed) is the
+    file whose frontmatter is read. Reconstructing a name — the old
+    ``body_file.upper()`` — opens ``SKILL.MD`` for an on-disk ``skill.md``:
+    that resolves only on case-insensitive filesystems and silently loses
+    the declared ``name:`` (and, for a reference, the whole resource) on
+    case-sensitive ones such as Linux CI. Ancestor probing is likewise
+    case-insensitive, listing each ancestor once instead of probing
+    exact-case names.
+
+    CONSTRAINT: this only NAMES the document for shaping and for the
+    pruning exemption (``skill://`` and ``guide://`` are both exempt — see
+    ``compaction/pruning.py:_is_prunable``). The result still carries
+    ``details['path']`` (the real path compaction supersedes on);
+    ``url`` is additive.
+    """
+    name_folded = path.name.casefold()
+    body_kind = (
+        "skill" if name_folded == "skill.md" else "guide" if name_folded == "guide.md" else None
+    )
+    body_path: Path | None = None
+    resource_dir: Path | None = None
+    scheme: str | None = None
+    if body_kind is not None:
+        # The file itself is the body: read ITS frontmatter, by its real path.
+        body_path = path
+        resource_dir = path.parent
+        scheme = body_kind
+    else:
+        # A reference file: its resource is the nearest ancestor holding a
+        # body file. One directory listing per level (bounded above) finds
+        # either kind case-insensitively and yields the body's real path.
+        for ancestor in list(path.parents)[:_INTERNAL_URL_ANCESTOR_LIMIT]:
+            try:
+                entries = list(ancestor.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                folded = entry.name.casefold()
+                if folded not in ("skill.md", "guide.md"):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                body_path = entry
+                resource_dir = ancestor
+                scheme = "skill" if folded == "skill.md" else "guide"
+                break
+            if body_path is not None:
+                break
+        if body_path is None or resource_dir is None or scheme is None:
+            return None
+    assert body_path is not None and resource_dir is not None and scheme is not None
+    declared: str | None = None
+    try:
+        head = body_path.read_bytes()[:4096].decode("utf-8", errors="replace")
+    except OSError:
+        head = ""
+    if head.startswith("---"):
+        for line in head.splitlines()[1:]:
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "name" and value.strip():
+                declared = value.strip().strip('"').strip("'")
+                break
+    resource_name = declared or resource_dir.name
+    if not resource_name:
+        return None
+    url = f"{scheme}://{resource_name}"
+    if path.parent != resource_dir:
+        try:
+            url += "/" + path.relative_to(resource_dir).as_posix()
+        except ValueError:
+            return None
+    elif body_kind is None:
+        # A sibling of the body file (same directory, different file): it is
+        # part of the resource but is not the body itself.
+        url += f"/{path.name}"
+    return url
+
+
 def _shape_internal_document(
     content: str, target: str, context: ToolContext | None
 ) -> tuple[str, dict[str, Any] | None]:
@@ -8545,6 +8669,29 @@ async def _read_path(
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
+
+    # A skill/guide file read by its ON-DISK path gets the internal shape,
+    # not the plain 8 KiB clamp (Fix A; see _internal_url_for_path). Only a
+    # whole-file, non-raw read qualifies — a range or raw=true is the
+    # caller explicitly asking for exact bytes, and shaping it would break
+    # the expansion calls the shaped footer itself advertises. The shaped
+    # body spills the full text, so nothing becomes unreachable: the footer
+    # names a range into the spill handle, exactly like a skill:// read.
+    if not params.range and not params.raw:
+        internal_url = _internal_url_for_path(path)
+        if internal_url is not None:
+            body, spill_details = _shape_internal_document(text, internal_url, context)
+            if spill_details is not None or body != text:
+                return _text(
+                    tool_call_id,
+                    "read",
+                    body,
+                    details={
+                        "path": str(path),
+                        "url": internal_url,
+                        **(spill_details or {}),
+                    },
+                )
 
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
@@ -12707,6 +12854,27 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
     return f"next at {due}{every}{fired}"
 
 
+def _pending_wake_ids(scheduler: WakeSchedulerProtocol) -> frozenset[str]:
+    """The handles the scheduler is holding for a successor, or the empty set.
+
+    A probed OPTIONAL capability (``WakeSchedulerProtocol`` documents it): a host
+    without a live reservation concept simply cannot answer, and "no pending" is
+    the honest reading of that — never a fabricated phase. Failure is swallowed
+    the same way: an unreadable phase must not cost the model its listing.
+    """
+    probe = getattr(scheduler, "pending_ids", None)
+    if not callable(probe):
+        return frozenset()
+    # ``getattr`` erases the capability's type; the ``cast`` names what the probe
+    # returns so ``frozenset(...)`` type-checks. Runtime behaviour is unchanged.
+    probe = cast("Callable[[], Iterable[str]]", probe)
+    try:
+        return frozenset(probe())
+    except Exception:  # noqa: BLE001 — a listing must survive a broken phase probe
+        logger.debug("wake pending_ids probe failed; listing rows as ordinary", exc_info=True)
+        return frozenset()
+
+
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
     # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
     # 5): one shared filter with the panel and the CLI
@@ -12723,7 +12891,19 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
             useless=True,
             details={"useless": True},
         )
-    lines = [f'- {s.id}: "{s.message}" {_wake_due_label(s)}' for s in schedules]
+    # Pending handles render EXPLICITLY, not as an imminent fire. A held row is a
+    # schedule this runtime still owns for a successor to run (a departing fire
+    # reserved its occurrence); the timer here will NOT fire it, so "next at
+    # <soon>" would promise a delivery that is not coming from this list. The
+    # capability is probed, not required: a scheduler that cannot report a live
+    # reservation (a snapshot facade, a reduced host) yields the empty set and
+    # every row reads as ordinary.
+    pending = _pending_wake_ids(scheduler)
+    lines = [
+        f'- {s.id}: "{s.message}" '
+        + ("awaiting runtime handover" if s.id in pending else _wake_due_label(s))
+        for s in schedules
+    ]
     return _text(tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines))
 
 
@@ -13543,6 +13723,10 @@ class SendParams(BaseModel):
         default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
     )
+    repeat: bool = Field(
+        default=False,
+        description=("Repeat a confirmed same-turn send only on explicit user request."),
+    )
     model: str | None = Field(
         default=None,
         description=(
@@ -13970,6 +14154,12 @@ async def _execute_send_peer(
     return _text(tool_call_id, "send", text, details=details)
 
 
+# A pathological attention turn must not retain every unique payload forever.
+# Capacity/size overflow falls back to actual sends, never a delivery refusal.
+_CONFIRMED_SEND_CACHE_MAX_ENTRIES = 64
+_CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES = 16 * 1024
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -14178,9 +14368,51 @@ async def execute_send(
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
+    target_sid = record.session_id if record is not None else cold_session_id
+    receipt_key = None
+    if (
+        context is not None
+        and context.send_turn_id
+        and context.session_id.strip()
+        and target_sid.strip()
+        and not params.repeat
+    ):
+        # Resolve WHO before lookup: raw names/pids can refer to different
+        # sessions. Exact body and effective mode are intent, not fuzzy matches.
+        # Patience is also an act; changing it must not silently reuse an old wait.
+        receipt_key = (
+            context.send_turn_id,
+            context.session_id or "",
+            target_sid,
+            message,
+            mode,
+            bool(params.wake) if not params.now else False,
+            patience_ms,
+        )
+        previous = context.confirmed_send_receipts.get(receipt_key)
+        if previous is not None:
+            return _text(
+                tool_call_id,
+                "send",
+                "duplicate suppressed — no new delivery, wake or patience wait. "
+                f"Original confirmed receipt: {previous.text}",
+                details={
+                    # Historical proof is not this call's delivery/wake outcome.
+                    # Current-result consumers must never promote it to a new act.
+                    "original_receipt": {
+                        "text": previous.text,
+                        "details": previous.model_copy(deep=True).details or {},
+                    },
+                    "duplicate_suppressed": True,
+                    "original_tool_call_id": previous.tool_call_id,
+                },
+            )
     sender = await _send_sender_identity(context)
 
-    from local_operator.mobile.peer_send import deliver_peer_message_outcome
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        deliver_peer_message_outcome,
+    )
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
@@ -14281,7 +14513,29 @@ async def execute_send(
         clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
-    return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    result = _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    # Only the confirmed state is reusable. Partial/uncertain receipts and
+    # refusals must allow a real retry; model switches and mesh calls bypass
+    # this local boundary entirely. Send is exclusive in the tool executor.
+    if (
+        receipt_key is not None
+        and context is not None
+        and outcome.state == DELIVERY_DELIVERED
+        and len(context.confirmed_send_receipts) < _CONFIRMED_SEND_CACHE_MAX_ENTRIES
+        and len(message) + len(result.text) <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES
+    ):
+        try:
+            entry_bytes = len(message.encode("utf-8")) + len(
+                result.model_dump_json().encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            # Receipt reuse is optional; serialization must never turn an
+            # already confirmed delivery into a reported failure.
+            pass
+        else:
+            if entry_bytes <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES:
+                context.confirmed_send_receipts[receipt_key] = result.model_copy(deep=True)
+    return result
 
 
 async def _arm_send_patience(
@@ -16955,10 +17209,22 @@ def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[
             ("--name", params.name),
             ("--team", params.team),
             ("--profile", params.profile),
-            ("--model", params.model),
         ):
             if value and value.strip():
                 argv += [flag, value.strip()]
+        model = (params.model or "").strip()
+        if model:
+            # The CLI takes hosting separately. Leaving a qualified selector in
+            # --model pairs it with the configured provider; split only once so
+            # aggregator model IDs keep their own vendor/model slash. Bare IDs
+            # intentionally retain the configured hosting, unlike remote spawns.
+            from local_operator.providers.failover import parse_selector
+
+            provider, model_id = parse_selector(model)
+            if "/" in model:
+                argv += ["--hosting", provider.strip(), "--model", model_id.strip()]
+            else:
+                argv += ["--model", model]
     argv.append("--")
     argv.append(params.prompt or "")
     return argv
@@ -20282,6 +20548,34 @@ def _surface_host_or_first(pinned: str, *, ui: bool) -> str:
     return HOST_UI_PREFIX if ui else HOST_BRIDGE_PREFIX
 
 
+def _pinned_host_for_access(context: ToolContext | None) -> str:
+    """The host a surface-free access action must use, or "" for none.
+
+    A fresh `open` that failed with origin-not-allowed is the ordinary reason
+    `request_access`/`await_access`/`cancel_access` arrive with no minted tab:
+    the operator has to approve the origin the open was refused on. The decision
+    of WHICH host that open was targeted at is durable
+    (`resource.pinned_host()`), and the approval must be raised on THAT host —
+    not re-picked from availability, which can land the prompt on a different
+    peer than the one the refused navigation belongs to (review R2 code GCP
+    neighbour: approval routing before tab creation).
+
+    Why the durable pin and not availability: a refused fresh navigation saves
+    its actual transport in `pending_access_host`; a resumed/refused owned scope
+    also carries its host in the record. Availability cannot choose which jar
+    owes an approval, and never confers ownership of a foreign tab.
+    `_surface_host_or_first` still handles the no-pin case, so a session with
+    no durable host keeps the availability order.
+    """
+    resource = getattr(getattr(context, "browser", None), "resource", None)
+    if resource is None:
+        return ""
+    try:
+        return resource.pinned_host()
+    except (AttributeError, RuntimeError):
+        return ""
+
+
 def _non_cmux_host_hint(*, ui: bool, bridge: bool) -> str:
     """Which non-cmux host to use, and how to reach it — ONE spelling.
 
@@ -20471,7 +20765,8 @@ def _backend_unavailable_result(tool_call_id: str, backend: str) -> ToolResult:
     remedy = {
         "ui": (
             "the Local Operator desktop app's browser tab is not reachable right now — "
-            "open a browser tab in the desktop app (or restart it), then retry"
+            "check Browser in the desktop app; if it offers Try again, use that, "
+            "then retry this tool. A missing ready host does not mean the app is closed"
         ),
         "extension": (
             "the paired Local Operator browser extension is not reachable right now — "
@@ -20687,6 +20982,17 @@ async def _bridge_open(
             client=client,
         )
     if problem is not None:
+        resource = getattr(state, "resource", None)
+        if (
+            resource is not None
+            and created_new
+            and not adopting
+            and (problem.details or {}).get("error_code") == "origin_not_allowed"
+        ):
+            # An approval obligation exists even when no tab was minted. Keep
+            # its actual transport across recovery/resume; this is routing
+            # metadata, NOT a capability or permission grant.
+            resource.record["pending_access_host"] = prefix
         pending = (problem.details or {}).pop("cleanup_surface", "")
         if isinstance(pending, str) and NON_CMUX_SURFACE_HANDLE_RE.fullmatch(pending):
             state.surface_id = pending
@@ -20700,6 +21006,9 @@ async def _bridge_open(
             f"{_host_label(prefix)} opened a tab but returned no valid handle",
         )
     state.surface_id = surface
+    resource = getattr(state, "resource", None)
+    if resource is not None:
+        resource.record.pop("pending_access_host", None)
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
     # Name the host that actually served the open (§16.1): the caller must be
@@ -22785,6 +23094,20 @@ async def execute_browser(
         # and of the session's own RECORD first, which is the one answer a
         # resumed session has (see `_ownership_lane_host`).
         lane_host = await _ownership_lane_host(state, resource)
+        # A fresh explicit navigation must reconcile on the host it will dial,
+        # not the availability-first peer. Held/adopted capabilities still win;
+        # an unavailable or invalid hint is refused by the normal dispatcher.
+        hinted = str(args.get("backend", "")).strip().lower()
+        if (
+            str(args.get("action", "")).strip().lower() == "open"
+            and not state.surface_id
+            and not str(args.get("tab", "")).strip()
+            and not resource.pinned_host()
+        ):
+            if hinted == "extension" and await bridge_browser_reachable():
+                lane_host = HOST_BRIDGE_PREFIX
+            elif hinted == "ui" and await ui_browser_reachable():
+                lane_host = HOST_UI_PREFIX
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
@@ -22815,9 +23138,8 @@ async def execute_browser(
     async with resource.lock:
         try:
             resource.initialize()
-            if not resource.recovered:
-                await resource.recover()
-                state.surface_id = str(resource.record.get("surface_id", ""))
+            await resource.ensure_recovered()
+            state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
             # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
             # here used to render a recovery timeout as the bare daemon message
@@ -22945,6 +23267,8 @@ async def execute_browser(
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
+                if action == "cancel_access" and not result.is_error:
+                    resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
                 elif access_state and resource.record.get("retention") == "pending site approval":
@@ -23058,7 +23382,7 @@ async def _execute_browser(
     # permission model at all, so it degrades with the same typed error as
     # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
-        pinned = _host_of_surface(state.surface_id)
+        pinned = _host_of_surface(state.surface_id) or _pinned_host_for_access(context)
         if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
@@ -23570,6 +23894,8 @@ CONSOLE_SURFACE_PREFIX = "con:"
 #: and parameter docs use it.
 CONSOLE_ACTIONS: tuple[str, ...] = (
     "list",
+    "resources",
+    "cleanup",
     "create",
     "status",
     "read",
@@ -23584,7 +23910,7 @@ CONSOLE_ACTIONS: tuple[str, ...] = (
 #: The methods whose approval tier is `read`; every other console method is
 #: `exec` (§11.1). A frozenset rather than a list because the question asked of it
 #: is membership only, and the tier hook runs per call.
-CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot"})
+CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot", "resources"})
 
 #: Guard on a scrollback window. The app clamps further; this bounds what ONE
 #: tool result can carry, because a paged read that returns 5,000 lines costs more
@@ -23701,7 +24027,7 @@ class ConsoleParams(BaseModel):
     surface: str = Field(
         default="",
         description="The handle from 'list'/'create' (e.g. 'con:1:9f2a'); required for every "
-        "method but 'list'/'create'.",
+        "method but 'list'/'create'/'resources'/'cleanup'.",
     )
     cwd: str = Field(
         default="", description="'create': the working directory (default: the user's home)."
@@ -23800,6 +24126,12 @@ def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[s
         if params.rows is not None:
             target["rows"] = params.rows
 
+    if method == "resources":
+        return {}, ""
+    if method == "cleanup":
+        # Cleanup is owner-scoped, completed-only and preserves retained files.
+        # Never accept a caller-supplied owner or let turn-end imply a kill.
+        return {"session_id": session_id}, ""
     if method == "list":
         # The session filter is the CALLER's own session, always. It is not a
         # parameter: a surface belongs to the session that created it, another
@@ -24024,7 +24356,10 @@ def build_console_tool(context: ToolContext | None) -> AgentTool | None:
             "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
             "ordinary commands: `bash` returns output directly. The surface handle names this "
             "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
-            "asking them to repeat their output. Playbook: `guide://console`."
+            "asking them to repeat their output. `resources` gives aggregate capacity; `cleanup` "
+            "releases only this owner's completed surfaces, preserving retained logs. "
+            "After exit, read/status acknowledges completion for protected cleanup. "
+            "Never close live idle/auth/REPL work at turn end. Playbook: `guide://console`."
         ),
         parameters=ConsoleParams.model_json_schema(),
         # The tool's tier is the HIGHEST of its ops (create/input/keys/resize/
@@ -24200,6 +24535,12 @@ def _console_status_text(result: dict[str, Any]) -> str:
         lines.append(f"idle: {float(idle) / 1000:.1f}s since the last output")
     elif result.get("last_output_at") or result.get("last_activity"):
         lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        lines.append(
+            f"grid degraded: {dropped_grid} parser bytes omitted under resource "
+            "pressure; retained history may contain them"
+        )
     if result.get("cursor") is not None:
         lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
@@ -24238,6 +24579,9 @@ def _console_read_text(result: dict[str, Any]) -> str:
         footer.append(f"cursor {_console_cursor_text(cursor)}")
     if result.get("truncated"):
         footer.append("truncated by the app")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        footer.append(f"grid degraded: {dropped_grid} parser bytes omitted under resource pressure")
     if result.get("live") is False:
         footer.append("not live: this is the retained history of a surface whose app has gone")
     tail = " [stdout and stderr are one pty stream]"
@@ -24470,7 +24814,7 @@ async def execute_console(
             f"{', '.join(CONSOLE_ACTIONS)})",
         )
     surface = params.surface.strip()
-    if method not in ("list", "create"):
+    if method not in ("list", "create", "resources", "cleanup"):
         if not surface:
             return _error(
                 tool_call_id,
@@ -24481,7 +24825,7 @@ async def execute_console(
         if refusal:
             return _error(tool_call_id, "console", refusal)
     session_id = str(getattr(context, "session_id", "") or "").strip()
-    if method in ("list", "create") and not session_id:
+    if method in ("list", "create", "cleanup") and not session_id:
         # A surface is keyed by the session that owns it, so a create with no
         # session would make a surface nobody can list or read. Names the reason
         # rather than sending an empty id the app would have to guess about.
@@ -24492,6 +24836,10 @@ async def execute_console(
             "run the call from a session rather than from a bare tool context.",
         )
     wire, problem = _console_wire_params(params, session_id)
+    # Additive identity for the shared lifecycle fence. Older hosts ignore it;
+    # current hosts refuse a different owner before reading/signalling a surface.
+    if "surface" in wire and session_id:
+        wire["session_id"] = session_id
     if problem:
         return _error(tool_call_id, "console", problem)
     if method == "input":
@@ -24504,6 +24852,7 @@ async def execute_console(
         CONSOLE_ABSENT_COPY,
         CONSOLE_FEATURE_OFF_COPY,
         ConsoleHostClient,
+        aggregate_console_metrics,
         console_error_text,
     )
     from local_operator.ui_console.state import Liveness
@@ -24519,6 +24868,17 @@ async def execute_console(
         return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
 
     client = ConsoleHostClient()
+    if (
+        method in ("resources", "cleanup")
+        and f"console_{method}" not in client.capabilities().methods
+    ):
+        return _error(
+            tool_call_id,
+            "console",
+            "This desktop app does not support console capacity/cleanup methods yet. "
+            "Update the desktop app; its existing console methods remain available. "
+            "No global listing or automatic close was attempted.",
+        )
     try:
         result = await client.call(f"console_{method}", wire)
     except BridgeUnreachable as exc:
@@ -24526,6 +24886,25 @@ async def execute_console(
     except BridgeError as exc:
         return _error(tool_call_id, "console", console_error_text(exc))
 
+    if method in ("resources", "cleanup"):
+        # New host methods are additive. Older hosts return unsupported_method
+        # through the existing typed error path; never substitute a global list.
+        if method == "resources":
+            projected = aggregate_console_metrics(result)
+        else:
+            projected = {
+                key: value
+                for key in ("released", "protected", "running")
+                if isinstance(value := result.get(key), int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+        return _text(
+            tool_call_id,
+            "console",
+            json.dumps(projected, separators=(",", ":")),
+            details=projected,
+        )
     if method == "list":
         surfaces = result.get("surfaces") if isinstance(result, dict) else None
         return _text(
@@ -28017,7 +28396,35 @@ async def _execute_hub_parent(
         if deliveries
         else f"{params.op}: nothing to do"
     )
-    lines = [header, *_hub_receipt_lines(deliveries), *(f"- {error}" for error in errors)]
+    receipt_lines = _hub_receipt_lines(deliveries)
+    delivery_states = []
+    if params.op == "send" and callable(getattr(comms, "roster_pass", None)):
+        # Queue acceptance is not execution: a settled child can retain its
+        # aside queue. Read the existing lifecycle/alias authority once rather
+        # than inventing liveness from a receipt or starting a new actor.
+        snapshot = comms.roster_pass()
+        for index, delivery in enumerate(deliveries):
+            node = snapshot.node_for(delivery.job_id)
+            if node is not None and node.status in {
+                "completed",
+                "paused",
+                "failed",
+                "cancelled",
+                "gone",
+                "interrupted",
+            }:
+                accepted = (
+                    "queued for next resume" if delivery.outcome != "failed" else "delivery refused"
+                )
+                receipt_lines[index] = (
+                    f"- {delivery.label} ({node.job_id}): child is {node.status}; {accepted}; "
+                    "not running — no work started. Resume existing history explicitly with "
+                    f"hub op='resume' to='{node.job_id}' and the work message."
+                )
+                delivery_states.append(
+                    {"job_id": node.job_id, "status": node.status, "resume_required": True}
+                )
+    lines = [header, *receipt_lines, *(f"- {error}" for error in errors)]
     return _text(
         tool_call_id,
         "hub",
@@ -28026,6 +28433,7 @@ async def _execute_hub_parent(
             "op": params.op,
             "job_ids": ids,
             "acted": len(acted),
+            **({"delivery_states": delivery_states} if delivery_states else {}),
             # Mirrored into details as well as the flag: every other useless
             # site in this module carries the key, and compaction's pruning
             # pass reads it from there.

@@ -524,7 +524,14 @@ async def test_peer_order_never_uses_receiver_index(tmp_path: Path, monkeypatch)
     bridge = DesktopSessionBridge(tmp_path, row.id, str(tmp_path), remote_row=row)
 
     async def legacy_peer(**kwargs):
-        return {"entries": [], "has_more": False, "cursor_missing": False}
+        assert kwargs["journal_order"] is True
+        assert kwargs["order_ids"] == ["receiver-row"]
+        return {
+            "entries": [],
+            "has_more": False,
+            "cursor_missing": False,
+            "journal_order_state": "unsupported",
+        }
 
     monkeypatch.setattr(bridge, "_remote_history", legacy_peer)
     unknown = await bridge.history(journal_order=True, order_ids=["receiver-row"])

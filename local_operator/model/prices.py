@@ -164,6 +164,15 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
     "alibaba": ("alibaba",),
     "alibaba-token-plan": ("alibaba-token-plan", "alibaba"),
     "openrouter": ("openrouter",),
+    # Muse Code's models live under models.dev's ``meta`` key, spelled with
+    # the same bare ids the provider serves (``muse-spark-1.3``). Without
+    # this entry the chain never looked, so a Muse id the shipped registry
+    # had not been taught (Spark 1.1, a future point release) resolved 0/0
+    # even though models.dev quotes the Spark table. Wonder 1.0 is the
+    # known hole in that key (models.dev lists it with NO ``cost``), so it
+    # falls through to the OpenRouter leg and then the registry — which is
+    # why the registry rows carry Meta's published prices outright.
+    "meta-muse": ("meta",),
 }
 
 #: The models.dev keys whose ``0/0`` means "billed in plan credits", NOT "free".
@@ -182,7 +191,7 @@ _PRICE_CATALOGUE_KEYS: dict[str, tuple[str, ...]] = {
 #: catalogues: a zero there is a quoted zero (``zai/glm-4.7-flash`` is $0 on
 #: Z.AI's own pricing page) and is exactly what ``free`` is for.
 _PLAN_BILLED_KEYS: frozenset[str] = frozenset(
-    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan"}
+    {"alibaba-token-plan", "kimi-for-coding", "zai-coding-plan", "meta-muse"}
 )
 
 #: Every models.dev key the projection keeps, derived from the map above so the
@@ -217,6 +226,10 @@ OPENROUTER_NAMESPACE: dict[str, str] = {
     "alibaba": "qwen",
     "kimi": "moonshotai",
     "zai": "z-ai",
+    # OpenRouter publishes Meta's models under ``meta/`` (``meta/muse-spark-1.3``;
+    # note Wonder is ``meta/muse-wonder`` there, without the ``-1.0`` the
+    # first-party id carries, so that one spelling is the registry's job).
+    "meta-muse": "meta",
 }
 
 #: The OpenRouter document's name in the catalogue cache, for the keyless read
