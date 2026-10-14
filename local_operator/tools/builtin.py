@@ -20498,7 +20498,7 @@ def _backend_unavailable_result(tool_call_id: str, backend: str) -> ToolResult:
     remedy = {
         "ui": (
             "the Local Operator desktop app's browser tab is not reachable right now — "
-            "check Browser in the desktop app; if it offers Retry, use that safe startup action, "
+            "check Browser in the desktop app; if it offers Try again, use that, "
             "then retry this tool. A missing ready host does not mean the app is closed"
         ),
         "extension": (
