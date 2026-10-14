@@ -289,12 +289,24 @@ def test_symlink_escape_and_unresolvables_count_as_outside(tmp_path):
     (alien / "x.bin").write_bytes(b"x")
     (world / "esc").symlink_to(alien)
     (world / "loop").symlink_to(world / "loop")
+    # A two-link cycle and a dangling link: the cycle is unresolvable, the
+    # dangling link is not (it resolves to a path that simply does not exist
+    # yet, which is reachable like any other not-yet-written file).
+    (world / "ping").symlink_to(world / "pong")
+    (world / "pong").symlink_to(world / "ping")
+    (world / "dangling").symlink_to(world / "not-yet.bin")
     boundary = ToolConfinement.at(world)
 
     assert _reachable(boundary, world / "plain.bin")
     # A symlink LOOP makes ``Path.resolve`` raise RuntimeError on Python 3.12;
     # the contract is "unresolvable counts as outside", so it must read False.
+    # Python 3.13 stopped raising and returns the loop unresolved instead, so
+    # both interpreters must be pinned: a path THROUGH the loop, and a cycle.
     assert not _reachable(boundary, world / "loop")
+    assert not _reachable(boundary, world / "loop" / "inner.bin")
+    assert not _reachable(boundary, world / "ping")
+    assert _reachable(boundary, world / "dangling")
+    assert _reachable(boundary, world / "not-yet" / "deeper.bin")
     assert not _reachable(boundary, world / "esc" / "x.bin")
     assert not _reachable(boundary, alien / "x.bin")
     assert not _reachable(boundary, Path("bad\x00name"))
