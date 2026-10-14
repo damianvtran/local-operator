@@ -112,3 +112,38 @@ def test_an_empty_timeout_is_a_bounds_error_not_a_silent_default(tmp_path) -> No
     assert refused["ok"] is False
     assert "timeout must be between" in refused["error"]
     assert queue.records() == []
+
+
+def test_the_derived_id_is_in_the_store_namespace_and_deterministic(tmp_path) -> None:
+    # R1-3 (PR #2378): the derived ask id must parse as the store's own
+    # ``a-<hex>`` shape (``parse_mirror_request_id``), or the legacy mirror
+    # card cannot answer a bridge ask; determinism keeps retries idempotent.
+    from local_operator.asks import store as asks_store
+
+    queue = _queue(tmp_path)
+    first = queue.enqueue_idempotent(
+        issuance_key="iss-ns", fingerprint=FP, questions=[_question()]
+    )
+    assert first["ok"] is True
+    ask_id = str(first["details"]["ask_id"])
+    assert ask_id.startswith("a-")
+    mirrored = f"{ask_id}{asks_store.MIRROR_REQUEST_SEPARATOR}1"
+    assert asks_store.parse_mirror_request_id(mirrored) == (ask_id, 1)
+    same = queue.enqueue_idempotent(
+        issuance_key="iss-ns", fingerprint=FP, questions=[_question()]
+    )
+    assert str(same["details"]["ask_id"]) == ask_id
+
+
+def test_bridge_scope_digest_is_one_shared_serializer() -> None:
+    # R1-5 (PR #2378): the queue's recompute and the issuance ledger's digest
+    # are the SAME function — a divergence is a test failure, not a silent
+    # "scope mismatch" refusal on an honest retry.
+    from local_operator.asks.queue import _bridge_fingerprint_from_row
+    from local_operator.team_bridge.ask_issuance import bridge_scope_digest
+
+    assert bridge_scope_digest(SCOPE) == FP
+    assert _bridge_fingerprint_from_row({"questions": [{"bridge": SCOPE}]}) == FP
+    assert bridge_scope_digest(SCOPE) == _bridge_fingerprint_from_row(
+        {"questions": [{"bridge": SCOPE}]}
+    )

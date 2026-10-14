@@ -22,6 +22,7 @@ await — the same discipline the decide-intent ledger keeps.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -29,6 +30,24 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .store import _owner_key
+
+
+def bridge_scope_json(scope: Mapping[str, Any]) -> str:
+    """The ONE canonical JSON of a bridge scope block (R1-5, PR #2378).
+
+    The keyed queue door (``asks/queue.py``), the session's tri-state lookup
+    and this ledger's stored ``scope_json`` all normalize through HERE, so a
+    future divergence between the three is a test failure — not a silent
+    "scope mismatch" refusal on an honest retry.
+    """
+
+    return json.dumps(dict(scope), separators=(",", ":"), sort_keys=True)
+
+
+def bridge_scope_digest(scope: Mapping[str, Any]) -> str:
+    """Canonical digest of a bridge scope block (identity comparison only)."""
+
+    return hashlib.sha256(bridge_scope_json(scope).encode("utf-8")).hexdigest()
 
 #: The issuance row's lifecycle. ``claimed`` means the durable record exists
 #: and the enqueue attempt is in flight or was interrupted (a retry may still
@@ -184,7 +203,7 @@ class AskIssuance:
 
         key = _owner_key(owner)
         generation = self.generation_is_live(owner)
-        scope_json = json.dumps(dict(scope), separators=(",", ":"), sort_keys=True)
+        scope_json = bridge_scope_json(scope)
         now = time.time()
         local_id = str(local_row_id or "")
         with self._connect() as conn:
@@ -318,4 +337,6 @@ __all__ = [
     "STATE_PENDING",
     "STATE_RAISED",
     "STATE_UNRECOVERABLE",
+    "bridge_scope_digest",
+    "bridge_scope_json",
 ]

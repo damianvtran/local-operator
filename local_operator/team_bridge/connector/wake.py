@@ -41,8 +41,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from local_operator.harness.message_types import (
+    DISPLAY_CONTEXT_BOUNDS,
     TEAM_BRIDGE_MESSAGE_TYPE,
     display_context_digest as canonical_display_digest,
+    validate_bridge_meta,
 )
 from local_operator.team_bridge.types import AckTarget
 
@@ -76,13 +78,13 @@ def _producer_fence(store: Any, owner: Any, access: Any, settings: Any) -> str:
     # feature while a screening or ACK await is in flight, and a cached True
     # would let later ACK/handoff traffic continue. This is the SAME fresh-read
     # discipline ``authority_fence`` uses; a torn read fails closed.
-    from pathlib import Path as _Path
-
     from local_operator.config import read_config_values
 
     from local_operator.team_bridge.settings import TeamBridgeSettings
 
-    config_dir = _Path(store._path).parent.parent
+    # NIT-3 (PR #2378): the store names its own config directory — this read
+    # and the store's own state go through the SAME path by construction.
+    config_dir = store.config_dir
     try:
         values = read_config_values(config_dir)
     except Exception:  # noqa: BLE001 — a torn read is not "still enabled"
@@ -135,10 +137,12 @@ def _display_fields(item: Mapping[str, Any]) -> dict[str, str] | None:
     return fields
 
 #: The excerpt window §11.4 pins: at least 1200 chars of the screened body
-#: reach the CoS (a shorter body is sent whole), and at most 2400 — the
-#: client-side cap on what of a large body enters model context.
+#: reach the CoS (a shorter body is sent whole), and at most the SHARED
+#: display-context bound — the ONE constant both digest sides normalize by,
+#: and the bound that keeps the whole locator inside the carriage's 2 KiB cap
+#: (R1-1, PR #2378: a larger window built blocks the send hop refused).
 EXCERPT_MIN_CHARS = 1200
-EXCERPT_MAX_CHARS = 2400
+EXCERPT_MAX_CHARS = DISPLAY_CONTEXT_BOUNDS["excerpt"]
 
 #: How long one wake handoff may hold a message claim. Screening + ack +
 #: delivery are bounded by the screening deadline; this lease only needs to
@@ -591,6 +595,15 @@ async def handle_message_available(
                 delivery_ref=str(envelope["delivery_ref"]),
                 display_digest=str(envelope["display_digest"]),
             )
+            try:
+                bridge_meta = validate_bridge_meta(bridge_meta)
+            except ValueError:
+                # R1-1 (PR #2378): a locator that cannot be canonically
+                # carried is a typed HOLD — visible and retryable — never an
+                # exception on the connector's stack (the loop would
+                # otherwise back off into the same deterministic refusal).
+                logger.warning("bridge: locator refused by its own carriage", exc_info=True)
+                return {"action": "hold", "message_id": message_id, "code": "bridge_meta_invalid"}
         # FENCE #2 before the ACK I/O.
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
@@ -679,13 +692,20 @@ async def handle_message_available(
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
             return {"action": "hold", "message_id": message_id, "code": fence_code}
-        outcome = await deliver_wake(
-            owner,
-            payload,
-            session_id=designation,
-            config_dir=config_dir,
-            bridge_meta=bridge_meta,
-        )
+        try:
+            outcome = await deliver_wake(
+                owner,
+                payload,
+                session_id=designation,
+                config_dir=config_dir,
+                bridge_meta=bridge_meta,
+            )
+        except ValueError:
+            # R1-1 (PR #2378): the send hop re-validates the locator; any
+            # residual refusal surfaces as a typed HOLD here — escaping into
+            # run_forever would only back off into the same refusal forever.
+            logger.warning("bridge: carriage refused the locator", exc_info=True)
+            return {"action": "hold", "message_id": message_id, "code": "bridge_meta_invalid"}
         if bridge_meta is not None:
             try:
                 store.mark_delivery_phase(owner, str(bridge_meta["delivery_ref"]), "delivered")

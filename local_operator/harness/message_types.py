@@ -398,12 +398,16 @@ BRIDGE_META_KEYS = frozenset(
 #: Bounds for the canonical display context (S-9). The producer and the
 #: receiver MUST normalize identically or a tamper-evident digest cannot exist;
 #: an oversized value is REFUSED, never silently truncated on one side only.
+#: ``excerpt`` is bounded by the CARRIAGE, not by comfort: the locator block
+#: must fit ``BRIDGE_META_MAX_BYTES`` (2 KiB) beside its ~600 B of fixed
+#: fields, and §11.4 only guarantees "at least 1200 chars" — a larger window
+#: made the producer build blocks its own send hop refuses (R1-1, PR #2378).
 DISPLAY_CONTEXT_BOUNDS = {
     "sender_name": 200,
     "organization": 200,
     "sender_label": 200,
     "thread_id": 200,
-    "excerpt": 2400,
+    "excerpt": 1200,
 }
 DISPLAY_CONTEXT_FIELDS = ("sender_name", "organization", "sender_label", "thread_id", "excerpt")
 

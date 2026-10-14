@@ -9440,6 +9440,17 @@ class Session:
         # before the next turn reads context. On the idle path it appends
         # straight through, matching the prior behaviour.
         await self._transcript.append_message(message)
+        # MAJOR R1 (PR #2378): THIS arm persists a bridge row WITHOUT going
+        # through _append_injected_message, so the live hook never ran for it
+        # — and the repair scanner's newest-20 window could lose the oldest
+        # asks of a burst arriving while the CoS is mid-turn. Raise the ask
+        # from here too; the hook is idempotent by issuance identity, so a
+        # re-delivery that ALSO reaches the live arm cannot double-ask.
+        if (
+            isinstance(message, CustomMessage)
+            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
+        ):
+            self._maybe_raise_bridge_ask(message)
         self._append_or_park_journal(message)
         await self._emit_peer_receipt(message, sender)
         # LAST, deliberately: this wakes a blocking `wait`, and the woken tool
@@ -9923,8 +9934,12 @@ class Session:
                 # S-8: an UNPARSEABLE expiry is absence of evidence in the
                 # wrong direction — it must not authorize a request ask.
                 ledger.claim(
-                owner, bound, {}, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
-            )
+                    owner,
+                    bound,
+                    {},
+                    delivery_ref=str(envelope["delivery_ref"]),
+                    local_row_id=local_row_id,
+                )
                 ledger.mark_unrecoverable(owner, bound, "request_expiry_invalid")
                 return
         scope = {
@@ -10065,6 +10080,11 @@ class Session:
             return
         from local_operator.team_bridge.asks_bridge import enqueue_bridge_request_ask
 
+        # R1-4 (PR #2378): the scope handed over and the scope the fingerprint
+        # is taken over must be THE SAME value — an empty block is handed as
+        # None, so its fingerprint is empty too (a digest-of-nothing would
+        # make the mint guard refuse with a misleading "scope mismatch").
+        handed_scope = scope if isinstance(scope, Mapping) and scope else None
         try:
             result = enqueue_bridge_request_ask(
                 queue,
@@ -10074,15 +10094,13 @@ class Session:
                 # M1: derived at RENDER time from the sanctioned session store
                 # via the row's own mapping — the ledger keeps no body text.
                 excerpt=self._bridge_display_excerpt(record),
-                scope=scope if isinstance(scope, Mapping) and scope else None,
+                scope=handed_scope,
                 # S-10: the KEY is the preallocated issuance identity (minted
                 # internally, never model/UI-chosen); the fingerprint is the
                 # canonical stored original block — the queue returns the SAME
                 # ask id for a retry and refuses a mismatch.
                 issuance_key=str(record.get("issuance_id") or ""),
-                fingerprint=self._scope_fingerprint(scope)
-                if isinstance(scope, Mapping)
-                else "",
+                fingerprint=self._scope_fingerprint(handed_scope) if handed_scope else "",
             )
         except Exception:  # noqa: BLE001 — a failed enqueue is a durable PENDING
             logger.warning("bridge ask: enqueue failed", exc_info=True)
@@ -10147,13 +10165,15 @@ class Session:
 
     @staticmethod
     def _scope_fingerprint(scope: Mapping[str, Any]) -> str:
-        """Canonical digest of a bridge scope block (identity comparison only)."""
+        """Canonical digest of a bridge scope block (identity comparison only).
 
-        import hashlib
+        R1-5 (PR #2378): delegates to the ONE shared serializer the keyed
+        queue door and the issuance ledger also use.
+        """
 
-        return hashlib.sha256(
-            json.dumps(dict(scope), separators=(",", ":"), sort_keys=True).encode("utf-8")
-        ).hexdigest()
+        from local_operator.team_bridge.ask_issuance import bridge_scope_digest
+
+        return bridge_scope_digest(scope)
 
     async def _refresh_stale_pending_standing(self, owner: Any) -> dict[str, dict]:
         """S-8: ONE explicit trusted-boundary standing read per stale pending.
