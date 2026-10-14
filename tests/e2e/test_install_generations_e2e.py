@@ -492,9 +492,13 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> N
         )
         assert second != first
         # The NEW generation becomes current promptly, so a fresh start resolves
-        # it at once — the convergence half of the operator decision.
-        assert update_mod.current_generation() == second
-        assert update_mod.current_generation().name == second.name
+        # it at once — the convergence half of the operator decision. ``current``
+        # is narrowed to a non-optional local: pyright cannot know the real
+        # promotion above left the pointer resolvable, and the assertion is what
+        # says so (the ``.name`` read was redundant with the equality).
+        current = update_mod.current_generation()
+        assert current is not None, "the pointer must resolve after a real promotion"
+        assert current == second
         # But the OLD runtime is left entirely alone: same pid, still alive, still
         # on the root it launched from. A promotion must not move a live runtime's
         # world out from under it.
