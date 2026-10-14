@@ -835,6 +835,17 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     cred_share.add_argument(
         "--network", default="", help="Network name or id (default: the only one)"
     )
+    finite_action = cred_share.add_mutually_exclusive_group()
+    finite_action.add_argument(
+        "--request-approval",
+        action="store_true",
+        help="Request signed recovery of this exact finite share; does not grant",
+    )
+    finite_action.add_argument(
+        "--approval",
+        default="",
+        help="Apply signed finite-share recovery; never future inheritance",
+    )
     cred_share.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
         "revoke",
@@ -2141,6 +2152,43 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     # persists its tombstone first, and legacy share cannot clear that tombstone.
     from local_operator.network.credentials import consent
 
+    finite_result = None
+    if verb == "share" and (
+        getattr(args, "request_approval", False) or getattr(args, "approval", "")
+    ):
+        from local_operator.network.credentials import finite_share
+
+        if getattr(args, "request_approval", False):
+            requested = finite_share.request(
+                record.network_id, identity.device_id, device, key, scope
+            )
+            return _emit(
+                args,
+                {
+                    "ok": True,
+                    "approval_id": requested["approval_id"],
+                    "state": requested["state"],
+                    "summary": finite_share.summary(requested),
+                },
+                [
+                    finite_share.summary(requested) or "",
+                    "Request only; nothing shared.",
+                    f"Approve: lop network approvals approve {requested['approval_id']}",
+                    f"Apply: lop network credential share {key} --with {device} "
+                    f"--network {record.network_id} --scope {scope} "
+                    f"--approval {requested['approval_id']}",
+                ],
+            )
+        finite_result = finite_share.apply(
+            str(getattr(args, "approval", "")),
+            {
+                "owner_device": identity.device_id,
+                "network_id": record.network_id,
+                "recipient_device": device,
+                "key": key,
+                "scope": scope,
+            },
+        )
     if verb == "revoke":
         import time as _clock
 
@@ -2153,10 +2201,25 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         )
         entry_json = reduced["entry"] or {}
         action = "revoked"
+    elif finite_result is not None:
+        entry_json = finite_result
+        action = "sharing"
     else:
         authority = consent.ConsentDocument(record.network_id, identity.device_id)
         with authority.locked():
-            consent.check_borrow(record.network_id, identity.device_id, device, key, {})
+            try:
+                consent.check_borrow(record.network_id, identity.device_id, device, key, {})
+            except MeshRefusal as exc:
+                if exc.code in {"not_a_holder", "scope_unknown"}:
+                    raise MeshRefusal(
+                        "supersede_required",
+                        "This finite share was explicitly withdrawn; a bare share cannot clear it. "
+                        f"Request exact signed recovery: lop network credential share {key} "
+                        f"--with {device} --network {record.network_id} --scope {scope} "
+                        "--request-approval. No automatic future-sign-in inheritance "
+                        "enabled by this operation.",
+                    ) from exc
+                raise
             with placement_mod.mutate(
                 record.network_id, self_device=identity.device_id
             ) as document:
@@ -8058,6 +8121,15 @@ _CARD_LABEL_WIDTH = len("withdrawn by")
 
 def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     """The human half of the same read, in the card's own order: what / where / who."""
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(dict(record))
+    if finite_summary is not None:
+        return [
+            finite_summary,
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            "This operation restores only the signed finite share; nothing is installed or joined.",
+        ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
     state = str(record.get("state") or "")
@@ -8291,6 +8363,12 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     from local_operator.network import approvals as approval_store
 
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    finite_summary = finite_share.summary(record)
+    if finite_summary is not None:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        print(finite_summary, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8388,8 +8466,18 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         return _emit(args, payload, _approval_lines(decided))
     if verb == "withdraw":
         return _cmd_approvals_withdraw(args)
+    # Operation dispatch precedes every generic runner: a finite recovery is
+    # never an SSH/setup/join request just because it reuses the normal envelope.
     # verb == "run" — the agent's execution path.
     record = approval_store.load_record(args.approval)
+    from local_operator.network.credentials import finite_share
+
+    if finite_share.intent(record) is not None:
+        raise MeshRefusal(
+            "finite_apply_required",
+            "This is finite-share recovery, not onboarding. Use the exact "
+            "credential share --approval command shown on its request; no setup ran.",
+        )
     state = str(record.get("state") or "")
     if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
         # A ``connecting`` record has TWO answers (drill finding, 2026-10-04):

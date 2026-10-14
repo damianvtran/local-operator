@@ -25,8 +25,6 @@ from local_operator.network.types import MeshRefusal
 
 SCHEMA = 1
 MAX_REVISION = 2**53 - 2**20 - 1
-NETWORK = re.compile(r"n_[0-9a-f]{24}\Z")
-DEVICE = re.compile(r"d_[0-9a-f]{32}\Z")
 REFERENCE = re.compile(r"[A-Za-z0-9_.:/-]{1,256}\Z")
 PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,199}\Z")
 STEP = "credential_inheritance"
@@ -143,8 +141,8 @@ class ConsentDocument:
     """
 
     def __init__(self, network_id: str, owner_device: str, root: Path | None = None):
-        if NETWORK.fullmatch(network_id) is None or DEVICE.fullmatch(owner_device) is None:
-            refuse("consent_identity_invalid")
+        store.safe_component(network_id)
+        store.safe_component(owner_device)
         self.network_id = network_id
         self.owner_device = owner_device
         self.root = root
@@ -199,8 +197,7 @@ class ConsentDocument:
         if not isinstance(recipients, dict) or len(recipients) > 256:
             refuse("consent_invalid")
         for device, recipient in recipients.items():
-            if DEVICE.fullmatch(device) is None:
-                refuse("consent_identity_invalid")
+            store.safe_component(device)
             rec = _exact(
                 recipient,
                 {"public_key_fingerprint", "enabled", "approval", "inherit", "denies"},
@@ -324,9 +321,8 @@ def serving_guard(
     if not path.exists():
         # The lock is still needed: first revoke may race an initially absent file.
         # Invalid legacy fixture IDs cannot name a new consent document.
-        if NETWORK.fullmatch(network_id) is None or DEVICE.fullmatch(owner) is None:
-            yield
-            return
+        store.safe_component(network_id)
+        store.safe_component(owner)
     doc = ConsentDocument(network_id, owner, root)
     with doc.locked():
         check_borrow(network_id, owner, recipient, key, context, root)
@@ -344,8 +340,7 @@ def restrict_and_revoke(
     """Durable owner reduction FIRST; stale placement cannot undo this tombstone."""
     _selector(selector)
     _ref(source_ref)
-    if DEVICE.fullmatch(recipient) is None:
-        refuse("consent_identity_invalid")
+    store.safe_component(recipient)
     doc = ConsentDocument(network_id, owner, root)
     with doc.locked():
         # Ownership must be decided before any authority write. This read does

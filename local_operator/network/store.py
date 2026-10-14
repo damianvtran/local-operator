@@ -149,6 +149,25 @@ def ensure_networks_dir(root: Path | None = None) -> Path:
     return path
 
 
+def safe_component(value: Any) -> str:
+    """Validate an existing opaque storage ID, NEVER normalize or invent a format.
+
+    Network/member/identity records preserve IDs verbatim. Requiring the modern
+    mint's hex spelling rejects legitimate older records; accepting path syntax
+    instead crosses the owner-local authority boundary on POSIX or Windows.
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or len(value.encode("utf-8")) > 256
+        or any(ch in value for ch in ("/", "\\", ":"))
+        or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in value)
+    ):
+        raise MeshRefusal("unsafe_storage_id", "the storage ID must be one bounded safe component")
+    return value
+
+
 def record_path(network_id: str, root: Path | None = None) -> Path:
     return networks_dir(root) / f"{network_id}.json"
 

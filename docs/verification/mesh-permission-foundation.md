@@ -132,6 +132,71 @@ actual CLI revoke then SAME session not_a_holder with0 added refreshes. Legacy
 forge mint/audit and missing-source ladder tests pass. These are isolated source
 fixtures, not live owner adoption, external provider or native UI acceptance.
 
+## Round-2 integration — safe opaque IDs and explicit finite recovery
+
+The existing network/identity records preserve opaque identifiers, not exclusively
+new mint spellings. The shared `store.safe_component` rejects empty/dot/dotdot,
+separators/backslashes/drives and C0/C1 controls, and bounds exact UTF-8 bytes;
+consent uses it without normalization, storage relocation or weakened exact
+network/owner/member/public-key binding. The UNMODIFIED `n_copy_receipts` suite
+went from 10 failures/27 passes to **37 passes**. The reason audit's exact two
+new internal receipt/proof `detail` reads are declared, not renamed/ignored:
+**2 passes** after the reproduced 1 failure/1 pass.
+
+A bare re-share after withdrawal now returns actionable `supersede_required`.
+Use `credential share KEY --with PEER --scope SCOPE --request-approval`, then
+normal `network approvals approve AP_ID`, then the same exact share arguments
+with `--approval AP_ID`. Request is NOT authority. The normal signed
+`device_onboard` envelope contains exclusive `what.credential_finite_share` and
+the real anchor trio, NO fictional SSH host or setup target. Its summary precedes
+normal signing (stderr for JSON); generic run admission refuses onboarding.
+Owned provider/secret/MCP/forge keys use the same finite adapter, not the native
+future-inheritance gate. Existing successful share JSON/prose/copy ceilings remain.
+
+Signed apply binds current owner/network/active member/current public fingerprint,
+exact owned key/scope and ALL matching deny selector/revision/reference tuples,
+plus policy CAS and the current unexpired signed run. Source-record → consent →
+placement locks have no await/network/SSH. Existing crypto receipt/terminal writers
+are factored into internal locked helpers; public entrypoints retain their locks.
+Finite projection readback and EXECUTED/terminal proof precede the final deny
+removal. Final expiry/member checks run before authority publish. No future
+positive permission is created. Publication failures restore original denies and
+EXACT original projection bytes; failed deny compensation persists/readbacks a
+withheld holder instead. A simultaneous inability to write either durable store
+cannot be claimed as validated recovery; filesystem repair remains required.
+
+Overlapping enabled future policy refuses `finite_future_scope_conflict` rather
+than implicitly reviving inheritance. Exact signed provider IDs/MCP URLs prove
+non-overlap; broad selectors whose exclusion cannot be proved also refuse. No key
+namespace/account guess, disabling all permissions, new schema/exemption or new
+reconciler was added. Exact selector-exclusion recovery is unsupported/pending a
+separate design. Copy says **No automatic future-sign-in inheritance enabled by
+this operation**: it does not revoke normal authorized refresh/rotation of the
+same existing key/subject. No future reconciler exists in this slice; old busy
+actors remain an adoption limitation.
+
+Final bounded, isolated, serial source file results (existing Python 3.12.13;
+512MiB process-group ceiling, each `run_bounded.py --timeout 120`; n0/addopts empty):
+- finite public parser/dispatch + signed context/replay/fault/future guard: **27 passed**;
+- unchanged copy receipts: **37 passed**; exact reason audit: **2 passed**;
+- retained consent/R1 majors: **31 passed**;
+- full existing wipe: **14 passed**; owned secret copies: **6 passed**;
+- full existing encrypted real-link/static-key receipt: **10 passed**;
+- normal approval receipt/run/terminal neighbors: **10 passed,24 deselected**;
+- audit taxonomy/material filters: **4 passed,14 deselected**;
+- unchanged CLI parser-demand neighbors: **4 passed,80 deselected** (caught and
+  corrected the share-only optional flag read for revoke before CI; no assertion edit);
+- scoped black/isort/flake8 pass; explicit existing-interpreter pyright **0 errors**.
+
+Own actual source CLI proof also emitted `supersede_required` → `requested` →
+`approved` → normal `sharing` JSON; holder=true, matching denies=0,
+future_enabled=false, terminal=connected with executed finite steps. Replay
+returned finite `approval_already_connected`, not an onboarding claim. Presign
+summary was on stderr while JSON stdout remained exactly one object. Software
+operator fixture ONLY; actual native operator prompt, live policy, installed old
+actor, full remote runtime and activation are NOT validated. Independent CLI
+UX/design/QA rounds still required; no merge/install/version changes.
+
 ## Explicit deferrals / activation holds
 
 - **Deferred — next reviewed lifecycle slice:** positive inventory reconciliation,
