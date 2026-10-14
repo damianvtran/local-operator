@@ -1,0 +1,107 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: agent_name, agent_id. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.approval_callback_gate_required": {
+    "role": "SDK invalid-input diagnostic from ApprovalPolicy.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: ApprovalPolicy.callback(). English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.approval_declared_tools_empty": {
+    "role": "SDK invalid-input diagnostic from ApprovalPolicy.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: ApprovalPolicy.declared(), ApprovalPolicy.refuse(). English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": {
+    "role": "SDK invalid-input diagnostic from ApprovalPolicy.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: mode: str, already repr-quoted opaque caller value. Preserve technical tokens: ApprovalPolicy.handler, callback. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": {
+    "role": "SDK invalid-input diagnostic from ApprovalPolicy.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: mode: str, already repr-quoted opaque caller value. Preserve technical tokens: ApprovalPolicy.tools, declared. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.attach_fields_unsupported": {
+    "role": "SDK invalid-input diagnostic from _refuse_attach_extras",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: fields: str, comma-separated technical field/format identifiers. Preserve technical tokens: mode='attach', spec.resume, resume, mode='own', field identifiers. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.attach_output_unsupported": {
+    "role": "SDK invalid-input diagnostic from _refuse_attach_extras",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: none. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.attach_resume_required": {
+    "role": "SDK invalid-input diagnostic from open_session",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: mode='attach', spec.resume. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.mode_invalid": {
+    "role": "SDK invalid-input diagnostic from open_session",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: mode: str, already repr-quoted opaque caller value. Preserve technical tokens: mode, 'own', 'attach'. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.output_format_invalid": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: formats: str, comma-separated technical field/format identifiers. Preserve technical tokens: output_format and format identifiers. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.output_retries_range": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: output_retries, 0, 5. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.output_retries_requires_format": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: output_retries, output_format. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.output_schema_requires_format": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: output_schema, output_format. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.resume_empty": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: resume, @latest. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": {
+    "role": "SDK invalid-input diagnostic from spawn_session",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: birth_effort, hosting/model, open_session. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.spawn_fields_unsupported": {
+    "role": "SDK invalid-input diagnostic from _refuse_spawn_extras",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: fields: str, comma-separated technical field/format identifiers. Preserve technical tokens: spawn_session(), open_session, field identifiers. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.spawn_model_pair_required": {
+    "role": "SDK invalid-input diagnostic from spawn_session",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: spawn_session(), hosting/model, NEW. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.spawn_output_unsupported": {
+    "role": "SDK invalid-input diagnostic from _refuse_spawn_extras",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: fields: str, comma-separated technical field/format identifiers. Preserve technical tokens: spawn_session(), open_session(..., mode='own'), field identifiers. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.tools_empty": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: tools, None. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.world_root_empty": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: none. Preserve technical tokens: world_root. English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  },
+  "wire.errors.sdk_spec.yolo_approval_unreachable": {
+    "role": "SDK invalid-input diagnostic from SessionSpec.__post_init__",
+    "tone": "developer diagnostic with remedy; byte-compatible English source",
+    "note": "Placeholders: approval_mode: str, technical mode token. Preserve technical tokens: yolo=True, ApprovalPolicy.<mode>(), ApprovalPolicy.auto(). English source only; no width cap. Opaque parameters are data, not ICU syntax. Keep the existing exception string unchanged; translation requires caller-contract migration."
+  }
+}
