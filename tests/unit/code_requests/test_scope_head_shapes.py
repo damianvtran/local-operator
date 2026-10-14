@@ -86,8 +86,9 @@ _TAIL_40 = "89abcdef0123456789abcdef0123456789abcdef"
         ("`main..release-next` (merge `5f6a7b8`) (head `3ea522cc21`)", "3ea522cc21"),
         # A base that EQUALS the previous head still chains; only prefixes are restricted.
         ("`b..b1a2c3d4` + `b1a2c3d4..f0e1d2c3`", "f0e1d2c3"),
-        # Two hashes joined by git's three-dot form ARE a range, and its head is the answer.
-        ("`82adb042eb... 3ea522cc21`", "3ea522cc21"),
+        # -- review round 3: labels whose window contains hex LETTERS ------------------
+        # A cited report is not the reviewed head.
+        ("`3ea522cc21` (Round-1 report: `82adb042eb`)", "3ea522cc21"),
     ],
 )
 def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
@@ -108,6 +109,22 @@ def test_the_reviewed_head_is_a_ranges_head(scope: str, expected: str) -> None:
         "`aaaaaaa..bbbbbbb` + `bbbbbbb..ccccccc` + `ccccccc..bbbbbbb`",
         # A prose ellipsis with a word inside is not a range: nothing decides here.
         "`82adb042eb and 3ea522cc21`",
+        # F10, the direction that matters most: a prose ellipsis must NOT become a
+        # range. With the loose separator this read FRESH against a live head of
+        # def5678abc — a head the review never named.
+        "`abc1234` — rebased onto main... `def5678abc`",
+        # A three-dot range has to be TIGHT to count as one. With room around the dots
+        # it is prose, and two named hashes with no range leave nothing to decide on —
+        # which is the safe answer, not the looser one (F10).
+        "`82adb042eb... 3ea522cc21`",
+        # The accepted cost of the narrow label window (F12). ``Base `main` @ `d1fd63d` ``
+        # needs a window wide enough to cross a quoted token, and that same width
+        # mislabelled real heads on #2223/#2114 — a wrong head can read FRESH, a lost
+        # one reads unknown, so this shape stays unknown by decision.
+        "`main..release` (base `main` @ `d1fd63d`) (head `3ea522cc21`)",
+        # The deliberate exclusion, pinned: ``on`` is ordinary prose, so a hash it
+        # introduces stays a candidate and an ambiguous scope stays unknown (Q7).
+        "`main..release` (on `82adb042eb`) and `3ea522cc21`",
         # No range at all, and two bare hashes to choose from.
         "`82adb042eb` and `3ea522cc21`",
         # A symbolic range names no hash; freshness is unknown, never stale.
@@ -138,6 +155,13 @@ def test_an_ambiguous_scope_is_unknown_and_never_fresh(scope: str) -> None:
         # an indecisive Scope now falls through to Head instead of stopping (Q5).
         ("", "`82adb042eb..3ea522cc21`", "3ea522cc21"),
         ("`82adb042eb` and `3ea522cc21`", "f0e1d2c3b4a5", "f0e1d2c3b4a5"),
+        # A range mentioned AFTER the head is a description of a delta, not the head
+        # (F11): the leading hash wins.
+        (
+            "",
+            "`fd0683986b` (merge of `02eb44ef9e` into `b011d09a0b`) … delta `04f8b3e0..02eb44ef9e`",
+            "fd0683986b",
+        ),
     ],
 )
 def test_the_head_field_still_resolves(scope: str, head_field: str, expected: str) -> None:
@@ -167,16 +191,20 @@ def test_the_real_2345_review_reads_fresh() -> None:
 
 
 def test_a_long_scope_line_parses_in_bounded_time() -> None:
-    """F5/Q6: the range pattern has to stay LINEAR on hostile payloads.
+    """F5/Q6/Q8: the pattern must stay linear, and the guard must be able to fail.
 
-    Two rounds of review found quadratic shapes here — a run of ``z`` measured 11.4 s at
-    32 kB, and runs of ``a-a-``, ``a.`` and ``a/`` measured 18-73 s at 32-64 kB — on a
-    parse that runs inline on the event loop over forge-supplied text. Every payload
-    below measured ~0.2-0.4 ms on this head, so the 1 s bound carries ~2500x headroom:
-    it flags a quadratic regression, it is not a stopwatch on a busy host.
+    Two rounds of review found quadratic shapes here: a ``z`` run (11.4 s at 32 kB) and
+    ``a-a-``/``a.``/``a/`` runs (18-73 s at 32-64 kB), on a parse that runs inline on the
+    event loop over forge-supplied text. Round 3 then found this guard proved nothing —
+    its payloads were past the 4 kB ``_MAX_FIELD`` cap, so they never reached the
+    pattern, and a 4 kB payload is too small for a loose bound to notice either.
 
-    (A 32 kB run of *spaces* costs this parser ~2.5 s, and does so on ``main`` as well —
-    a pre-existing cost outside this pattern, recorded here rather than fixed here.)
+    So the sensitive check drives the PATTERN directly on 32 kB payloads, where the
+    round-2 build took 18 s and this head takes ~0.2 ms: the 0.5 s bound carries ~2500x
+    headroom on a correct build and is 36x short of a quadratic one. A second loop keeps
+    the end-to-end field path honest under the cap, and the cap's own path is asserted
+    to stay cheap. (A 32 kB run of *spaces* costs ~2.5 s and costs ``main`` the same:
+    that is ``_FIELD``, outside this pattern.)
     """
     hostile = {
         "z run": "z" * 32000,
@@ -184,13 +212,28 @@ def test_a_long_scope_line_parses_in_bounded_time() -> None:
         "a. run": "a." * 16000,
         "a/ run": "a/" * 16000,
         "dotted words": "abc.def.ghi " * 2600,
+        "backtick run": "`" * 32000,
+        "tab run": "\t" * 32000,
+        "space run": " " * 32000,
     }
     for label, payload in hostile.items():
-        body = f"### Agent review — round 1\n\nReviewer: r\nScope: `{payload}`\n"
         start = time.perf_counter()
-        parse([Comment(id="1", created_at="2026-10-14T00:00:00Z", body=body)])
+        rounds._SHA_RANGE.findall(payload)  # the pattern itself: no field cap here
         elapsed = time.perf_counter() - start
-        assert elapsed < 1.0, f"{label} took {elapsed:.1f}s"
+        assert elapsed < 0.5, f"{label} in the pattern took {elapsed:.2f}s — quadratic?"
+
+    # Under the cap, the whole field path — collapse, scan, collect, decide.
+    for label, payload in hostile.items():
+        assert len(payload) > 4096, label
+        start = time.perf_counter()
+        assert rounds._reviewed_head(payload, "") is None, label
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.5, f"{label} through _reviewed_head took {elapsed:.2f}s"
+
+    body = "### Agent review — round 1\n\nReviewer: r\nScope: `" + "a-a-" * 1000 + "`\n"
+    start = time.perf_counter()
+    parse([Comment(id="1", created_at="2026-10-14T00:00:00Z", body=body)])
+    assert time.perf_counter() - start < 1.0, "the end-to-end parse path regressed"
 
 
 @pytest.mark.parametrize(

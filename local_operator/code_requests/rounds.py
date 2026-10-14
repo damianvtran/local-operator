@@ -129,8 +129,11 @@ _VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.I
 #: head (local-operator#2345, comment 6152890889). Git's three-dot ``A...B`` is a
 #: range as well, and its right-hand side is still the head (review round 2, F7).
 #:
-#: EVERY GUARD HERE IS LOAD-BEARING, and two review rounds had to teach it. The
-#: lookbehind stops a match starting mid-token. The POSSESSIVE whitespace runs
+#: EVERY GUARD HERE IS LOAD-BEARING, and three review rounds had to teach it. The
+#: lookbehind stops a match starting mid-token. The whitespace runs are POSSESSIVE and
+#: BOUNDED (``[ \t]{0,8}+``): possessive so the engine cannot re-try an alignment, and
+#: bounded because an unbounded possessive run still costs one scan per start position —
+#: which made a 32 kB run of TABS quadratic even after the space case was fixed (round 3).
 #: (``[ \t]*+``) are what make the scan linear — they cannot hand space back, so the
 #: engine cannot re-try the same alignment combinatorially. The base is bounded, and
 #: the separator is ``..``/``...`` with non-dot lookarounds so a longer dot run is not
@@ -138,9 +141,15 @@ _VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.I
 #: 72.9 s at 64 kB** against ~1.3 ms / 2.5 ms here (review round 2, F5; QA round 2,
 #: Q6), on a parse that runs inline on the event loop over forge-supplied bodies.
 _SHA_RANGE = re.compile(
-    r"`?[ \t]*+(?<![0-9A-Za-z._/-])(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]{1,100}?)"
-    r"[ \t]*+`?[ \t]*+(?<!\.)\.{2,3}(?!\.)[ \t]*+`?[ \t]*+"
-    r"(?P<head>[0-9a-f]{7,40})[ \t]*+`?"
+    r"`?[ \t]{0,8}+(?<![0-9A-Za-z._/-])(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]{1,100}?)"
+    # Two dots may have room around them; THREE dots must sit tight against the base
+    # (one backtick is fine) and against the head, or a prose ellipsis — "rebased onto
+    # main... `def5678abc`" — becomes a range and reports a head the review never
+    # named. That is the false-FRESH direction, the one this field exists to prevent
+    # (review round 3, F10).
+    r"(?:[ \t]{0,8}+`?[ \t]{0,8}+(?<!\.)\.\.(?!\.)[ \t]{0,8}+`?[ \t]{0,8}+"
+    r"|`?\.\.\.`?)"
+    r"(?P<head>[0-9a-f]{7,40})[ \t]{0,8}+`?"
 )
 _SHA = re.compile(r"\b(?P<sha>[0-9a-f]{7,40})\b")
 
@@ -716,9 +725,28 @@ _MAX_FIELD = 4096
 #: head — the base of a diff, its parent, the merge commit, the tree — so it must not
 #: compete for the single-hash rule. Reading the label is not a guess; guessing the
 #: order instead was wrong-stale on 29 of 45 real passes (QA round 2, Q4).
+#:
+#: The window is DELIBERATELY NARROW — the label must sit within three of
+#: ``[\s`:=]`` from the hash. A wider window was tried and reverted: written as
+#: ``[^0-9a-f]`` it missed labels whose window contained a hex LETTER (the ``a`` in
+#: "main", QA round 3 Q7), and widened to "anything that is not the start of a hex
+#: run" it then reached across prose — ``(origin/main, the PR base) ..`` and
+#: ``(#2104's head = this PR's base) ..`` — and made #2223 and #2114 record their
+#: range BASE as the head (review round 3, F12). A wrong head can read FRESH; a lost
+#: one reads ``unknown``, so the narrow window wins and the lanes it costs are named
+#: on the PR rather than hidden.
 _LABELLED_ELSEWHERE = re.compile(
-    r"(?i)\b(?:base|parent|merge(?:[- ]base)?|tree|root|onto)\b[^0-9a-f]{0,12}$"
+    r"(?i)\b(?:base|parent|merge(?:[- ]base)?|tree|root|onto)\b[\s`:=]{0,3}$"
 )
+
+#: A weak label is ordinary prose, so it has to sit right against the hash to count:
+#: ``Round-1 report: `sha` `` is a reference to a report, not a reviewed head.
+#:
+#: DELIBERATELY EXCLUDED — ``on`` and ``vs``. Both are two-sided: "reviewed on `X`"
+#: would lose a real head, and ``vs`` would record the wrong hash on #2133 even though
+#: its freshness comes out the same (QA round 3, Q7). The two lanes they would recover
+#: stay ``unknown`` rather than carry a head nobody can trust.
+_LABELLED_ADJACENT = re.compile(r"(?i)\breport\b[\s`*:]{0,4}$")
 
 
 def _collapse(text: str) -> str:
@@ -731,7 +759,7 @@ def _bare_heads(text: str) -> list[str]:
     kept: list[str] = []
     for match in _SHA.finditer(text):
         prefix = text[max(0, match.start() - 40) : match.start()]
-        if _LABELLED_ELSEWHERE.search(prefix):
+        if _LABELLED_ELSEWHERE.search(prefix) or _LABELLED_ADJACENT.search(prefix):
             continue
         kept.append(match.group("sha").lower())
     return kept
@@ -852,9 +880,13 @@ def _reviewed_head(scope: str, head: str) -> str | None:
                 return found[0]
     head_text = _collapse(head or "")[: _MAX_FIELD + 1]
     quoted = _SHA_RANGE.search(head_text)
-    if quoted is not None:
-        return quoted.group("head").lower()
     leading = _SHA.search(head_text)
+    # A quoted range wins only when it is the FIRST thing the field says. A range
+    # mentioned after the head — ``Head: `fd0683986b` (merge of …) … delta
+    # `04f8b3e0..02eb44ef9e` `` — is a description of the delta, not the head itself
+    # (review round 3, F11).
+    if quoted is not None and (leading is None or quoted.start() <= leading.start()):
+        return quoted.group("head").lower()
     return leading.group("sha").lower() if leading else None
 
 
