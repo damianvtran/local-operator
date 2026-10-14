@@ -139,16 +139,16 @@ def usage_unavailable() -> Msg:
     return Msg("relay.shell.usage.unavailable", {})
 
 
-def usage_unit_credits() -> Msg:
-    return Msg("relay.shell.usage.unit_credits", {})
+def usage_unit_credits(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_credits", {"count": count})
 
 
-def usage_unit_requests() -> Msg:
-    return Msg("relay.shell.usage.unit_requests", {})
+def usage_unit_requests(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_requests", {"count": count})
 
 
-def usage_unit_tokens() -> Msg:
-    return Msg("relay.shell.usage.unit_tokens", {})
+def usage_unit_tokens(*, count: int | float) -> Msg:
+    return Msg("relay.shell.usage.unit_tokens", {"count": count})
 
 
 def usage_unit_usd() -> Msg:
