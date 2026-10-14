@@ -151,7 +151,7 @@ async def test_a_tick_is_bounded_to_fifty_items_oldest_checked_first(rig) -> Non
             for i in range(60)
         }
     }
-    picked = runner._pick(links, doc)
+    picked = runner._pick(links, doc, {})
     assert len(picked["agent"]) == 50 and "id0" in picked["agent"] and "id59" not in picked["agent"]
     assert picked["team"] == set()
 
@@ -253,7 +253,27 @@ async def test_pick_never_mixes_agent_and_team_ids(rig) -> None:
     from local_operator.hub_sync.check import Link
 
     links = [Link("agent", "shared", "a", "h", None), Link("team", "shared", "t", "h", None)]
-    picked = runner._pick(links, {"items": {}})
+    picked = runner._pick(links, {"items": {}}, {})
     assert picked["agent"] == {"shared"} and picked["team"] == {"shared"}
     # Both kinds are addressed independently; the runner hands each its own set.
     assert set(picked) == {"agent", "team"}
+
+
+async def test_pick_skips_a_both_off_link_and_orders_retry_first(rig) -> None:
+    """Fairness: a both-OFF link does no periodic work; a due retry sorts ahead."""
+    runner, hub, agents, root, *_ = rig
+    from local_operator.hub_sync.check import Link
+    from local_operator.hub_sync.identity import LinkIdentity, LinkPolicy
+
+    ident = LinkIdentity("agent", "a-ok", "https://hub.test/v1", "public", None, "h")
+    ident_off = LinkIdentity("agent", "a-off", "https://hub.test/v1", "public", None, "h2")
+    links = [
+        Link("agent", "a-ok", "ok", "h", None, link_id=ident.link_id),
+        Link("agent", "a-off", "off", "h2", None, link_id=ident_off.link_id),
+    ]
+    policies = {
+        ident.link_id: LinkPolicy(subscribe=True, auto_push=False),
+        ident_off.link_id: LinkPolicy(subscribe=False, auto_push=False),
+    }
+    picked = runner._pick(links, {"items": {}}, policies)
+    assert picked["agent"] == {"a-ok"}  # the both-off link does nothing

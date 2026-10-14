@@ -241,6 +241,10 @@ def blank_item(
         "first_seen_available_at": None,
         "last_checked_at": None,
         "last_applied_at": None,
+        # Per-DIRECTION activity: a pull and a push have independent due times, so
+        # a fast inbound cadence never masks a stalled push and vice versa.
+        "last_pulled_at": None,
+        "last_pushed_at": None,
         "next_retry_at": None,
         "auto_retry": True,
         "applied_backup": None,
@@ -367,6 +371,7 @@ def settle_applied(
         auto_retry=True,
         summary=dict(summary),
         last_applied_at=_iso(now),
+        last_pulled_at=_iso(now),
         applied_backup=backup,
         first_seen_available_at=None,
     )
@@ -388,6 +393,9 @@ def settle_unchanged(item: dict[str, Any]) -> None:
         first_seen_available_at=None,
         summary={},
     )
+    # A no-op merge is still a completed inbound pass: stamp the pull side so the
+    # independent inbound interval advances and the item is not re-integrated.
+    item["last_pulled_at"] = _iso(datetime.now(timezone.utc))
     item.pop("updating_since", None)
 
 
@@ -510,6 +518,26 @@ def check_due(item: Mapping[str, Any], now: datetime | None = None) -> bool:
         due = _parse(item.get("next_retry_at"))
         return due is None or due <= (now or datetime.now(timezone.utc))
     return True
+
+
+def pull_due(item: Mapping[str, Any], interval_min: int, now: datetime | None = None) -> bool:
+    """Independent inbound due time: has the pull interval elapsed since last pull?
+
+    Keyed on the last actual PULL (integrated update), never on the cheap check:
+    an item that is available and was checked but not yet applied is due
+    immediately; the interval only spaces genuine integrations, so a busy inbound
+    cadence cannot make a stalled PUSH look freshly serviced (or the reverse).
+    """
+    now = now or datetime.now(timezone.utc)
+    last = _parse(item.get("last_pulled_at"))
+    return last is None or (now - last) >= timedelta(minutes=max(0, interval_min))
+
+
+def push_due(item: Mapping[str, Any], interval_min: int, now: datetime | None = None) -> bool:
+    """Independent outbound due time: has the push interval elapsed since last push?"""
+    now = now or datetime.now(timezone.utc)
+    last = _parse(item.get("last_pushed_at"))
+    return last is None or (now - last) >= timedelta(minutes=max(0, interval_min))
 
 
 def prune_items(doc: dict[str, Any], live: set[str]) -> None:

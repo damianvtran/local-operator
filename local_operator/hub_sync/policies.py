@@ -102,6 +102,18 @@ def materialize_policy(
         return current
 
 
+def link_policy_for(values: Mapping[str, Any], link_id: str, kind: str) -> LinkPolicy:
+    """The stored per-link policy for a link id, else its kind's creation default.
+
+    Used by the runner, which has a link id (from a baseline identity) but may not
+    have a full :class:`LinkIdentity` at enumeration time.
+    """
+    policies = _mapping(_hub(values).get("links", {}))
+    if link_id in policies:
+        return LinkPolicy.from_json(policies[link_id])
+    return creation_policy(values, kind)
+
+
 def update_policy(
     manager: "ConfigManager",
     identity: LinkIdentity,

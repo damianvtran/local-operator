@@ -286,3 +286,20 @@ def test_merge_refused_still_retires() -> None:
     item: dict = {"attempts": 0, "auto_retry": True, "next_retry_at": None}
     st.record_failure(item, "merge-refused", "conflict", now=FIXED)
     assert item["auto_retry"] is False
+
+
+def test_pull_and_push_due_times_are_independent() -> None:
+    from datetime import datetime, timezone
+
+    from local_operator.hub_sync import store as st
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    # A fresh pull does not make a stale push look serviced, or the reverse.
+    item = {"last_pulled_at": "2026-01-01T11:59:00Z", "last_pushed_at": "2026-01-01T08:00:00Z"}
+    assert st.pull_due(item, 30, now) is False
+    assert st.push_due(item, 30, now) is True
+    item = {"last_pulled_at": "2026-01-01T08:00:00Z", "last_pushed_at": "2026-01-01T11:59:00Z"}
+    assert st.pull_due(item, 30, now) is True
+    assert st.push_due(item, 30, now) is False
+    # Never serviced -> both due.
+    assert st.pull_due({}, 30, now) and st.push_due({}, 30, now)

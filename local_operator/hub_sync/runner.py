@@ -33,7 +33,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Callable, Literal, Sequence, TypeVar
+from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
 
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
@@ -50,6 +50,12 @@ def prov_fingerprint(check: Any) -> str:
     from local_operator.hub_sync import provenance as prov
 
     return prov.fingerprint_snapshot(check.kind, check.local or {})
+
+
+def _parse_sortable(ts: Any) -> str:
+    """A stable, sortable string for a timestamp that may be missing."""
+
+    return str(ts) if isinstance(ts, str) and ts else ""
 
 
 T = TypeVar("T")
@@ -249,7 +255,8 @@ class HubSyncRunner:
             return report
 
         doc = ctx.store().load()
-        picked = self._pick(links, doc)
+        policies = self._link_policies(links)
+        picked = self._pick(links, doc, policies)
         lease = st.RunnerLease(ctx.config_dir)
         if not await self._offload(lease.acquire):
             report.skipped = "lease-held"
@@ -268,12 +275,20 @@ class HubSyncRunner:
             report.checked = len(checks)
             report.available = sum(1 for c in checks if c.verdict == "available")
             grace = await self._offload(self._first_run_grace, ctx)
+            policies = self._link_policies(links)
             for c in checks:
                 if c.verdict != "available":
                     continue
                 auto = settings.auto_for(c.kind) and not grace
+                policy = policies.get(c.link_id) if c.link_id else None
                 item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
+                # INBOUND applies when this LINK's subscribe is on. An explicit
+                # per-link policy wins; a LEGACY link with no confirmed identity
+                # has never been migrated, so the kind's creation default governs
+                # (preserving a global OFF exactly once, as the addendum requires).
                 if not auto:
+                    continue
+                if policy is not None and not policy.subscribe:
                     continue
                 # A prompt-too-long item keeps a cheap SCHEDULED retry but only
                 # re-sends when the input/config fingerprint moved; a plain
@@ -284,6 +299,10 @@ class HubSyncRunner:
                     if not st.prompt_too_long_eligible(item, current_fp):
                         continue
                 elif not st.auto_apply_due(item):
+                    continue
+                # Independent inbound due time: a push-only link never blocks the
+                # inbound cadence and a just-pulled item is not re-fetched.
+                if not st.pull_due(item, settings.interval_min):
                     continue
                 result = await self._offload(svc.apply_one, ctx, c, auto=True)
                 report.reports.append(result)
@@ -298,20 +317,57 @@ class HubSyncRunner:
         self.last_tick = report
         return report
 
-    def _pick(self, links: Sequence[Link], doc: dict[str, Any]) -> dict[str, set[str]]:
-        """Per-kind local ids, oldest-checked first; never a shared bare-id set.
+    def _link_policies(self, links: Sequence[Link]) -> dict[str, Any]:
+        """Per-link policy for the links that carry a confirmed identity.
 
-        A bare ``local_id`` set handed to both kinds would let an agent id equal
-        to a team id select the wrong kind's rows. Keying by ``(kind, local_id)``
-        is what keeps one kind's due ids from bleeding into the other.
+        Read FRESH from config so a TUI/CLI policy edit is seen next tick; explicit
+        per-link values win and a link with no stored policy falls back to its kind's
+        creation default. Local work only.
+        """
+        from local_operator.hub_sync import policies as pol
+
+        try:
+            values = self._cm.get_config().values
+        except Exception:  # noqa: BLE001 - a bad read is treated as no explicit policy
+            return {}
+        out: dict[str, Any] = {}
+        for link in links:
+            if not link.link_id:
+                continue
+            try:
+                out[link.link_id] = pol.link_policy_for(values, link.link_id, link.kind)
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _pick(
+        self, links: Sequence[Link], doc: dict[str, Any], policies: Mapping[str, Any]
+    ) -> dict[str, set[str]]:
+        """Per-kind local ids, oldest-AND-retry-first for fairness, never a shared set.
+
+        A link is selected when its per-link policy is interested in EITHER
+        direction (``subscribe`` or ``auto_push``); a both-OFF link does no periodic
+        work (manual pull/check still works). An item whose retry is due sorts ahead
+        of one merely due on the interval, so a failing item is not starved by a
+        long healthy queue. Keying by ``(kind, local_id)`` stops one kind's ids
+        bleeding into the other.
         """
 
         items = doc.get("items", {})
 
-        def last(link: Link) -> str:
-            return str(
-                items.get(st.item_key(link.kind, link.local_id), {}).get("last_checked_at") or ""
-            )
+        def interested(link: Link) -> bool:
+            policy = policies.get(link.link_id) if link.link_id else None
+            if policy is None:
+                # A legacy link with no identity is enumerated for the check
+                # (manual/pending compatibility); the apply gate decides the rest.
+                return True
+            return bool(policy.subscribe or policy.auto_push)
+
+        def order(link: Link) -> tuple[int, str, str]:
+            item = items.get(st.item_key(link.kind, link.local_id), {})
+            retry = _parse_sortable(item.get("next_retry_at"))
+            checked = _parse_sortable(item.get("last_checked_at"))
+            return (0 if retry else 1, retry, checked)
 
         picked: dict[str, set[str]] = {"agent": set(), "team": set()}
         for kind in ("agent", "team"):
@@ -319,9 +375,10 @@ class HubSyncRunner:
                 link
                 for link in links
                 if link.kind == kind
+                and interested(link)
                 and st.check_due(items.get(st.item_key(link.kind, link.local_id), {}))
             ]
-            eligible.sort(key=last)
+            eligible.sort(key=order)
             picked[kind] = {link.local_id for link in eligible[:MAX_ITEMS_PER_TICK]}
         return picked
 

@@ -84,6 +84,9 @@ class ItemCheck:
     #: B4.3 failure class when ``verdict == "unavailable"``.
     reason: str = ""
     detail: str = ""
+    #: The confirmed link id when the baseline carries an identity (None for a
+    #: legacy unknown-origin link). The runner keys per-link policy on it.
+    link_id: str | None = None
 
 
 def _status_of(error: BaseException) -> int | None:
@@ -255,6 +258,11 @@ def check_hub_agents(
                 local=local,
                 remote=remote,
                 base=base_fields,
+                link_id=(
+                    record.identity.link_id
+                    if record is not None and record.identity is not None
+                    else None
+                ),
             )
         )
     return checks
@@ -437,6 +445,7 @@ def check_hub_teams(
                 local=local,
                 remote=remote,
                 base=record.fields if known else None,
+                link_id=record.identity.link_id if record.identity is not None else None,
                 detail=note,
             )
         )
