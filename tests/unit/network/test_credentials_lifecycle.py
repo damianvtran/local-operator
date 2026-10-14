@@ -199,18 +199,34 @@ def test_distinct_scope_refs_cannot_make_the_file_unreadable(tmp_path):
     assert replay.reason == L.OBSERVED_REPLAY
 
 
-def test_long_scope_refs_cannot_exceed_the_file_bound(tmp_path):
+def test_long_scope_refs_cannot_exceed_the_file_bound(tmp_path, monkeypatch):
+    # WHY a patched ceiling: reaching the real 1 MiB bound takes ~3.5k full
+    # load-and-rewrite cycles (~35 s), which alone pushed the heaviest CI shard past
+    # its wall ceiling. ``_save`` and ``load`` both read the module constant at call
+    # time, so a small ceiling exercises the identical production byte-bound path.
+    bound = 8_192
+    monkeypatch.setattr(L, "MAX_FILE_BYTES", bound)
     lc = L.LifecycleStore(NET, root=tmp_path)
     pad = "x" * 240
     refused = None
+    accepted = 0
     for i in range(L.MAX_ROWS):
+        before = lc.path.read_bytes() if lc.path.exists() else None
         res = lc.observe(L.Observation("dev-a", KEY, f"{pad}{i:05d}", 1, 1))
         if not res.applied:
             refused = res
             break
+        accepted += 1
     assert refused is not None and refused.reason == L.OBSERVED_TABLE_FULL
-    assert lc.path.stat().st_size <= L.MAX_FILE_BYTES
+    # The bound, not the row cap, stopped it - and only a handful of rows were needed.
+    assert 0 < accepted < L.MAX_ROWS and accepted < 100
+    # The refusal left the file byte-identical, within the bound, and still loadable.
+    assert lc.path.read_bytes() == before
+    assert lc.path.stat().st_size <= bound
     assert L.LifecycleStore(NET, root=tmp_path).status() == "ok"
+    # An existing ident still moves forward after the refusal.
+    res = lc.observe(L.Observation("dev-a", KEY, f"{pad}{0:05d}", 2, 3))
+    assert res.applied and (res.login_chain_revision, res.material_generation) == (2, 3)
 
 
 def test_full_table_still_applies_updates_to_existing_idents(tmp_path):
