@@ -36,6 +36,8 @@ half's copy of it so a caller can validate a name before it reaches the wire.
 
 from __future__ import annotations
 
+import asyncio
+import math
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,8 @@ from local_operator.ui_console import state as state_store
 #: order is stable and a caller can render the accepted set in a refusal.
 CONSOLE_METHODS: tuple[str, ...] = (
     "console_list",
+    "console_resources",
+    "console_cleanup",
     "console_create",
     "console_status",
     "console_read",
@@ -74,6 +78,8 @@ CONSOLE_METHODS: tuple[str, ...] = (
 #: model than waiting three minutes to say the same thing.
 CONSOLE_TIMEOUTS: dict[str, float] = {
     "console_list": 15.0,
+    "console_resources": 15.0,
+    "console_cleanup": 30.0,
     "console_create": 30.0,
     "console_status": 15.0,
     "console_read": 30.0,
@@ -224,6 +230,29 @@ def _unmodelled_error_code(http_response: httpx.Response) -> str:
     return ""
 
 
+async def cleanup_owner_completed(
+    session_id: str, root: Path | None = None
+) -> dict[str, Any] | None:
+    """Best-effort owner teardown, shared by ordinary and delegated sessions.
+
+    Never falls back to enumerating/closing handles: only the host can atomically
+    distinguish completion from live auth/REPL/background work. Old hosts do not
+    advertise the capability, so teardown leaves them alone rather than retrying.
+    This is housekeeping, not proof of stopping a process or removing history.
+    """
+    if not session_id:
+        return None
+    client = ConsoleHostClient(root)
+    if "console_cleanup" not in client.capabilities().methods:
+        return None
+    try:
+        return await asyncio.wait_for(
+            client.call("console_cleanup", {"session_id": session_id}), timeout=2.0
+        )
+    except Exception:  # noqa: BLE001 — housekeeping must not mask session teardown
+        return None
+
+
 def console_timeout(method: str) -> float:
     """The client budget for ``method``, without constructing a client.
 
@@ -324,6 +353,87 @@ async def _health_ok(port: int, pid: int) -> bool:
         return False
 
 
+def aggregate_console_metrics(value: Any) -> dict[str, Any]:
+    """Project counts only, never redact a global surface listing after reading it.
+
+    The additive diagnostics seam has fixed keys and numeric values; a mixed
+    version response must not smuggle foreign handles/commands through a future
+    field. Unknown counters remain absent instead of claiming an observed zero.
+    """
+    if not isinstance(value, dict):
+        return {}
+
+    def counters(raw: Any, keys: tuple[str, ...]) -> dict[str, int | float | None]:
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, int | float | None] = {}
+        for key in keys:
+            item = raw.get(key)
+            if (
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and 0 <= item <= 2**53 - 1
+                and math.isfinite(item)
+            ):
+                result[key] = item
+            elif key in ("fd_available", "pty_available") and key in raw and item is None:
+                result[key] = None
+        return result
+
+    result: dict[str, Any] = counters(value, ("generation", "sampled_at", "started_at"))
+    # The one allowed string identifies the console-host lifetime, not a session,
+    # handle or process command. Strict canonical UUID4 validation prevents this
+    # additive seam becoming a generic metadata/string pass-through.
+    import re
+
+    epoch = value.get("host_epoch")
+    if isinstance(epoch, str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", epoch
+    ):
+        result["host_epoch"] = epoch
+    states = value.get("states")
+    if isinstance(states, dict):
+        result["states"] = {
+            name: counters(states.get(name), ("user", "agent"))
+            for name in ("starting", "running", "exited", "restored")
+        }
+    for group, keys in (
+        ("caps", ("maxLive", "maxOwner", "userReserved")),
+        (
+            "resources",
+            (
+                "ptys",
+                "log_bytes",
+                "pending_bytes",
+                "emulator_cells",
+                "protected",
+                "modeled_managed_bytes",
+                "fd_available",
+                "pty_available",
+                "pty_reservations",
+                "native_sampled_at",
+                "pending_allocations",
+                "user_reserved_vacant",
+                "user_remaining_modeled_units",
+            ),
+        ),
+        (
+            "resource_caps",
+            (
+                "log_bytes",
+                "pending_bytes",
+                "emulator_cells",
+                "modeled_managed_bytes",
+                "native_ptys",
+            ),
+        ),
+    ):
+        projected = counters(value.get(group), keys)
+        if projected:
+            result[group] = projected
+    return result
+
+
 def console_error_text(error: BridgeError) -> str:
     """The model-facing sentence for one typed console refusal (design §15).
 
@@ -353,6 +463,24 @@ def console_error_text(error: BridgeError) -> str:
     code = error.code
     data = error.data or {}
     message = (error.message or "").strip()
+    if code == ErrorCode.TAB_LIMIT:
+        metrics = aggregate_console_metrics(data.get("metrics"))
+        if metrics:
+            import json
+
+            proposed = aggregate_console_metrics({"resources": data.get("proposed_resources")})
+            if proposed.get("resources"):
+                metrics["proposed_resources"] = proposed["resources"]
+            reserved = data.get("reserved_user_slots")
+            if isinstance(reserved, int) and not isinstance(reserved, bool) and 0 <= reserved <= 32:
+                metrics["reserved_user_slots"] = reserved
+            return (
+                f"tab_limit: {message}\nAggregate capacity: "
+                + json.dumps(metrics, separators=(",", ":"))
+                + ". Use resources; inspect only your own surfaces and cleanup "
+                "completed work. Never close another owner's or merely idle "
+                "live terminal."
+            )
     if code == ErrorCode.UNSUPPORTED_METHOD:
         return (
             "This app version has no console. Update Local Operator (the app must be "

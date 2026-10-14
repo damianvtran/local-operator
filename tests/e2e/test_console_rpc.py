@@ -558,7 +558,16 @@ async def test_the_secret_ref_cell_against_the_real_store(
         assert result.is_error is False, result.text
 
         # The app receives the value: the one accepted disclosure (§11.3).
-        assert peer.received == [("console_input", {"surface": "con:1:a", "text": SECRET})]
+        assert peer.received == [
+            (
+                "console_input",
+                {
+                    "surface": "con:1:a",
+                    "text": SECRET,
+                    "session_id": session.session_id,
+                },
+            )
+        ]
 
         # The model's result does not, and neither do the arguments it emitted.
         assert SECRET not in result.text
@@ -611,7 +620,16 @@ async def test_a_session_credential_is_relayed_without_the_store(
         assert result.is_error is False, result.text
 
         # The app receives the value; the model's result and arguments do not.
-        assert peer.received == [("console_input", {"surface": "con:1:a", "text": SECRET})]
+        assert peer.received == [
+            (
+                "console_input",
+                {
+                    "surface": "con:1:a",
+                    "text": SECRET,
+                    "session_id": session.session_id,
+                },
+            )
+        ]
         assert SECRET not in result.text
         assert SECRET not in repr(args)
         assert "SUDO_PASSWORD" in result.text
@@ -716,9 +734,16 @@ async def test_every_key_spelling_is_one_name_and_one_byte(
         await session.dispose()
 
     assert result.is_error is False, (spelling, result.text)
+    # The session's OWN id rides every surface op (A2's additive lifecycle
+    # fence): the wire carries `session_id` beside the surface, and the tool
+    # never lets the model choose whose. Older hosts ignore it.
     assert peer.received[-1] == (
         "console_keys",
-        {"surface": "con:1:a", "keys": [canonical]},
+        {
+            "surface": "con:1:a",
+            "keys": [canonical],
+            "session_id": session.session_id,
+        },
     ), peer.received[-1]
     assert peer.encoded == [[byte]], (spelling, peer.encoded)
 
@@ -749,7 +774,11 @@ async def test_a_name_the_encoder_does_not_have_is_refused_with_its_own_words(
         await session.dispose()
 
     assert result.is_error is True
-    assert peer.received[-1][1] == {"surface": "con:1:a", "keys": ["meta+c"]}
+    assert peer.received[-1][1] == {
+        "surface": "con:1:a",
+        "keys": ["meta+c"],
+        "session_id": session.session_id,
+    }
     assert "Unknown key name: meta+c" in result.text, result.text
     assert "ctrl+c" in result.text, result.text
     # Nothing was written: the app encodes the whole list before any of it, and this
