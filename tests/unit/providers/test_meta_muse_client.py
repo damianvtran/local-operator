@@ -165,10 +165,59 @@ async def test_request_rejection_retains_safe_diagnostics_without_auth_advice():
     assert "invalid_request_error" in error.message
     assert "invalid_value" in error.message
     assert "input[2].content[0].type" in error.message
-    assert "req_0123456789abcdef" in error.message
+    assert "req_0123456789abcdef" not in error.message
     assert "sign in" not in error.message and "subscription" not in error.message
-    assert "unchanged Continue" in error.message
+    assert "Continue unchanged" in error.message
+    assert "/model" in error.message
+    assert "HTTP 400" not in error.message
+    assert error.message.index("/model") < error.message.index("Details:")
+    assert "Shorten" not in error.message
     assert KEY not in error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["context_length_exceeded", "invalid_value", None])
+async def test_shorter_context_advice_requires_confirmed_code(code):
+    def reject(_wire):
+        return httpx.Response(400, json={"error": {"code": code}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject)) as http:
+        client = client_for_spec(request().model, http_client=http)
+        with pytest.raises(ProviderError) as caught:
+            _ = [event async for event in client.stream(request(), KEY)]
+    assert ("Shorten the conversation context" in caught.value.message) == (
+        code == "context_length_exceeded"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "private",
+    ["req_" + "abc12345" * 4, "-".join(["12345678", "1234", "1234", "1234", "123456789abc"])],
+)
+async def test_error_header_cannot_publish_reflected_submitted_input(private):
+    req = request()
+    req.messages[0].content = [TextContent(text=private)]
+    seen = []
+
+    def reject(wire):
+        body = json.loads(wire.content)
+        reflected = body["input"][0]["content"][0]["text"]
+        assert reflected == private
+        seen.append(reflected)
+        return httpx.Response(
+            400,
+            headers={"x-request-id": reflected},
+            json={"error": {"type": "invalid_request_error"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject)) as http:
+        client = client_for_spec(req.model, http_client=http)
+        with pytest.raises(ProviderError) as caught:
+            _ = [event async for event in client.stream(req, KEY)]
+    assert seen == [private]
+    assert private not in caught.value.message
+    assert private not in str(caught.value)
 
 
 @pytest.mark.asyncio
