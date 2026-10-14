@@ -610,12 +610,15 @@ def _load_consumed_response_row(runtime: Any, ask_id: str) -> Mapping[str, Any] 
     if not isinstance(details, Mapping) or str(details.get("ask_id") or "") != str(ask_id):
         return None
     if str(details.get("bridge_provenance") or "") != "authority_grant":
-        # R3-5: a row the harness did NOT build for a provenance-verified
-        # decision is not evidence of a human answer. A forged ask-log fold
-        # line can produce a look-alike row, and after a restart the in-memory
-        # grant table is gone — so the marker the ROW carries is what separates
-        # a verified answer from a forgery. Rows that predate the marker are
-        # non-authorizing (typed refusal upstream), never backfilled.
+        # R3-5: the marker is a CORRELATION marker — it records that the HARNESS
+        # rendered this row under a confirmed admitted verdict, which is what
+        # separates it from a fold line any same-uid writer appended. It is NOT
+        # unforgeable by itself (the transcript file is writable by the same
+        # user) and this door does not treat it as authority: the consumed
+        # GRANT, the original scope block and the live fence are the authority,
+        # and the marker only narrows which rows may even be considered. Rows
+        # that predate the marker are non-authorizing (typed refusal upstream),
+        # never backfilled.
         return None
     return dict(details)
 

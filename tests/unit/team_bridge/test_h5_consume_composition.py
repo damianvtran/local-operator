@@ -85,6 +85,16 @@ def _answered_queue(tmp_path) -> tuple[AskQueue, str]:
     )
     assert outcome["ok"] is True
     ask_id = str(outcome["details"]["ask_id"])
+    # The human's tap in PRODUCTION goes through the authority seam, which mints
+    # the one-shot grant at admission and only then records the answer: that is
+    # what makes the consumed row carry the correlation marker the recovery door
+    # requires. Answering without it here would be a shape production cannot
+    # produce (round-4 R3-5).
+    from local_operator.harness.approval import mint_bridge_decide_grant
+
+    mint_bridge_decide_grant(
+        session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="approve"
+    )
     answered = queue.respond(ask_id, {QUESTION_UID: ["approve"]}, by="human")
     assert answered.get("ok") is True
     return queue, ask_id
@@ -122,7 +132,15 @@ async def test_real_chain_recovers_once_with_the_frozen_final_selection(
     monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
     queue, ask_id = _answered_queue(tmp_path)
     # REVISION INSIDE THE WINDOW: the append has not happened, so the change
-    # of mind is accepted — and the CONSUMED row must carry it.
+    # of mind is accepted — and the CONSUMED row must carry it. A revision is a
+    # SECOND admitted decision, so its own grant is minted first (production
+    # mints at admission for the word it admitted; without one the row would be
+    # a shape the product cannot produce).
+    from local_operator.harness.approval import mint_bridge_decide_grant
+
+    mint_bridge_decide_grant(
+        session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="deny"
+    )
     revised = queue.revise(ask_id, {QUESTION_UID: ["deny"]}, by="human")
     assert revised.get("ok") is not False
     message, directory, transcript = _consume(queue, ask_id, tmp_path)

@@ -139,6 +139,26 @@ def test_install_renders_own_label_to_temp_only(tmp_path) -> None:
     assert not hasattr(install_mod, "install") and not hasattr(install_mod, "bootstrap")
 
 
+def test_missing_or_mismatched_credential_is_credential_changed(tmp_path) -> None:
+    """TB-14's `credential_changed` arm (m2): the sweep must not delete it.
+
+    The fence refuses a context that cannot name its credential row, and one
+    that names a DIFFERENT row than the owner's committed one — both are the
+    same fail-closed verdict, and this case keeps the second arm exercised now
+    that every other call site carries the owner's own id.
+    """
+
+    from local_operator.team_bridge.connector import wake as wake_mod
+
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)  # the fence reads the DISK config (S-8a) first
+    missing = SimpleNamespace()  # no credential_id at all
+    wrong = SimpleNamespace(credential_id=int(owner.credential_id) + 1)
+    assert wake_mod._producer_fence(store, owner, missing, None) == "credential_changed"
+    assert wake_mod._producer_fence(store, owner, wrong, None) == "credential_changed"
+    assert wake_mod._producer_fence(store, owner, _access(owner), None) == ""
+
+
 def test_connector_import_stays_bounded() -> None:
     """The import pin: module scope must not pull the session/model graphs."""
 

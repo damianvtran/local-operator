@@ -1285,29 +1285,59 @@ class AskQueue:
     # around it). These four methods are that append's queue-side contract, and
     # nothing else in this module touches ``_committing`` or ``_handed``:
 
-    def _bridge_question(self, record: Mapping[str, Any]) -> tuple[str, str] | None:
-        """The bridge (question_id, word) a record's answer decided, or ``None``.
+    def _is_bridge_ask_record(self, record: Mapping[str, Any]) -> bool:
+        """Whether a folded ask record is a BRIDGE request at all (structural).
 
-        A bridge question is the one carrying a server ``question_id`` (the wire
-        message id) — the predicate the session's own door uses — and the word
-        is its single pick, lowercased. Ordinary asks answer ``None`` here.
+        The SAME predicate the session's door uses (``_is_bridge_ask_record``:
+        ANY question carrying a non-empty ``question_id``) — structure, never
+        sniffing of which pick happened to resolve. Keying the provenance gate
+        off "did one bridge pick resolve" was the S3-1 BLOCKER: a record whose
+        bridge question lost its ``id``, carried two picks, or left its first
+        bridge question unanswered fell through to the ordinary-ask arm, where
+        the forged pick rendered as the user's and its append closed the
+        revision window on the human's genuine tap.
+        """
+
+        return any(
+            str(question.get("question_id") or "")
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        )
+
+    def _bridge_picks(self, record: Mapping[str, Any]) -> list[tuple[str, str]]:
+        """Every bridge (question_id, word) the record's answers decided.
+
+        One entry per bridge question that carries a single pick. A bridge
+        question with zero or two-plus picks is NOT represented — the caller
+        reads the count against the number of bridge questions to see that
+        resolution failed and must withhold.
         """
 
         answers = record.get("answers") or {}
+        picks: list[tuple[str, str]] = []
         for question in record.get("questions") or ():
             if not isinstance(question, Mapping):
                 continue
             candidate = str(question.get("question_id") or "")
             if not candidate:
                 continue
-            picks = [
+            values = [
                 str(value)
                 for value in ((answers.get(str(question.get("id") or "")) or ()))
             ]
-            if len(picks) != 1:
-                return None
-            return candidate, picks[0].strip().lower()
-        return None
+            if len(values) != 1:
+                continue
+            picks.append((candidate, values[0].strip().lower()))
+        return picks
+
+    def _bridge_question_count(self, record: Mapping[str, Any]) -> int:
+        """How many bridge questions the record carries."""
+
+        return sum(
+            1
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping) and str(question.get("question_id") or "")
+        )
 
     def _bridge_answer_is_proven(self, record: Mapping[str, Any]) -> bool:
         """Whether a BRIDGE record's recorded answer may reach the model.
@@ -1317,23 +1347,36 @@ class AskQueue:
         when the answer is backed by a decision THIS runtime's authority seam
         admitted for this session — the one-shot grant, live (the human's
         gesture, dispatched around the append) or already consumed by the
-        dispatcher. An unproven answer is withheld rather than rendered as the
-        user's: the human still decides through the verified door, which
-        supersedes the forged record while the window is open. Ordinary asks
-        are unaffected — this answers ``True`` for them.
+        dispatcher.
+
+        FAIL-CLOSED ON RESOLUTION, not just on absence: a bridge record whose
+        answers do not resolve to exactly ONE pick per bridge question (none,
+        two, or a bridge question without its own ``id`` so its answer cannot
+        be read) is WITHHELD — the ordinary-ask arm is only for records that
+        carry no bridge question at all. An unproven answer is withheld rather
+        than rendered as the user's: the human still decides through the
+        verified door, which supersedes the forged record while the window is
+        open.
         """
 
-        bridge = self._bridge_question(record)
-        if bridge is None:
+        if not self._is_bridge_ask_record(record):
             return True
-        question_id, word = bridge
+        picks = self._bridge_picks(record)
+        if len(picks) != self._bridge_question_count(record):
+            # At least one bridge question did not resolve to a single pick:
+            # there is no admitted decision to point at, so nothing may render.
+            return False
+        if not picks:
+            return False
         from local_operator.harness.approval import bridge_decide_grant_seen
 
-        return bridge_decide_grant_seen(
-            session_id=str(self._session_id or ""),
-            ask_id=str(record.get("ask_id") or ""),
-            question_id=question_id,
-            word=word,
+        session_id = str(self._session_id or "")
+        ask_id = str(record.get("ask_id") or "")
+        return all(
+            bridge_decide_grant_seen(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=word
+            )
+            for question_id, word in picks
         )
 
     def begin_row_commit(self, row_id: str) -> None:
@@ -1407,6 +1450,22 @@ class AskQueue:
             store.STATUS_DECLINED,
             store.STATUS_LATE,
         ):
+            return message
+        if self._is_bridge_ask_record(record) and not self._bridge_answer_is_proven(record):
+            # M3: this rebuild re-derives the row from the CURRENT fold, so the
+            # provenance VERDICT is re-taken here — never inherited from the
+            # preview's shape or from the earlier reconcile. A fold rewritten
+            # between the gate and the append (or a grant withdrawn since) must
+            # not have its content landed, and it must not carry the marker.
+            # The preview the queue already deemed owed is returned unchanged:
+            # that content came from the fold at the moment the gate passed, and
+            # dropping the row here would be the silent loss this method's own
+            # contract forbids.
+            logger.warning(
+                "bridge ask %s no longer proves its decision at the append — the "
+                "rebuilt row is refused and the pre-append preview is kept",
+                ask_id,
+            )
             return message
         return self._response_message(record)
 
@@ -1500,7 +1559,14 @@ class AskQueue:
             images_missing=images_missing,
         )
         extra: dict[str, Any] = {}
-        bridge_question = self._bridge_question(record)
+        # M3: the marker is stamped on a VERDICT, never on the shape of the
+        # record — this builder is reached from the reconcile (always gated) and
+        # from the append-time refresh (which re-takes the verdict), and a
+        # record that cannot show an admitted decision must not be able to earn
+        # the marker by merely looking like a bridge row.
+        bridge_proven = self._is_bridge_ask_record(
+            record
+        ) and self._bridge_answer_is_proven(record)
         if images:
             # THE IMAGES RIDE AS A TOP-LEVEL ``content`` EXTRA, not inside
             # ``details`` -- measured, not assumed (design §1.3, spikes A and B):
@@ -1544,15 +1610,17 @@ class AskQueue:
                 "secret_lost": lost,
                 "tool_call_id": str(record.get("tool_call_id") or ""),
                 "text": text,
-                # S3-1/R3-5: this row is built ONLY for a provenance-verified
-                # bridge answer, so it ATTEST that the harness admitted the
-                # decision. The ask-log fold cannot set it — the row is built
-                # here — which is what lets the restart-surviving recovery door
-                # tell a verified answer from a forged fold line after the
-                # in-memory grant table is gone.
+                # R3-5/S3-1: a CORRELATION marker, not unforgeable provenance.
+                # It records that THIS builder wrote the row under a confirmed
+                # admitted verdict, which is what lets the recovery door tell a
+                # row the harness rendered from a fold line a forger appended —
+                # within the same-uid trust boundary, where the transcript file
+                # is itself writable. The AUTHORITY stays the consumed grant; an
+                # absent marker means "not written by this path" and is
+                # non-authorizing on its own.
                 **(
                     {"bridge_provenance": "authority_grant"}
-                    if bridge_question is not None
+                    if bridge_proven
                     else {}
                 ),
                 # REFS for the cards (TUI, desktop, phone): thumbnails come from
