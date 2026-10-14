@@ -104,6 +104,52 @@ def test_the_stt_transcript_type_matches_the_sidecar_writer():
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
+    """A busy-turn checkpoint is durable WITH the batch it describes.
+
+    The whole point of the checkpoint argument is that there is never a
+    committed batch without a checkpoint, so the row count before and after is
+    exactly one write; the cold reader sees the record on disk.
+    """
+    from local_operator.session.transcript import CHECKPOINT_CUSTOM_TYPE, read_latest_custom
+
+    assistant = Message.assistant("did the thing")
+    tool_result = Message.user("tool result")
+    checkpoint = {
+        "session_id": "s",
+        "turn_id": "t",
+        "committed_message_ids": [assistant.id, tool_result.id],
+        "completed_effects": [{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+        "pending_effect": {},
+        "phase": "resume",
+    }
+    rows = await transcript.append_messages(
+        [assistant, tool_result], checkpoint=checkpoint
+    )
+    # Two message rows plus exactly one checkpoint row, one atomic write.
+    assert len(rows) == 3 and rows[-1].payload["custom_type"] == CHECKPOINT_CUSTOM_TYPE
+    assert len(transcript.path.read_text().splitlines()) == 3
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    assert on_disk["committed_message_ids"] == [assistant.id, tool_result.id]
+    assert on_disk["phase"] == "resume"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_only_write_is_allowed_and_is_bookkeeping(transcript):
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        is_bookkeeping_entry,
+        read_latest_custom,
+    )
+
+    rows = await transcript.append_messages(
+        [], checkpoint={"session_id": "s", "turn_id": "t", "phase": "deferred"}
+    )
+    assert len(rows) == 1 and is_bookkeeping_entry(rows[0])
+    assert read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)["phase"] == "deferred"
+
+
+@pytest.mark.asyncio
 async def test_usage_cost_round_trips_and_old_rows_default_to_unreported(transcript):
     """Provider receipts are durable, while pre-receipt transcripts still load.
 

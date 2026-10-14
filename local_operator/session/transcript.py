@@ -185,6 +185,19 @@ ENTRY_PRUNE = "prune"
 #: turn the user would recognise — and it is reachable only for a runtime that
 #: ended a turn without persisting a message, since every ordinary turn writes
 #: its own message rows in the same pass.
+#: The busy-turn checkpoint record (see `service_handoff` / the checkpoint
+#: contract). It is BOOKKEEPING, not a conversation row: a checkpoint is a
+#: record ABOUT the session and must not advance the activity clock, or a
+#: mid-turn rollover would re-rank the session as freshly worked. Declared here,
+#: above the bookkeeping set that lists it, so the set can name it.
+CHECKPOINT_CUSTOM_TYPE = "busy_turn_checkpoint_v1"
+
+#: The phase vocabulary for a checkpoint record. ``resume`` means the successor
+#: may carry the turn forward from the committed batch; ``deferred`` means the
+#: work could not be checkpointed and the successor must NOT claim to continue
+#: it (provider streams, PTY, native children, non-idempotent effects).
+CHECKPOINT_PHASES = ("resume", "deferred")
+
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -207,6 +220,10 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
         # ``stt.sidecar`` drift rule: this module does not import the writer).
         "video_job_v1",
+        # A busy-turn handoff checkpoint is a record ABOUT the session (see
+        # ``CHECKPOINT_CUSTOM_TYPE``): its write must not read as operator
+        # activity, or a mid-turn rollover would keep the session ranked fresh.
+        CHECKPOINT_CUSTOM_TYPE,
     }
 )
 
@@ -1932,6 +1949,7 @@ class Transcript:
         *,
         producer_command_id: str | None = None,
         preserve_mtime: bool = False,
+        checkpoint: dict[str, Any] | None = None,
     ) -> list[TranscriptEntry]:
         """Durably commit an ordered message batch with one fsync.
 
@@ -1943,10 +1961,17 @@ class Transcript:
         ``preserve_mtime`` is forwarded to :meth:`_write_entries`, which holds
         the rule; it is opt-in so every existing call site keeps moving the
         activity clock exactly as it did.
+
+        ``checkpoint`` rides the SAME atomic write as the pair it describes (see
+        :data:`CHECKPOINT_CUSTOM_TYPE`): a busy-turn handoff must never expose a
+        checkpoint whose committed batch is not yet durable, or one whose durable
+        batch has no checkpoint — both are the split this argument exists to
+        prevent. It is written AFTER the message rows in the batch, so a reader
+        that scans backward for the newest checkpoint sees it.
         """
         if producer_command_id is not None and len(messages) != 1:
             raise ValueError("producer admission requires exactly one message")
-        if not messages:
+        if not messages and checkpoint is None:
             return []
 
         def build() -> list[TranscriptEntry]:
@@ -1957,6 +1982,15 @@ class Transcript:
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
                 rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            if checkpoint is not None:
+                rows.append(
+                    TranscriptEntry(
+                        uuid.uuid4().hex,
+                        time.time(),
+                        ENTRY_CUSTOM,
+                        {"custom_type": CHECKPOINT_CUSTOM_TYPE, "details": checkpoint},
+                    )
+                )
             return rows
 
         return await self._commit(build, preserve_mtime=preserve_mtime)

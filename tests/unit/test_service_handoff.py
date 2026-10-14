@@ -171,3 +171,50 @@ def test_unit_inventory_classifies_every_owned_central_unit() -> None:
     assert handoff.unit("usage").kind == "service"
     with pytest.raises(KeyError):
         handoff.unit("nonexistent")
+
+
+def test_checkpoint_record_is_well_formed_and_phase_checked() -> None:
+    record = handoff.checkpoint_record(
+        session_id="s",
+        turn_id="t",
+        committed_message_ids=["m1", "m2"],
+        completed_effects=[{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+        pending_effect={"tool": "write", "call_id": "c2"},
+        phase="resume",
+    )
+    assert record["phase"] == "resume"
+    assert record["committed_message_ids"] == ["m1", "m2"]
+    assert record["pending_effect"] == {"tool": "write", "call_id": "c2"}
+    with pytest.raises(handoff.HandoffError):
+        handoff.checkpoint_record(
+            session_id="s", turn_id="t", committed_message_ids=[], phase="bogus"
+        )
+
+
+def test_exactly_once_skips_a_committed_call_and_refuses_without_a_call_id() -> None:
+    record = handoff.checkpoint_record(
+        session_id="s",
+        turn_id="t",
+        committed_message_ids=["m1"],
+        completed_effects=[{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+    )
+    assert handoff.effect_already_committed(record, "c1") is True
+    assert handoff.effect_already_committed(record, "c2") is False
+    # No stable call_id: cannot be proven committed => at-least-once (declared limit).
+    assert handoff.effect_already_committed(record, "") is False
+
+
+def test_resumable_requires_a_readable_record_with_phase_resume() -> None:
+    good = handoff.checkpoint_record(session_id="s", turn_id="t", committed_message_ids=[])
+    assert handoff.resumable(good) is True
+    assert handoff.resumable(None) is False  # unreadable is not permission to continue
+    deferred = handoff.checkpoint_record(
+        session_id="s", turn_id="t", committed_message_ids=[], phase="deferred"
+    )
+    assert handoff.resumable(deferred) is False
+
+
+def test_checkpoint_phase_vocabulary_matches_the_transcript_module() -> None:
+    from local_operator.session import transcript as transcript_mod
+
+    assert handoff.CHECKPOINT_PHASES == transcript_mod.CHECKPOINT_PHASES
