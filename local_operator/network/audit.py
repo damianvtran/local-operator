@@ -209,6 +209,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # that `sub` acknowledged the named material generation / login-chain
         # revision. Counters and keys only, never material.
         "credential.lifecycle_acked",
+        # The owner's sender: a recipient APPLIED (or already held) the named
+        # counters. `sub` is the recipient. Counters and the key only.
+        "credential.lifecycle_announced",
         # The github narrowing's delivery receipts (the adapter's §3.4 bound):
         # the owner's designated repositories reached a borrowing device and
         # were written to its config — or were refused, with the machine reason.
@@ -487,6 +490,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # The lifecycle ack's two integers are the generation and login-chain revision
     # the recipient acknowledged (owner.py's ack arm) — counters, never material.
     "credential.lifecycle_acked": frozenset(
+        {"credential_key", "material_generation", "login_chain_revision"}
+    ),
+    "credential.lifecycle_announced": frozenset(
         {"credential_key", "material_generation", "login_chain_revision"}
     ),
     # The narrowing's delivery (the github adapter's §3.4 bound): `repositories`

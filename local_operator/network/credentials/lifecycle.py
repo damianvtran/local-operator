@@ -51,6 +51,7 @@ Pure derivation (:func:`derive`: facts -> next row) is separate from persistence
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -59,6 +60,8 @@ from typing import Any, Iterator, Mapping, NoReturn, Optional
 from local_operator.network import store
 from local_operator.network.credentials import consent, placement
 from local_operator.network.types import MeshRefusal
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = 1
 LIFECYCLE_FILENAME = "lifecycle.json"
@@ -687,3 +690,209 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
             }
         )
     return {"kind": "ack", "entries": results}
+
+
+# ---------------------------------------------------------------------------
+# The owner's sender: a tick step that announces persisted counters
+# ---------------------------------------------------------------------------
+
+#: Per-relay memory of what each recipient has ACKNOWLEDGED, so a quiet owner does not
+#: re-send an unchanged row to every holder every 60 s. Deliberately in-memory only:
+#: nothing is queued or persisted (a restart makes the first tick re-announce to every
+#: active member, which the recipient's forward-only high-water absorbs as a replay),
+#: and the durable owner-side ack ledger is a later slice.
+_SENT_ATTR = "_mesh_credential_lifecycle_sent"
+
+#: Acks that mean "this recipient needs nothing more for that row". ``applied`` is the
+#: normal case; ``replayed``/``stale`` say the recipient already holds this counter or a
+#: newer one. Everything else — notably ``observation_table_full`` (the recipient could
+#: NOT record it) — is retry-later, never success.
+_SETTLED_REASONS = frozenset({OBSERVED, OBSERVED_REPLAY, OBSERVED_STALE})
+
+
+def _sent_ledger(server: Any) -> dict[tuple[str, str, str], tuple[str, int, int]]:
+    ledger = getattr(server, _SENT_ATTR, None)
+    if ledger is None:
+        ledger = {}
+        try:
+            setattr(server, _SENT_ATTR, ledger)
+        except Exception:  # noqa: BLE001 — a server that refuses attributes just re-sends
+            pass
+    return ledger
+
+
+def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, Any]]]:
+    """``(network_id, entries)`` this owner owes ``device_id``, at most one frame's worth.
+
+    Recomputed from the persisted counters and the placement document on every call
+    (nothing is queued). Only keys this device OWNS and that ``device_id`` HOLDS are
+    announced — the recipient re-checks both — and only for an ACTIVE member, so a
+    removed member learns nothing here. An unreadable counter file
+    (``needs_baseline``) announces nothing: its numbers are not provable.
+    """
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.placement import PlacementDocument
+    from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+
+    root = getattr(server, "root", None)
+    self_device = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    if root is None or not self_device or not device_id:
+        return "", []
+    document = PlacementDocument.resolve(root, self_device=self_device)
+    if document is None:
+        return "", []
+    network_id = str(document.network_id)
+    if not sync_mod._member_is_active(root, network_id, device_id):  # noqa: SLF001
+        return network_id, []
+    owned: set[str] = set()
+    for key in document.keys_owned_by(self_device):
+        entry = document.entry(key)
+        if entry is not None and key not in DEVICE_BOUND_PROVIDERS and entry.is_holder(device_id):
+            owned.add(key)
+    if not owned:
+        return network_id, []
+    doc = LifecycleStore(network_id, root).load()
+    if doc.needs_baseline:
+        return network_id, []
+    ledger = _sent_ledger(server)
+    entries: list[dict[str, Any]] = []
+    cap = min(sync_mod.ANNOUNCE_CAP, MAX_ENTRIES)
+    for (key, scope), row in sorted(doc.rows.items()):
+        if key not in owned:
+            continue
+        if ledger.get((device_id, key, scope)) == (
+            row.state,
+            row.login_chain_revision,
+            row.material_generation,
+        ):
+            continue
+        entries.append(
+            {
+                "credential_key": key,
+                "account_scope_ref": scope,
+                "state": row.state,
+                "material_generation": row.material_generation,
+                "login_chain_revision": row.login_chain_revision,
+            }
+        )
+        if len(entries) >= cap:
+            break
+    return network_id, entries
+
+
+def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
+    """One member's lifecycle announcement, run INSIDE the mesh-definitions tick.
+
+    Registered with ``definitions.add_tick_step`` beside ``sync.credentials_sync_step``
+    so it rides the same thread and floors (15 s tick, 60 s to a reachable member) and
+    adds no thread, queue or dialer. The order is cheap-before-costly: the capability
+    table check (``net_broker`` needs ``broker_credential``) and the local pending
+    computation come first, so a member owed nothing costs no dial.
+
+    THE NEGOTIATED CAPABILITY IS THE GATE. After the dial, a peer whose LINK did not
+    negotiate ``credential-lifecycle-v1`` gets ZERO frames — an old peer would answer
+    a lifecycle kind with a refusal it had to compose, and the design promises old
+    peers receive no new kinds. One frame (<= ``ANNOUNCE_CAP`` entries) per exchange;
+    the rest follow on later ticks, recomputed from the counters.
+
+    The returned string is the outcome for the tick's log only; none is a policy
+    refusal, so a failed exchange is retried on the next tick rather than parked.
+    """
+    from local_operator.network import definitions, wire
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import validate_lifecycle_frame
+
+    blocked = definitions.unholdable_capability(step_server, device_id, "net_broker")
+    if blocked:
+        return f"skipped:no_{blocked}"
+    network_id, entries = _pending_entries(step_server, device_id)
+    if not entries:
+        return "in_sync"
+    link = step_server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
+    if link is None:
+        return "unreachable"
+    if wire.CREDENTIAL_LIFECYCLE_V1 not in link.capabilities:
+        return "skipped:peer_lacks_lifecycle"
+    identity = step_server.identity
+    self_device = str(identity.device_id)
+    frame = {
+        "op": "net_broker",
+        "kind": "lifecycle_announce",
+        "network_id": network_id,
+        "from_device": self_device,
+        "from_device_name": str(getattr(identity, "name", "") or ""),
+        "owner_device": self_device,
+        "recipient_device": device_id,
+        "req": step_server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
+        "entries": entries,
+    }
+    try:
+        validate_lifecycle_frame(frame)  # the bounds a recipient will apply to it
+        reply = link.request(frame, timeout=sync_mod.ANNOUNCE_TIMEOUT_S)
+        detail = checked_reply_detail(reply)
+    except Exception:  # noqa: BLE001 — one member's link is that member's problem
+        logger.debug("credential lifecycle: announce to %s failed", device_id, exc_info=True)
+        return "failed"
+    if detail.get("kind") == "error":
+        return "refused"
+    results = detail.get("entries")
+    if not isinstance(results, list):
+        return "failed"
+    ledger = _sent_ledger(step_server)
+    delivered = 0
+    for item, result in zip(entries, results):
+        if (
+            not isinstance(result, dict)
+            or result.get("credential_key") != item["credential_key"]
+            or result.get("account_scope_ref") != item["account_scope_ref"]
+        ):
+            continue
+        if not (result.get("applied") is True or result.get("reason") in _SETTLED_REASONS):
+            continue
+        ledger[(device_id, item["credential_key"], item["account_scope_ref"])] = (
+            item["state"],
+            item["login_chain_revision"],
+            item["material_generation"],
+        )
+        delivered += 1
+        _audit_announced(step_server, network_id, self_device, device_id, item)
+    return "delivered" if delivered == len(entries) else "retry_later"
+
+
+def _audit_announced(
+    server: Any, network_id: str, self_device: str, recipient: str, item: Mapping[str, Any]
+) -> None:
+    """One keyless audit row per settled entry — counters and the key, never material."""
+    audit = getattr(server, "audit", None)
+    if audit is None:
+        return
+    try:
+        from local_operator.network.audit import AuditEvent
+
+        audit.record(
+            AuditEvent(
+                event="credential.lifecycle_announced",
+                network_id=network_id,
+                actor=self_device,
+                actor_kind="device",
+                subject=recipient,
+                detail={
+                    "credential_key": item["credential_key"],
+                    "material_generation": item["material_generation"],
+                    "login_chain_revision": item["login_chain_revision"],
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — a log that cannot be written is not a failure
+        pass
+
+
+def install() -> None:
+    """Register the lifecycle cadence on the definitions syncer's ONE seam.
+
+    Idempotent by identity (``definitions.add_tick_step``); called from
+    ``credentials.install`` so the step exists exactly where the ops do.
+    """
+    from local_operator.network import definitions
+
+    definitions.add_tick_step(lifecycle_tick_step)
