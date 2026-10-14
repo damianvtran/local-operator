@@ -628,7 +628,13 @@ def shared_tier_saturation(
     shared: list[float] = []
     tier_binding = False
     for limit in report.limits:
-        if limit.paid_fallback:
+        # A payable meter is an ALTERNATIVE to the plan, not part of the shared
+        # plan pool: counting it here collapsed the shared headroom this
+        # function exists to measure (regression the tier-spent notice tests
+        # caught). The legacy ``:extra`` id is the same concept on rows written
+        # before the explicit marker existed (``anthropic:extra``), kept so a
+        # pre-marker wire shape reads the way it always did.
+        if limit.paid_fallback or limit.id.endswith(":extra"):
             continue
         fraction = limit.amount.fraction()
         if fraction is None:
