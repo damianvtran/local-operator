@@ -10,10 +10,12 @@ IMPORT DISCIPLINE. The stream/model stack is imported lazily inside functions:
 ``tests/unit/test_import_graph.py`` fails the build if a boot pulls the model
 stack. A runner tick that never finds a conflict never pays for it.
 
-WHICH MODEL. The user's configured default (``bootstrap.resolve_hosting_model``,
-called rather than restated), unless ``hub.merge_model`` names another
-``provider/model``. There is deliberately NO fallback chain: trying other
-providers would spend a credential the user did not choose for this job.
+WHICH MODEL. The user's CURRENT configured default
+(``bootstrap.resolve_hosting_model``, called rather than restated), resolved
+fresh on each merge. There is deliberately NO ``hub.merge_model`` pin and NO
+fallback chain: a second model preference beside the real one silently routes a
+review to a tier the operator never chose, and trying other providers would spend
+a credential they did not pick for this job.
 
 WHY WE OWN THE BACKOFF. The request is ``isolated=True`` so the driver's own
 retry/fallback/rotation and sticky-route writes are off (a background job must
