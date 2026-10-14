@@ -398,3 +398,46 @@ def test_drift_check_passes_on_the_committed_tree() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "byte-identical" in result.stdout
+
+
+@pytest.mark.parametrize("slash_status", [None, "failed", "passed"])
+@pytest.mark.parametrize("candidate", ["zh-CN", "zh-cn", "zh-Hans", "zh_CN"])
+def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
+    generated, i18n_generate, slash_status, candidate
+) -> None:
+    """Synthetic bytes only: omission is the bypass the carried gate cannot see."""
+    root, _ = generated
+    entries = []
+    for locale in ("en", "fr", candidate):
+        (root / locale).mkdir(exist_ok=True)
+        (root / locale / "wire.exec.json").write_text(
+            json.dumps({"wire.exec.demo": "Synthetic receipt"})
+        )
+    (root / "en" / "wire.slash.json").write_text(
+        json.dumps({"wire.slash.demo": "Synthetic action"})
+    )
+    for locale in ("fr", candidate):
+        entries.append(
+            {
+                "locale": locale,
+                "namespace": "wire.exec",
+                "status": "passed",
+                "source_sha256": catalogues.catalogue_sha256("en", "wire.exec"),
+            }
+        )
+    if slash_status is not None:
+        (root / candidate / "wire.slash.json").write_text(
+            json.dumps({"wire.slash.demo": "Synthetic action"})
+        )
+        entries.append(
+            {
+                "locale": candidate,
+                "namespace": "wire.slash",
+                "status": slash_status,
+                "source_sha256": catalogues.catalogue_sha256("en", "wire.slash"),
+            }
+        )
+    i18n_generate.LEDGER.write_text(json.dumps({"entries": entries}))
+    # fr proves that ordinary partial namespace eligibility remains supported.
+    # Even fabricated passes do not constitute explicit security disposition.
+    assert i18n_generate._shipped_locales() == ["en", "fr"]
