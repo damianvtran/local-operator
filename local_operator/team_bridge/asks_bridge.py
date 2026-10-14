@@ -98,7 +98,16 @@ def bridge_request_question(
         "options": [dict(option) for option in BRIDGE_ASK_OPTIONS],
         "multi": False,
         "secret": False,
-        "persist": True,
+        # NO ``persist`` (round 13). ``persist`` is the CREDENTIAL promotion
+        # route — ``AskQuestion.persist`` reads "with ``secret=true``, also save
+        # the answer to the operator's encrypted long-term store" — and its only
+        # reader is ``_report_secret_answers``' secret branch, which an
+        # Approve/Deny question never enters. On this question it was inert AND
+        # fatal to the surface: ``AskQuestion._shape`` refuses "persist only
+        # applies to a secret question", so the row the queue stored could not
+        # be validated by the ask card's models and a REAL bridge ask mounted no
+        # card anywhere. This ask's durability is the ask LOG's job (the queue
+        # persists every row), not this field's.
         "human_required": True,
         "question_id": str(message_id),
     }

@@ -9654,6 +9654,15 @@ class Session:
                 # The row's OWN provenance kind, so the live surface paints the
                 # same card the history replay will (§13.4); empty stays peer.
                 custom_type=message.custom_type,
+                # ...and the row's OWN details, for the same reason and the
+                # reason D1 gives: a bridge card is a view of the VALIDATED
+                # provenance the row carries (``details["bridge"]``), so a live
+                # receipt without it left the live paint with a field the TUI
+                # message did not have — an exception inside the handler and no
+                # card at all, live, for a human card the replay painted fine.
+                # The replay fold reads the same dict, so the two surfaces
+                # cannot drift.
+                details=dict(message.details),
             )
         )
 
