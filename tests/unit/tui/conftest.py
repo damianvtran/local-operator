@@ -148,7 +148,6 @@ async def await_session_boot(app: App[None]) -> None:
     workers = [w for w in app.workers if w.group == "session"]
     if workers:
         await asyncio.wait_for(app.workers.wait_for_complete(workers), BOOT_DEADLOCK_GUARD_S)
-        return
     assert getattr(app, "_session", None) is not None, (
         "no session worker is pending and no session was adopted -- the boot "
         "worker never ran, so waiting here would have waited on nothing"

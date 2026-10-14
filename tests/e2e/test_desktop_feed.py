@@ -610,9 +610,8 @@ class _PresenceCacheClock:
         # matrix measures a cache entry's age as ``now - ((now + TTL) - TTL)``,
         # which is exactly 0 only if every addition is exact. With a fractional
         # uptime the round trip loses a ulp and the age comes back as -1.4e-14
-        # (measured: ~0.3% of starts for an uptime in 64..256 s -- a fresh CI
-        # runner -- and 2.8% below 64 s), failing ``0 <= age`` on a healthy
-        # cache. An integer base plus the TTL, +1 and TTL/16 steps used below
+        # (reproduced at uptime 252.56993219293187), failing ``0 <= age`` on a
+        # healthy cache. An integer base plus the TTL, +1 and TTL/16 steps used below
         # are all dyadic, so the arithmetic stays exact at any magnitude.
         # ``ceil`` (not ``int``) keeps the base at or above the real clock, so
         # a cache entry stamped by the real clock before this patch still
