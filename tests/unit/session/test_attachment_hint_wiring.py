@@ -216,3 +216,47 @@ async def test_a_text_only_model_strips_the_image_and_earns_no_note(tmp_path):
     assert any(IMAGE_OMITTED_TEXT_ONLY_NOTICE in text for text in texts)
 
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_confined_session_keeps_pixels_but_drops_the_path_promise(tmp_path):
+    """The world-root seam: the note no longer promises a read the session's
+    own confinement refuses, while the image still rides the wire and the
+    aside stays byte-equal to the turn (the provider-cache property)."""
+    world = tmp_path / "world"
+    world.mkdir()
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, confinement_root=str(world))
+
+    await session.prompt("edit this", [ImageContent(data=PNG_B64, mime_type="image/png")])
+
+    request = stream.requests[0]
+    notes = [
+        block.text
+        for message in request.messages
+        for block in getattr(message, "content", [])
+        if isinstance(block, TextContent) and "no workspace file" in block.text
+    ]
+    assert len(notes) == 1
+    store = AttachmentStore()
+    assert str(store.path_for(PNG_DIGEST)) not in notes[0]
+    assert "read or edit" not in notes[0]
+    assert f"digest {PNG_DIGEST}" in notes[0]
+
+    # The pixels are still on the wire — only the false promise left.
+    assert any(
+        isinstance(block, ImageContent)
+        for message in request.messages
+        if message.role == "user"
+        for block in message.content
+    )
+
+    # Aside == turn still: the two seams must keep rendering byte-equal.
+    turns = [Message.user("and now?")]
+    _blocks, aside = await session._read_only_prompt(turns)
+    expected = bound_replay_payloads(
+        session._render_for_request([*session._wire_legal_snapshot(), *turns])
+    )
+    assert [m.model_dump() for m in aside] == [m.model_dump() for m in expected]
+
+    await session.dispose()
