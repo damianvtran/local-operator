@@ -1431,3 +1431,105 @@ the large one.
 | Q2 | Tier 2's static pool size: 1 × `m7g.xlarge` (floor $208/mo) or start at `min 0`? | **`min 1`**, because `kube-system` + the EBS CSI controller + Karpenter itself need a non-spot home, and a 0-floor cluster cannot schedule its own DNS | A cheaper design that taints `kube-system` onto Fargate profiles (possible, more moving parts, and it re-opens the "namespace is not a boundary" question) |
 | Q3 | Is a spot tier wanted for *short* tasks at all, given §11's ≈$0.043 vs $0.0869 per task-hour against a $209/mo floor? | **No, not on cost.** Spot belongs to long-running dedicated workloads (multi-hour) where the floor is already paid | An operator use case where a task runs for hours and the ~45% discount is material |
 | Q4 | `cloud.enabled` — the one registered key (§7.2), or no kill switch and rely on the hidden subparser? | **The key.** A spend-capable surface needs an off switch that is not "remember not to type it" | A house preference against adding keys for experimental surfaces |
+
+---
+
+## Implementation notes
+
+Slices 1 and 2, as landed. Every entry below is a place where this document was
+ambiguous or wrong against the code, with the smallest sound choice and why.
+Nothing here re-opens a decision the document states; the state machine, the
+store discipline, the refusal style, the env names and the scope cut are all as
+written.
+
+**1. `FargateClients` has a fourth field, `definitions`.** §4.2 sketches three
+(`ecs`, `sts`, `s3`), but §4.1's extraction map sends
+`active_task_definition(operator, outputs)` into `describe()` and the same script
+records that the controller role *deliberately* holds no
+`ecs:DescribeTaskDefinition` — it reads the definition with the OPERATOR session.
+A provider holding only the controller's client cannot make the call the map
+assigns it. `definitions` is that client, optional, defaulting to `None` meaning
+"`ecs` can read definitions too", so a deployment with one identity still needs
+one client. Without it, either `describe()` breaks in production or `run_task`
+runs as the operator, which is the thing the POC's split exists to prevent.
+
+**2. `FargateTargets` carries two fields §4.2 does not name: `bucket` and
+`secret_arn`.** `submit()` presigns (so it needs the bucket) and
+`task_environment` writes `POC_MODEL_SECRET_ARN` (§4.1 requires that env name, and
+the value is `outputs["secretArn"]`). Both arrive in the same
+`pulumi stack output --json` document, so they belong on the record that document
+builds.
+
+**3. `FargateProvider.__init__` takes `targets` (required) and a `clock`.** §4.2's
+sketch ends at `poll_interval_s` with `...`, and `run_task` cannot be shaped
+without the subnets and security group. `clock` is injectable for the same reason
+`sleep` is: `drain`'s deadline must be exercised without waiting for it, and
+patching the event loop's own `time.monotonic` is how that test hangs instead of
+failing. The POC's `run_deadline_s` is used as the drain's ceiling, so a drain can
+never outlast the client deadline that is already scheduled to stop the task.
+
+**4. `CloudBlobs` has `object_present` and not `download_tree`.** §4.1 names
+`presign_put` and `download_tree` on this seam; the drain needs a third thing —
+the checkpoint marker it waits for ("the results object appearing at the presigned
+URL") — and result *hand-off* is explicitly not the provider's. `download_tree`
+therefore lands with the CLI in slice 3, on this same injected record.
+
+**5. `ComputeTask.transition` returns `bool` and accepts `**extra`.** §3.4 sketches
+`transition(state, detail="") -> None`. The write-once no-op has to be
+*observable* (the ledger reports `None` for "nothing advanced", exactly as
+`move_queue.transition` does), and the provider reference, artifacts and
+checkpoint each become true *with* a transition — the ref is the evidence for
+`queued → provisioning` — so they are written by the same writer at the same
+moment instead of by a second one. Which keys do that is a closed tuple,
+`RECORD_FIELDS`, so a mistyped key is journaled and nothing else. An accepted
+transition appends one event; a same-state reading stamps `last_seen_at` and
+appends none; a terminal record writes nothing at all.
+
+**6. §3.2's refusal-code list is illustrative, not closed.** The document's own
+criteria add `overrides_too_large` (§10 slice 2 criterion 2) and §9.3 adds
+`network_unbound`, neither of which appears in the list. This slice adds
+`version_unknown` (a record shape or vocabulary this build cannot read) and
+`hosting_unknown`, beside the listed `size_unknown` and `tier_unknown`. The rule
+the codes serve is the one §3.5 states: a value this build does not know is
+refused BY NAME, because reading an unknown `size` as the default `m` provisions
+the wrong machine.
+
+**7. §3.5's "all three records" is read as `PoolRequest`, `ComputeTask` and
+`ComputeStatus`** — the three that cross a process boundary — each with
+hand-written `to_json`/`from_json`. `ProviderCapacity` and `DrainOutcome` are
+transient readings and stay dataclasses. `provider.py`'s reader imports the
+coercion helpers from `types.py` *inside* the function: `types.py` imports
+`provider.py` at import time (that is where `CloudRefused` lives), so the reverse
+direction is the deferred one, the same pattern `move_queue.lock_for` uses.
+
+**8. `PoolRequest.from_json` reads `size_class` as well as `size`.** §3.3.1 renames
+the key to `size`, and §4.1's literal body — which §10 criterion 2 requires to
+parse — spells it `size_class`. Absent is not a claim, but a v1 body that *says*
+`"l"` must not be read as the default `m`.
+
+**9. `CloudLedger.create` stamps `requested_at` when the request has none.** The
+request is immutable intent and the file is not re-opened, but "when was this
+asked for" is a fact only the recording process can witness, and §11's cost
+accounting needs it. A request that arrives with its own timestamp keeps it.
+
+**10. Two rules from §3.4 needed a home §3.6's method table does not name.**
+`PROVISION_DEADLINE_S` (`queued`/`provisioning` → `failed`, no `running` in
+time) is `CloudLedger.expire_stalled`, measured from `submitted_at` when there is
+one and `created_at` otherwise. And `lost` is reachable from all four live states
+(the table says "any live"), not only from the three that hold a provider
+reference.
+
+**11. `drain()` refuses to wait for a marker it cannot see.** If the provider has
+no record of the reference (it was restarted since `submit`), it stops the task
+and returns `DrainOutcome(drained=False, reason="provider_refused")` rather than
+spending the container's budget on a checkpoint nothing can observe. `§3.2`'s
+"ask it to stop, wait up to `deadline_s`" is honoured; what is refused is the
+pretence of waiting.
+
+**12. Slice-1/2 deltas that are scope, not design.** `reconcile()` re-reads and
+reports and never re-drives (§9.2); `MAX_CLOUD_TASKS` pruning returns the retained
+records, so a caller cannot print a record the same call deleted; and the POC
+script `scripts/remote_agents_poc.py` is byte-identical to the base revision —
+the provider duplicates the run/status/stop *shapes* rather than calling into it,
+because its recorded evidence is the reason the extraction is trustworthy in the
+first place.
