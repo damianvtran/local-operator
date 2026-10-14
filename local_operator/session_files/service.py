@@ -909,7 +909,7 @@ def materialise(
     store = store_for_transcript_dir(family.session_dir)
     blob = store.get_bytes(record.digest)
     if blob is None:
-        raise MaterialiseError("artifact_bytes_missing")
+        raise MaterialiseError("artifact_missing")
     data, stored_mime = blob
 
     scratch = scratchpad_root(family.session_dir)

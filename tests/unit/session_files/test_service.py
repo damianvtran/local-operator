@@ -660,7 +660,7 @@ def test_materialise_refuses_a_path_row_and_a_missing_store_entry(world: World) 
         service.materialise(
             world.config, world.family(), rows["flux-dev-01.png"]["id"], home=str(world.tmp)
         )
-    assert gone.value.code == "artifact_bytes_missing"
+    assert gone.value.code == "artifact_missing"
 
 
 def test_materialise_refuses_a_bit_rotted_store_entry(world: World) -> None:
@@ -668,7 +668,7 @@ def test_materialise_refuses_a_bit_rotted_store_entry(world: World) -> None:
     AttachmentStore().path_for(digest).write_bytes(b"rotted")
     with pytest.raises(service.MaterialiseError) as refusal:
         service.materialise(world.config, world.family(), file_id, home=str(world.tmp))
-    assert refusal.value.code == "artifact_bytes_missing"
+    assert refusal.value.code == "artifact_missing"
 
 
 def test_sanitise_name_unit() -> None:
