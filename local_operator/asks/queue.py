@@ -298,9 +298,10 @@ class AskQueue:
         DERIVED from the preallocated issuance identity (never caller/model/
         UI-chosen), and the exact-key lookup + fingerprint validation + append
         run inside ONE ``_NonBlockingLock`` section on the ask log — the same
-        lock discipline as every other writer — so two writers cannot both
-        observe "absent" and mint duplicate asks. Same key + same fingerprint
-        returns the SAME ask id (even after the ask was consumed); a mismatched
+        lock discipline as every other writer — and under lock contention this
+        door FAILS CLOSED (a retryable refusal) rather than deciding on a read
+        it cannot prove exclusive (TB-10). Same key + same fingerprint returns
+        the SAME ask id (even after the ask was consumed); a mismatched
         fingerprint or multiple exact rows REFUSE. The generic heuristic
         duplicate-text refusal does not apply here: the KEY is the identity,
         and a retry legitimately carries the same wording.
@@ -333,14 +334,21 @@ class AskQueue:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(
                 store.asks_log_path(self.session_dir),
-                os.O_CREAT | os.O_WRONLY | os.O_APPEND | store._O_BINARY,
+                store.append_flags(),
                 0o600,
             )
         except OSError:
             logger.warning("could not open the ask log in %s", self.session_dir, exc_info=True)
             return {"ok": False, "error": "the ask log could not be opened; not enqueuing."}
         try:
-            with store._NonBlockingLock(fd):
+            lock = store._NonBlockingLock(fd)
+            with lock:
+                if not lock.acquired:
+                    # TB-10: the lookup+mint DECISION needs the lock — the
+                    # atomic append alone only protects the write — so under
+                    # contention this door fails closed (retryable) instead of
+                    # deciding on a read it cannot prove exclusive.
+                    return {"ok": False, "error": "the ask log is contended; retry shortly."}
                 try:
                     rows = self.records()
                 except Exception:  # noqa: BLE001 — unreadable is its own answer
@@ -367,6 +375,11 @@ class AskQueue:
                     # SAME key + SAME fingerprint: the SAME ask, even when it
                     # has since been answered/consumed — a crash retry or a
                     # live+cold duplicate must never mint a second one.
+                    # TB-08: the idempotent return keeps the deadline/wake
+                    # behaviour of a fresh enqueue — a cold runtime still gets
+                    # its timeout row armed and the fold republished.
+                    self._arm_deadline_wake(row)
+                    self._refresh()
                     return {
                         "ok": True,
                         "text": "",

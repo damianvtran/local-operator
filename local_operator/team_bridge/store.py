@@ -3578,7 +3578,9 @@ class Store:
 
         Crash after commit replays nothing (refs are durable); crash BEFORE
         commit replays the feed batch — the same either way: a ref is acted on
-        only after it is on disk here.
+        only after it is on disk here. Once handled, the caller DELETES the
+        ref (:meth:`delete_feed_refs`), which is what makes consumption
+        once-only across polls and restarts (TB-01).
         """
 
         with self._connect() as conn:
@@ -3588,6 +3590,32 @@ class Store:
                 (_owner_key(owner), int(upto_seq)),
             ).fetchall()
             return [row["ref"] for row in rows]
+
+    def delete_feed_refs(self, owner: OwnerSnapshot, refs: Sequence[str]) -> int:
+        """DELETE drained refs — once-only durable consumption (TB-01).
+
+        The rows ARE the durable cursor: a ref is deleted only after its
+        delivery outcome was handled, so a crash BEFORE the delete replays the
+        batch (at-least-once; the receiver's own dedupe absorbs it) and any
+        restart AFTER it consumes nothing. Live-owner fenced; bounded by the
+        caller's drained list.
+        """
+
+        if not refs:
+            return 0
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            key = _owner_key(owner)
+            deleted = 0
+            for ref in refs:
+                cur = conn.execute(
+                    "DELETE FROM feed_refs WHERE owner_key = ? AND ref = ?",
+                    (key, str(ref)),
+                )
+                deleted += int(cur.rowcount or 0)
+            return deleted
 
     def merge_refs(self, owner: OwnerSnapshot, refs: Sequence[MessageRef]) -> None:
         """Persist refs WITHOUT touching the inbox checkpoint (single reads).
