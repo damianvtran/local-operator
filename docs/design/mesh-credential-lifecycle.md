@@ -383,18 +383,19 @@ retry batches rotate independently of delivery success.
 ### Restrictive observation overflow requires recovery
 
 If a new restrictive observation cannot fit the recipient's row, per-owner or
-file-byte bound, the recipient writes one constant-size, device-local
-`.lifecycle-restriction-overflow.json` marker under that network's credential
-root, atomically at 0600 under the lifecycle lock, before applying the ephemeral
-restriction or returning the refusal. No omitted owner/key/scope identity is
-added to another table. The existing mesh store's process-crash durability
+file-byte bound, the recipient first retains process-local recovery evidence
+and attempts one constant-size, device-local `.lifecycle-restriction-overflow.json`
+marker under that network's credential root, atomically at 0600 under the
+lifecycle lock. A successful write precedes the normal capacity refusal and
+restrictive receipt. No omitted owner/key/scope identity is added to another table. The existing mesh store's process-crash durability
 contract applies; this is not a new host/power-loss durability guarantee.
 
 Any marker presence, including malformed/unreadable contents or a symlink, is
 fail-closed. Existing symlinks are not overwritten. While it stands, lifecycle
 observations return `needs_authoritative_baseline` and restore only `withdrawn`
-receipt evidence, even after recipient restart. The first overflow remains
-`applied:false, observation_table_full`; no delivery success is claimed.
+receipt evidence, even after recipient restart. On successful persistence the
+first overflow remains `applied:false, observation_table_full`; no delivery
+success is claimed.
 
 This deliberately reduces metadata availability for the entire recipient
 network: another scope's replay, material update or higher login cannot prove
@@ -403,3 +404,24 @@ permanent-success claim. Reviewed authoritative baseline recovery is required;
 this slice does not implement or authorize clearing that recovery marker.
 The marker is never copied with sessions or to another device, and does not
 change the native credential database, counters, grants or credential payloads.
+
+If the marker cannot be written, the recipient still applies withdrawn evidence
+but returns `applied:false, overflow_persistence_failed`, never a durable-success
+claim or sensitive exception text. A fresh store instance sees the in-process
+root/network baseline; equal/material/higher-scope traffic cannot clear it.
+Each later observation retries persistence. Once the writer is restored, the
+next request writes the durable marker and releases only the transient memory
+slot; the recovery-required baseline remains and the request is still refused.
+
+The process registry admits at most 128 active/pending root-network contexts,
+with no scope/credential identities. Healthy inactive entries disappear
+immediately; failed entries are never evicted. If every slot is active/pending,
+a new context is refused **before observation processing or filesystem/receipt
+mutation**, with `lifecycle_recovery_busy`; existing contexts can still retry and
+persist their baselines. This bounds memory without discarding failed evidence
+or globally marking unrelated roots/networks as restricted.
+
+When storage truly cannot persist anything, this fallback is **process-only**.
+It survives receipt loss and same-process relay replacement, but cannot promise
+the omitted fact survives process/module-state loss, another process, or power
+loss. No cross-process durability or recovery/reset implementation is fabricated.

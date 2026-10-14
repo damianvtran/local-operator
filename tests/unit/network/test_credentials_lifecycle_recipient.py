@@ -831,3 +831,139 @@ def test_capacity_marker_symlink_is_never_overwritten(rig, tmp_path):
     assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
     assert marker.is_symlink() and target.read_text() == "untouched"
     assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+
+
+def test_marker_write_failure_retains_process_baseline_and_retries_honestly(rig, monkeypatch):
+    import json
+
+    from local_operator.network import store
+
+    monkeypatch.setattr(L, "_VOLATILE_BASELINES", {})
+    monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", 1)
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    before = life.path.read_bytes()
+    writer = store._write_private_json
+
+    def unavailable(path, payload):
+        if path.name == L.LIFECYCLE_OVERFLOW_FILENAME:
+            raise OSError("opaque-private-error-detail")
+        return writer(path, payload)
+
+    monkeypatch.setattr(store, "_write_private_json", unavailable)
+    omitted = {**_announce_frame(rig)["entries"][0], "account_scope_ref": "omitted"}
+    first = _announce(rig, entries=[omitted])["entries"][0]
+    assert not first["applied"] and first["reason"] == L.OVERFLOW_PERSISTENCE_FAILED
+    assert "opaque-private-error-detail" not in json.dumps(first)
+    assert not life.restriction_overflowed()  # honest: no durable marker exists
+    assert L.LifecycleStore(N, rig.root).status() == L.NEEDS_AUTHORITATIVE_BASELINE
+    for chain, material in [(1, 1), (1, 2), (99, 99)]:
+        effective._receipts.clear()
+        reply = _announce(rig, chain=chain, material=material)["entries"][0]
+        assert not reply["applied"] and reply["reason"] == L.OVERFLOW_PERSISTENCE_FAILED
+        assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    extra = {
+        **omitted,
+        "state": "available",
+        "account_scope_ref": "never-recorded",
+        "login_chain_revision": 99,
+        "material_generation": 99,
+    }
+    assert _announce(rig, entries=[extra])["entries"][0]["reason"] == L.OVERFLOW_PERSISTENCE_FAILED
+    assert life.path.read_bytes() == before and len(L._VOLATILE_BASELINES) == 1
+    assert not life.restriction_overflowed()
+    for other in [
+        L.LifecycleStore(N, rig.root / "other-root"),
+        L.LifecycleStore("n_222222222222222222222222", rig.root),
+    ]:
+        assert not other.restriction_pending() and other.status() == "ok"
+        assert other.observe(L.Observation("another-owner", P, "scope", 1, 1, "available")).applied
+        assert other.status() == "ok"  # healthy contexts leave no memory entries
+    assert len(L._VOLATILE_BASELINES) == 1
+    monkeypatch.setattr(store, "_write_private_json", writer)
+    restored = _announce(rig)["entries"][0]
+    assert not restored["applied"] and restored["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+    assert life.restriction_overflowed() and L._VOLATILE_BASELINES == {}
+    assert life.path.read_bytes() == before
+    assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+
+
+def test_process_baseline_admission_is_bounded_without_evicting_failed_context(rig, monkeypatch):
+    from local_operator.network import store
+    from local_operator.network.types import MeshRefusal
+
+    monkeypatch.setattr(L, "_VOLATILE_BASELINES", {})
+    monkeypatch.setattr(L, "MAX_VOLATILE_BASELINES", 1)
+    monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", 1)
+    _announce(rig)
+    writer = store._write_private_json
+
+    def unavailable(path, payload):
+        if path.name == L.LIFECYCLE_OVERFLOW_FILENAME:
+            raise OSError("marker unavailable")
+        return writer(path, payload)
+
+    monkeypatch.setattr(store, "_write_private_json", unavailable)
+    omitted = {**_announce_frame(rig)["entries"][0], "account_scope_ref": "omitted"}
+    assert (
+        _announce(rig, entries=[omitted])["entries"][0]["reason"] == L.OVERFLOW_PERSISTENCE_FAILED
+    )
+    other = L.LifecycleStore(N, rig.root / "unadmitted-root")
+    for _ in range(3):
+        with pytest.raises(MeshRefusal) as refusal:
+            other.observe(L.Observation("other-owner", P, "scope", 1, 1, "available"))
+        assert refusal.value.code == L.RECOVERY_BUSY
+        assert len(L._VOLATILE_BASELINES) == 1
+    assert not other.path.parent.exists()  # refusal precedes filesystem/receipt mutation
+    assert other.status() == "ok" and not other.restriction_pending()
+    assert L.LifecycleStore(N, rig.root).restriction_pending()
+    monkeypatch.setattr(store, "_write_private_json", writer)
+    assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+    assert L._VOLATILE_BASELINES == {}  # durable handoff frees admission, not the baseline
+    assert other.observe(L.Observation("other-owner", P, "scope", 1, 1, "available")).applied
+    assert L._VOLATILE_BASELINES == {}
+
+
+def test_unverifiable_marker_is_not_claimed_as_durable_handoff(rig, monkeypatch):
+    monkeypatch.setattr(L, "_VOLATILE_BASELINES", {})
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    original = L.LifecycleStore._marker_present
+
+    def unreadable(target):
+        if target.path == life.path:
+            raise OSError("inspection unavailable")
+        return original(target)
+
+    monkeypatch.setattr(L.LifecycleStore, "_marker_present", unreadable)
+    reply = _announce(rig)["entries"][0]
+    assert not reply["applied"] and reply["reason"] == L.OVERFLOW_PERSISTENCE_FAILED
+    assert life._volatile_key() in L._VOLATILE_BASELINES
+    assert not life.path.with_name(L.LIFECYCLE_OVERFLOW_FILENAME).exists()
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    monkeypatch.setattr(L.LifecycleStore, "_marker_present", original)
+    assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+    assert life.restriction_overflowed() and L._VOLATILE_BASELINES == {}
+
+
+def test_process_to_disk_handoff_cannot_report_unrestricted_gap(rig, monkeypatch):
+    from local_operator.network import store
+
+    life = L.LifecycleStore(N, rig.root)
+    state = L._VolatileBaseline(pending=True)
+    monkeypatch.setattr(L, "_VOLATILE_BASELINES", {life._volatile_key(): state})
+
+    def disk_read_then_handoff():
+        # Model a reader seeing absent disk just BEFORE the writer commits and
+        # clears memory. Reading disk-before-memory would see two false values
+        # that were never simultaneously false at any valid linearization point.
+        with life.locked():
+            store._write_private_json(
+                life.path.with_name(L.LIFECYCLE_OVERFLOW_FILENAME),
+                {"reason": L.NEEDS_AUTHORITATIVE_BASELINE},
+            )
+            state.pending = False
+        return False
+
+    monkeypatch.setattr(life, "restriction_overflowed", disk_read_then_handoff)
+    assert life.restriction_pending()

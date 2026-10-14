@@ -53,6 +53,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -97,6 +98,22 @@ OBSERVED_INVALID = "invalid"
 OBSERVED_TABLE_FULL = "observation_table_full"
 #: ``MeshRefusal`` code for the same condition on the owner counters side.
 TABLE_FULL = "lifecycle_table_full"
+OVERFLOW_PERSISTENCE_FAILED = "overflow_persistence_failed"
+RECOVERY_BUSY = "lifecycle_recovery_busy"
+
+
+@dataclass
+class _VolatileBaseline:
+    pending: bool = False
+    users: int = 0
+
+
+# Admission is bounded BEFORE processing an observation. Failed baselines cannot
+# be evicted/forgotten, while healthy inactive contexts disappear immediately.
+# Full admission refuses a new context rather than accepting an unretainable fact.
+MAX_VOLATILE_BASELINES = 128
+_VOLATILE_BASELINES: dict[str, _VolatileBaseline] = {}
+_VOLATILE_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -428,6 +445,14 @@ class LifecycleStore:
             return doc
         return LifecycleDocument.from_json(self.network_id, data)
 
+    def _marker_present(self) -> bool:
+        """Confirmed path presence; inspection errors are NOT persistence proof."""
+        try:
+            self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME).lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
     def restriction_overflowed(self) -> bool:
         """Presence-only, constant-size recipient baseline latch for this network.
 
@@ -437,14 +462,68 @@ class LifecycleStore:
         copied, and has no automatic recovery: an authoritative baseline is needed.
         """
         try:
-            self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME).lstat()
-        except FileNotFoundError:
-            return False
+            return self._marker_present()
         except OSError:
             return True
+
+    def _volatile_key(self) -> str:
+        # Canonical full lifecycle path binds both config root and network. No
+        # owner/key/scope identities or material enter this process-only registry.
+        return str(self.path.resolve())
+
+    def restriction_pending(self) -> bool:
+        """A durable OR process-only baseline; not proof a marker was written."""
+        key = self._volatile_key()
+        with _VOLATILE_GUARD:
+            state = _VOLATILE_BASELINES.get(key)
+            pending = state is not None and state.pending
+        # Promotion commits disk BEFORE clearing memory. The reader takes these
+        # in the reverse order so it cannot observe a false/false handoff gap.
+        return pending or self.restriction_overflowed()
+
+    @contextmanager
+    def _volatile_baseline(self) -> Iterator[_VolatileBaseline]:
+        key = self._volatile_key()
+        with _VOLATILE_GUARD:
+            state = _VOLATILE_BASELINES.get(key)
+            if state is None:
+                if len(_VOLATILE_BASELINES) >= MAX_VOLATILE_BASELINES:
+                    raise MeshRefusal(
+                        RECOVERY_BUSY, "credential lifecycle recovery is busy; retry later"
+                    )
+                state = _VolatileBaseline()
+                _VOLATILE_BASELINES[key] = state
+            state.users += 1
+        try:
+            yield state
+        finally:
+            with _VOLATILE_GUARD:
+                state.users -= 1
+                if state.users == 0 and not state.pending:
+                    _VOLATILE_BASELINES.pop(key, None)
+
+    def _persist_restriction(self, volatile: _VolatileBaseline) -> bool:
+        # Set process evidence BEFORE attempting I/O: cancellation/write failure
+        # cannot silently drop the restriction. Only a durable marker permits
+        # releasing this slot, never an availability replay or arbitrary login.
+        with _VOLATILE_GUARD:
+            volatile.pending = True
+        try:
+            if not self._marker_present():
+                store._write_private_json(
+                    self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME),
+                    {"reason": NEEDS_AUTHORITATIVE_BASELINE},
+                )
+        except OSError:
+            # Exception text can contain paths/material. Report a fixed error
+            # code, not exception payload, and never imply durable success.
+            logger.debug("credential lifecycle overflow persistence failed; baseline pending")
+            return False
+        with _VOLATILE_GUARD:
+            volatile.pending = False
         return True
 
-    def _capacity_refusal(self, obs: Observation) -> ObservationResult:
+    def _capacity_refusal(self, obs: Observation, volatile: _VolatileBaseline) -> ObservationResult:
         """Called under the lifecycle lock BEFORE any ephemeral receipt/ack.
 
         One marker rather than another owner/key/scope table keeps overflow
@@ -453,12 +532,11 @@ class LifecycleStore:
         other scope's login can prove the omitted restriction superseded. The
         mesh store's atomic 0600 write is process-crash durable, not a new claim
         of host/power-loss durability. An existing marker is never overwritten.
+        If persistence fails, retain process-only evidence and return an honest
+        fixed error while still restricting the receipt; retry can persist later.
         """
-        if obs.state in _RESTRICTIVE_STATES and not self.restriction_overflowed():
-            store._write_private_json(
-                self.path.with_name(LIFECYCLE_OVERFLOW_FILENAME),
-                {"reason": NEEDS_AUTHORITATIVE_BASELINE},
-            )
+        if obs.state in _RESTRICTIVE_STATES and not self._persist_restriction(volatile):
+            return ObservationResult(False, OVERFLOW_PERSISTENCE_FAILED, state=STATE_WITHDRAWN)
         return ObservationResult(
             False,
             OBSERVED_TABLE_FULL,
@@ -486,7 +564,7 @@ class LifecycleStore:
     def status(self) -> str:
         return (
             NEEDS_AUTHORITATIVE_BASELINE
-            if self.restriction_overflowed() or self.load().needs_baseline
+            if self.restriction_pending() or self.load().needs_baseline
             else "ok"
         )
 
@@ -537,9 +615,14 @@ class LifecycleStore:
         ):
             return ObservationResult(False, OBSERVED_INVALID)
         ident = (obs.owner, obs.key, obs.account_scope_ref)
-        with self.locked():
-            if self.restriction_overflowed():
-                return ObservationResult(False, NEEDS_AUTHORITATIVE_BASELINE, state=STATE_WITHDRAWN)
+        with self._volatile_baseline() as volatile, self.locked():
+            if volatile.pending or self.restriction_overflowed():
+                persisted = self._persist_restriction(volatile)
+                return ObservationResult(
+                    False,
+                    NEEDS_AUTHORITATIVE_BASELINE if persisted else OVERFLOW_PERSISTENCE_FAILED,
+                    state=STATE_WITHDRAWN,
+                )
             doc = self.load()
             if doc.needs_baseline:
                 return ObservationResult(False, NEEDS_AUTHORITATIVE_BASELINE)
@@ -555,7 +638,7 @@ class LifecycleStore:
                     or sum(owner == obs.owner for owner, _, _ in doc.high_water)
                     >= min(MAX_ROWS, MAX_OWNER_OBSERVATIONS)
                 ):
-                    return self._capacity_refusal(obs)
+                    return self._capacity_refusal(obs, volatile)
                 doc.high_water[ident] = hw
             changed = reason == OBSERVED
             if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY):
@@ -580,7 +663,7 @@ class LifecycleStore:
                 except MeshRefusal as refusal:
                     if refusal.code != TABLE_FULL:
                         raise
-                    return self._capacity_refusal(obs)
+                    return self._capacity_refusal(obs, volatile)
             receipt_state = None
             if obs.state is not None and reason in (OBSERVED, OBSERVED_REPLAY, OBSERVED_STALE):
                 # EffectiveAccess is provider-level: another scope's availability
@@ -802,7 +885,7 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
             )
         providers[item["credential_key"]] = str(entry.provider or item["credential_key"])
     life = LifecycleStore(document.network_id, root)
-    if life.load().needs_baseline and not life.restriction_overflowed():
+    if life.load().needs_baseline and not life.restriction_pending():
         return _announce_error(
             NEEDS_AUTHORITATIVE_BASELINE,
             "",
