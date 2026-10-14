@@ -641,7 +641,9 @@ async def session_report(
     return reply({"data": await asyncio.to_thread(read_report)})
 
 
-async def _read_skills(roots: list[pathlib.Path], name: str | None) -> dict[str, Any]:
+async def _read_skills(
+    roots: list[pathlib.Path], name: str | None, *, config_dir: pathlib.Path | None = None
+) -> dict[str, Any]:
     """One root set's catalogue: rows, warnings, ``version``, optional detail.
 
     ONE SCAN PER REQUEST, no server-side cache: the body carries ``version``,
@@ -658,8 +660,12 @@ async def _read_skills(roots: list[pathlib.Path], name: str | None) -> dict[str,
     from local_operator.skills.api import resolve_skill_url, roots_fingerprint
 
     def read() -> tuple[list[Any], list[str], str]:
-        discovered, warnings = discover_skills(roots)
-        fingerprint = roots_fingerprint(roots)
+        if config_dir is None:
+            discovered, warnings = discover_skills(roots)
+            fingerprint = roots_fingerprint(roots)
+        else:
+            discovered, warnings = discover_skills(roots, config_dir=config_dir)
+            fingerprint = roots_fingerprint(roots, config_dir=config_dir)
         digest = hashlib.sha256(
             json.dumps(list(fingerprint), separators=(",", ":")).encode("utf-8")
         )
@@ -720,14 +726,30 @@ async def skills(
         # process's cwd, so a sessionless read would silently discover whatever
         # tree the server happened to be started in. This request's folder — home
         # when it named none — is the only correct start (skills/api.py).
+        # Upstream's revert dropped the injection parameter from
+        # ``default_skill_roots``, so the call matches its current signature;
+        # the owned-reader lock (``config_dir``) stays on the SCAN path, which
+        # is ours.
         roots = default_skill_roots(pathlib.Path(folder))
-        return reply({"data": await _read_skills(roots, name)})
+        return reply(
+            {
+                "data": await _read_skills(
+                    roots, name, config_dir=request.app.state.config_manager.config_dir
+                )
+            }
+        )
 
     async with errors(request), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
         roots = default_skill_roots(pathlib.Path(cwd))
-        return reply({"data": await _read_skills(roots, name)})
+        return reply(
+            {
+                "data": await _read_skills(
+                    roots, name, config_dir=request.app.state.config_manager.config_dir
+                )
+            }
+        )
 
 
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])

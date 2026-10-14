@@ -1760,6 +1760,9 @@ class _KnowledgeHooks:
     #: ecosystem roots by existence, so a root created mid-session would change
     #: the list and quietly widen what the session scans.
     skill_roots: list[Path] = field(default_factory=list)
+    #: Explicit active profile ownership for native-root transaction read discipline.
+    #: Never infer the controller home when a child reuses this session closure.
+    skill_config_dir: Path | None = None
     #: The world boundary this session was constructed with, when it has one.
     #: Carried so the resolver's miss-path rescan clips to the same scope the
     #: initial walk used — a refresh that silently re-widened the scan would
@@ -2087,7 +2090,7 @@ async def _setup_knowledge(
     leg needed (PR2a), and an unused parameter reads as a live dependency the
     next reader would wire back up.
     """
-    hooks = _KnowledgeHooks()
+    hooks = _KnowledgeHooks(skill_config_dir=config_dir)
     try:
         from local_operator.guides import discover_guides
         from local_operator.skills.api import (
@@ -2111,7 +2114,9 @@ async def _setup_knowledge(
         #: tree has just been walked: recording it at first use instead would make a
         #: session's first message look like a change and pay a second full scan.
         hooks.skills_fingerprint = _skills_fingerprint(hooks)
-        skills, discovery_warnings = discover_skills(hooks.skill_roots, boundary=world_root)
+        skills, discovery_warnings = discover_skills(
+            hooks.skill_roots, boundary=world_root, config_dir=config_dir
+        )
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
         hooks.skills_by_name = {skill.name: skill for skill in skills}
@@ -2342,7 +2347,11 @@ def _skills_fingerprint(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
     try:
         from local_operator.skills.discovery import roots_fingerprint
 
-        return roots_fingerprint(roots)
+        return roots_fingerprint(
+            roots,
+            config_dir=hooks.skill_config_dir,
+            boundary=hooks.world_root,
+        )
     except Exception:  # noqa: BLE001 — a fingerprint is an optimisation, never a gate
         logger.debug("classification: skill fingerprint failed", exc_info=True)
         return None
@@ -2500,7 +2509,16 @@ def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
     try:
         from local_operator.skills.discovery import discover_skills
 
-        discovered, _warnings = discover_skills(list(hooks.skill_roots), boundary=hooks.world_root)
+        if hooks.skill_config_dir is None:
+            discovered, _warnings = discover_skills(
+                list(hooks.skill_roots), boundary=hooks.world_root
+            )
+        else:
+            discovered, _warnings = discover_skills(
+                list(hooks.skill_roots),
+                boundary=hooks.world_root,
+                config_dir=hooks.skill_config_dir,
+            )
     except Exception:  # noqa: BLE001 — the roster must survive a scan fault
         logger.debug("classification: live skill rescan failed", exc_info=True)
         return known
@@ -3475,9 +3493,17 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
     # running, because they inherit this closure and it mutates
     # ``hooks.skills_by_name`` IN PLACE. Guides are packaged release resources
     # and cannot change at runtime, so the guide resolver takes no roots.
-    skill_resolver = make_skill_resolver(
-        hooks.skills_by_name, hooks.skill_roots, boundary=hooks.world_root
-    )
+    if hooks.skill_config_dir is None:
+        skill_resolver = make_skill_resolver(
+            hooks.skills_by_name, hooks.skill_roots, boundary=hooks.world_root
+        )
+    else:
+        skill_resolver = make_skill_resolver(
+            hooks.skills_by_name,
+            hooks.skill_roots,
+            boundary=hooks.world_root,
+            config_dir=hooks.skill_config_dir,
+        )
 
     def resolver(url: str) -> str | None:
         guide_result = guide_resolver(url)

@@ -20,6 +20,7 @@
   "wire.slash.goal": "लक्ष्य तय करें और काम शुरू करें; /goal --clear उसे हटा देता है",
   "wire.slash.help": "सभी कमांड दिखाएँ",
   "wire.slash.highlights": "उत्तर के नीचे की हाइलाइट्स रद्द करें, फिर से चलाएँ या दिशा बदलें",
+  "wire.slash.hub": "Open Hub links — per-link subscribe and auto-push policy",
   "wire.slash.info": "इंस्टॉलेशन, संस्करण और इस मशीन पर चल रहे सत्र",
   "wire.slash.keys": "कीबोर्ड की संकेत-सूची दिखाएँ",
   "wire.slash.language": "इंटरफ़ेस की भाषा दिखाएँ या सेट करें; auto सिस्टम का अनुसरण करता है",

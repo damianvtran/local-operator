@@ -414,6 +414,7 @@ from local_operator.tui.widgets.goal_panel import (
     GoalMarkDone,
     GoalPanel,
 )
+from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
@@ -5207,6 +5208,9 @@ class OperatorApp(App[None]):
         # the user to the composer they were typing in rather than to nothing.
         # The approval card follows the same discipline for the same reason.
         self._usage_focus_restore: Any | None = None
+        #: What had focus when the Hub links overlay opened, so Esc puts it
+        #: back — the usage card's own restore, for the same reason.
+        self._hub_links_focus_restore: Any | None = None
         #: What had focus when the goal overlay opened, so Esc puts it back —
         #: the same restore the usage card keeps for the same reason.
         self._goal_focus_restore: Any | None = None
@@ -11145,6 +11149,10 @@ class OperatorApp(App[None]):
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
         self._sync_boot_layout()
+        if opened:
+            # The hub DOOR's count is local-only, so it rides the open gesture
+            # (never a poll): the footer notes the fleet total the same way.
+            self.refresh_hub_total()
         if self._sidebar_timer is not None:
             if opened:
                 self._sidebar_timer.resume()
@@ -11660,6 +11668,12 @@ class OperatorApp(App[None]):
         # it can show its loading state.
         with Container(id="usage-host"):
             yield UsagePanel()
+        # The Hub links overlay shares the toast layer and the mount-once rule for
+        # the same reason: `/hub` opens on a keystroke, an inventory is REFERENCE
+        # the user acts on in the same breath, and taking rows from the transcript
+        # would scroll away the work they opened it to reason about.
+        with Container(id="hub-links-host"):
+            yield HubLinksPanel()
         # The goal overlay is on the same layer, mounted once and hidden, for the
         # same reasons: `/goal` with no argument is a READ of standing state the
         # user acts on in the same breath, so the card must appear on the
@@ -17673,7 +17687,7 @@ class OperatorApp(App[None]):
     #: the handler never runs, while the marks it lists are on disk in front of
     #: the user the whole time.
     _SAVED_LOCAL_COMMANDS = frozenset(
-        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume", "/notifications"}
+        {"/copy", "/links", "/sidebar", "/help", "/settings", "/hub", "/resume", "/notifications"}
     )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -27364,6 +27378,12 @@ class OperatorApp(App[None]):
     ) -> None:
         """The sidebar footer's fleet-ask note was pressed: open the fleet list."""
         self.action_open_fleet_asks()
+
+    def on_session_sidebar_hub_links_requested(
+        self, message: "SessionSidebar.HubLinksRequested"
+    ) -> None:
+        """The sidebar footer's hub door was pressed: open the Hub links surface."""
+        self.action_hub_links()
 
     def action_open_fleet_asks(self) -> None:
         """Open the ask list on the FLEET scope — every conversation's queue.
@@ -39419,6 +39439,11 @@ class OperatorApp(App[None]):
                 self.action_toggle_sidebar()
         elif command == "/settings":
             self._cmd_settings(notice)
+        elif command == "/hub":
+            # The Hub links surface. The action is SYNC and owns its own worker,
+            # the fleet-door and usage-panel pattern: calling it directly keeps
+            # the async fetch spawned once, in one place, not double-wrapped.
+            self.action_hub_links()
         elif command == "/search":
             self._cmd_search(arg, notice)
         elif command == "/accounts":
@@ -46211,6 +46236,226 @@ class OperatorApp(App[None]):
         else:
             self._editor().focus()
 
+    # -- the Hub links overlay ------------------------------------------------
+    #
+    # A local-only read (no network): the inventory is enumerated from the
+    # baselines and the status store. The panel is pure presentation; THIS owns
+    # the fetch and the policy intent, exactly as the usage card splits.
+    def _hub_links_panel(self) -> HubLinksPanel | None:
+        try:
+            return self.query_one(HubLinksPanel)
+        except Exception:  # noqa: BLE001 - optional chrome
+            return None
+
+    def action_hub_links(self) -> None:
+        """Open the Hub links overlay and paint the current inventory.
+
+        SYNC, owning its worker internally, exactly as `action_open_fleet_asks`
+        and `_open_usage_panel` do: the three callers (the footer door's
+        message, the sidebar `ctrl+n` chord, the `/hub` dispatch) all reach this
+        one entry point, so none of them `run_worker`s it — the async fetch is
+        spawned here once, `exclusive` so a re-open re-reads rather than racing.
+        """
+        panel = self._hub_links_panel()
+        if panel is None:
+            self._system_notice("hub links panel unavailable", "warning")
+            return
+        # Save the focus to restore on dismiss, and TAKE it: the panel's own
+        # bindings (esc/up/down/enter/r) are dead without it, and `Dismissed`
+        # never fires — the usage-panel pattern, which this mirrors.
+        self._hub_links_focus_restore = self.focused
+        panel.start_fetch()
+        panel.focus()
+        self.run_worker(
+            self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
+        )
+
+    async def _fetch_hub_links_worker(self) -> None:
+        """Read the local inventory off the loop and paint it (never raises out)."""
+        panel = self._hub_links_panel()
+        if panel is None:
+            return
+        try:
+            snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+        except Exception as error:  # noqa: BLE001 - surfaced IN the panel
+            if panel.is_open:
+                panel.show_error(f"hub links unavailable: {error}")
+            return
+        if panel.is_open:
+            panel.show_links(snapshot)
+
+    def _hub_links_snapshot_sync(self) -> dict[str, Any]:
+        from local_operator.config import ConfigManager
+        from local_operator.hub_sync import service as svc
+        from local_operator.paths import config_dir
+
+        cm = ConfigManager(config_dir())
+        ctx = svc.HubSyncContext(
+            config_dir=cm.config_dir, config_manager=cm, client_for_tenant=lambda _t: None
+        )
+        return svc.links_snapshot(ctx)
+
+    def refresh_hub_total(self) -> None:
+        """Feed the sidebar footer's hub DOOR the local link count (no network).
+
+        Rides the sidebar refresh gesture, like the fleet total: the door is
+        geometry-preserving and local-only, so it never warrants a poll. Read
+        off the loop and fed back on it (a thread may not touch a widget).
+        """
+        sidebar = self._session_sidebar
+        if not sidebar.is_mounted:
+            return
+
+        async def load() -> None:
+            try:
+                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+            except Exception:  # noqa: BLE001 - a door must not break the sidebar
+                return
+            total = len(snapshot.get("links", [])) + len(snapshot.get("unresolved", []))
+            sidebar.set_hub_total(total)
+
+        self.run_worker(load(), thread=False, group="hub-total")
+
+    def on_hub_links_panel_dismissed(self, message: "HubLinksPanel.Dismissed") -> None:
+        message.stop()
+        self.workers.cancel_group(self, "hub-links")
+        # Round-2 D12: the door's count is refreshed on DISMISS too. Opening the
+        # panel is exactly where a link's state can change (a pull applies, a
+        # policy toggles), so the footer count the door paints would otherwise
+        # be stale until the next sidebar toggle.
+        self.refresh_hub_total()
+        restore = self._hub_links_focus_restore
+        self._hub_links_focus_restore = None
+        if restore is not None and getattr(restore, "is_mounted", False):
+            restore.focus()  # type: ignore[union-attr]
+        else:
+            self._editor().focus()
+
+    def on_hub_links_panel_refresh_requested(
+        self, message: "HubLinksPanel.RefreshRequested"
+    ) -> None:
+        message.stop()
+        # A refresh is a state change too; the door follows it (round-2 D12).
+        self.refresh_hub_total()
+        self.run_worker(
+            self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
+        )
+
+    def on_hub_links_panel_refusal_raised(self, message: "HubLinksPanel.RefusalRaised") -> None:
+        """A policy action was refused: paint it ON the card (round-3 D19).
+
+        The old handler printed a transcript notice, which sits BEHIND the
+        overlay the user is looking at — the refusal was invisible. The panel
+        already owns a status line, so the app hands it the message; no literal,
+        the panel's message carries catalogue-rendered copy.
+        """
+        message.stop()
+        panel = self._hub_links_panel()
+        if panel is not None and panel.is_open:
+            panel.show_notice(message.text, message.severity)
+
+    def on_hub_links_panel_policy_toggle_requested(
+        self, message: "HubLinksPanel.PolicyToggleRequested"
+    ) -> None:
+        """Apply one source-scoped policy toggle through the CLI's own service path.
+
+        Round-2 D7: this is a REAL write. It calls the same ``update_policy`` the
+        CLI ``lop hub link set`` and the desktop PATCH route call, under the same
+        revision CAS, with the same service-computed auto-push eligibility and
+        the same explicit public-egress consent — so a toggle here changes the
+        CONFIG (a new policy revision) or refuses with a NAMED reason. Nothing
+        about the write is re-implemented; the panel reports intent and this owns
+        the service call.
+        """
+        message.stop()
+        if message.link_id is None:
+            panel = self._hub_links_panel()
+            if panel is not None and panel.is_open:
+                from local_operator.i18n.keys import tui_hub_links as _k
+                from local_operator.i18n.text import tr
+
+                panel.show_notice(tr("tui.hub_links")(_k.refusal_resolve_first()), "warning")
+            return
+
+        def work() -> str | None:
+            """Returns a refusal message, or ``None`` on success."""
+            from local_operator.config import ConfigManager
+            from local_operator.hub_sync import provenance as prov
+            from local_operator.hub_sync import service as svc
+            from local_operator.hub_sync.identity import LinkError
+            from local_operator.hub_sync.policies import update_policy
+            from local_operator.paths import config_dir
+
+            cm = ConfigManager(config_dir())
+            record = None
+            for candidate in prov.iter_baselines(cm.config_dir):
+                if candidate.identity is not None and candidate.identity.link_id == message.link_id:
+                    record = candidate
+                    break
+            if record is None or record.identity is None:
+                return "no link with that id is known locally"
+            ctx = svc.HubSyncContext(
+                config_dir=cm.config_dir,
+                config_manager=cm,
+                client_for_tenant=lambda _t: None,
+            )
+            row = next(
+                (
+                    link
+                    for link in svc.links_snapshot(ctx)["links"]
+                    if link["link_id"] == message.link_id
+                ),
+                None,
+            )
+            eligible = bool(row and row["eligibility"]["can_auto_push"])
+            # The service's ineligibility reason is PASSED THROUGH so
+            # ``update_policy`` can apply its ONE public-consent carve-out
+            # (round-4 cross-surface fix): a public origin with no grant is
+            # ``unsafe-publication``, which the confirm mints, while every EARLIER
+            # gate still refuses. The TUI no longer carries its own
+            # ``consent_completes`` special case — it passes the same
+            # ``can_enable_auto_push`` the CLI and the desktop PATCH do.
+            reason = str((row or {}).get("eligibility", {}).get("reason") or "")
+            subscribe = message.value if message.policy == "subscribe" else None
+            auto_push = message.value if message.policy == "auto_push" else None
+            try:
+                update_policy(
+                    cm,
+                    record.identity,
+                    expected_revision=message.revision,
+                    subscribe=subscribe,
+                    auto_push=auto_push,
+                    can_enable_auto_push=eligible,
+                    confirm_public_egress=message.confirm_egress,
+                    ineligible_reason=reason or "unsupported-precondition",
+                )
+            except LinkError as error:
+                # Humanize the service code; the raw code in a notice is exactly
+                # what round-3 D19 flags (a code like `policy-revision-changed`
+                # reads as machinery, not a sentence). The message is already
+                # prose, so use it and name the code's words if the message is
+                # thin.
+                detail = str(error).strip() or error.code.replace("-", " ")
+                return detail
+            return None
+
+        async def run() -> None:
+            refusal = await asyncio.to_thread(work)
+            panel = self._hub_links_panel()
+            # D19: the refusal is painted ON the card the user is looking at, not
+            # a transcript notice hidden behind the overlay.
+            if refusal is not None and panel is not None and panel.is_open:
+                panel.show_notice(refusal, "warning")
+            # Re-read either way: a success shows the new policy, a refusal (a
+            # CAS mismatch) shows the row that moved under the user.
+            if panel is not None and panel.is_open:
+                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                if panel.is_open:
+                    panel.show_links(snapshot)
+            self.refresh_hub_total()
+
+        self.run_worker(run(), thread=False, group="hub-links", exclusive=True)
+
     # -- the /btw aside ------------------------------------------------------
     #
     # The contract, because everything below is downstream of it: an aside
@@ -51084,16 +51329,25 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import (
                 discover_skills,
                 roots_fingerprint,
             )
 
+            # The hub-owned managed root is reached through the STANDARD roots
+            # (the home-native ``~/.local-operator/skills`` IS the default
+            # profile's managed root); upstream's revert dropped the extra
+            # injection parameter from ``default_skill_roots``, so the call
+            # matches its current signature — while the owned-reader lock
+            # (``config_dir``) still guards fingerprinting and scanning of
+            # that root wherever it appears in the list.
+            active_config_dir = getattr(self._providers, "config_dir", None) or config_dir()
             roots = default_skill_roots(Path(os.getcwd()))
-            fingerprint = roots_fingerprint(roots)
+            fingerprint = roots_fingerprint(roots, config_dir=active_config_dir)
             if self._skills_by_name is None or fingerprint != self._skills_fingerprint:
-                skills, _warnings = discover_skills(roots)
+                skills, _warnings = discover_skills(roots, config_dir=active_config_dir)
                 self._skills_by_name = {skill.name: skill for skill in skills}
                 self._skills_fingerprint = fingerprint
                 # A rescan is the ONE place the vocabulary changes: push it so
@@ -51285,10 +51539,15 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import discover_skills
 
-            skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
+            active_config_dir = getattr(self._providers, "config_dir", None) or config_dir()
+            skills, _warnings = discover_skills(
+                default_skill_roots(Path(os.getcwd())),
+                config_dir=active_config_dir,
+            )
             if not skills:
                 return None
             rows = [

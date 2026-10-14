@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -238,3 +239,225 @@ def test_teams_link_refuses_a_differing_copy_until_accepted_and_then_never_delet
     sync = parser.parse_args(["teams", "sync", "--name", "release"])
     assert cli.teams_sync_command(sync, teams, root) == 0
     assert teams.get_team(team.id).instructions == "mine"
+
+
+def test_hub_links_and_link_set_parse(parser) -> None:
+    links = parser.parse_args(["hub", "links", "--kind", "agent", "--json"])
+    assert links.hub_command == "links" and links.kind == "agent" and links.json
+
+    setp = parser.parse_args(
+        ["hub", "link", "set", "abc", "--subscribe", "false", "--auto-push", "true"]
+    )
+    assert setp.hub_command == "link" and setp.hub_link_command == "set"
+    assert setp.link_id == "abc" and setp.subscribe == "false" and setp.auto_push == "true"
+
+
+def test_hub_links_command_lists_a_local_link(rig, capsys) -> None:
+    root, hub, agents = rig
+    _pull_agent(agents, hub, root)
+
+    rc = cli.hub_links_command(argparse.Namespace(kind=None, json=True), root)
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["capability"] == "hub_links:1"
+    # A legacy link is under `unresolved` until its source is confirmed.
+    assert payload["links"] == [] and len(payload["unresolved"]) == 1
+    assert payload["unresolved"][0]["hub_id"] == "h1"
+
+
+def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) -> None:
+    root, hub, agents = rig
+    _pull_agent(agents, hub, root)
+
+    # Resolve the legacy link to a confirmed identity so it has a policy revision.
+    from local_operator.config import ConfigManager
+    from local_operator.hub_sync import service as svc
+
+    cm = ConfigManager(root)
+    ctx = svc.HubSyncContext(
+        config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None, credential="ok"
+    )
+    record = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=agents.list_agents()[0].name,
+        hub_source="https://api.radienthq.com/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert record.identity is not None
+    link_id = record.identity.link_id
+
+    rc = cli.hub_link_set_command(
+        argparse.Namespace(
+            link_id=link_id,
+            subscribe="false",
+            auto_push=None,
+            expected_revision=None,
+            confirm_public_egress=False,
+            json=True,
+        ),
+        root,
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["policy"]["subscribe"] is False and out["policy"]["auto_push"] is False
+
+    # A WRONG explicit revision is refused (CAS), not applied.
+    bad = cli.hub_link_set_command(
+        argparse.Namespace(
+            link_id=link_id,
+            subscribe="true",
+            auto_push=None,
+            expected_revision="not-it",
+            confirm_public_egress=False,
+            json=True,
+        ),
+        root,
+    )
+    assert bad == 1
+    assert "error:" in capsys.readouterr().out
+
+
+def _seed_public_link(
+    root: Path, *, lineage: str = "clean", recorded_by: str = "pull", cas: bool = True
+) -> str:
+    """A CONFIRMED public link the way a real pull + capability probe leaves it.
+
+    A baseline record with a source-scoped remote revision and known scope, plus
+    (unless ``cas`` is False) the persisted revision-CAS attestation — the facts
+    ``_eligibility`` reads. ``lineage``/``recorded_by``/``cas`` are varied to
+    reach each earlier gate in order: capability first (unsupported-
+    precondition), then the baseline (baseline-unknown), then lineage.
+    """
+
+    import dataclasses
+
+    from local_operator.config import ConfigManager
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    source = "https://api.radienthq.com/v1"
+    identity = LinkIdentity("agent", "synthetic-local", source, "public", None, "h1")
+    record = prov.make_record(
+        "agent", "synthetic-local", "h1", None, {"instructions": "x"}, recorded_by
+    )
+    record = dataclasses.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage=lineage,
+        scope_known=True,
+        local_alias="coder",
+    )
+    prov.write_baseline(root, record)
+    cm = ConfigManager(root)
+    cm.set_config_value(
+        "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
+    )
+    if cas:
+        svc.record_server_capabilities(
+            svc.HubSyncContext(
+                config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
+            ),
+            {"revision_cas": 1},
+            source=source,
+        )
+    return identity.link_id
+
+
+def _set(root: Path, link_id: str, **over: Any) -> int:
+    base: dict[str, Any] = dict(
+        link_id=link_id,
+        subscribe=None,
+        auto_push=None,
+        expected_revision=None,
+        confirm_public_egress=False,
+        json=True,
+    )
+    base.update(over)
+    # The parser hands the command STRINGS ("true"/"false"); mirror that here.
+    for key in ("subscribe", "auto_push"):
+        if isinstance(base[key], bool):
+            base[key] = "true" if base[key] else "false"
+    return cli.hub_link_set_command(argparse.Namespace(**base), root)
+
+
+def _grant_written(root: Path, link_id: str) -> bool:
+    from local_operator.config import ConfigManager
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return link_id in (hub.get("public_egress_grants") or {})
+
+
+def _policy_values(root: Path, link_id: str) -> dict[str, Any]:
+    """The persisted per-link policy subtree (N1: assert the refusal wrote nothing)."""
+
+    from local_operator.config import ConfigManager
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return dict((hub.get("links") or {}).get(link_id) or {})
+
+
+def test_cli_can_mint_the_first_public_grant_with_confirm(rig, capsys) -> None:
+    """The cross-surface fix: the REAL CLI can create a public link's first grant.
+
+    ``can_enable_auto_push`` is False for a public origin with no grant (reason
+    ``unsafe-publication``); the carve-out inside ``update_policy`` mints the
+    grant only when ``--confirm-public-egress`` is given.
+    """
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root)
+    # WITHOUT consent: refused, naming the missing public consent, NO grant.
+    assert _set(root, link_id, auto_push=True) == 1
+    assert "public publication consent is required" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)
+    # WITH consent: rc 0 and the grant persisted.
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 0
+    assert _grant_written(root, link_id)
+
+
+def test_cli_refuses_when_an_earlier_gate_fails_even_with_consent(rig, capsys) -> None:
+    """No CAS attestation ⇒ refused ``unsupported-precondition``, NO grant (consent and all)."""
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root, recorded_by="adopt-unknown")
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
+    assert "not eligible for this origin" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)
+    # N1: the refusal must not have flipped auto_push either.
+    assert _policy_values(root, link_id)["auto_push"] is False
+
+
+def test_cli_refuses_mixed_lineage_with_consent(rig, capsys) -> None:
+    """D34: a MIXED-LINEAGE public origin refuses even with --confirm-public-egress."""
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root, lineage="mixed-lineage")
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
+    assert "not eligible for this origin" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)
+    # N1: the refusal must not have flipped auto_push either.
+    assert _policy_values(root, link_id)["auto_push"] is False
+
+
+def test_cli_second_write_after_the_grant_uses_the_served_revision(rig, capsys) -> None:
+    """F1: `hub link set` works AGAIN after the grant (served revision must match).
+
+    The command reads the current revision from the inventory when none is given;
+    with the grant-unaware served token the second edit 409'd on every public
+    link that held a grant.
+    """
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root)
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 0
+    capsys.readouterr()
+    # The user's second edit: no explicit revision, so the SERVED one is used.
+    assert _set(root, link_id, subscribe=False) == 0
+    out = capsys.readouterr().out
+    assert "changed" not in out, out
+    values = _policy_values(root, link_id)
+    assert values["subscribe"] is False and values["auto_push"] is True

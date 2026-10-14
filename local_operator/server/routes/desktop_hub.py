@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
 from local_operator.config import ConfigManager
+from local_operator.hub_sync.identity import Visibility
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_config_manager,
@@ -67,6 +68,14 @@ class HubApply(Input):
     replace: Literal["remote", "local"] | None = None
     confirm_replace: bool = False
     dry_run: bool = False
+    #: SOURCE-RESOLUTION ARM. ``resolve_source: true`` is the explicit act that
+    #: confirms source+scope for a legacy unknown-origin link and materializes its
+    #: immutable identity + guarded baseline. It is mutually exclusive with the
+    #: merge arms above and never runs implicitly.
+    resolve_source: bool = False
+    hub_source: str | None = None
+    visibility: Literal["public", "org"] | None = None
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class HubApplyAll(Input):
@@ -110,8 +119,21 @@ async def _run(
         raise _refusal(409, str(busy)) from None
 
 
-def _refusal(status: int, message: str) -> HTTPException:
-    return HTTPException(status, message)
+def _refusal(status: int, message: str, *, code: str | None = None) -> HTTPException:
+    """A refusal, TYPED when it carries a category code.
+
+    The desktop plane's refusals carry ``{"code", "message"}`` as the detail
+    (the desktop_mesh.py precedent): the renderer keys on
+    ``DesktopControlError.code``, which desktop-api.ts reads from
+    ``detail.code`` when detail is an object, and a declared code always wins
+    over a status-derived one. A plain string body drops the category, so
+    every refusal whose error has a LinkError-style ``code`` must use this
+    form; routes without a code keep the plain string body unchanged.
+    """
+
+    if code is None:
+        return HTTPException(status, message)
+    return HTTPException(status, {"code": code, "message": message})
 
 
 def _raise_for(reports: Any) -> None:
@@ -197,6 +219,87 @@ async def apply(
     """Apply ONE item (click-to-update). ``dry_run`` previews without writing."""
 
     from local_operator.hub_sync import service as svc
+
+    if body.resolve_source:
+        # Mutually exclusive with the merge arms: this arm writes identity/scope
+        # metadata only and never merges content.
+        if body.prefer or body.replace or body.dry_run:
+            raise _refusal(422, "resolve_source cannot be combined with prefer/replace/dry_run")
+        if not body.hub_source or not body.visibility:
+            raise _refusal(422, "resolve_source needs hub_source and visibility")
+        if body.visibility == "org" and not body.tenant_id:
+            raise _refusal(422, "an org source resolution needs tenant_id")
+        if body.visibility == "public" and body.tenant_id:
+            raise _refusal(422, "a public source resolution must not name an organization")
+        # Bind the guarded values ONCE, before the closure: pyright does not
+        # carry the guard's narrowing into a nested function body, and these
+        # are exactly the values the runtime checks above vouched for.
+        requested_source: str = body.hub_source
+        requested_visibility: Visibility = body.visibility
+
+        def resolve_work(ctx: Any) -> dict[str, Any]:
+            from local_operator.hub_sync.identity import LinkError as _IdentityError
+            from local_operator.hub_sync.identity import approve_source
+            from local_operator.providers.radient_credentials import (
+                configured_radient_base_url,
+            )
+
+            # The supplied source must match the ONE configured credential-free
+            # base -- never an arbitrary URL gaining credential egress.
+            approved = (configured_radient_base_url(ctx.config_manager),)
+            try:
+                source = approve_source(requested_source, approved)
+            except _IdentityError as error:
+                raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
+            if ctx.credential == "none":
+                raise _refusal(401, "no hub credential is configured for this destination")
+            try:
+                record = svc.resolve_source(
+                    ctx,
+                    kind=body.kind,
+                    name=body.name,
+                    hub_source=source,
+                    visibility=requested_visibility,
+                    tenant_id=body.tenant_id,
+                )
+            except _IdentityError as error:
+                raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
+            except LookupError as error:
+                # An unknown/unlinked name is a 404-able "no such thing", never
+                # the AttributeError-500 this arm used to produce.
+                raise _refusal(404, str(error)) from None
+            # resolve_source MATERIALIZES the identity on the record it returns;
+            # the Optional on the record type covers adopt/legacy records, not
+            # this arm. An EXPLICIT check, not ``assert``: under -O a stripped
+            # assert would return a half-built payload with a null link.
+            identity = record.identity
+            if identity is None:
+                raise _refusal(500, "the source resolution did not record an identity")
+            return {
+                "link": identity.to_json(),
+                "resolved": {
+                    "source": identity.hub_source,
+                    "visibility": identity.visibility,
+                    "tenant_id": identity.tenant_id,
+                    # The ACTUAL baseline provenance literal this arm writes. The
+                    # resolve arm always records "adopt-unknown" (a source/scope
+                    #  confirmed but no content common-ancestor vouched for); the
+                    # separate equal-text path records "adopt". Exposed under a
+                    # stable key so a client keys on the enum, not on a field name.
+                    "baseline_state": record.recorded_by,
+                    "scope_known": record.scope_known,
+                },
+            }
+
+        async def resolve_mutate() -> dict[str, Any]:
+            return await _run(request, config_manager, provider_auth_store, resolve_work)
+
+        async with errors(request):
+            return reply(
+                await receipts(request).run(
+                    "hub-resolve:" + body.request_id, body.model_dump(), resolve_mutate
+                )
+            )
 
     if body.replace and not body.confirm_replace:
         raise _refusal(
@@ -305,5 +408,148 @@ async def retry(
         return reply(
             await receipts(request).run(
                 "hub-retry:" + body.request_id, body.model_dump(), mutate, retry_safe=True
+            )
+        )
+
+
+class LinkPolicyPatch(Input):
+    request_id: RequestID
+    #: Both independent values are optional: a patch may set one and leave the
+    #: other, but at least one must be present (validated in the service).
+    subscribe: bool | None = None
+    auto_push: bool | None = None
+    #: The DELIBERATE public-egress consent: enabling auto-push on a PUBLIC origin
+    #: additionally requires this explicit acknowledgement, which is bound into
+    #: the persisted grant. Strict bool -- a truthy string cannot stand in for
+    #: consent.
+    confirm_public_egress: bool = False
+    #: The authority for the write: the policy revision the editor last saw. A
+    #: mismatch is a named 409 (the config was edited by someone else), never a
+    #: last-write-wins clobber. Named ``expected_policy_revision`` so the client
+    #: cannot confuse it with any other revision token.
+    expected_policy_revision: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/v1/desktop/hub/links", response_model=CRUDResponse)
+async def links(
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    kind: str | None = None,
+):
+    """The full local-only links inventory: every link, healthy or not. No network.
+
+    Gated on the ``hub_links:1`` capability so an older renderer never sees rows
+    it cannot act on; the legacy ``/hub/updates`` projection is unchanged. Skill
+    rows are NEW and capability-gated: an old typed agent/team-only consumer asks
+    for its kinds explicitly, so ``?kind=agent|team`` never returns a skill row.
+    """
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    kinds: tuple[str, ...] | None = None
+    if kind:
+        if kind not in ("agent", "team", "skill"):
+            raise _refusal(422, f"unknown link kind {kind!r}")
+        kinds = (kind,)
+
+    def read() -> dict[str, Any]:
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=lambda _tenant: None,
+        )
+        return svc.links_snapshot(ctx, kinds=kinds)
+
+    async with errors(request):
+        try:
+            return reply(await asyncio.to_thread(read))
+        except OSError as exc:
+            raise _refusal(503, f"the hub link store is unreadable: {exc}") from None
+        except LinkError as error:
+            # A malformed local policy/grant (read_policy validation) refuses the
+            # INVENTORY with its own code instead of surfacing a bare 500; the
+            # renderer keys on the code (F3).
+            raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
+
+
+@router.patch("/v1/desktop/hub/links/{link_id}", response_model=CRUDResponse)
+async def patch_link(
+    link_id: str,
+    body: LinkPolicyPatch,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+):
+    """Set one link's independent subscribe/auto_push, under a revision CAS.
+
+    A policy edit is LOCAL config work (no network): turning auto_push ON demands
+    a service eligibility attestation, but turning a value OFF or changing
+    subscribe never requires a working hub connection.
+    """
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.policies import update_policy
+
+    def work() -> dict[str, Any]:
+        record = None
+        for candidate in prov.iter_baselines(config_manager.config_dir):
+            if candidate.identity is not None and candidate.identity.link_id == link_id:
+                record = candidate
+                break
+        if record is None or record.identity is None:
+            raise _refusal(404, "no link with that id is known locally")
+        # SERVICE-COMPUTED eligibility, not a hardcoded refusal: the same
+        # fact the inventory reports, so a client that saw can_auto_push=true
+        # cannot be refused here, and one that saw false cannot force it.
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=lambda _t: None,
+        )
+        row = next(
+            (link for link in svc.links_snapshot(ctx)["links"] if link["link_id"] == link_id),
+            None,
+        )
+        eligible = bool(row and row["eligibility"]["can_auto_push"])
+        reason = str((row or {}).get("eligibility", {}).get("reason") or "")
+        try:
+            snapshot = update_policy(
+                config_manager,
+                record.identity,
+                expected_revision=body.expected_policy_revision,
+                subscribe=body.subscribe,
+                auto_push=body.auto_push,
+                # The attestation is the SERVICE-computed eligibility; public
+                # enable additionally demands the explicit egress consent below.
+                # The REASON is passed through so ``update_policy`` applies its
+                # ONE public-consent carve-out for the first grant (round-4
+                # cross-surface fix); every earlier gate still refuses.
+                can_enable_auto_push=eligible,
+                confirm_public_egress=body.confirm_public_egress,
+                ineligible_reason=reason or "unsupported-precondition",
+            )
+        except LinkError as error:
+            code = getattr(error, "code", "") or ""
+            # TYPED refusal: the renderer branches on `write.error.code` (e.g.
+            # policy-revision-changed vs unsafe-publication), so the code must
+            # ride the detail — a string body would flatten every refusal into
+            # one untyped shape (F3).
+            if code == "policy-revision-changed":
+                raise _refusal(409, str(error), code=code) from None
+            raise _refusal(422, str(error), code=code or None) from None
+        return {"link_id": link_id, "policy": snapshot.to_json()}
+
+    async def mutate() -> dict[str, Any]:
+        return await asyncio.to_thread(work)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "hub-link-policy:" + body.request_id,
+                {"link_id": link_id, **body.model_dump()},
+                mutate,
+                retry_safe=True,
             )
         )

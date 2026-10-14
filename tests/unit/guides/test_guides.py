@@ -369,6 +369,10 @@ def test_agent_hint_rows_are_never_rendered(tmp_path: Path) -> None:
         ["mcp", "add", "demo", "--command", "demo-mcp", "--arg", "serve"],
         ["agents", "list", "--page", "2", "--perpage", "10"],
         ["exec", "review this", "--agent", "research"],
+        # The hub-links policy surface the agents/teams/extensions guides document.
+        ["hub", "links", "--kind", "skill"],
+        ["hub", "link", "set", "L1", "--subscribe", "false"],
+        ["hub", "link", "set", "L1", "--auto-push", "true", "--confirm-public-egress"],
     ],
 )
 def test_documented_cli_shapes_parse(argv: list[str]) -> None:

@@ -369,6 +369,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``GRACE_FILE``: the first-run marker under ``<config>/hub/`` — the hub update "
         "runner's own install-level state, beside ``sessions/``, never inside a session",
     ),
+    # The push outbox (``hub_sync/outbox.py``): one durable intent/receipt JSON per
+    # publication operation under ``<config>/hub/outbox/``, the directory this
+    # constant names. It is the install's own crash-recovery journal for IN-FLIGHT
+    # hub pushes — keyed by link identity and operation id, bound to this machine's
+    # leases, pins and credentials (the sibling of the runner's GRACE_FILE above and
+    # of ``install_transaction.OPERATION_DIR``). A session directory travelling
+    # between devices carries neither the journal nor its pending operations, and no
+    # copy walk of a session can meet it: it is not an entry of a session directory.
+    "local_operator/hub_sync/outbox.py": (
+        1,
+        "``OUTBOX_DIR``: the push outbox under ``<config>/hub/``, beside "
+        "``sessions/`` — install-level publication state, never an entry of a session "
+        "directory",
+    ),
     "local_operator/skills/discovery.py": (
         1,
         "``_SKILL_FILE`` (``SKILL.md``): the marker FILENAME looked for inside skill "

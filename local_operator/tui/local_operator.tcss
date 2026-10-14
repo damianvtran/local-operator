@@ -1141,6 +1141,28 @@ GoalPanel.-squeezed {
     height: auto;
 }
 
+/* ---- the /hub links overlay ------------------------------------------- *
+ *
+ * Same layer, same host rule, same reason as `#usage-host` above: `width:
+ * auto` so the host hugs the card, because a stretched host on an overlay
+ * layer blanks every cell of every row it covers. Placement is a Python-set
+ * offset (`widgets/overlay.recentre`), which is why there is no `align` here.
+ * It holds focus while open (the policy keys are the point), so it dismisses on
+ * Esc/q and is sized by the widget against the measured screen. */
+#hub-links-host {
+    layer: toast;
+    width: auto;
+    height: auto;
+}
+
+HubLinksPanel {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+    background: $lo-overlay;
+    color: $lo-fg;
+}
+
 KeysLegend {
     width: auto;
     height: auto;

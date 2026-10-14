@@ -94,6 +94,10 @@ def highlights() -> Msg:
     return Msg("wire.slash.highlights", {})
 
 
+def hub() -> Msg:
+    return Msg("wire.slash.hub", {})
+
+
 def info() -> Msg:
     return Msg("wire.slash.info", {})
 
