@@ -200,6 +200,15 @@ def _projected_action_schema(model: Any) -> dict[str, Any]:
     if isinstance(properties, dict):
         for name in _INJECTED_ACTION_FIELDS:
             properties.pop(name, None)
+        # JSON Schema patterns SEARCH, but a provider's constrained decoder may
+        # full-match them. Bare \S then offers one character rather than the
+        # protocol's nonblank identifier/text. Rephrase only this known pattern
+        # in our fresh offer: both match modes now accept the same strings,
+        # including newlines (.* would not). Keep protocol schemas/digests and
+        # all type/length bounds intact; never rewrite a foreign tool's regex.
+        for field_schema in properties.values():
+            if isinstance(field_schema, dict) and field_schema.get("pattern") == r"\S":
+                field_schema["pattern"] = r"[\s\S]*\S[\s\S]*"
     required = schema.get("required")
     if isinstance(required, list):
         schema["required"] = [name for name in required if name not in _INJECTED_ACTION_FIELDS]
