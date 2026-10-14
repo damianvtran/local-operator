@@ -1,0 +1,698 @@
+{
+  "fr": {
+    "amounts": [
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 0,
+        "unit": "credits",
+        "text": "reste 0 crédit"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 0,
+        "unit": "credits",
+        "text": "utilisation de 0 crédit"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 0,
+        "unit": "usd",
+        "text": "reste 0 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 0,
+        "unit": "usd",
+        "text": "utilisation de 0 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 0,
+        "unit": "tokens",
+        "text": "reste 0 jeton"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 0,
+        "unit": "tokens",
+        "text": "utilisation de 0 jeton"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 0,
+        "unit": "requests",
+        "text": "reste 0 requête"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 0,
+        "unit": "requests",
+        "text": "utilisation de 0 requête"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1,
+        "unit": "credits",
+        "text": "reste 1 crédit"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1,
+        "unit": "credits",
+        "text": "utilisation de 1 crédit"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1,
+        "unit": "usd",
+        "text": "reste 1 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1,
+        "unit": "usd",
+        "text": "utilisation de 1 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1,
+        "unit": "tokens",
+        "text": "reste 1 jeton"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1,
+        "unit": "tokens",
+        "text": "utilisation de 1 jeton"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1,
+        "unit": "requests",
+        "text": "reste 1 requête"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1,
+        "unit": "requests",
+        "text": "utilisation de 1 requête"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 2,
+        "unit": "credits",
+        "text": "reste 2 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 2,
+        "unit": "credits",
+        "text": "utilisation de 2 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 2,
+        "unit": "usd",
+        "text": "reste 2 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 2,
+        "unit": "usd",
+        "text": "utilisation de 2 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 2,
+        "unit": "tokens",
+        "text": "reste 2 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 2,
+        "unit": "tokens",
+        "text": "utilisation de 2 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 2,
+        "unit": "requests",
+        "text": "reste 2 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 2,
+        "unit": "requests",
+        "text": "utilisation de 2 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1.5,
+        "unit": "credits",
+        "text": "reste 1,5 crédit"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1.5,
+        "unit": "credits",
+        "text": "utilisation de 1,5 crédit"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1.5,
+        "unit": "usd",
+        "text": "reste 1,5 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1.5,
+        "unit": "usd",
+        "text": "utilisation de 1,5 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1.5,
+        "unit": "tokens",
+        "text": "reste 1,5 jeton"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1.5,
+        "unit": "tokens",
+        "text": "utilisation de 1,5 jeton"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1.5,
+        "unit": "requests",
+        "text": "reste 1,5 requête"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1.5,
+        "unit": "requests",
+        "text": "utilisation de 1,5 requête"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1,
+        "unit": "credits",
+        "text": "reste -1 crédit"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1,
+        "unit": "credits",
+        "text": "utilisation de -1 crédit"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1,
+        "unit": "usd",
+        "text": "reste -1 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1,
+        "unit": "usd",
+        "text": "utilisation de -1 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1,
+        "unit": "tokens",
+        "text": "reste -1 jeton"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1,
+        "unit": "tokens",
+        "text": "utilisation de -1 jeton"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1,
+        "unit": "requests",
+        "text": "reste -1 requête"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1,
+        "unit": "requests",
+        "text": "utilisation de -1 requête"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -2,
+        "unit": "credits",
+        "text": "reste -2 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -2,
+        "unit": "credits",
+        "text": "utilisation de -2 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -2,
+        "unit": "usd",
+        "text": "reste -2 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -2,
+        "unit": "usd",
+        "text": "utilisation de -2 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -2,
+        "unit": "tokens",
+        "text": "reste -2 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -2,
+        "unit": "tokens",
+        "text": "utilisation de -2 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -2,
+        "unit": "requests",
+        "text": "reste -2 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -2,
+        "unit": "requests",
+        "text": "utilisation de -2 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1.5,
+        "unit": "credits",
+        "text": "reste -1,5 crédit"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1.5,
+        "unit": "credits",
+        "text": "utilisation de -1,5 crédit"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1.5,
+        "unit": "usd",
+        "text": "reste -1,5 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1.5,
+        "unit": "usd",
+        "text": "utilisation de -1,5 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1.5,
+        "unit": "tokens",
+        "text": "reste -1,5 jeton"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1.5,
+        "unit": "tokens",
+        "text": "utilisation de -1,5 jeton"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1.5,
+        "unit": "requests",
+        "text": "reste -1,5 requête"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1.5,
+        "unit": "requests",
+        "text": "utilisation de -1,5 requête"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1000000,
+        "unit": "credits",
+        "text": "reste 1 000 000 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1000000,
+        "unit": "credits",
+        "text": "utilisation de 1 000 000 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1000000,
+        "unit": "usd",
+        "text": "reste 1 000 000 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1000000,
+        "unit": "usd",
+        "text": "utilisation de 1 000 000 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1000000,
+        "unit": "tokens",
+        "text": "reste 1 000 000 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1000000,
+        "unit": "tokens",
+        "text": "utilisation de 1 000 000 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 1000000,
+        "unit": "requests",
+        "text": "reste 1 000 000 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 1000000,
+        "unit": "requests",
+        "text": "utilisation de 1 000 000 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1000000,
+        "unit": "credits",
+        "text": "reste -1 000 000 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1000000,
+        "unit": "credits",
+        "text": "utilisation de -1 000 000 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1000000,
+        "unit": "usd",
+        "text": "reste -1 000 000 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1000000,
+        "unit": "usd",
+        "text": "utilisation de -1 000 000 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1000000,
+        "unit": "tokens",
+        "text": "reste -1 000 000 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1000000,
+        "unit": "tokens",
+        "text": "utilisation de -1 000 000 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": -1000000,
+        "unit": "requests",
+        "text": "reste -1 000 000 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": -1000000,
+        "unit": "requests",
+        "text": "utilisation de -1 000 000 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 5,
+        "unit": "credits",
+        "text": "reste 5 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 5,
+        "unit": "credits",
+        "text": "utilisation de 5 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 5,
+        "unit": "usd",
+        "text": "reste 5 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 5,
+        "unit": "usd",
+        "text": "utilisation de 5 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 5,
+        "unit": "tokens",
+        "text": "reste 5 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 5,
+        "unit": "tokens",
+        "text": "utilisation de 5 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 5,
+        "unit": "requests",
+        "text": "reste 5 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 5,
+        "unit": "requests",
+        "text": "utilisation de 5 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 21,
+        "unit": "credits",
+        "text": "reste 21 crédits"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 21,
+        "unit": "credits",
+        "text": "utilisation de 21 crédits"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 21,
+        "unit": "usd",
+        "text": "reste 21 USD"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 21,
+        "unit": "usd",
+        "text": "utilisation de 21 USD"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 21,
+        "unit": "tokens",
+        "text": "reste 21 jetons"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 21,
+        "unit": "tokens",
+        "text": "utilisation de 21 jetons"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "value": 21,
+        "unit": "requests",
+        "text": "reste 21 requêtes"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "value": 21,
+        "unit": "requests",
+        "text": "utilisation de 21 requêtes"
+      }
+    ],
+    "unknownUnits": [
+      {
+        "message": "remaining_unknown_unit",
+        "value": 0,
+        "text": "reste 0"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 0,
+        "text": "utilisation de 0"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 1,
+        "text": "reste 1"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 1,
+        "text": "utilisation de 1"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 2,
+        "text": "reste 2"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 2,
+        "text": "utilisation de 2"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 1.5,
+        "text": "reste 1,5"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 1.5,
+        "text": "utilisation de 1,5"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": -1,
+        "text": "reste -1"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": -1,
+        "text": "utilisation de -1"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": -2,
+        "text": "reste -2"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": -2,
+        "text": "utilisation de -2"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": -1.5,
+        "text": "reste -1,5"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": -1.5,
+        "text": "utilisation de -1,5"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 1000000,
+        "text": "reste 1 000 000"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 1000000,
+        "text": "utilisation de 1 000 000"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": -1000000,
+        "text": "reste -1 000 000"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": -1000000,
+        "text": "utilisation de -1 000 000"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 5,
+        "text": "reste 5"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 5,
+        "text": "utilisation de 5"
+      },
+      {
+        "message": "remaining_unknown_unit",
+        "value": 21,
+        "text": "reste 21"
+      },
+      {
+        "message": "used_unknown_unit",
+        "value": 21,
+        "text": "utilisation de 21"
+      }
+    ],
+    "percentages": [
+      {
+        "key": "relay.shell.usage.fraction",
+        "value": 0.29,
+        "text": "29 % utilisé"
+      },
+      {
+        "key": "relay.shell.usage.remaining_percent",
+        "value": 0.29,
+        "text": "reste 29 %"
+      },
+      {
+        "key": "relay.shell.usage.used_percent",
+        "value": 0.29,
+        "text": "29 % utilisé"
+      },
+      {
+        "key": "relay.shell.usage.fraction",
+        "value": 0.07,
+        "text": "7 % utilisé"
+      },
+      {
+        "key": "relay.shell.usage.remaining_percent",
+        "value": 0.07,
+        "text": "reste 7 %"
+      },
+      {
+        "key": "relay.shell.usage.used_percent",
+        "value": 0.07,
+        "text": "7 % utilisé"
+      }
+    ],
+    "rows": [
+      {
+        "key": "relay.shell.usage.row",
+        "text": "Quota inclus · 5 heures : reste 1 crédit"
+      },
+      {
+        "key": "relay.shell.usage.row_family",
+        "text": "Quota inclus (Example) · 5 heures : reste 1 crédit"
+      }
+    ],
+    "dates": [
+      {
+        "key": "relay.shell.usage.reset",
+        "text": "Réinitialisation le 14 oct. 2026 à 15:04"
+      },
+      {
+        "key": "relay.shell.usage.as_of",
+        "text": "Données du 14 oct. 2026 à 15:04."
+      }
+    ]
+  }
+}

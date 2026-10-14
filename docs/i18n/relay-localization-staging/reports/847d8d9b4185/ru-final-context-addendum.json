@@ -1,0 +1,51 @@
+{
+  "auditor": "847d8d9b4185",
+  "actual_model": "openai/gpt-6.1-sol",
+  "date": "2026-10-14",
+  "scope": "context-only final addendum, no tests/full-native-audit reset",
+  "old_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "new_context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+  "read_keys": [
+    "relay.shell.usage.unit_credits",
+    "relay.shell.usage.unit_tokens",
+    "relay.shell.usage.unit_requests"
+  ],
+  "context_notes": {
+    "relay.shell.usage.unit_credits": "Localized unit noun for API token credits. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity.",
+    "relay.shell.usage.unit_tokens": "Localized unit noun for API token tokens. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity.",
+    "relay.shell.usage.unit_requests": "Localized unit noun for API token requests. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+  },
+  "retention": [
+    {
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "b96e8923fe82824db2434720f722d2cf323d5aa733d78ad1c75285391c16245b",
+      "source_unchanged": true,
+      "target_unchanged": true
+    },
+    {
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "1d3618c0928e956da89e70b9eaf0945c15062493a043a6e17a8364fc912efdec",
+      "source_unchanged": true,
+      "target_unchanged": true
+    },
+    {
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "6235f9f3f058fe859194f37879d485199449345c1692beeda2dc767f691dfaa1",
+      "source_unchanged": true,
+      "target_unchanged": true
+    }
+  ],
+  "result": "compatible; prior narrow native passed verdict retained for exact RU target/source bytes",
+  "native_rule": "Russian fractional decimal quantities govern genitive singular: 1,5 кредита / 1,5 токена / 1,5 запроса. Hence other noun forms кредита/токена/запроса are correct; integer many instead uses кредитов/токенов/запросов (0, 5, 1000000). This agrees with new notes and the previously executed native audit. No fresh native coverage asserted.",
+  "compatibility": "Same finite remaining ?? used count, no # or repeated numeric value, noun-only branches and fixed USD match approved targets/caller. English singular is an intentional count correction. FR digit-million no-de OQLF and ES digit-million de RAE section6 are cross-locale context guidance read here, not independently audited or externally source-verified by this RU auditor.",
+  "prior_minor": "RU-M1 retained deferred non-gating; target command value unchanged.",
+  "rendered": "HOLD/BLOCKED customer resource hold",
+  "new_tests": false,
+  "new_native_coverage": false,
+  "candidate_edits": false,
+  "ledger_writes": false,
+  "prior_audit": "reports/847d8d9b4185/ru-minimal3noun-delta-audit.json"
+}

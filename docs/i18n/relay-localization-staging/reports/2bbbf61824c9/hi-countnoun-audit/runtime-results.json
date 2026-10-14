@@ -1,0 +1,392 @@
+{
+  "passed": true,
+  "changes": {
+    "relay.shell": [
+      "relay.shell.usage.unit_credits",
+      "relay.shell.usage.unit_tokens",
+      "relay.shell.usage.unit_requests"
+    ],
+    "relay.session": [],
+    "relay.login": []
+  },
+  "hashes": {
+    "relay.shell": {
+      "old_target": "ee6c90d66c844549caa867ed81645b3cb642efad970a4537f9985b0f9b100ab0",
+      "new_target": "feab9e023be86d7841bd1e08cb273a48bbaaa118c41ade6040d7a29a701305eb",
+      "working_source": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "base_source": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "source_changed_keys": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests"
+      ]
+    },
+    "relay.session": {
+      "old_target": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "new_target": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "working_source": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "base_source": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "source_changed_keys": []
+    },
+    "relay.login": {
+      "old_target": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "new_target": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "working_source": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "base_source": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "source_changed_keys": []
+    }
+  },
+  "working_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "outputs": [
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "0 क्रेडिट शेष"
+    },
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "0 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "1 क्रेडिट शेष"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "1 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "2 क्रेडिट शेष"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "2 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "1.5 क्रेडिट शेष"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "1.5 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "-1 क्रेडिट शेष"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "-1 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "-2 क्रेडिट शेष"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "-2 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "-1.5 क्रेडिट शेष"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "-1.5 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "10,00,000 क्रेडिट शेष"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "10,00,000 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "0 टोकन शेष"
+    },
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "0 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "1 टोकन शेष"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "1 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "2 टोकन शेष"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "2 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "1.5 टोकन शेष"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "1.5 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "-1 टोकन शेष"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "-1 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "-2 टोकन शेष"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "-2 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "-1.5 टोकन शेष"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "-1.5 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "10,00,000 टोकन शेष"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "टोकन",
+      "action": "used",
+      "output": "10,00,000 टोकन का उपयोग हुआ"
+    },
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "0 अनुरोध शेष"
+    },
+    {
+      "count": 0,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "0 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "1 अनुरोध शेष"
+    },
+    {
+      "count": 1,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "1 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "2 अनुरोध शेष"
+    },
+    {
+      "count": 2,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "2 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "1.5 अनुरोध शेष"
+    },
+    {
+      "count": 1.5,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "1.5 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "-1 अनुरोध शेष"
+    },
+    {
+      "count": -1,
+      "category": "one",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "-1 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "-2 अनुरोध शेष"
+    },
+    {
+      "count": -2,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "-2 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "-1.5 अनुरोध शेष"
+    },
+    {
+      "count": -1.5,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "-1.5 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "10,00,000 अनुरोध शेष"
+    },
+    {
+      "count": 1000000,
+      "category": "other",
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "10,00,000 अनुरोध का उपयोग हुआ"
+    }
+  ],
+  "negative": [
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "missing_count": "relay.shell.usage.unit_credits"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "missing_count": "relay.shell.usage.unit_tokens"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "missing_count": "relay.shell.usage.unit_requests"
+    }
+  ]
+}

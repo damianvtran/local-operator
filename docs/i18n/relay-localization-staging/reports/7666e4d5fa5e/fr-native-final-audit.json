@@ -1,0 +1,91 @@
+{
+  "audit": "PR2329 independent French final numeric-million remediation audit",
+  "date": "2026-10-14",
+  "auditor": {
+    "session": "7666e4d5fa5e",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_of_translator": true
+  },
+  "native_verdict": "pass",
+  "terminal_native_round": true,
+  "source_provenance": {
+    "checkout": "source-checkout",
+    "HEAD": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+    "status": "counted English source working bytes UNCOMMITTED, not committed HEAD bytes",
+    "shell_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1"
+  },
+  "target_root": "historical-scratch/c4131ebe3f64/relay-final65-numeric-million/fr",
+  "namespace_results": {
+    "relay.shell": {
+      "native_verdict": "pass",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "7c33c08b1632baec788b8e84f018ae3c861a2d3ccfb180c5029de214341a1e15",
+      "changed": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests"
+      ],
+      "retained_lines_identical": 41,
+      "wholefile_identical": false
+    },
+    "relay.session": {
+      "native_verdict": "pass",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "ff308557eaaac62556f20625039d9e70df97cf55f5b150580f7511c16ecd2018",
+      "changed": [],
+      "retained_lines_identical": 17,
+      "wholefile_identical": true
+    },
+    "relay.login": {
+      "native_verdict": "pass",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "5f6cc95bffee5f11984b4a083af057ba96a5e332a623c5b5c3659a9e61530d24",
+      "changed": [],
+      "retained_lines_identical": 4,
+      "wholefile_identical": true
+    }
+  },
+  "delta": "only three many branch de removals; retained one/other exact byte compatibility and 62 unchanged serialized entry lines; session/login whole-file identical",
+  "findings": [
+    {
+      "id": "F-FR-01",
+      "severity": "MAJOR",
+      "status": "resolved, retained from previous counted-noun remediation pass",
+      "compatibility": "singular/other branches and outer messages unchanged"
+    },
+    {
+      "id": "F-FR-02",
+      "severity": "MAJOR",
+      "status": "resolved on exact final target hash",
+      "evidence": "actual submitted +/- million × 3 nouns × remaining/used yields digit-written plainplural without noun de",
+      "authority": "https://vitrinelinguistique.oqlf.gouv.qc.ca/21647/la-typographie/nombres/ecriture-de-million-et-de-milliard"
+    }
+  ],
+  "new_findings": [],
+  "executed_this_round": [
+    "actual relay createMessageRuntime 12 corrected +/-million composed outputs",
+    "actual check_catalogues narrow three-key source/target/context fixture zero problems",
+    "plural count/NFC checks for three keys",
+    "absent count negative rejected/restored fixture green"
+  ],
+  "retained_evidence": "prior independently executed 0/1/2/1.5/negative whole-row, one/other, typed ICU/style and namespace native assessment retained by exact delta compatibility; no full65 rerun",
+  "limitations": {
+    "rendered_visual": "HOLD/BLOCKED customer/resource hold; no pixel/browser/layout/mounted app evidence",
+    "RTL": "not applicable French LTR",
+    "pseudo": "not run; prior limitations unchanged",
+    "integration": "bind ledger to exact audited working source hash after unified commit, not historical de9 HEAD; no ship gate waiver"
+  },
+  "historical_reports_preserved": [
+    "reports/7666e4d5fa5e/fr-native-audit.json",
+    "reports/7666e4d5fa5e/fr-native-remediation-audit.json"
+  ],
+  "artifacts": {
+    "fr-native-final-audit.json": "reports/7666e4d5fa5e/fr-native-final-audit.json",
+    "fr-native-final-audit.md": "reports/7666e4d5fa5e/fr-native-final-audit.md",
+    "fr-numeric-million-final.log": "historical-scratch/7666e4d5fa5e/fr-numeric-million-final.log",
+    "fr-numeric-million-validator.log": "historical-scratch/7666e4d5fa5e/fr-numeric-million-validator.log",
+    "fr-numeric-million-final.mjs": "historical-scratch/7666e4d5fa5e/fr-numeric-million-final.mjs",
+    "validate-fr-numeric-million-final.py": "historical-scratch/7666e4d5fa5e/validate-fr-numeric-million-final.py"
+  }
+}

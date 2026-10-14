@@ -1,0 +1,101 @@
+{
+  "auditor": {
+    "agent": "independent Hindi auditor task / session 2bbbf61824c9",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback_used": false
+  },
+  "verdict": "pass",
+  "terminal_native_round": true,
+  "finding_ids": [],
+  "findings": [],
+  "unresolved_blocker_major": 0,
+  "scope": "Narrow three-counted-noun delta plus direct composed amount neighbors; prior65 native evidence retained for62 unchanged values, not freshly re-audited. Not a human-native-speaker attestation.",
+  "source_state": "WORKING UNCOMMITTED source; base HEAD de9b9a490c839d6de2c2e41ea03ec819f66be489 is not source-byte identity for shell",
+  "hashes": {
+    "relay.shell": {
+      "old_target": "ee6c90d66c844549caa867ed81645b3cb642efad970a4537f9985b0f9b100ab0",
+      "new_target": "feab9e023be86d7841bd1e08cb273a48bbaaa118c41ade6040d7a29a701305eb",
+      "working_source": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "base_source": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "source_changed_keys": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests"
+      ]
+    },
+    "relay.session": {
+      "old_target": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "new_target": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "working_source": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "base_source": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "source_changed_keys": []
+    },
+    "relay.login": {
+      "old_target": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "new_target": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "working_source": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "base_source": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "source_changed_keys": []
+    }
+  },
+  "working_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "changed_keys": {
+    "relay.shell": [
+      "relay.shell.usage.unit_credits",
+      "relay.shell.usage.unit_tokens",
+      "relay.shell.usage.unit_requests"
+    ],
+    "relay.session": [],
+    "relay.login": []
+  },
+  "compatibility": {
+    "unchanged_values": 62,
+    "session_login": "byte-identical old/new targets and unchanged English sources",
+    "shell": "Only unit_credits/unit_tokens/unit_requests differ in English and Hindi; other41 target values identical",
+    "prior_audit": "../hi-audit/audit.json"
+  },
+  "native_reasoning": "क्रेडिट and टोकन loan nouns and अनुरोध masculine consonant-ending noun have invariant direct singular/plural counted forms here. Identical Hindi one/other noun branches are intentional, not missing translations. No number duplication, no oblique postposition attached to noun; outer शेष / का उपयोग हुआ forms retain correct neutral composition. USD unchanged.",
+  "runtime": {
+    "passed": true,
+    "composed_outputs": 48,
+    "quantities": [
+      0,
+      1,
+      2,
+      1.5,
+      -1,
+      -2,
+      -1.5,
+      1000000
+    ],
+    "Hindi_CLDR_observed": {
+      "0": "one",
+      "1": "one",
+      "2": "other",
+      "1.5": "other",
+      "-1": "one",
+      "-2": "other",
+      "-1.5": "other",
+      "1000000": "other"
+    },
+    "typed_count_parity_negative_errors": [
+      "hi/relay.shell: relay.shell.usage.unit_credits: arguments () != en's (('count', 'plural'),)",
+      "hi/relay.shell: relay.shell.usage.unit_tokens: arguments () != en's (('count', 'plural'),)",
+      "hi/relay.shell: relay.shell.usage.unit_requests: arguments () != en's (('count', 'plural'),)"
+    ],
+    "evidence": [
+      "runtime-results.json",
+      "structural-results.json"
+    ],
+    "missing_count_runtime": "All three return key; object count rejected as nonprimitive",
+    "style": "Count is plural type, one/other categories meet Hindi CLDR; no # and no number formatting inside unit; outer amount number style unchanged"
+  },
+  "eligibility_limits": {
+    "rendered": "HOLD per resource restriction; no visual evidence",
+    "pseudo": "not performed",
+    "RTL": "not applicable Hindi LTR; no RTL validation claim",
+    "ledger": "not evaluated or edited",
+    "shipped_activation": "not approved by this audit",
+    "no_repo_edits": true
+  }
+}

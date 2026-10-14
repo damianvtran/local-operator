@@ -1,0 +1,57 @@
+{
+  "kind": "context-only compatibility reattestation",
+  "result": "compatible",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_used": false,
+  "auditor_session": "6fbcfaf3acb1",
+  "old_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "new_context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+  "changed_context_keys": [
+    "relay.shell.usage.unit_credits",
+    "relay.shell.usage.unit_tokens",
+    "relay.shell.usage.unit_requests"
+  ],
+  "exact_notes": {
+    "relay.shell.usage.unit_credits": {
+      "role": "measurement unit label",
+      "tone": "Neutral, compact.",
+      "note": "Localized unit noun for API token credits. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+    },
+    "relay.shell.usage.unit_tokens": {
+      "role": "measurement unit label",
+      "tone": "Neutral, compact.",
+      "note": "Localized unit noun for API token tokens. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+    },
+    "relay.shell.usage.unit_requests": {
+      "role": "measurement unit label",
+      "tone": "Neutral, compact.",
+      "note": "Localized unit noun for API token requests. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+    }
+  },
+  "retained_source_target_hashes": {
+    "relay.shell": {
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "9e6691cdd0fab8dfbf09c314d8acd353a2d109a135d487493c652cb02a712438"
+    },
+    "relay.session": {
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "17a2bf64b2a6f5ffeb10d7d8d54a06d76e6a3102c477681fdf59815a57b463f2"
+    },
+    "relay.login": {
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658"
+    }
+  },
+  "spanish_primary_authority": {
+    "url": "https://www.rae.es/dpd/cardinales",
+    "section": 6,
+    "quote": "Lo mismo sucede si se escriben con números: 1 000 000 de personas, 1 200 000 personas."
+  },
+  "new_native_coverage": false,
+  "tests_run": false,
+  "rendered": "BLOCKED / HOLD; no waiver",
+  "prior_audit": "reports/6fbcfaf3acb1/es-final65-final-token-audit/AUDIT.json",
+  "prior_dispositions": "ES65-1/2/4 resolved in audited candidate; ES65-3 deferred nonblocking durable style documentation.",
+  "scope": "Only assigned3 ES target catalogues independently verified; no claim over other12 programme targets.",
+  "changes": "Own addendum files only."
+}

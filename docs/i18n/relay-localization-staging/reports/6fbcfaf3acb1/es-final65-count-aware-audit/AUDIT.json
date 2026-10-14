@@ -1,0 +1,256 @@
+{
+  "audit": "Independent ES count-aware remediation delta",
+  "date": "2026-10-14",
+  "auditor": {
+    "agent": "independent task Spanish audit",
+    "session": "6fbcfaf3acb1",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback": false
+  },
+  "source_revision_status": "working EN/context on unchanged base HEAD de9b9a490c839d6de2c2e41ea03ec819f66be489; source noun changes uncommitted",
+  "source_root": "source-checkout",
+  "target_root": "historical-scratch/5ad0af2dd59e/es-final65-count-aware",
+  "prior_audit": "reports/6fbcfaf3acb1/es-final65-audit/AUDIT.json",
+  "verdict": "clean_with_followups",
+  "terminal_native_round": true,
+  "unresolved_major": 0,
+  "rendered": "BLOCKED HOLD; no waiver/publication approval",
+  "metadata": {
+    "relay.shell": {
+      "keys": 44,
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+      "target_sha256": "852545691f324684e456b67d9a1e6b3193b346a82bc544bb340f3f6a4e5e32d2",
+      "target_full_byte_unchanged": false,
+      "source_delta_from_HEAD": {
+        "relay.shell.usage.unit_credits": {
+          "before": "credits",
+          "after": "{count, plural, one {credit} other {credits}}"
+        },
+        "relay.shell.usage.unit_tokens": {
+          "before": "tokens",
+          "after": "{count, plural, one {token} other {tokens}}"
+        },
+        "relay.shell.usage.unit_requests": {
+          "before": "requests",
+          "after": "{count, plural, one {request} other {requests}}"
+        }
+      }
+    },
+    "relay.session": {
+      "keys": 17,
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "context_sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db",
+      "target_sha256": "17a2bf64b2a6f5ffeb10d7d8d54a06d76e6a3102c477681fdf59815a57b463f2",
+      "target_full_byte_unchanged": true,
+      "source_delta_from_HEAD": {}
+    },
+    "relay.login": {
+      "keys": 4,
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
+      "target_sha256": "b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658",
+      "target_full_byte_unchanged": true,
+      "source_delta_from_HEAD": {}
+    }
+  },
+  "scope": {
+    "target_changed_keys": [
+      "relay.shell.usage.remaining",
+      "relay.shell.usage.reset",
+      "relay.shell.usage.as_of",
+      "relay.shell.usage.unit_credits",
+      "relay.shell.usage.unit_tokens",
+      "relay.shell.usage.unit_requests",
+      "relay.shell.usage.remaining_unknown_unit"
+    ],
+    "source_changed_keys": [
+      "relay.shell.usage.unit_credits",
+      "relay.shell.usage.unit_tokens",
+      "relay.shell.usage.unit_requests"
+    ],
+    "retained58": [
+      "relay.shell.list.empty",
+      "relay.shell.list.connecting",
+      "relay.shell.list.section.active",
+      "relay.shell.list.section.previous",
+      "relay.shell.list.theme",
+      "relay.shell.session.waiting",
+      "relay.shell.session.connecting",
+      "relay.shell.usage.title",
+      "relay.shell.usage.cached",
+      "relay.shell.usage.unavailable",
+      "relay.shell.usage.loading",
+      "relay.shell.usage.empty",
+      "relay.shell.usage.last_known",
+      "relay.shell.usage.continue",
+      "relay.shell.usage.family_caps",
+      "relay.shell.usage.paid",
+      "relay.shell.usage.family",
+      "relay.shell.usage.included",
+      "relay.shell.usage.amount_unknown",
+      "relay.shell.usage.blocked",
+      "relay.shell.usage.eligibility_unknown",
+      "relay.shell.usage.unlimited",
+      "relay.shell.usage.window_five",
+      "relay.shell.usage.window_week",
+      "relay.shell.usage.window_month",
+      "relay.shell.usage.window_lifetime",
+      "relay.shell.usage.window_unknown",
+      "relay.shell.usage.used",
+      "relay.shell.usage.fraction",
+      "relay.shell.usage.command",
+      "relay.shell.usage.stale",
+      "relay.shell.usage.row",
+      "relay.shell.usage.row_family",
+      "relay.shell.usage.unit_usd",
+      "relay.shell.usage.remaining_percent",
+      "relay.shell.usage.used_percent",
+      "relay.shell.usage.used_unknown_unit",
+      "relay.session.list.search_placeholder",
+      "relay.session.list.empty_hint",
+      "relay.session.list.no_matches",
+      "relay.session.list.start_idle",
+      "relay.session.list.start_busy",
+      "relay.session.view.back",
+      "relay.session.view.empty_title",
+      "relay.session.view.empty_hint",
+      "relay.session.past.back",
+      "relay.session.past.heading",
+      "relay.session.past.search_placeholder",
+      "relay.session.past.loading",
+      "relay.session.directory.sheet_title",
+      "relay.session.directory.path_placeholder",
+      "relay.session.model.sheet_title",
+      "relay.session.model.filter_placeholder",
+      "relay.session.model.loading",
+      "relay.login.page.title",
+      "relay.login.password.label",
+      "relay.login.submit.label",
+      "relay.login.error.password"
+    ],
+    "compatibility": "58 identical serialized target lines plus unchanged EN/context per-key values; session/login complete file byte identity; all source/type/styles checked mechanically; prior native assessments retained, not re-audited"
+  },
+  "namespace_results": {
+    "relay.shell": {
+      "native": "passed_with_minor_followups",
+      "major": 0,
+      "minor": 2,
+      "rendered": "BLOCKED"
+    },
+    "relay.session": {
+      "native": "passed_retained_byte_compatible",
+      "rendered": "BLOCKED"
+    },
+    "relay.login": {
+      "native": "passed_retained_byte_compatible",
+      "rendered": "BLOCKED"
+    }
+  },
+  "assessment": {
+    "relay.shell.usage.remaining": "PASS: Cantidad restante is natural, neutral and count-independent; correctly inflected unit follows numeric value, no parentheses workaround or spend-permission implication.",
+    "relay.shell.usage.remaining_unknown_unit": "PASS: count-independent unknown-unit caption retains amount and omits untrusted API token.",
+    "relay.shell.usage.used": "PASS direct neighbor: unchanged Uso caption now agrees with inflected units at 0/1/2/fractions/negative/millions.",
+    "relay.shell.usage.unit_credits": "PASS: crédito/créditos/de créditos one/other/many; numeric exact-million de explicitly supported by RAE DPD cardinales §6.",
+    "relay.shell.usage.unit_tokens": "PASS agreement with MINOR ES65-4 orthography: singular tóken needs token, plural tókenes valid; many de correct for numeric exact million per RAE.",
+    "relay.shell.usage.unit_requests": "PASS: solicitud/solicitudes/de solicitudes one/other/many, including negative absolute-value plural selection.",
+    "relay.shell.usage.reset": "PASS: Restablecimiento neutral noun caption retains reset semantics; typed medium date/short time and 1:00 no article agreement defect.",
+    "relay.shell.usage.as_of": "PASS: Datos del with comma preserves timestamp freshness semantics; typed medium date/short time; no fixed a las.",
+    "relay.shell.usage.row": "PASS direct neighbor: whole-row punctuation uses em dash plus exactly one amount colon; no duplicated de or number.",
+    "relay.shell.usage.row_family": "PASS direct neighbor: family opus remains machine identifier in parentheses; unknown-window label and complete punctuation retained."
+  },
+  "resolution": {
+    "ES65-1": {
+      "status": "resolved_in_audited_candidate",
+      "evidence": "80 actual Python and80 actual phone composed cases prove corrected noun agreement and neutral remaining captions; real UsageSheet source count propagation read at48-63; does not claim commit/landing"
+    },
+    "ES65-2": {
+      "status": "resolved_in_audited_candidate",
+      "evidence": "actual reset/as_of1:00 strings have neutral comma, no a las"
+    },
+    "ES65-3": {
+      "status": "MINOR followup still durable-recording parent owned",
+      "evidence": "REMEDIATION.md:22 records narrow rationale; source style guide unchanged, no durable repo exception yet; record token/tókenes not malformed singular tóken"
+    }
+  },
+  "findings": [
+    {
+      "id": "ES65-4",
+      "severity": "MINOR",
+      "key": "relay.shell.usage.unit_tokens",
+      "path": "historical-scratch/5ad0af2dd59e/es-final65-count-aware/relay.shell.json",
+      "line": 40,
+      "actual": [
+        "Cantidad restante: 1 tóken",
+        "Uso: -1 tóken"
+      ],
+      "expected": [
+        "Cantidad restante: 1 token",
+        "Uso: -1 token"
+      ],
+      "required_target_delta": "one {tóken} -> one {token}; other {tókenes} and many {de tókenes} unchanged",
+      "evidence": "https://www.fundeu.es/recomendacion/token-alternativas-en-espanol/ states singular token/toquen, plurals tókenes/tóquenes, accented due esdrújula plural. Independently fetched full page in this round.",
+      "rationale": "Orthographic followup, no count/meaning/permission error; minor does not force another native round."
+    }
+  ],
+  "million_lead": {
+    "received": "second sample proposed no de when entire million numeral is digits, based on French OQLF",
+    "disposition": "rejected_for_ES_with_primary_evidence; preserve lead and distinguish languages",
+    "primary": "https://www.rae.es/dpd/cardinales §6",
+    "quote": "Lo mismo sucede si se escriben con números: 1 000 000 de personas, 1 200 000 personas.",
+    "secondary": "https://www.wikilengua.org/index.php/mill%C3%B3n §3 cites same recommendation and notes technical-symbol omission usage; primary RAE explicitly supports current Spanish de.",
+    "required_ES_delta": "none for many branches; do not apply French rule to Spanish",
+    "probe_evidence": "1.000.000 de créditos and -1.000.000 de solicitudes produced once-only de; family and no-family row tests pass"
+  },
+  "checks": {
+    "argument_kinds_styles": "PASS all65 exact source types/order and AST skeletons",
+    "repo_validator": "PASS isolated source fixtures",
+    "negative_controls": [
+      {
+        "control": "missing_count",
+        "actual": [
+          "es/relay.shell: relay.shell.usage.unit_credits: arguments () != en's (('count', 'plural'),)"
+        ],
+        "result": "PASS rejected"
+      },
+      {
+        "control": "invalid_category",
+        "actual": [
+          "es/relay.shell: relay.shell.usage.unit_requests: plural category 'few' not in ['many', 'one', 'other']"
+        ],
+        "result": "PASS rejected"
+      },
+      {
+        "control": "number_percent_style",
+        "actual": "independent AST-style comparator distinguishes percent from plain number",
+        "result": "PASS rejected"
+      }
+    ],
+    "restored": "PASS",
+    "python_compositions": 80,
+    "actual_phone_compositions": 80,
+    "runtime_parity": "PASS all80 amount,row,family strings identical",
+    "counts": [
+      0,
+      1,
+      2,
+      1.5,
+      -1,
+      -1.5,
+      1000000,
+      -1000000
+    ],
+    "percent_controls": [
+      0.29,
+      0.07
+    ],
+    "timestamp": "2026-10-14T01:00:00+00:00",
+    "real_caller": "UsageSheet.tsx48-63 uses same finite measured number for unit count and amount value, USD invariant; no fallback0 manufactured; source inspected, no full React/browser exercise claimed"
+  },
+  "limitations": {
+    "rendered": "BLOCKED; no browser fit evidence, no rendered waiver",
+    "pseudo": "Applicable but BLOCKED; runtime strings not layout expansion proof",
+    "RTL": "Spanish LTR, native RTL not applicable; generic mixed-script visual proof unclaimed"
+  },
+  "edits": "Own scratch fixtures/rigs/reports only; no source/target/ledger edits, no installs/dependency copies/browser/heavy runs"
+}

@@ -1,0 +1,116 @@
+{
+  "audit": "PR2329 French counted-noun remediation independent narrow native audit",
+  "date": "2026-10-14",
+  "auditor": {
+    "session": "7666e4d5fa5e",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_of_translator": true,
+    "human_native_speaker_claim": false
+  },
+  "verdict": "changes_requested",
+  "terminal_native_round": false,
+  "source_provenance": {
+    "checkout": "source-checkout",
+    "HEAD": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+    "english_noun_edits": "UNCOMMITTED working-tree bytes, not committed de9b9a490 bytes",
+    "shell_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1"
+  },
+  "target_root": "historical-scratch/c4131ebe3f64/relay-final65-counted/fr",
+  "namespace_results": {
+    "relay.shell": {
+      "native_verdict": "changes_requested",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "b2ddca1751c5a650fa00f29035944701c17dc1039480f80abe74ae1a322bc84c",
+      "changed": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests"
+      ],
+      "retained": 41,
+      "retained_line_bytes_identical": true,
+      "wholefile_identical": false
+    },
+    "relay.session": {
+      "native_verdict": "pass",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "ff308557eaaac62556f20625039d9e70df97cf55f5b150580f7511c16ecd2018",
+      "changed": [],
+      "retained": 17,
+      "retained_line_bytes_identical": true,
+      "wholefile_identical": true
+    },
+    "relay.login": {
+      "native_verdict": "pass",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "5f6cc95bffee5f11984b4a083af057ba96a5e332a623c5b5c3659a9e61530d24",
+      "changed": [],
+      "retained": 4,
+      "retained_line_bytes_identical": true,
+      "wholefile_identical": true
+    }
+  },
+  "retained_entries_total": 62,
+  "changed_entries_total": 3,
+  "findings_resolved": [
+    {
+      "id": "F-FR-01",
+      "original_severity": "MAJOR",
+      "status": "resolved on audited source/target hashes",
+      "evidence": "56 actual relay composed amount/family-row outputs 0/1/2/1.5/-1/-1.5/1000000 × four units × remaining/used; plural count inflects nouns, no caption workaround; many outer de and noun de separated by number and grammatical"
+    }
+  ],
+  "new_findings": [
+    {
+      "id": "F-FR-02",
+      "severity": "MAJOR",
+      "location": "historical-scratch/c4131ebe3f64/relay-final65-counted/fr/relay.shell.json:37,39-40",
+      "title": "many branch uses spelled-out million grammar for digit-written measurement",
+      "source": "https://vitrinelinguistique.oqlf.gouv.qc.ca/21647/la-typographie/nombres/ecriture-de-million-et-de-milliard",
+      "authoritative_quote": "Nombres exacts: La préposition de est absente.",
+      "actual": "utilisation de 1 000 000 de crédits",
+      "required": "utilisation de 1 000 000 crédits",
+      "required_target_delta": "Same three noun messages only: many {crédits}, many {jetons}, many {requêtes}, or omit many and let other supply these plural nouns; no source/caller/outer change",
+      "status": "unresolved on submitted target hash"
+    }
+  ],
+  "prior_failed_report_preserved": "reports/7666e4d5fa5e/fr-native-audit.json",
+  "mechanics": {
+    "exact_key_counts": [
+      44,
+      17,
+      4
+    ],
+    "ICU_names_kinds_order": "pass",
+    "ICU_styles": "pass independent AST check",
+    "NFC": "pass independent text check",
+    "CLDR_grammar": "pass one/other/many and negative direct neighbors",
+    "validator": "actual check_catalogues zero problems",
+    "negative_controls": [
+      "number->simple rejected by validator",
+      "dropped noun count rejected by validator",
+      "missing count actual runtime returns key token",
+      "audit-only decomposed accent detected",
+      "audit-only lost percent style detected"
+    ],
+    "caller_review": "read actual working diff: same finite measured=remaining??used passed as count and outer value; nonfinite/null skipped",
+    "mounted_customer_UI": "NOT_EXECUTED"
+  },
+  "limitations": {
+    "rendered_visual": "HOLD/BLOCKED customer/resource hold; no browser, pixels, geometry or mounted app claim",
+    "RTL": "not applicable French LTR",
+    "pseudo": "not run; width/truncation/reflow unverified",
+    "shipping_eligibility": "not granted; no ledger/shipped changes; new source bytes require committed provenance before integration"
+  },
+  "artifacts": {
+    "fr-native-remediation-audit.json": "reports/7666e4d5fa5e/fr-native-remediation-audit.json",
+    "fr-native-remediation-audit.md": "reports/7666e4d5fa5e/fr-native-remediation-audit.md",
+    "fr-remediation-intl.log": "historical-scratch/7666e4d5fa5e/fr-remediation-intl.log",
+    "fr-remediation-validator.log": "historical-scratch/7666e4d5fa5e/fr-remediation-validator.log",
+    "fr-remediation-output-assertions.log": "historical-scratch/7666e4d5fa5e/fr-remediation-output-assertions.log",
+    "audit-fr-remediation.mjs": "historical-scratch/7666e4d5fa5e/audit-fr-remediation.mjs",
+    "validate-fr-remediation.py": "historical-scratch/7666e4d5fa5e/validate-fr-remediation.py",
+    "fr-million-numeral-counterfactual.log": "historical-scratch/7666e4d5fa5e/fr-million-numeral-counterfactual.log"
+  },
+  "authority_correction": "Earlier many-de recommendation and pre-authority native-pass conclusion were wrong for exact numeral output; original lead retained and explicitly superseded. F-FR-01 singular agreement remains resolved."
+}

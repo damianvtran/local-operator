@@ -1,0 +1,112 @@
+{
+  "namespaces": {
+    "relay.shell": {
+      "count": 44,
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "6f196e2535134079dfec349f645b27a75a132c95bbd40bd98a3f3cd68f18d22f",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {}
+    },
+    "relay.session": {
+      "count": 17,
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "7743c7b5d018b84395478e99231714a46cd998e8c78ce465333be8df62fd517a",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {}
+    },
+    "relay.login": {
+      "count": 4,
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "a87e8ed3381143ee8d61dada52b0df604c72191cdde1747b9ea8fd6c46537020",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {}
+    }
+  },
+  "probes": {
+    "remaining:12345.67:credits": "Còn lại 12.345,67 tín dụng",
+    "used:12345.67:credits": "Đã dùng 12.345,67 tín dụng",
+    "remaining:12345.67:usd": "Còn lại 12.345,67 USD",
+    "used:12345.67:usd": "Đã dùng 12.345,67 USD",
+    "remaining:12345.67:tokens": "Còn lại 12.345,67 token",
+    "used:12345.67:tokens": "Đã dùng 12.345,67 token",
+    "remaining:12345.67:requests": "Còn lại 12.345,67 yêu cầu",
+    "used:12345.67:requests": "Đã dùng 12.345,67 yêu cầu",
+    "remaining:0:credits": "Còn lại 0 tín dụng",
+    "used:0:credits": "Đã dùng 0 tín dụng",
+    "remaining:0:usd": "Còn lại 0 USD",
+    "used:0:usd": "Đã dùng 0 USD",
+    "remaining:0:tokens": "Còn lại 0 token",
+    "used:0:tokens": "Đã dùng 0 token",
+    "remaining:0:requests": "Còn lại 0 yêu cầu",
+    "used:0:requests": "Đã dùng 0 yêu cầu",
+    "remaining:1:credits": "Còn lại 1 tín dụng",
+    "used:1:credits": "Đã dùng 1 tín dụng",
+    "remaining:1:usd": "Còn lại 1 USD",
+    "used:1:usd": "Đã dùng 1 USD",
+    "remaining:1:tokens": "Còn lại 1 token",
+    "used:1:tokens": "Đã dùng 1 token",
+    "remaining:1:requests": "Còn lại 1 yêu cầu",
+    "used:1:requests": "Đã dùng 1 yêu cầu",
+    "remaining:2:credits": "Còn lại 2 tín dụng",
+    "used:2:credits": "Đã dùng 2 tín dụng",
+    "remaining:2:usd": "Còn lại 2 USD",
+    "used:2:usd": "Đã dùng 2 USD",
+    "remaining:2:tokens": "Còn lại 2 token",
+    "used:2:tokens": "Đã dùng 2 token",
+    "remaining:2:requests": "Còn lại 2 yêu cầu",
+    "used:2:requests": "Đã dùng 2 yêu cầu",
+    "fraction:0.29": "Đã dùng 29%",
+    "fraction:0.07": "Đã dùng 7%",
+    "remaining_percent:0.29": "Còn lại 29%",
+    "remaining_percent:0.07": "Còn lại 7%",
+    "used_percent:0.29": "Đã dùng 29%",
+    "used_percent:0.07": "Đã dùng 7%",
+    "reset": "Đặt lại vào 14 thg 10, 2026, 13:07",
+    "as_of": "Dữ liệu tính đến 14 thg 10, 2026, 13:07.",
+    "row": "Hạn mức theo dòng mô hình · 5 giờ: Còn lại 12.345,67 tín dụng",
+    "row_family": "Hạn mức theo dòng mô hình (opus) · 5 giờ: Còn lại 12.345,67 tín dụng"
+  },
+  "negative_controls": {
+    "dropped_number": [
+      "vi/relay.shell: relay.shell.usage.remaining: arguments (('unit', 'simple'),) != en's (('value', 'number'), ('unit', 'simple'))"
+    ],
+    "wrong_style": {
+      "repository_checker": [],
+      "independent_typed_style_check": "REJECTED"
+    },
+    "invalid_CLDR": [
+      "vi/relay.shell: relay.shell.list.empty: arguments (('count', 'plural'),) != en's ()",
+      "vi/relay.shell: relay.shell.list.empty: plural category 'one' not in ['other']"
+    ],
+    "HTML_injection": {
+      "input": "<script>alert(\"x\")</script>&__TITLE__",
+      "actual_escaped": "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&amp;__TITLE__",
+      "unescaped_present": false,
+      "one_pass_token_preserved": true
+    }
+  },
+  "checker_positive": [],
+  "restored_positive": [],
+  "CLDR_vi_categories": [
+    "other"
+  ],
+  "login_positive": {
+    "lang": "vi",
+    "dir": "ltr",
+    "title": "local operator — đăng nhập",
+    "password": "mật khẩu",
+    "submit": "đăng nhập",
+    "error": "Mật khẩu không đúng.",
+    "alert": true
+  },
+  "login_restored_positive": true
+}

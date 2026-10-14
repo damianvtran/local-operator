@@ -1,0 +1,806 @@
+{
+  "audit": "Independent Spanish final65 semantic/native-format audit",
+  "date": "2026-10-14",
+  "auditor": {
+    "agent": "task / independent Spanish final65 auditor",
+    "session": "6fbcfaf3acb1",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "human_native_speaker_claim": false
+  },
+  "translator_source": "HANDOFF.md: relay-es-final65-translation / openai/gpt-6.1-sol; distinct agent/session, same model family",
+  "source_revision": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "source_root": "source-checkout",
+  "target_root": "historical-scratch/5ad0af2dd59e/es-final65",
+  "scope": {
+    "shell": 44,
+    "session": 17,
+    "login": 4,
+    "total": 65,
+    "prior55_status": "changes_requested per delegation; no previously approved semantic slice retained"
+  },
+  "verdict": "changes_requested",
+  "terminal": false,
+  "namespace_results": {
+    "relay.shell": {
+      "keys": 44,
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "79b38a869a17d43911401ab4f5fa8ff5dcce98ffe588dde031ee8d757a002482",
+      "context_sha256": "cb317b9989bcb49ad2fb1cc4c843faf350b67e6633f508a4d00825b36f756de0",
+      "exact_keys_types": "PASS",
+      "native_result": "changes_requested",
+      "unresolved_major": 1,
+      "minor": 2,
+      "rendered_result": "BLOCKED",
+      "publication_approval": false
+    },
+    "relay.session": {
+      "keys": 17,
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "17a2bf64b2a6f5ffeb10d7d8d54a06d76e6a3102c477681fdf59815a57b463f2",
+      "context_sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db",
+      "exact_keys_types": "PASS",
+      "native_result": "passed",
+      "unresolved_major": 0,
+      "minor": 0,
+      "rendered_result": "BLOCKED",
+      "publication_approval": false
+    },
+    "relay.login": {
+      "keys": 4,
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658",
+      "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
+      "exact_keys_types": "PASS",
+      "native_result": "passed",
+      "unresolved_major": 0,
+      "minor": 0,
+      "rendered_result": "BLOCKED",
+      "publication_approval": false
+    }
+  },
+  "findings": [
+    {
+      "id": "ES65-1",
+      "severity": "MAJOR",
+      "namespace": "relay.shell",
+      "keys": [
+        "relay.shell.usage.remaining",
+        "relay.shell.usage.used",
+        "relay.shell.usage.remaining_unknown_unit"
+      ],
+      "locations": [
+        {
+          "path": "historical-scratch/5ad0af2dd59e/es-final65/relay.shell.json",
+          "line": 29,
+          "key": "relay.shell.usage.remaining"
+        },
+        {
+          "path": "historical-scratch/5ad0af2dd59e/es-final65/relay.shell.json",
+          "line": 30,
+          "key": "relay.shell.usage.used"
+        },
+        {
+          "path": "historical-scratch/5ad0af2dd59e/es-final65/relay.shell.json",
+          "line": 44,
+          "key": "relay.shell.usage.remaining_unknown_unit"
+        }
+      ],
+      "summary": "Complete amount messages force plural unit labels and a plural verb at value 1.",
+      "actual": [
+        "Quedan 1 créditos",
+        "Uso: 1 créditos",
+        "Quedan 1 tókenes",
+        "Uso: 1 solicitudes",
+        "Quedan 1"
+      ],
+      "cause": "UsageSheet selects invariant localized unit labels and passes numeric 1 into complete messages; no unit inflection path exists. Context explicitly permits rephrasing to avoid invariant-label agreement.",
+      "real_path": "local_operator/mobile/web/src/components/usage-sheet.tsx:48-59 -> createMessageRuntime -> IntlMessageFormat",
+      "recommendation": "Use a count-independent label structure, e.g. Restante ({unit}): {value, number}, Uso ({unit}): {value, number}, Restante: {value, number}. Keep existing named parameters and numeric ICU types. Alternatively introduce correctly inflected unit handling through a separately reviewed source change.",
+      "severity_rationale": "Repeated incorrect native complete messages at ordinary value 1 across three changed amount variants fail the explicitly requested agreement audit; this is a native-copy defect, not a wrong numeric amount or spend-permission bug."
+    },
+    {
+      "id": "ES65-2",
+      "severity": "MINOR",
+      "namespace": "relay.shell",
+      "keys": [
+        "relay.shell.usage.reset",
+        "relay.shell.usage.as_of"
+      ],
+      "locations": [
+        {
+          "path": "historical-scratch/5ad0af2dd59e/es-final65/relay.shell.json",
+          "line": 32,
+          "key": "relay.shell.usage.reset"
+        },
+        {
+          "path": "historical-scratch/5ad0af2dd59e/es-final65/relay.shell.json",
+          "line": 34,
+          "key": "relay.shell.usage.as_of"
+        }
+      ],
+      "summary": "Fixed a las is not grammatical when the formatted time is 1:00.",
+      "actual": [
+        "Se restablece el 1 ene 2026 a las 1:00",
+        "Datos del 1 ene 2026 a las 1:00."
+      ],
+      "expected": "Spanish time phrase is a la 1:00, not a las 1:00.",
+      "recommendation": "Avoid the time-dependent article with neutral timestamp punctuation, while preserving date medium/time short placeholders, e.g. Restablecimiento: {value, date, medium}, {value, time, short}.",
+      "severity_rationale": "Timestamp value stays correct and understandable; this is a narrow grammatical follow-up, not an independent blocker/major."
+    },
+    {
+      "id": "ES65-3",
+      "severity": "MINOR",
+      "namespace": "relay.shell",
+      "keys": [
+        "relay.shell.usage.cached",
+        "relay.shell.usage.unavailable",
+        "relay.shell.usage.loading",
+        "relay.shell.usage.empty",
+        "relay.shell.usage.command",
+        "relay.shell.usage.unit_tokens"
+      ],
+      "locations": [
+        {
+          "path": "source-checkout/i18n/style-guides/es.md",
+          "line": 24,
+          "key": "kept-English technical list"
+        }
+      ],
+      "summary": "Native caché/tókenes choices are sound, but the source Spanish style guide still lists cache/token as kept-English.",
+      "actual": "i18n/style-guides/es.md:24-27 includes token and cache in the binding kept-English list; translator HANDOFF.md records adapted prose/measurement choices only in scratch.",
+      "recommendation": "Record the narrowly scoped Spanish prose caché and measurement-label tókenes decisions in the durable Spanish style guide when landing translations. Keep API tokens/identifiers byte-identical. No need to replace sound native wording with raw English.",
+      "severity_rationale": "Documentation consistency follow-up; no change to meaning, numeric rendering, or eligibility. This alone does not force another native round."
+    }
+  ],
+  "rows": [
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.list.empty",
+      "source": "no sessions running",
+      "target": "no hay sesiones en ejecución",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Faithful running-session empty state; concise lowercase."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.list.connecting",
+      "source": "connecting…",
+      "target": "conectando…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Connection in progress, distinct from connected empty state; U+2026 preserved."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.list.section.active",
+      "source": "Active Sessions",
+      "target": "Sesiones activas",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct active-session heading and source title case."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.list.section.previous",
+      "source": "Previous Sessions",
+      "target": "Sesiones anteriores",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct previous-session heading and source title case."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.list.theme",
+      "source": "choose theme",
+      "target": "elegir tema",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Infinitive is natural accessible control name."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.session.waiting",
+      "source": "waiting for projection…",
+      "target": "esperando la vista de la sesión…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Vista de la sesión conveys delivered live view/state snapshot, not prediction, graphics or reconnection."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.session.connecting",
+      "source": "connecting to session…",
+      "target": "conectando con la sesión…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Conectando con la sesión preserves pre-connection state distinct from waiting for snapshot."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.title",
+      "source": "usage",
+      "target": "uso",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Uso is the ordinary compact usage-sheet title."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.cached",
+      "source": "Cached usage. No provider refresh is requested.",
+      "target": "Uso en caché. No se solicita actualizar con el proveedor.",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "Caché spelling is correct; the second sentence preserves no provider refresh request, not a live refresh promise. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unavailable",
+      "source": "Cached usage unavailable.",
+      "target": "Uso en caché no disponible.",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "Correct unavailable cached usage, not zero usage. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.loading",
+      "source": "Loading cached usage…",
+      "target": "Cargando uso en caché…",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "Correct in-flight cached data state; U+2026 preserved. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.empty",
+      "source": "No cached usage reported.",
+      "target": "No se informó uso en caché.",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "No reported cached data, not an exhausted or zero balance. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.last_known",
+      "source": "Last known usage; current usage unavailable.",
+      "target": "Último uso conocido; el uso actual no está disponible.",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Preserves last-known versus current-unavailable contrast."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.continue",
+      "source": "Included quota used; credits will continue.",
+      "target": "Cuota incluida agotada; se continuará con créditos.",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Agotada expresses included quota exhaustion; credit continuation remains paired with family-cap warning."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.family_caps",
+      "source": "Model-family caps still apply.",
+      "target": "Siguen aplicando los límites por familia de modelos.",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Preserves model-family caps still applying; no blanket unlimited-spend promise."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.paid",
+      "source": "Paid allowance",
+      "target": "Cuota de pago",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Cuota de pago coheres with included/family/unlimited allowance vocabulary."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.family",
+      "source": "Model-family allowance",
+      "target": "Cuota por familia de modelos",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Cuota por familia de modelos is semantically accurate."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.included",
+      "source": "Included allowance",
+      "target": "Cuota incluida",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Cuota incluida coheres with exhausted included-quota disclosure."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.amount_unknown",
+      "source": "Amount not reported",
+      "target": "Cantidad no informada",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "No reported amount remains unknown, not zero."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.blocked",
+      "source": "Spend unavailable",
+      "target": "Gasto no disponible",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Gasto no disponible preserves spend-unavailable state."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.eligibility_unknown",
+      "source": "Spend eligibility unknown",
+      "target": "Elegibilidad de gasto desconocida",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Bureaucratic but unambiguous and concise; explicitly unknown spending eligibility, not permission."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unlimited",
+      "source": "Unlimited paid allowance",
+      "target": "Cuota de pago ilimitada",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Ilimitada qualifies only paid allowance; separate family caps retained."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.window_five",
+      "source": "5-hour",
+      "target": "5 horas",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "5 horas is natural compact interval label."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.window_week",
+      "source": "7-day",
+      "target": "7 días",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "7 días is natural compact interval label."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.window_month",
+      "source": "Monthly",
+      "target": "Mensual",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Mensual preserves monthly window."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.window_lifetime",
+      "source": "Lifetime",
+      "target": "Total histórico",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Total histórico conveys lifetime cumulative window, not a future lifetime guarantee."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.window_unknown",
+      "source": "Unknown window",
+      "target": "Ventana desconocida",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Unknown window remains explicitly unknown."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.remaining",
+      "source": "{value, number} {unit} left",
+      "target": "Quedan {value, number} {unit}",
+      "native_result": "changes_requested",
+      "finding_ids": [
+        "ES65-1"
+      ],
+      "assessment": "Numeric format/type correct but invariant plural unit and verb fail singular; ES65-1."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.used",
+      "source": "{value, number} {unit} used",
+      "target": "Uso: {value, number} {unit}",
+      "native_result": "changes_requested",
+      "finding_ids": [
+        "ES65-1"
+      ],
+      "assessment": "Numeric format/type correct but invariant plural noun fails direct singular count; ES65-1."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.fraction",
+      "source": "{value, number, percent} used",
+      "target": "{value, number, percent} usado",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Typed numeric fraction produces 29/7/0/100/200 NBSP percent; singular usado refers to porcentaje, not a unit noun."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.reset",
+      "source": "Resets at {value, date, medium}, {value, time, short}",
+      "target": "Se restablece el {value, date, medium} a las {value, time, short}",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-2"
+      ],
+      "assessment": "Typed medium date/short time preserves timestamp semantics; a las fails at 1:00, ES65-2."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.command",
+      "source": "Show cached provider usage",
+      "target": "Muestra el uso en caché del proveedor",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "Muestra is a natural command description; cached/provider meaning retained. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.as_of",
+      "source": "As of {value, date, medium}, {value, time, short}.",
+      "target": "Datos del {value, date, medium} a las {value, time, short}.",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-2"
+      ],
+      "assessment": "Datos del preserves as-of cache freshness, not a refresh time; a las fails at 1:00, ES65-2."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.stale",
+      "source": "May be out of date.",
+      "target": "Puede estar desactualizado.",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Desactualizado agrees with uso and preserves may-be-stale uncertainty."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.row",
+      "source": "{label} · {window}: {value}",
+      "target": "{label} · {window} — {value}",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Whole row owns order and em-dash separator; composed use amount has one colon, no doubled separator."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.row_family",
+      "source": "{label} ({family}) · {window}: {value}",
+      "target": "{label} ({family}) · {window} — {value}",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Family machine identifier remains literal in parentheses; translated labels and whole row punctuation correct."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unit_credits",
+      "source": "credits",
+      "target": "créditos",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct invariant measurement label; complete amount syntax must not force this plural after 1."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unit_usd",
+      "source": "USD",
+      "target": "USD",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct untranslated currency acronym; no currency conversion."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unit_tokens",
+      "source": "tokens",
+      "target": "tókenes",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "ES65-3"
+      ],
+      "assessment": "Tókenes is the accepted adapted plural of token; FundéuRAE explicitly verifies accent and plural. Durable style-guide exception needed; ES65-3."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.unit_requests",
+      "source": "requests",
+      "target": "solicitudes",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Solicitudes is correct provider request-count label; complete amount syntax must avoid fixed plural after 1."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.remaining_percent",
+      "source": "{value, number, percent} left",
+      "target": "Queda {value, number, percent}",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Queda agrees with understood porcentaje; fraction formatting not prescaled or duplicated."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.used_percent",
+      "source": "{value, number, percent} used",
+      "target": "{value, number, percent} usado",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Usado agrees with understood porcentaje; correct percent scalar and spacing."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "source": "{value, number} left",
+      "target": "Quedan {value, number}",
+      "native_result": "changes_requested",
+      "finding_ids": [
+        "ES65-1"
+      ],
+      "assessment": "Unknown unit omitted correctly but Quedan 1 has singular verb defect; ES65-1."
+    },
+    {
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.used_unknown_unit",
+      "source": "{value, number} used",
+      "target": "Uso: {value, number}",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Uso: value is grammatical, neutral and omits unknown unit without inventing currency."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.list.search_placeholder",
+      "source": "Search conversations…",
+      "target": "Buscar conversaciones…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Search conversation bodies; source capitalization and ellipsis retained."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.list.empty_hint",
+      "source": "start one below, or from the TUI on your machine",
+      "target": "empieza una abajo o desde la TUI en tu máquina",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Informal tú imperative and una refer to sesión; below/TUI/on-machine routes preserved."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.list.no_matches",
+      "source": "no matching conversations",
+      "target": "ninguna conversación coincide",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Accurate no-matching-conversation verdict distinct from no active sessions."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.list.start_idle",
+      "source": "new session",
+      "target": "nueva sesión",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural lowercase new-session control."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.list.start_busy",
+      "source": "starting…",
+      "target": "iniciando…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "In-flight session creation distinct from idle control; ellipsis correct."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.view.back",
+      "source": "back to sessions",
+      "target": "volver a las sesiones",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural accessible back-to-session-list label."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.view.empty_title",
+      "source": "no messages yet",
+      "target": "aún no hay mensajes",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Accurate no-messages-yet state, preserves aún."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.view.empty_hint",
+      "source": "send a message below to get started",
+      "target": "envía un mensaje abajo para empezar",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Informal tú imperative; below/start behavior preserved."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.past.back",
+      "source": "back",
+      "target": "atrás",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural compact backward navigation label."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.past.heading",
+      "source": "past sessions",
+      "target": "sesiones anteriores",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural past-session heading, consistent with shell previous-session noun."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.past.search_placeholder",
+      "source": "search names and conversations…",
+      "target": "buscar nombres y conversaciones…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Preserves searching both session names and conversation bodies."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.past.loading",
+      "source": "loading…",
+      "target": "cargando…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural in-flight loading placeholder; ellipsis correct."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.directory.sheet_title",
+      "source": "working directory",
+      "target": "directorio de trabajo",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct working-directory surface title, not current path value."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.directory.path_placeholder",
+      "source": "or type another path…",
+      "target": "o escribe otra ruta…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Preserves alternate typed path option; ruta idiomatic."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.model.sheet_title",
+      "source": "model",
+      "target": "modelo",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct compact model-sheet title."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.model.filter_placeholder",
+      "source": "filter models",
+      "target": "filtrar modelos",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural infinitive filter instruction for models."
+    },
+    {
+      "namespace": "relay.session",
+      "key": "relay.session.model.loading",
+      "source": "loading…",
+      "target": "cargando…",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct in-flight model loading placeholder; ellipsis correct."
+    },
+    {
+      "namespace": "relay.login",
+      "key": "relay.login.page.title",
+      "source": "local operator — sign in",
+      "target": "local operator — iniciar sesión",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Brand remains untranslated; sign-in page title natural."
+    },
+    {
+      "namespace": "relay.login",
+      "key": "relay.login.password.label",
+      "source": "password",
+      "target": "contraseña",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Correct password field label, lowercase."
+    },
+    {
+      "namespace": "relay.login",
+      "key": "relay.login.submit.label",
+      "source": "sign in",
+      "target": "iniciar sesión",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Natural sign-in submit action, consistent with page title."
+    },
+    {
+      "namespace": "relay.login",
+      "key": "relay.login.error.password",
+      "source": "Wrong password.",
+      "target": "Contraseña incorrecta.",
+      "native_result": "passed",
+      "finding_ids": [],
+      "assessment": "Wrong-password alert is accurate and sentence-cased; literal independently checked without relying on tool redaction."
+    }
+  ],
+  "mechanical": {
+    "repo_checker": "PASS",
+    "negative_controls": [
+      {
+        "mutation": "percent_type",
+        "result": "PASS",
+        "actual_problems": [
+          "es/relay.shell: relay.shell.usage.fraction: arguments (('value', 'simple'),) != en's (('value', 'number'),)"
+        ]
+      },
+      {
+        "mutation": "missing_key",
+        "result": "PASS",
+        "actual_problems": [
+          "es/relay.shell: missing key 'relay.shell.usage.row_family'"
+        ]
+      }
+    ],
+    "restored_control": "PASS",
+    "python_format_probes": 65,
+    "actual_phone_runtime_probes": 63,
+    "node_version": "v26.5.0",
+    "phone_probe_timezone": "UTC",
+    "input_hashes_rechecked_unchanged": true,
+    "plural_note": "No ICU plural/select expressions in these 65 candidate keys. Repo plural-category check therefore has no branch coverage to prove here; explicit numeric 0/1/2 probes discriminate the invariant-unit defect."
+  },
+  "terminology": {
+    "token": "Accepted adapted plural tókenes; no finding.",
+    "token_source": "https://www.fundeu.es/recomendacion/token-alternativas-en-espanol/",
+    "quota": "cuota family consistent across paid/included/family/unlimited and exhausted quota.",
+    "cache": "All five cache-prose occurrences consistently use caché.",
+    "projection": "Vista de la sesión explicitly matches EN context live view/state snapshot.",
+    "style_guide": "Source es.md keeps token/cache English; sound native prose/measurement decisions need durable scoped exception (ES65-3 MINOR)."
+  },
+  "rendered": {
+    "result": "BLOCKED",
+    "reason": "No browser/visual dispatch authorized in this audit; scope explicitly excludes browser/heavy work. Runtime strings are not rendered fit screenshots. Separate browser/design/UX evidence remains required before rendered/publication approval.",
+    "pseudo": "Applicable for UI expansion/overflow; not executed, BLOCKED. Numeric, delimiter and complete-row string probes are not pseudo layout proof.",
+    "RTL": "Spanish is LTR; native RTL mirroring is not a Spanish-locale semantic requirement. Actual runtime directionFor(es) returned ltr. Mixed-script/path/family isolation and generic RTL regression render proof are outside this no-browser scope, not claimed passed."
+  },
+  "changes": "Own scratch scripts/fixtures/reports only; no source, target, ledger or shipped-data edits. No installs, dependency copies or browser."
+}

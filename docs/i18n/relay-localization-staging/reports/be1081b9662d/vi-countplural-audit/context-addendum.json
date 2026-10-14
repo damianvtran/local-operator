@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-14",
+  "type": "context-only compatibility addendum — no test rerun or native coverage reset",
+  "auditor_agent": "lopdev task — independent Vietnamese auditor",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_used": false,
+  "prior_audit": "reports/be1081b9662d/vi-countplural-audit/audit.json",
+  "old_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "new_context_sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea",
+  "changed_context_keys": [
+    "relay.shell.usage.unit_credits",
+    "relay.shell.usage.unit_tokens",
+    "relay.shell.usage.unit_requests"
+  ],
+  "only_note_fields_changed": true,
+  "retained_VI_source_and_target": {
+    "relay.shell": {
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "f475dbefccd75d713fdea93fd8c5a12b541f94d00ec00c23b00fe72e2e942319",
+      "unchanged_from_prior_audit": true
+    },
+    "relay.session": {
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "7743c7b5d018b84395478e99231714a46cd998e8c78ce465333be8df62fd517a",
+      "unchanged_from_prior_audit": true
+    },
+    "relay.login": {
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "a87e8ed3381143ee8d61dada52b0df604c72191cdde1747b9ea8fd6c46537020",
+      "unchanged_from_prior_audit": true
+    }
+  },
+  "compatibility": "PASS",
+  "findings": [],
+  "native_coverage": "Retains previously approved 3 count-noun delta + 62 unchanged messages. No new native coverage claim.",
+  "native_rule": "Vietnamese CLDR cardinal has other only; invariant nouns tín dụng/token/yêu cầu render noun only. Existing numeric amount formats/prints the count once. No classifier, count repetition or million de form is needed in Vietnamese.",
+  "context_read": "Exact three new note fields read. Same finite measured remaining ?? used (not used_fraction); noun only; USD invariant; English singular correction acknowledged. French OQLF / Spanish RAE §6 / Russian fractional instructions are locale-specific and introduce no Vietnamese morphology obligation. Their native correctness is outside this Vietnamese addendum, not independently re-certified.",
+  "rendered": "HOLD retained",
+  "scope_limitation": "Verified only the three Vietnamese namespace targets. No assertion independently verifying all 15 other-locale target files.",
+  "tests_rerun": false,
+  "candidate_repo_ledger_edits": false
+}

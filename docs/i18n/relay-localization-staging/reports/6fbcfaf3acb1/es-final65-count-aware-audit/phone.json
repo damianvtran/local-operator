@@ -1,0 +1,849 @@
+{
+  "runtime": "actual createMessageRuntime",
+  "node": "v26.5.0",
+  "timezone": "UTC",
+  "probes": [
+    {
+      "value": 0,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 0 créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 0 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 0 créditos",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "used",
+      "amount": "Uso: 0 créditos",
+      "row": "Cuota incluida · 7 días — Uso: 0 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 0 créditos",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 0 tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 0 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 0 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "used",
+      "amount": "Uso: 0 tókenes",
+      "row": "Cuota incluida · 7 días — Uso: 0 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 0 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 0 solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 0 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 0 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: 0 solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: 0 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 0 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 0 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 0 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 0 USD",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: 0 USD",
+      "row": "Cuota incluida · 7 días — Uso: 0 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 0 USD",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: 0",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 0",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 0",
+      "category": "other"
+    },
+    {
+      "value": 0,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: 0",
+      "row": "Cuota incluida · 7 días — Uso: 0",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 0",
+      "category": "other"
+    },
+    {
+      "value": 1,
+      "unit_name": "credits",
+      "unit_text": "crédito",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1 crédito",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1 crédito",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1 crédito",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "credits",
+      "unit_text": "crédito",
+      "amount_key": "used",
+      "amount": "Uso: 1 crédito",
+      "row": "Cuota incluida · 7 días — Uso: 1 crédito",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1 crédito",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "tokens",
+      "unit_text": "tóken",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1 tóken",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1 tóken",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1 tóken",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "tokens",
+      "unit_text": "tóken",
+      "amount_key": "used",
+      "amount": "Uso: 1 tóken",
+      "row": "Cuota incluida · 7 días — Uso: 1 tóken",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1 tóken",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "requests",
+      "unit_text": "solicitud",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1 solicitud",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1 solicitud",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1 solicitud",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "requests",
+      "unit_text": "solicitud",
+      "amount_key": "used",
+      "amount": "Uso: 1 solicitud",
+      "row": "Cuota incluida · 7 días — Uso: 1 solicitud",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1 solicitud",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1 USD",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: 1 USD",
+      "row": "Cuota incluida · 7 días — Uso: 1 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1 USD",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: 1",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1",
+      "category": "one"
+    },
+    {
+      "value": 1,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: 1",
+      "row": "Cuota incluida · 7 días — Uso: 1",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1",
+      "category": "one"
+    },
+    {
+      "value": 2,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 2 créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 2 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 2 créditos",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "used",
+      "amount": "Uso: 2 créditos",
+      "row": "Cuota incluida · 7 días — Uso: 2 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 2 créditos",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 2 tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 2 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 2 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "used",
+      "amount": "Uso: 2 tókenes",
+      "row": "Cuota incluida · 7 días — Uso: 2 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 2 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 2 solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 2 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 2 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: 2 solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: 2 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 2 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 2 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 2 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 2 USD",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: 2 USD",
+      "row": "Cuota incluida · 7 días — Uso: 2 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 2 USD",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: 2",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 2",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 2",
+      "category": "other"
+    },
+    {
+      "value": 2,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: 2",
+      "row": "Cuota incluida · 7 días — Uso: 2",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 2",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1,5 créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1,5 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1,5 créditos",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "used",
+      "amount": "Uso: 1,5 créditos",
+      "row": "Cuota incluida · 7 días — Uso: 1,5 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1,5 créditos",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1,5 tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1,5 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1,5 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "used",
+      "amount": "Uso: 1,5 tókenes",
+      "row": "Cuota incluida · 7 días — Uso: 1,5 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1,5 tókenes",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1,5 solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1,5 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1,5 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: 1,5 solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: 1,5 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1,5 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1,5 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1,5 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1,5 USD",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: 1,5 USD",
+      "row": "Cuota incluida · 7 días — Uso: 1,5 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1,5 USD",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: 1,5",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1,5",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1,5",
+      "category": "other"
+    },
+    {
+      "value": 1.5,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: 1,5",
+      "row": "Cuota incluida · 7 días — Uso: 1,5",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1,5",
+      "category": "other"
+    },
+    {
+      "value": -1,
+      "unit_name": "credits",
+      "unit_text": "crédito",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1 crédito",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1 crédito",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1 crédito",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "credits",
+      "unit_text": "crédito",
+      "amount_key": "used",
+      "amount": "Uso: -1 crédito",
+      "row": "Cuota incluida · 7 días — Uso: -1 crédito",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1 crédito",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "tokens",
+      "unit_text": "tóken",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1 tóken",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1 tóken",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1 tóken",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "tokens",
+      "unit_text": "tóken",
+      "amount_key": "used",
+      "amount": "Uso: -1 tóken",
+      "row": "Cuota incluida · 7 días — Uso: -1 tóken",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1 tóken",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "requests",
+      "unit_text": "solicitud",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1 solicitud",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1 solicitud",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1 solicitud",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "requests",
+      "unit_text": "solicitud",
+      "amount_key": "used",
+      "amount": "Uso: -1 solicitud",
+      "row": "Cuota incluida · 7 días — Uso: -1 solicitud",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1 solicitud",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1 USD",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: -1 USD",
+      "row": "Cuota incluida · 7 días — Uso: -1 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1 USD",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: -1",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1",
+      "category": "one"
+    },
+    {
+      "value": -1,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: -1",
+      "row": "Cuota incluida · 7 días — Uso: -1",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1",
+      "category": "one"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1,5 créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1,5 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1,5 créditos",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "credits",
+      "unit_text": "créditos",
+      "amount_key": "used",
+      "amount": "Uso: -1,5 créditos",
+      "row": "Cuota incluida · 7 días — Uso: -1,5 créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1,5 créditos",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1,5 tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1,5 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1,5 tókenes",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "tokens",
+      "unit_text": "tókenes",
+      "amount_key": "used",
+      "amount": "Uso: -1,5 tókenes",
+      "row": "Cuota incluida · 7 días — Uso: -1,5 tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1,5 tókenes",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1,5 solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1,5 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1,5 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "requests",
+      "unit_text": "solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: -1,5 solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: -1,5 solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1,5 solicitudes",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1,5 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1,5 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1,5 USD",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: -1,5 USD",
+      "row": "Cuota incluida · 7 días — Uso: -1,5 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1,5 USD",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: -1,5",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1,5",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1,5",
+      "category": "other"
+    },
+    {
+      "value": -1.5,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: -1,5",
+      "row": "Cuota incluida · 7 días — Uso: -1,5",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1,5",
+      "category": "other"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "credits",
+      "unit_text": "de créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1.000.000 de créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1.000.000 de créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1.000.000 de créditos",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "credits",
+      "unit_text": "de créditos",
+      "amount_key": "used",
+      "amount": "Uso: 1.000.000 de créditos",
+      "row": "Cuota incluida · 7 días — Uso: 1.000.000 de créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1.000.000 de créditos",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "tokens",
+      "unit_text": "de tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1.000.000 de tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1.000.000 de tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1.000.000 de tókenes",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "tokens",
+      "unit_text": "de tókenes",
+      "amount_key": "used",
+      "amount": "Uso: 1.000.000 de tókenes",
+      "row": "Cuota incluida · 7 días — Uso: 1.000.000 de tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1.000.000 de tókenes",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "requests",
+      "unit_text": "de solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1.000.000 de solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1.000.000 de solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1.000.000 de solicitudes",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "requests",
+      "unit_text": "de solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: 1.000.000 de solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: 1.000.000 de solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1.000.000 de solicitudes",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: 1.000.000 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1.000.000 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1.000.000 USD",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: 1.000.000 USD",
+      "row": "Cuota incluida · 7 días — Uso: 1.000.000 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1.000.000 USD",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: 1.000.000",
+      "row": "Cuota incluida · 7 días — Cantidad restante: 1.000.000",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: 1.000.000",
+      "category": "many"
+    },
+    {
+      "value": 1000000,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: 1.000.000",
+      "row": "Cuota incluida · 7 días — Uso: 1.000.000",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: 1.000.000",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "credits",
+      "unit_text": "de créditos",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1.000.000 de créditos",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1.000.000 de créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1.000.000 de créditos",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "credits",
+      "unit_text": "de créditos",
+      "amount_key": "used",
+      "amount": "Uso: -1.000.000 de créditos",
+      "row": "Cuota incluida · 7 días — Uso: -1.000.000 de créditos",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1.000.000 de créditos",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "tokens",
+      "unit_text": "de tókenes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1.000.000 de tókenes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1.000.000 de tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1.000.000 de tókenes",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "tokens",
+      "unit_text": "de tókenes",
+      "amount_key": "used",
+      "amount": "Uso: -1.000.000 de tókenes",
+      "row": "Cuota incluida · 7 días — Uso: -1.000.000 de tókenes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1.000.000 de tókenes",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "requests",
+      "unit_text": "de solicitudes",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1.000.000 de solicitudes",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1.000.000 de solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1.000.000 de solicitudes",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "requests",
+      "unit_text": "de solicitudes",
+      "amount_key": "used",
+      "amount": "Uso: -1.000.000 de solicitudes",
+      "row": "Cuota incluida · 7 días — Uso: -1.000.000 de solicitudes",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1.000.000 de solicitudes",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "remaining",
+      "amount": "Cantidad restante: -1.000.000 USD",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1.000.000 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1.000.000 USD",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "usd",
+      "unit_text": "USD",
+      "amount_key": "used",
+      "amount": "Uso: -1.000.000 USD",
+      "row": "Cuota incluida · 7 días — Uso: -1.000.000 USD",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1.000.000 USD",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "remaining_unknown_unit",
+      "amount": "Cantidad restante: -1.000.000",
+      "row": "Cuota incluida · 7 días — Cantidad restante: -1.000.000",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Cantidad restante: -1.000.000",
+      "category": "many"
+    },
+    {
+      "value": -1000000,
+      "unit_name": "unknown",
+      "unit_text": null,
+      "amount_key": "used_unknown_unit",
+      "amount": "Uso: -1.000.000",
+      "row": "Cuota incluida · 7 días — Uso: -1.000.000",
+      "family": "Cuota por familia de modelos (opus) · Ventana desconocida — Uso: -1.000.000",
+      "category": "many"
+    }
+  ],
+  "controls": [
+    {
+      "key": "fraction",
+      "value": 0.29,
+      "actual": "29 % usado"
+    },
+    {
+      "key": "remaining_percent",
+      "value": 0.29,
+      "actual": "Queda 29 %"
+    },
+    {
+      "key": "used_percent",
+      "value": 0.29,
+      "actual": "29 % usado"
+    },
+    {
+      "key": "fraction",
+      "value": 0.07,
+      "actual": "7 % usado"
+    },
+    {
+      "key": "remaining_percent",
+      "value": 0.07,
+      "actual": "Queda 7 %"
+    },
+    {
+      "key": "used_percent",
+      "value": 0.07,
+      "actual": "7 % usado"
+    },
+    {
+      "key": "reset",
+      "value": "2026-10-14T01:00:00+00:00",
+      "actual": "Restablecimiento: 14 oct 2026, 1:00"
+    },
+    {
+      "key": "as_of",
+      "value": "2026-10-14T01:00:00+00:00",
+      "actual": "Datos del 14 oct 2026, 1:00."
+    }
+  ]
+}

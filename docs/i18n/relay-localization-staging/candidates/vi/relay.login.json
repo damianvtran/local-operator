@@ -1,0 +1,6 @@
+{
+  "relay.login.page.title": "local operator — đăng nhập",
+  "relay.login.password.label": "mật khẩu",
+  "relay.login.submit.label": "đăng nhập",
+  "relay.login.error.password": "Mật khẩu không đúng."
+}

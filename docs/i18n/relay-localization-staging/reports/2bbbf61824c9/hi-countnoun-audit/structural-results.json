@@ -1,0 +1,35 @@
+{
+  "typed_count_negatives": [
+    "hi/relay.shell: relay.shell.usage.unit_credits: arguments () != en's (('count', 'plural'),)",
+    "hi/relay.shell: relay.shell.usage.unit_tokens: arguments () != en's (('count', 'plural'),)",
+    "hi/relay.shell: relay.shell.usage.unit_requests: arguments () != en's (('count', 'plural'),)"
+  ],
+  "namespace_results": {
+    "relay.shell": {
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "feab9e023be86d7841bd1e08cb273a48bbaaa118c41ade6040d7a29a701305eb",
+      "keys": 44,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    },
+    "relay.session": {
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "keys": 17,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    },
+    "relay.login": {
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "keys": 4,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    }
+  },
+  "validator_positive": [],
+  "validator_negative": [
+    "hi/relay.shell: relay.shell.usage.remaining: arguments (('value', 'number'), ('wrong_unit', 'simple')) != en's (('value', 'number'), ('unit', 'simple'))"
+  ],
+  "validator_restored": []
+}
