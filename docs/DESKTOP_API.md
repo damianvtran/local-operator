@@ -2214,6 +2214,11 @@ that stops after N messages or reads pruned content misses the rest. The index i
 the journal (`local_operator/session_files/`), cached outside the session directory
 (`<config>/cache/session_files/<id>.json`, schema-versioned, safe to delete) and resumable.
 
+**Authority and scope.** A backend advertising `session_files: 1` is authoritative: display
+ONLY its index rows (writes/edits, command outputs, artifacts, screenshots/downloads,
+Highlights and proven subagents). Do not merge client-scan prose/`read` mentions. The legacy
+client scan is capability-absent fallback only.
+
 **Query** (all optional): `scope=family|self` (default `family`: the conversation plus the
 subagents its own roster names, depth <= 3, <= 64); `kind` and `origin` (comma lists; `origin`
 is closed to `generated|written|screenshot|download|edited|command|highlight`, an unknown
@@ -2228,7 +2233,7 @@ DIFFERENT query or garbage is `422 session_files_bad_cursor`; a cursor from an o
 **Answer**: `state` is `ready`, `building` (a cold scan of a very large journal is still
 running in the background: partial rows are real, poll again; `scan.covered_bytes` of
 `scan.total_bytes` shows progress) or `unsupported` (a peer's conversation: its journal is not
-on this disk; the renderer keeps its own scan). `revision` is monotone per session while the
+on this disk; no backend rows are available). `revision` is monotone per session while the
 journal only grows and changes whenever the index changes. `total` counts rows matching every
 filter; `counts` is the per-kind census BEFORE the `kind` filter so chips can show every
 count. A draft id answers an empty `ready` page (not a 404); an unknown id is the shared 404; a
@@ -2253,7 +2258,9 @@ recorded values. The revision does NOT move when a file changes on disk; re-requ
 content-addressed and shared) and returns its absolute path; idempotent (`created: false` for
 an identical existing copy), never overwrites a different file, and writes only under the URL
 session's scratchpad. Refusals: `404 session_files_file_not_found`, `409
-session_files_not_an_artifact` (the row already has a path), `410
+session_files_not_an_artifact` (the row already has a path), `409
+session_files_unsafe_destination` (hostile symlink/moved parent, or no safe directory
+operations on this platform), `410
 session_files_artifact_missing` (the store entry was pruned), `500 session_files_materialise_failed`.
 
 **Privacy.** The desktop route returns absolute paths because the bearer-gated renderer

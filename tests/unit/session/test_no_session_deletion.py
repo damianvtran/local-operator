@@ -161,16 +161,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "Atomic pid-temp replace of one <config>/cache/session_files/<stem>.json (derived cache)",
     ),
-    # ``materialise``: the unlink removes a HALF-WRITTEN artifact copy this same call just
-    # created with ``open("xb")``. Its path is ``<session>/scratchpad/generated/<name>`` -
-    # four components below ``sessions/`` - where ``<name>`` is ``sanitise_name``'s single
-    # component (no separator, no leading dot), and the resolved parent is asserted equal to
-    # the resolved ``generated`` directory first. It cannot name ``sessions/<id>`` or a
-    # transcript, and it only ever removes a file this call created.
+    # The cleanup removes only the leaf THIS copy exclusively created, relative to its pinned
+    # generated-directory fd. The sanitized leaf cannot name a directory or transcript; even
+    # a concurrent parent swap cannot redirect the cleanup out of that pinned directory.
     (
-        "local_operator/session_files/service.py::materialise",
-        "<path>.unlink",
-        "Removes the partial copy this call just created under <session>/scratchpad/generated",
+        "local_operator/session_files/service.py::_copy_artifact",
+        "os.unlink",
+        "Removes a partial artifact leaf relative to its pinned generated directory fd",
     ),
     # -- the code-request FETCH cache (1b): same derived-store argument as the
     # ledger entries above. Every path here is built from ``fetch_dir()``

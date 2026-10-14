@@ -6331,7 +6331,9 @@ class SubagentChildUnavailable(Exception):
         super().__init__("That subagent does not belong to this conversation.")
 
 
-def _persisted_children(parent_dir: Path) -> list[Any]:
+def _persisted_children(
+    parent_dir: Path, *, indexed_roster: dict[str, Any] | None = None, indexed: bool = False
+) -> list[Any]:
     """The records of the children a conversation launched, from its own store.
 
     The roster is the ownership record for a child read (design § 9.1), and it
@@ -6377,6 +6379,15 @@ def _persisted_children(parent_dir: Path) -> list[Any]:
     )
 
     payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
+    if payload is None and indexed:
+        # Files already scanned the journal under its request budget, including a durable
+        # negative result. Never fall back to a second unbounded journal read here.
+        forked_at = fork_instant(parent_dir)
+        if indexed_roster is None or (
+            forked_at is not None and indexed_roster.get("ts", 0) <= forked_at
+        ):
+            return []
+        payload = indexed_roster.get("details", {})
     if payload is None:
         # The entry's TIMESTAMP is the half of the fork rule the sidecar makes
         # unnecessary: an entry at or before ``forked_at`` belongs to the
@@ -6489,7 +6500,13 @@ FAMILY_MAX_DEPTH = 3
 FAMILY_MAX_CHILDREN = 64
 
 
-def contained_descendants(root: Path, session_id: str) -> tuple[list[Any], int]:
+def contained_descendants(
+    root: Path,
+    session_id: str,
+    *,
+    indexed_roster: dict[str, Any] | None = None,
+    indexed: bool = False,
+) -> tuple[list[Any], int]:
     """``(children, skipped)``: the subagent sessions ``session_id`` launched, each PROVEN.
 
     ``children`` are :class:`~local_operator.session_files.service.ChildRef` values. A child is
@@ -6511,7 +6528,7 @@ def contained_descendants(root: Path, session_id: str) -> tuple[list[Any], int]:
     if not parent_dir.is_dir() or not is_user_session(parent_dir):
         return [], 0
     try:
-        records = _persisted_children(parent_dir)
+        records = _persisted_children(parent_dir, indexed_roster=indexed_roster, indexed=indexed)
     except (OSError, ValueError):
         return [], 0
     children: list[Any] = []

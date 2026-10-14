@@ -52,7 +52,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Final
 
@@ -347,7 +347,23 @@ def refresh(
     except OSError:
         return None
     key = _key(config_dir, session_id)
-    with _lock_for(key):
+    # A cold burst must not queue worker threads behind another reader's entire budget.
+    # Published scans are immutable: a loser can safely serve the last partial snapshot.
+    lock = _lock_for(key)
+    if not lock.acquire(blocking=budget_s is None):
+        cached = _resident(key)
+        if cached is not None and cached.cwd == cwd and cached.home == home:
+            return replace(cached, complete=False)
+        return Snapshot(
+            FileScan(cwd=cwd, home=home, deny=deny),
+            {},
+            False,
+            0.0,
+            cwd,
+            home,
+            total_bytes=stat.st_size,
+        )
+    try:
         cached = (
             None
             if force
@@ -367,7 +383,15 @@ def refresh(
             resumable = (
                 sig.get("inode") == stat.st_ino
                 and 0 < saved <= stat.st_size
-                and (_exact(sig, stat) or _verify_tail(path, saved, sig.get("tail")))
+                # A tail match proves append compatibility only under STRICT growth;
+                # an mtime-changed same-size prefix rewrite must start from byte zero.
+                and (
+                    _exact(sig, stat)
+                    or (
+                        stat.st_size > int(sig.get("size") or 0)
+                        and _verify_tail(path, saved, sig.get("tail"))
+                    )
+                )
             )
             if resumable:
                 base = cached.scan.clone()
@@ -389,6 +413,19 @@ def refresh(
             final = path.stat()
         except OSError:
             return cached
+        # Never publish an unread append as exact-ready. Nor may bytes read from the old
+        # inode be certified against an atomic replacement's new inode/signature.
+        if final.st_ino != stat.st_ino or final.st_size < end:
+            return Snapshot(
+                FileScan(cwd=cwd, home=home, deny=deny),
+                {},
+                False,
+                0.0,
+                cwd,
+                home,
+                total_bytes=final.st_size,
+            )
+        complete = complete and end == final.st_size
         previous = cached.updated_at if cached is not None else 0.0
         snapshot = Snapshot(
             scan=scan,
@@ -409,6 +446,8 @@ def refresh(
         _store(config_dir, session_id, snapshot)
         _remember(key, snapshot)
         return snapshot
+    finally:
+        lock.release()
 
 
 def peek(config_dir: str | Path, session_id: str) -> Snapshot | None:

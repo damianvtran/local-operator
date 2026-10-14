@@ -246,3 +246,60 @@ def test_denied_path_is_never_cached(tmp_path: Path) -> None:
     snapshot = _refresh(config, session_dir, deny=service.make_deny(config))
     assert list(snapshot.scan.records) == ["p:/work/proj/ok.md"]
     assert ".env" not in ledger.cache_path(config, SESSION).read_text()
+
+
+def test_append_between_eof_and_publication_is_resumed(tmp_path: Path, monkeypatch) -> None:
+    config, directory = _setup(tmp_path)
+    real = ledger._read_into
+    injected = False
+
+    def append_at_eof(*args):
+        nonlocal injected
+        result = real(*args)
+        if not injected:
+            injected = True
+            append_journal(directory, generate_image_rows(2, 10.0, D2, with_artifacts=True))
+        return result
+
+    monkeypatch.setattr(ledger, "_read_into", append_at_eof)
+    first = _refresh(config, directory)
+    assert first.covered_bytes < first.total_bytes and not first.complete
+    second = _refresh(config, directory)
+    assert second.complete and set(second.scan.records) == {f"a:{D1}", f"a:{D2}"}
+
+
+def test_replacement_between_eof_and_publication_is_not_certified(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config, directory = _setup(tmp_path)
+    real = ledger._read_into
+    injected = False
+
+    def replace_at_eof(*args):
+        nonlocal injected
+        result = real(*args)
+        if not injected:
+            injected = True
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(b"".join(line(r) for r in generate_image_rows(2, 10.0, D2)))
+            os.replace(replacement, directory / "transcript.jsonl")
+        return result
+
+    monkeypatch.setattr(ledger, "_read_into", replace_at_eof)
+    first = _refresh(config, directory)
+    assert not first.complete and not first.scan.records
+    second = _refresh(config, directory)
+    assert second.complete and set(second.scan.records) == {f"a:{D2}"}
+
+
+def test_same_size_changed_prefix_unchanged_tail_rescans(tmp_path: Path) -> None:
+    config, directory = _setup(tmp_path)
+    append_journal(directory, [assistant("unchanged-tail", 100.0, [])])
+    first = _refresh(config, directory)
+    path = directory / "transcript.jsonl"
+    raw = path.read_bytes()
+    path.write_bytes(raw.replace(D1.encode(), D2.encode()))
+    os.utime(path, (first.sig["mtime"] + 2, first.sig["mtime"] + 2))
+    assert path.stat().st_ino == first.sig["inode"] and path.stat().st_size == first.sig["size"]
+    second = _refresh(config, directory)
+    assert set(second.scan.records) == {f"a:{D2}"}
