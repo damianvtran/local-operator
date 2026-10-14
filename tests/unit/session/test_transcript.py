@@ -111,7 +111,10 @@ async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
     committed batch without a checkpoint, so the row count before and after is
     exactly one write; the cold reader sees the record on disk.
     """
-    from local_operator.session.transcript import CHECKPOINT_CUSTOM_TYPE, read_latest_custom
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        read_latest_custom,
+    )
 
     assistant = Message.assistant("did the thing")
     tool_result = Message.user("tool result")
@@ -123,9 +126,7 @@ async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
         "pending_effect": {},
         "phase": "resume",
     }
-    rows = await transcript.append_messages(
-        [assistant, tool_result], checkpoint=checkpoint
-    )
+    rows = await transcript.append_messages([assistant, tool_result], checkpoint=checkpoint)
     # Two message rows plus exactly one checkpoint row, one atomic write.
     assert len(rows) == 3 and rows[-1].payload["custom_type"] == CHECKPOINT_CUSTOM_TYPE
     assert len(transcript.path.read_text().splitlines()) == 3

@@ -205,9 +205,7 @@ def _acceptor_factory(listener: socket.socket, protocol_factory: Callable[[], An
         loop = asyncio.get_running_loop()
         owned = listener.dup()
         try:
-            server = await loop.create_server(
-                protocol_factory, sock=owned, start_serving=False
-            )
+            server = await loop.create_server(protocol_factory, sock=owned, start_serving=False)
         except BaseException:
             owned.close()
             raise
@@ -510,9 +508,7 @@ def resume_plan(checkpoint: "dict[str, Any] | None") -> ResumePlan:
             )
         replay = dict(pending)
     inbox = frozenset(
-        item
-        for item in checkpoint.get("inbox_consumed_ids", [])
-        if isinstance(item, str) and item
+        item for item in checkpoint.get("inbox_consumed_ids", []) if isinstance(item, str) and item
     )
     return ResumePlan(False, "", skip, replay, inbox)
 

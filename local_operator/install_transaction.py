@@ -298,7 +298,8 @@ def _persist_operation(path: Path, record: dict[str, Any]) -> None:
         before = os.fstat(directory)
         after = path.parent.lstat()
         if (before.st_dev, before.st_ino) != (
-            after.st_dev, after.st_ino
+            after.st_dev,
+            after.st_ino,
         ) or before.st_uid != os.getuid():
             raise InstallTransactionError(
                 "update operation directory identity changed; no record written"
@@ -386,11 +387,21 @@ def start_operation(root: Path, *, baseline: str, target: str, route: str) -> Up
                 raise InstallTransactionError(
                     "update recovery records are at capacity; inspect pending operations"
                 )
-        _persist_operation(path, {
-            **_identity(), "operation_id": identifier, "baseline": baseline,
-            "target": target, "route": route, "phase": "queued",
-            "candidate": "", "receipts": [], "continuations": [], "updated_at": time.time(),
-        })
+        _persist_operation(
+            path,
+            {
+                **_identity(),
+                "operation_id": identifier,
+                "baseline": baseline,
+                "target": target,
+                "route": route,
+                "phase": "queued",
+                "candidate": "",
+                "receipts": [],
+                "continuations": [],
+                "updated_at": time.time(),
+            },
+        )
     return UpdateOperation(root, identifier)
 
 
@@ -533,9 +544,11 @@ def note_capacity(
             cohort=[str(name) for name in cohort],
             # PRESERVE the original request time on a re-entry: the durable fact is
             # when the pressure was first seen, not when the caller last looked.
-            requested_at=previous.get("requested_at") or time.time()
-            if requested_at is None
-            else requested_at,
+            requested_at=(
+                previous.get("requested_at") or time.time()
+                if requested_at is None
+                else requested_at
+            ),
             recorded_at=time.time(),
         )
         handoff["capacity"] = entry
@@ -599,8 +612,15 @@ def advance_handoff(
     if state not in HANDOFF_STATES:
         raise InstallTransactionError("handoff state has no verified contract")
     allowed = {
-        "nonce", "from_pid", "from_birth", "to_pid", "to_birth",
-        "target_generation", "listener_ino", "control_fd_role", "inherited",
+        "nonce",
+        "from_pid",
+        "from_birth",
+        "to_pid",
+        "to_birth",
+        "target_generation",
+        "listener_ino",
+        "control_fd_role",
+        "inherited",
     }
     unknown = set(fields) - allowed
     if unknown:

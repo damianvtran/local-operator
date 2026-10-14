@@ -129,15 +129,23 @@ def _publication(target: str | None) -> tuple[str, str, str, str]:
         if not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name:
             continue
         compatible = (
-            name.endswith("-py3-none-any.whl") if sys.platform != "darwin"
-            else name.endswith("-py3-none-macosx_11_0_universal2.whl")
-        ) if isinstance(name, str) else False
+            (
+                name.endswith("-py3-none-any.whl")
+                if sys.platform != "darwin"
+                else name.endswith("-py3-none-macosx_11_0_universal2.whl")
+            )
+            if isinstance(name, str)
+            else False
+        )
         hashes = item.get("digests")
         digest = hashes.get("sha256", "") if isinstance(hashes, dict) else ""
         url = item.get("url", "")
         identified_url = isinstance(url, str)
-        if compatible and isinstance(digest, str) and identified_url and re.fullmatch(
-            r"[0-9a-f]{64}", digest
+        if (
+            compatible
+            and isinstance(digest, str)
+            and identified_url
+            and re.fullmatch(r"[0-9a-f]{64}", digest)
         ):
             return version, name, url, digest
     raise BootstrapError("no compatible non-yanked hash-identified controller wheel is published")
@@ -232,10 +240,24 @@ def bootstrap(args: argparse.Namespace) -> int:
         if (fresh.device, fresh.inode) != (initial.device, initial.inode):
             raise BootstrapError("destination root was replaced during controller preparation")
         command = [
-            str(python), "-B", "-P", "-m", "local_operator", "update",
-            "--controller-root", str(initial.root), "--controller-baseline", str(initial.baseline),
-            "--controller-artifact", str(wheel), "--controller-digest", digest,
-            "--controller-caller", args.caller, "--controller-target", version,
+            str(python),
+            "-B",
+            "-P",
+            "-m",
+            "local_operator",
+            "update",
+            "--controller-root",
+            str(initial.root),
+            "--controller-baseline",
+            str(initial.baseline),
+            "--controller-artifact",
+            str(wheel),
+            "--controller-digest",
+            digest,
+            "--controller-caller",
+            args.caller,
+            "--controller-target",
+            version,
         ]
         if args.snapshot is not None:
             command += ["--from-snapshot", args.snapshot]
@@ -283,8 +305,11 @@ def controller(args: argparse.Namespace) -> int:
                 f"published controller helper signature could not be verified: {exc}"
             ) from exc
     published = update._fresh_publication(version, "exact")
-    if (published is None or published.digest != args.controller_digest
-            or published.artifact != Path(args.controller_artifact).name):
+    if (
+        published is None
+        or published.digest != args.controller_digest
+        or published.artifact != Path(args.controller_artifact).name
+    ):
         raise BootstrapError("loaded controller no longer matches fresh published bytes")
     with tx.transaction(dest.root, operation="verified controller admission") as held:
         held.validate(dest.root)
@@ -313,7 +338,10 @@ def controller(args: argparse.Namespace) -> int:
             target = route.version
     try:
         promoted = update.install_into_generation(
-            source, version=target, commit=commit, ref=ref,
+            source,
+            version=target,
+            commit=commit,
+            ref=ref,
             target_mode=(
                 ("exact" if args.from_snapshot is not None else "latest")
                 if source is None
@@ -347,8 +375,16 @@ def controller(args: argparse.Namespace) -> int:
     python_name = "Scripts/python.exe" if os.name == "nt" else "bin/python"
     python = update._generation_install_root(now) / python_name
     command = [
-        str(python), "-B", "-P", "-m", "local_operator", "update",
-        "--controller-tail", str(promoted), "--controller-target", target,
+        str(python),
+        "-B",
+        "-P",
+        "-m",
+        "local_operator",
+        "update",
+        "--controller-tail",
+        str(promoted),
+        "--controller-target",
+        target,
     ]
     if args.no_services:
         command += ["--no-services"]
@@ -365,7 +401,9 @@ def controller(args: argparse.Namespace) -> int:
         print(f"core installed; central services remain pending: {exc}", file=sys.stderr)
         update._emit_update_report(
             install_version=update.generation_version(update.current_generation()),
-            target=target, stage=update.StageReport(), promoted_generation=promoted,
+            target=target,
+            stage=update.StageReport(),
+            promoted_generation=promoted,
         )
     return 0
 
@@ -383,8 +421,12 @@ def controller_tail(args: argparse.Namespace) -> int:
     if promoted.parent != update.generations_dir().resolve():
         raise BootstrapError("promoted receipt is outside the canonical generation store")
     return update._generation_upgrade(
-        0, install_version=update.generation_version(current), target=args.controller_target,
-        services=not args.no_services, roll=False, promoted_generation=promoted,
+        0,
+        install_version=update.generation_version(current),
+        target=args.controller_target,
+        services=not args.no_services,
+        roll=False,
+        promoted_generation=promoted,
     )
 
 

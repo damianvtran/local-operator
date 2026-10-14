@@ -490,9 +490,7 @@ def test_real_busy_record_allows_immutable_build_and_promotion(
         registry.publish(record, root)
         return code
 
-    next_generation = update.install_into_generation(
-        isolated, version="0.70.8", runner=become_busy
-    )
+    next_generation = update.install_into_generation(isolated, version="0.70.8", runner=become_busy)
     assert update.current_generation() == next_generation
     assert generation.is_dir() and path.exists()
 

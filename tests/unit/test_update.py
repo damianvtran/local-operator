@@ -4859,9 +4859,12 @@ def test_perform_upgrade_never_collects_previous_generations(
     monkeypatch.setattr(
         update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
     )
-    assert update_mod.perform_upgrade(
-        target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
-    ) == "0.70.19"
+    assert (
+        update_mod.perform_upgrade(
+            target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
+        )
+        == "0.70.19"
+    )
     assert installs == [
         (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
     ]
