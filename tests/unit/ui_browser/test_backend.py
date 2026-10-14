@@ -28,6 +28,7 @@ import pytest
 from local_operator.browser_bridge.backend import (
     BridgeError,
     BridgeUnreachable,
+    HostPreDeliveryFailure,
     format_error,
 )
 from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
@@ -214,6 +215,49 @@ async def test_modern_ui_retries_only_changed_record_predelivery_refusals(
         "generation": "instance-b"
     }
     assert counts == {"get": 2, "post": 1 if refusal == "health" else 2}
+
+
+@pytest.mark.asyncio
+async def test_a_vanished_record_on_reread_reraises_without_a_second_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-delivery failure whose replacement record is GONE must re-raise.
+
+    Regression (round 4, R4-1): the retry's guard was rewritten as
+    ``changed = replacement is None or identity(replacement) != identity(current)``
+    with ``if not changed: raise``, which INVERTED the ``None`` case — a record
+    that vanished on the re-read was treated as ``changed`` and dispatched with
+    ``None``, so the client raised ``AttributeError`` instead of the typed
+    ``HostPreDeliveryFailure``. An absent record means "nothing new to try": it
+    must re-raise the pre-delivery refusal and send NO second command.
+    """
+    publish(tmp_path, instance_id="instance-a")
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"host": "ui", "pid": os.getpid(), "instance_id": "instance-a"}
+            )
+        posts += 1
+        return httpx.Response(401, json={})
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    # The record is present for the first attempt and GONE for the retry's
+    # re-read — the exact shape of the app quitting mid-call.
+    real_read = client._read
+    reads = 0
+
+    def read_once_then_none() -> Any:
+        nonlocal reads
+        reads += 1
+        return real_read() if reads == 1 else None
+
+    monkeypatch.setattr(client, "_read", read_once_then_none)
+    with pytest.raises(HostPreDeliveryFailure):
+        await client.call("open", {"url": "https://example.test"})
+    assert posts == 1, "a vanished record must not dispatch a second command"
 
 
 @pytest.mark.asyncio
