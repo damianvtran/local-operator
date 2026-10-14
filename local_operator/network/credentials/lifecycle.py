@@ -400,9 +400,7 @@ class LifecycleStore:
             or len(payload["observations"]) > MAX_ROWS
             or len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_FILE_BYTES
         ):
-            raise MeshRefusal(
-                TABLE_FULL, "credential lifecycle table is full; nothing was changed"
-            )
+            raise MeshRefusal(TABLE_FULL, "credential lifecycle table is full; nothing was changed")
         store._write_private_json(self.path, payload)
 
     def status(self) -> str:

@@ -81,6 +81,7 @@ def test_counters_survive_reload_and_never_move_down(tmp_path):
     _login(a, 2.0, new_login=True)
     b = L.LifecycleStore(NET, root=tmp_path)
     row = b.snapshot(KEY, SCOPE)
+    assert row is not None
     assert (row.material_generation, row.login_chain_revision) == (2, 2)
     prev = row
     for facts in (
