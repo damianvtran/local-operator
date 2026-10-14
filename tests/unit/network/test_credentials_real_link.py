@@ -340,7 +340,9 @@ def test_a_static_key_revoke_says_the_copy_never_expires(
     assert "never expires" in receipt and "rotate the 'deepseek' key" in receipt, receipt
     assert "until the token expires" not in receipt, receipt
 
-    assert _lop_network("credential", "share", "deepseek", "--with", peer) == 0
+    from tests.unit.network.finite_recovery import restore_finite
+
+    restore_finite(mesh.a.root, "deepseek", peer)
     capsys.readouterr()
     assert _lop_network("credential", "revoke", "deepseek", "--from", peer, "--json") == 0
     payload = json.loads(capsys.readouterr().out)

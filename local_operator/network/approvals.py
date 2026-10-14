@@ -1501,25 +1501,57 @@ def append_receipt(
     """
     _require(bool(str(step)), "a receipt needs a step name")
     with _record_lock(approval_id, root):
-        record = _load_raw(approval_id, root)
-        if str(record.get("state")) != STATE_CONNECTING:
-            raise MeshRefusal(
-                "approval_receipt_refused",
-                f"a receipt can only land while this approval is running "
-                f"(it is {record.get('state')!r})",
-            )
-        record.setdefault("receipts", []).append(
-            {
-                "run_id": str(run_id),
-                "step": str(step),
-                "at": float(at if at is not None else time.time()),
-                "ok": bool(ok),
-                "detail": str(detail)[:400],
-                "digest": str(digest),
-            }
+        return _append_receipt_locked(
+            approval_id,
+            run_id=run_id,
+            step=step,
+            detail=detail,
+            root=root,
+            ok=ok,
+            digest=digest,
+            at=at,
         )
-        _write_record(record, root)
-        return presented(record)
+
+
+def _append_receipt_locked(
+    approval_id: str,
+    *,
+    run_id: str,
+    step: str,
+    ok: bool,
+    detail: str = "",
+    digest: str = "",
+    at: float | None = None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Append one step receipt while a run is in flight.
+
+    A receipt NEVER touches ``state``/``signature`` (F3) and is refused on a
+    record that is not ``connecting`` — in particular on a decided record, with
+    one exception baked into the design: the runner's own in-flight path, which
+    is exactly what ``connecting`` is. ``detail`` is the step's fixed-vocabulary
+    observation, never credential material.
+    """
+    _require(bool(str(step)), "a receipt needs a step name")
+    record = _load_raw(approval_id, root)
+    if str(record.get("state")) != STATE_CONNECTING:
+        raise MeshRefusal(
+            "approval_receipt_refused",
+            f"a receipt can only land while this approval is running "
+            f"(it is {record.get('state')!r})",
+        )
+    record.setdefault("receipts", []).append(
+        {
+            "run_id": str(run_id),
+            "step": str(step),
+            "at": float(at if at is not None else time.time()),
+            "ok": bool(ok),
+            "detail": str(detail)[:400],
+            "digest": str(digest),
+        }
+    )
+    _write_record(record, root)
+    return presented(record)
 
 
 def mark_failed(
@@ -1576,29 +1608,47 @@ def mark_connected(
     single-use definition); the final receipt lands in the same mutation.
     """
     with _record_lock(approval_id, root):
-        record = _load_raw(approval_id, root)
-        _require_transition(record, STATE_CONNECTED)
-        record["state"] = STATE_CONNECTED
-        record.setdefault("receipts", []).append(
-            {
-                "run_id": str(run_id),
-                "step": str(step),
-                "at": time.time(),
-                "ok": True,
-                "detail": str(detail)[:400],
-                "digest": "",
-            }
+        return _mark_connected_locked(
+            approval_id, run_id=run_id, step=step, detail=detail, root=root
         )
-        record["audit"].append("onboard_connected")
-        _write_record(record, root)
-        _audit(
-            "onboard_connected",
-            actor="self",
-            subject=approval_id,
-            root=root,
-            detail={"kind": str(record.get("kind"))},
-        )
-        return presented(record)
+
+
+def _mark_connected_locked(
+    approval_id: str,
+    *,
+    run_id: str,
+    step: str = "verify",
+    detail: str = "",
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """``connecting → connected``: every step verified. TERMINAL.
+
+    The record is never re-openable and never re-runnable after this (§2.2's
+    single-use definition); the final receipt lands in the same mutation.
+    """
+    record = _load_raw(approval_id, root)
+    _require_transition(record, STATE_CONNECTED)
+    record["state"] = STATE_CONNECTED
+    record.setdefault("receipts", []).append(
+        {
+            "run_id": str(run_id),
+            "step": str(step),
+            "at": time.time(),
+            "ok": True,
+            "detail": str(detail)[:400],
+            "digest": "",
+        }
+    )
+    record["audit"].append("onboard_connected")
+    _write_record(record, root)
+    _audit(
+        "onboard_connected",
+        actor="self",
+        subject=approval_id,
+        root=root,
+        detail={"kind": str(record.get("kind"))},
+    )
+    return presented(record)
 
 
 # ---------------------------------------------------------------------------
