@@ -11201,6 +11201,21 @@ class Session:
         # the guard here is what keeps that from being a bypass: the decision
         # must be the one this environment admitted — the grant is minted only
         # by the authority seam, for the exact word.
+        # The decision's OWN lateness, not merely "now is past the window": an
+        # ask answered inside its window stays answerable/decidable however long
+        # ago that was, while a carriage whose window closed before any admitted
+        # answer existed can only fold ``expired`` — or still read ``declined``
+        # with no answer at all.
+        expires_at = int(record.get("expires_at") or 0)
+        window_end = expires_at + _asks_store.LATE_WINDOW_S * 1000
+        decision_too_late = queue._is_bridge_ask_record(record) and (
+            status == _asks_store.STATUS_EXPIRED
+            or (
+                status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED)
+                and bool(expires_at)
+                and queue._now() > window_end
+            )
+        )
         forged_decline = (
             status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED)
             and queue._is_bridge_ask_record(record)
@@ -11212,6 +11227,19 @@ class Session:
             word=decision.word,
         ):
             return _refuse("that decision does not match what this session admitted for this ask.")
+        if decision_too_late:
+            # S7-1: the F5-1 admission carries the ask's own deadline. Past the
+            # late window the carriage folds ``expired`` (or still says
+            # ``declined`` with no answer at all), so admitting the decision
+            # would record an answer nothing may deliver — the fold and the wire
+            # disagreeing by construction — and leave a minted grant
+            # unreachable, with a retry reading "expired" where the first tap
+            # read "declined". Refused HERE, typed, with the grant withdrawn, so
+            # the surface is told the one thing that helps: answer again.
+            return _refuse_with_code(
+                "decision_expired",
+                "that answer expired before it could be sent — please answer again",
+            )
         unproven_answer = (
             bool(existing_word)
             and status in (_asks_store.STATUS_ANSWERED, _asks_store.STATUS_LATE)

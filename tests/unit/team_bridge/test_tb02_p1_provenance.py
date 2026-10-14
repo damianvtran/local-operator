@@ -1439,6 +1439,78 @@ async def test_a_decision_past_the_late_window_is_refused_not_split(
     monkeypatch.setattr(decide_mod, "decide_from_human_answer", recording_decide)
     decided = session.bridge_decide(ask_id, MESSAGE_ID, "approve")
     assert decided.get("ok") is False, decided
+    # S7-1: typed, actionably — "answer again" — not the generic sentence.
+    assert decided.get("code") == "decision_expired", decided
     assert posted == []
     assert not _decide_rows(tmp_path), "nothing may reach the wire for an expired carriage"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declined_carriage_past_the_late_window_is_refused_typed(
+    tmp_path: Path, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S7-1: the F5-1 admission is bounded by the ask's own deadline.
+
+    A declined carriage past the late window folds ``expired``, so admitting the
+    decision would record an answer nothing may deliver and leave the minted
+    grant unreachable — a retry then read "answer expired" where the first tap
+    read "declined". The door refuses it typed and withdraws the grant.
+    """
+
+    session = await _session(tmp_path)
+    ask_id = "a-s7-1-declined-past-window"
+    queue = session.ask_queue()
+    old_at = queue._now() - 8 * 24 * 60 * 60 * 1000  # past LATE_WINDOW_S
+    assert (
+        asks_store.append_event(
+            queue.session_dir,
+            {
+                "v": asks_store.EVENT_SCHEMA,
+                "kind": asks_store.EVENT_QUEUED,
+                "at": old_at,
+                "ask_id": ask_id,
+                "session_id": session.session_id,
+                "expires_at": old_at + 60_000,
+                "questions": [
+                    _bridge_question_shape(qid=f"bridge-{MESSAGE_ID}", question_id=MESSAGE_ID)
+                ],
+            },
+        )
+        is True
+    )
+    _append_row(queue, ask_id, asks_store.EVENT_DECLINED, at=old_at + 2_000, answers={})
+    record = [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]
+    assert record.get("status") == "declined", record.get("status")
+    monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
+    posted: list[str] = []
+
+    async def recording_decide(client, decision, **kwargs):
+        posted.append(str(getattr(decision, "word", "")))
+        return {"request": {}}
+
+    monkeypatch.setattr(decide_mod, "decide_from_human_answer", recording_decide)
+    mint_bridge_decide_grant(
+        session_id=session.session_id,
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+    )
+    decided = session.bridge_decide(ask_id, MESSAGE_ID, "approve")
+    assert decided.get("ok") is False, decided
+    assert decided.get("code") == "decision_expired", decided
+    assert posted == []
+    assert not _decide_rows(tmp_path)
+    # The refusal spends the grant: nothing is left live-but-unreachable.
+    from local_operator.harness.approval import bridge_decide_grant_seen
+
+    assert (
+        bridge_decide_grant_seen(
+            session_id=session.session_id,
+            ask_id=ask_id,
+            question_id=MESSAGE_ID,
+            word="approve",
+        )
+        is False
+    )
     await session.dispose()
