@@ -609,6 +609,14 @@ def _load_consumed_response_row(runtime: Any, ask_id: str) -> Mapping[str, Any] 
     details = payload.get("details")
     if not isinstance(details, Mapping) or str(details.get("ask_id") or "") != str(ask_id):
         return None
+    if str(details.get("bridge_provenance") or "") != "authority_grant":
+        # R3-5: a row the harness did NOT build for a provenance-verified
+        # decision is not evidence of a human answer. A forged ask-log fold
+        # line can produce a look-alike row, and after a restart the in-memory
+        # grant table is gone — so the marker the ROW carries is what separates
+        # a verified answer from a forgery. Rows that predate the marker are
+        # non-authorizing (typed refusal upstream), never backfilled.
+        return None
     return dict(details)
 
 

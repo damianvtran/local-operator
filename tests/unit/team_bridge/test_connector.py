@@ -37,6 +37,19 @@ from local_operator.team_bridge.types import (
     ScreeningReceipt,
 )
 
+
+def _access(owner: Any) -> SimpleNamespace:
+    """The authenticated access double the producer fence PINS (TB-14).
+
+    A context that cannot name its credential row is refused as
+    ``credential_changed`` — fail-closed, deliberately — so a case that means to
+    exercise a boundary must carry the owner's own credential id, exactly as
+    the production connector always does.
+    """
+
+    return SimpleNamespace(credential_id=int(owner.credential_id))
+
+
 OWNER = OwnerSnapshot(
     credential_id=1,
     account_id="acc_1",
@@ -175,7 +188,7 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(pull_mod, "events", fake_events)
     first = asyncio.run(
-        loop_mod.run_iteration(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert first["reissued"] is True and calls[0]["after"] is None
     # Simulate the durable cursor having advanced (as record_feed_batch would):
@@ -186,7 +199,7 @@ def test_loop_reissue_and_cursor_persistence(tmp_path, monkeypatch) -> None:
             (store_mod._owner_key(owner),),  # noqa: SLF001
         )
     second = asyncio.run(
-        loop_mod.run_iteration(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert second["cursor"] == 7 and second["reissued"] is False
     assert calls[1]["after"] == 7
@@ -213,7 +226,7 @@ def test_resync_walk_completes_only_after_terminal_page(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(pull_mod, "inbox", fake_inbox)
     monkeypatch.setattr(pull_mod, "finish_resync", fake_finish)
-    result = asyncio.run(loop_mod.resync_walk(owner, config_dir=tmp_path, access=None))
+    result = asyncio.run(loop_mod.resync_walk(owner, config_dir=tmp_path, access=_access(owner)))
     assert result["pages"] == 2 and len(finishes) == 1
     # Witness: a premature completion was IMPOSSIBLE by construction until the
     # terminal page merged; and calling finish early on a fresh walk refuses.
@@ -223,6 +236,20 @@ def test_resync_walk_completes_only_after_terminal_page(tmp_path, monkeypatch) -
 
 
 # -- H4c: the spine ----------------------------------------------------------
+
+
+def _enable_bridge(tmp_path: Path) -> None:
+    """Turn the feature ON the way the fence reads it: the DISK config (S-8a).
+
+    The fence re-reads ``config.yml`` at every boundary, so a case that wants to
+    exercise anything BEHIND it must write the real file shape. Without this the
+    spine refuses ``bridge_off`` before the first seam — and a case that awaits a
+    seam signal then waits forever, which hides the misconfiguration.
+    """
+
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
+    )
 
 
 def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
@@ -280,13 +307,7 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     monkeypatch.setattr(wake_mod, "screen_item", fake_screen)
     monkeypatch.setattr(wake_mod, "ack_read", fake_ack)
     monkeypatch.setattr(wake_mod, "deliver_wake", fake_deliver)
-    # S-8a: the fence reads the config from DISK now — the fixture writes the
-    # real file shape (read_config_values reads ``values`` of config.yml) with
-    # the feature enabled, instead of patching an in-memory object that no
-    # longer exists on the path.
-    (tmp_path / "config.yml").write_text(
-        json.dumps({"values": {"team_bridge": {"enabled": True}}}), encoding="utf-8"
-    )
+    _enable_bridge(tmp_path)  # S-8a: the fence reads the DISK config
     return record, body
 
 
@@ -295,7 +316,7 @@ def test_spine_delivers_from_screened_bytes_and_releases_claim(tmp_path, monkeyp
     record, body = _wire_spine(monkeypatch, tmp_path)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "delivered" and out["session"] == "sess_cos"
@@ -321,7 +342,7 @@ def test_spine_off_settings_start_zero_new_traffic(tmp_path, monkeypatch) -> Non
     )
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold" and out["code"] == "bridge_off"
@@ -345,7 +366,7 @@ def test_spine_ack_pending_holds_without_delivery(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(wake_mod, "ack_read", pending_ack)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold"
@@ -389,7 +410,7 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
         monkeypatch.setattr(wake_mod, "ack_read", bound_ack)
         out = asyncio.run(
             wake_mod.handle_message_available(
-                owner, "bmsg_1", config_dir=case, auth_store=None, access=None
+                owner, "bmsg_1", config_dir=case, auth_store=None, access=_access(owner)
             )
         )
         assert out["action"] == "hold", out
@@ -445,7 +466,7 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
     monkeypatch.setattr(wake_mod, "ack_read", foreign_ack)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=case, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=case, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold" and out["code"] == "ack_binding_mismatch"
@@ -458,7 +479,7 @@ def test_spine_ack_binding_accepts_the_real_frozen_intent(tmp_path, monkeypatch)
     record, body = _wire_spine(monkeypatch, tmp_path)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "delivered"
@@ -495,7 +516,7 @@ def test_spine_ack_full_tuple_mismatch_arms_hold(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(wake_mod, "ack_read", wrong_tuple_ack)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold"
@@ -523,7 +544,7 @@ def test_spine_ack_pending_ledger_with_confirmed_outcome_holds(tmp_path, monkeyp
     monkeypatch.setattr(wake_mod, "ack_read", lying_ack)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold"
@@ -576,7 +597,7 @@ def test_spine_phase_persistence_refusal_holds_without_delivery(tmp_path, monkey
     monkeypatch.setattr(_SpineStore, "mark_delivery_phase", refuse_phase)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold"
@@ -592,7 +613,7 @@ def test_spine_hold_and_bounce_never_wake(tmp_path, monkeypatch) -> None:
         record, _ = _wire_spine(monkeypatch, case, disposition=disposition)
         out = asyncio.run(
             wake_mod.handle_message_available(
-                owner, "bmsg_1", config_dir=case, auth_store=None, access=None
+                owner, "bmsg_1", config_dir=case, auth_store=None, access=_access(owner)
             )
         )
         assert out["action"] == expected
@@ -608,7 +629,7 @@ def test_spine_no_designation_is_badge_only(tmp_path, monkeypatch) -> None:
     record, _ = _wire_spine(monkeypatch, tmp_path)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "badge_only"
@@ -621,7 +642,7 @@ def test_spine_claimed_elsewhere_skips(tmp_path, monkeypatch) -> None:
     record, _ = _wire_spine(monkeypatch, tmp_path)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "claimed_elsewhere"
@@ -639,7 +660,7 @@ def test_spine_body_hash_mismatch_reholds(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(wake_mod, "screen_item", lying_screen)
     out = asyncio.run(
         wake_mod.handle_message_available(
-            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=None
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
         )
     )
     assert out["action"] == "hold" and out["code"] == "body_hash_mismatch"
@@ -730,7 +751,7 @@ def test_due_hold_is_redriven_to_deliver(tmp_path, monkeypatch) -> None:
     record, _ = _wire_spine(monkeypatch, tmp_path, disposition="deliver")
     store.persist_hold(owner, "bmsg_h", "screening_hold", retry_at=time.time() - 5)
     result = asyncio.run(
-        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert result["due"] == 1
     assert result["outcomes"] == [{"message_id": "bmsg_h", "action": "delivered"}]
@@ -746,7 +767,7 @@ def test_not_due_hold_is_skipped(tmp_path, monkeypatch) -> None:
     record, _ = _wire_spine(monkeypatch, tmp_path)
     store.persist_hold(owner, "bmsg_future", "screening_hold", retry_at=time.time() + 3600)
     result = asyncio.run(
-        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert result == {"due": 0, "outcomes": []}
     assert record["screened"] == 0  # nothing re-read, nothing re-screened
@@ -759,7 +780,7 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     _wire_spine(monkeypatch, tmp_path, disposition="hold")
     store.persist_hold(owner, "bmsg_f", "screening_hold", retry_at=time.time() - 5)
     first = asyncio.run(
-        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert first["outcomes"][0]["action"] == "hold"
     row_one = store.screening_hold(owner, "bmsg_f")
@@ -768,7 +789,11 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     assert 0 < gap_one <= loop_mod.RETRY_BASE_S + 5
     # Make it due again; the second failure must ADVANCE the gap (bounded 2x).
     store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
-    asyncio.run(loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None))
+    asyncio.run(
+        loop_mod.retry_due_holds(
+            owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+        )
+    )
     row_two = store.screening_hold(owner, "bmsg_f")
     assert row_two is not None
     gap_two = row_two["retry_at"] - time.time()
@@ -776,7 +801,11 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     # At the attempt cap the gap can never exceed RETRY_MAX_S.
     loop_mod._RETRY_ATTEMPTS["bmsg_f"] = loop_mod.RETRY_MAX_ATTEMPTS
     store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
-    asyncio.run(loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None))
+    asyncio.run(
+        loop_mod.retry_due_holds(
+            owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+        )
+    )
     row_three = store.screening_hold(owner, "bmsg_f")
     assert row_three is not None
     assert row_three["retry_at"] - time.time() <= loop_mod.RETRY_MAX_S + 5
@@ -790,7 +819,7 @@ def test_budget_exhaustion_hold_uses_the_same_due_path(tmp_path, monkeypatch) ->
     record, _ = _wire_spine(monkeypatch, tmp_path, disposition="deliver")
     store.persist_hold(owner, "bmsg_b", "budget_exhausted", retry_at=time.time() - 1)
     result = asyncio.run(
-        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     assert result["outcomes"] == [{"message_id": "bmsg_b", "action": "delivered"}]
     assert record["screened"] == 1
@@ -818,13 +847,19 @@ def test_cancel_during_retry_keeps_claim_releasable(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(pull_mod, "message", fake_message)
     monkeypatch.setattr(wake_mod, "fetch_item", fake_fetch)
     monkeypatch.setattr(wake_mod, "screen_item", slow_screen)
+    # The spine sits BEHIND the fence, so this case must enable the feature —
+    # and it BOUNDS the wait: a refusal here used to hang the suite instead of
+    # failing, which is how the missing config hid for a round.
+    _enable_bridge(tmp_path)
     store.persist_hold(owner, "bmsg_c", "screening_hold", retry_at=time.time() - 5)
 
     async def run() -> None:
         task = asyncio.ensure_future(
-            loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=None, auth_store=None)
+            loop_mod.retry_due_holds(
+                owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+            )
         )
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -849,12 +884,18 @@ def test_deliver_wake_selects_branch_by_typed_history_predicate(tmp_path, monkey
     owner = SimpleNamespace(account_id="acc_x")
     calls: dict[str, Any] = {}
 
-    async def fake_outcome(record, *, session_id, text, mode, wake, sender, custom_type=None):
+    async def fake_outcome(
+        record, *, session_id, text, mode, wake, sender, custom_type=None, bridge_meta=None
+    ):
+        # The double mirrors the PRODUCTION signature: the live wake carries the
+        # producer's locator block (H4e/F3), and a double that omits it would
+        # hide a hop that stopped carrying it.
         calls["live"] = {
             "session_id": session_id,
             "wake": wake,
             "text": text,
             "custom_type": custom_type,
+            "bridge_meta": bridge_meta,
         }
         return SimpleNamespace(detail="delivered (live)", state="delivered")
 

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.team_bridge import pull
 from local_operator.team_bridge.store import ACK_PENDING, OwnerReceipt, Store

@@ -28,6 +28,7 @@ from local_operator.harness.message_types import (
 )
 from local_operator.team_bridge.store import OwnerReceipt, Store
 from local_operator.team_bridge.types import OwnerSnapshot
+from tests.unit.team_bridge.test_connector import _access
 
 OWNER = OwnerSnapshot(
     credential_id=7,
@@ -104,10 +105,10 @@ def test_run_iteration_wakes_each_message_once(tmp_path, monkeypatch) -> None:
     loop_mod = _patch_loop(monkeypatch, refs=refs, handle=_handle)
 
     first = asyncio.run(
-        loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=_access(OWNER), auth_store=None)
     )
     second = asyncio.run(
-        loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=None, auth_store=None)
+        loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=_access(OWNER), auth_store=None)
     )
 
     assert [h["message_id"] for h in first["handled"]] == ["bmsg_1"]
@@ -127,7 +128,9 @@ def test_a_held_outcome_leaves_a_durable_retry_row(tmp_path, monkeypatch) -> Non
         return {"action": "hold", "message_id": message_id, "code": "delivery_failed"}
 
     loop_mod = _patch_loop(monkeypatch, refs=refs, handle=_handle)
-    asyncio.run(loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=None, auth_store=None))
+    asyncio.run(
+        loop_mod.run_iteration(OWNER, config_dir=tmp_path, access=_access(OWNER), auth_store=None)
+    )
 
     row = store.screening_hold(OWNER, "bmsg_hold")
     assert row is not None and row["hold_code"] == "delivery_failed"

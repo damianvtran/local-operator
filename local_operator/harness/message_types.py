@@ -448,7 +448,7 @@ BRIDGE_UNTRUSTED_CLAUSE = (
 
 
 def neutralize_bridge_tag(text: str) -> str:
-    """Escape wrapper-tag lookalikes inside UNTRUSTED text (TB-05/TB-06).
+    """Escape wrapper-tag lookalikes inside UNTRUSTED text (TB-05/TB-06/S3-7).
 
     A body containing ``</team-bridge-message>`` would close the untrusted
     region early — anything after it would read OUTSIDE the §11.1
@@ -457,11 +457,17 @@ def neutralize_bridge_tag(text: str) -> str:
     only by their builders, after this escaping, so the region cannot be
     closed from inside. One implementation for the wake wrap and the ask
     question text.
+
+    The match is DELIBERATELY LOOSE (S3-7): the separator between the name
+    parts may be a hyphen, an underscore or whitespace, and the slash may be
+    spaced (``< / team-bridge-message>``). A variant the reader would still
+    recognise as the tag must not survive this hop just because it is spelled
+    differently from the one the wrap emits.
     """
     import re
 
     return re.sub(
-        r"</?\s*team-bridge-message",
+        r"<\s*/?\s*team[\s\-_]*bridge[\s\-_]*message",
         lambda match: match.group(0).replace("<", "&lt;"),
         text,
         flags=re.IGNORECASE,

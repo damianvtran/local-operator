@@ -882,20 +882,63 @@ def reset_operator_caps_for_tests() -> None:
 #: answer from a forged one.
 _BRIDGE_DECIDE_GRANTS: dict[tuple[str, str, str], dict[str, Any]] = {}
 
-#: How long a minted (or consumed) grant stays in the table. The mint→consume
-#: window is one answer's durable append; the consumed tail must outlive the
-#: reconcile passes that re-read the frozen row. Both are well under this.
+#: How long a minted (or consumed) grant stays in the table, measured FROM THE
+#: MINT. The mint→consume window is one answer's durable append; the consumed
+#: tail must outlive the reconcile passes that re-read the frozen row. Both are
+#: well under this. Consuming does NOT extend it (S3-5): an expiry a decision
+#: can silently outlive is worse than a shorter window, so the drop of a LIVE
+#: grant is recorded and logged by :func:`_prune_bridge_grants`.
 BRIDGE_DECIDE_GRANT_TTL_S = 300.0
+
+#: The bounded audit ring of LIVE grants the TTL dropped (S3-5). The table is
+#: memory-only and dies with the process, so this is also what a RESTART-drop
+#: looks like to a test: nothing to read, but the row's own provenance marker
+#: (the verified append) is what the recovery door trusts instead.
+_BRIDGE_DECIDE_GRANT_DROPS: list[dict[str, Any]] = []
+
+
+def bridge_decide_grant_drops() -> list[dict[str, Any]]:
+    """The LIVE grants the TTL dropped, newest last — the visible drop (S3-5)."""
+    return [dict(entry) for entry in _BRIDGE_DECIDE_GRANT_DROPS]
 
 
 def _prune_bridge_grants(now: float) -> None:
+    """Drop grants past the TTL — VISIBLY when a decision is still live (S3-5).
+
+    Expiry is keyed off the MINT time (``at`` is written once, at mint, and
+    never refreshed), so a consumed entry ages out on the same clock as a live
+    one rather than being extended by the consume. That makes the drop real:
+    a LIVE grant falling out of the TTL is a human decision that can no longer
+    be dispatched, so it is announced — a bounded audit ring the surfaces/tests
+    can read, plus a log line — instead of vanishing between two reads. A
+    consumed entry ageing out only ends the supersede window, which is quiet.
+    """
     stale = [
         key
         for key, entry in _BRIDGE_DECIDE_GRANTS.items()
         if now - entry["at"] > BRIDGE_DECIDE_GRANT_TTL_S
     ]
     for key in stale:
-        _BRIDGE_DECIDE_GRANTS.pop(key, None)
+        entry = _BRIDGE_DECIDE_GRANTS.pop(key, None)
+        if entry is None or entry.get("consumed"):
+            continue
+        session_id, ask_id, question_id = key
+        _BRIDGE_DECIDE_GRANT_DROPS.append(
+            {
+                "session_id": session_id,
+                "ask_id": ask_id,
+                "question_id": question_id,
+                "word": str(entry.get("word") or ""),
+                "at": float(entry.get("at") or 0.0),
+            }
+        )
+        del _BRIDGE_DECIDE_GRANT_DROPS[:-32]
+        logger.warning(
+            "bridge decide grant for ask %s / %s expired before it was spent — the "
+            "decision was NOT sent; the card must offer a fresh answer",
+            ask_id,
+            question_id,
+        )
 
 
 def mint_bridge_decide_grant(
@@ -934,7 +977,8 @@ def consume_bridge_decide_grant(
     if str(entry.get("word")) != str(word).strip().lower():
         return False
     entry["consumed"] = True
-    entry["at"] = now
+    # ``at`` stays the MINT time (S3-5): consuming must not extend the window,
+    # or a decision could be kept alive indefinitely by re-spending attempts.
     return True
 
 
@@ -999,8 +1043,9 @@ def withdraw_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: s
 
 
 def reset_bridge_decide_grants_for_tests() -> None:
-    """Clear the process-wide table. Tests only — production never calls it."""
+    """Clear the process-wide table and the drop audit ring. Tests only."""
     _BRIDGE_DECIDE_GRANTS.clear()
+    _BRIDGE_DECIDE_GRANT_DROPS.clear()
 
 
 class OperatorCapHandoff:
