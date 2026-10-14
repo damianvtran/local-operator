@@ -201,6 +201,7 @@ def install(server: RelayServer) -> None:
     document on disk (``MeshCredentialBroker.relay_handler``), so a share made after
     the relay started is served without a restart.
     """
+    from local_operator.network.credentials import lifecycle as lifecycle_mod
     from local_operator.network.credentials import owner as owner_mod
     from local_operator.network.credentials import sync as sync_mod
 
@@ -208,6 +209,9 @@ def install(server: RelayServer) -> None:
     # syncer's tick, so it must be registered wherever the ops are — the same
     # place ``mcpdefs.install`` registers its step.
     sync_mod.install()
+    # THE LIFECYCLE SENDER rides the same tick; it sends only to peers whose link
+    # negotiated ``credential-lifecycle-v1`` (see ``lifecycle.lifecycle_tick_step``).
+    lifecycle_mod.install()
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     ops = _LocalOps(server)
     server.register_ops(

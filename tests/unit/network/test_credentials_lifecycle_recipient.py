@@ -249,3 +249,139 @@ def test_the_authorizer_admits_a_lifecycle_announce_only_with_broker_credential(
 
     with pytest.raises(Refusal):
         authorizer.check(link(capabilities={"view"}), frame)
+
+
+# -- the sender: lifecycle_tick_step ---------------------------------------------
+
+
+class _Wire:
+    """A scripted peer link: records frames, answers from ``reply``."""
+
+    def __init__(self, caps: set[str], reply: Any = None) -> None:
+        self.capabilities = frozenset(caps)
+        self.frames: list[dict[str, Any]] = []
+        self.reply = reply
+
+    def request(self, frame: dict[str, Any], timeout: float = 0.0) -> Any:
+        self.frames.append(frame)
+        if callable(self.reply):
+            return self.reply(frame)
+        return {"op": "ack", "req": frame["req"], "detail": self.reply}
+
+
+class _Audit:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def record(self, event: Any) -> None:
+        self.events.append(event)
+
+
+def _owner_server(rig: Any, wire_link: Any) -> Any:
+    from local_operator.network import store
+
+    for record in store.list_networks(rig.root):
+        record.self_capabilities = ["broker_credential"]
+        store.save(record, rig.root)
+    return SimpleNamespace(
+        root=rig.root,
+        identity=SimpleNamespace(device_id=rig.own.device_id, name="owner"),
+        audit=_Audit(),
+        _ensure_link=lambda device: wire_link,
+        _next_relay_req=lambda: 5,
+    )
+
+
+def _seed(rig: Any, rows: int = 1) -> None:
+    life = L.LifecycleStore(N, rig.root)
+    life.record_native(P, SCOPE, L.NativeFacts(present=True, new_login=True))
+    for index in range(rows - 1):
+        life.record_native(P, f"scope-{index}", L.NativeFacts(present=True, new_login=True))
+
+
+def _echo_applied(frame: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "op": "ack",
+        "req": frame["req"],
+        "detail": {
+            "kind": "ack",
+            "entries": [
+                {
+                    "credential_key": e["credential_key"],
+                    "account_scope_ref": e["account_scope_ref"],
+                    "applied": True,
+                    "reason": "applied",
+                }
+                for e in frame["entries"]
+            ],
+        },
+    }
+
+
+def test_the_tick_sends_nothing_to_a_peer_that_did_not_negotiate_the_capability(rig):
+    _seed(rig)
+    old_peer = _Wire({"mesh-net-v1", "credential-broker-v1"}, _echo_applied)
+    server = _owner_server(rig, old_peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "skipped:peer_lacks_lifecycle"
+    assert old_peer.frames == []
+
+
+def test_the_tick_announces_to_a_peer_that_negotiated_it(rig):
+    _seed(rig)
+    new_peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server = _owner_server(rig, new_peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    (frame,) = new_peer.frames
+    assert frame["kind"] == "lifecycle_announce" and frame["recipient_device"] == (
+        rig.peer.device_id
+    )
+    assert frame["entries"][0]["state"] == "available"
+    assert [e.event for e in server.audit.events] == ["credential.lifecycle_announced"]
+    # Delivered rows are not re-sent while the counters are unchanged.
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "in_sync"
+    assert len(new_peer.frames) == 1
+
+
+def test_the_tick_caps_one_exchange_at_eight_entries(rig):
+    _seed(rig, rows=11)
+    new_peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server = _owner_server(rig, new_peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    assert len(new_peer.frames[0]["entries"]) == 8
+    # The remainder follows on the next tick, recomputed from the counters.
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    assert len(new_peer.frames[1]["entries"]) == 3
+
+
+def test_observation_table_full_is_not_counted_as_delivered(rig):
+    _seed(rig)
+
+    def full(frame: dict[str, Any]) -> dict[str, Any]:
+        reply = _echo_applied(frame)
+        for entry in reply["detail"]["entries"]:
+            entry.update(applied=False, reason=L.OBSERVED_TABLE_FULL)
+        return reply
+
+    new_peer = _Wire({"credential-lifecycle-v1"}, full)
+    server = _owner_server(rig, new_peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "retry_later"
+    assert server.audit.events == []
+    # Not recorded as sent, so the next tick offers the row again.
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "retry_later"
+    assert len(new_peer.frames) == 2
+
+
+def test_a_malformed_reply_is_not_counted_as_delivered(rig):
+    _seed(rig)
+    new_peer = _Wire({"credential-lifecycle-v1"}, {"kind": "ack", "access_token": "[redacted]"})
+    server = _owner_server(rig, new_peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "failed"
+    assert server.audit.events == []
+
+
+def test_install_registers_the_tick_step_once():
+    from local_operator.network import definitions
+
+    L.install()
+    L.install()
+    assert definitions._tick_steps().count(L.lifecycle_tick_step) == 1  # noqa: SLF001
