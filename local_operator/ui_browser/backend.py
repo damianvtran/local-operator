@@ -80,11 +80,16 @@ class UiHostClient(HostClient):
                     return await self.call_once(current, method, params, deadline=deadline)
                 except HostPreDeliveryFailure:
                     replacement = self._read()
-                    if replacement is None or self._record_identity(replacement) == self._record_identity(current):
+                    changed = replacement is None or (
+                        self._record_identity(replacement) != self._record_identity(current)
+                    )
+                    if not changed:
                         raise
                     return await self.call_once(replacement, method, params, deadline=deadline)
         except TimeoutError as exc:
-            raise BridgeUnreachable(self.copy_for().timeout.format(method=method, timeout=budget)) from exc
+            raise BridgeUnreachable(
+                self.copy_for().timeout.format(method=method, timeout=budget)
+            ) from exc
 
     @staticmethod
     def _record_identity(current: state_store.UiHostState) -> tuple[int, int, str, str | None]:

@@ -477,7 +477,16 @@ async def test_serialized_extension_refusals_reach_python_recovery(
     assert opened["tab"].startswith("bridge:")
     for changed, marker, copy in (
         ({"requester": "session:attacker", "resumed_scope": True}, "foreign", "different owner"),
-        ({"owner_generation": "unknown-g", "previous_generation": "", "previous_generations": [], "resumed_scope": True}, "stale", "generation is stale"),
+        (
+            {
+                "owner_generation": "unknown-g",
+                "previous_generation": "",
+                "previous_generations": [],
+                "resumed_scope": True,
+            },
+            "stale",
+            "generation is stale",
+        ),
     ):
         with pytest.raises(BridgeError) as wire:
             await client.call("owner_recover", {**owner, **changed})
@@ -498,7 +507,9 @@ async def test_serialized_extension_refusals_reach_python_recovery(
         finally:
             resource.client = original_client  # type: ignore[method-assign]
     with pytest.raises(BridgeError) as wrong_tab:
-        await client.call("open", {**owner, "tab": "bridge:999:foreign", "url": "https://example.test/"})
+        await client.call(
+            "open", {**owner, "tab": "bridge:999:foreign", "url": "https://example.test/"}
+        )
     assert wrong_tab.value.data["refusal"] == "foreign"
     assert _control(protocol_peer)["tabs"] == 1
     await client.call("owner_finish", {**owner, "outcome": "completed"})

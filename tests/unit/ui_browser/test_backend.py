@@ -28,7 +28,6 @@ import pytest
 from local_operator.browser_bridge.backend import (
     BridgeError,
     BridgeUnreachable,
-    HostPreDeliveryFailure,
     format_error,
 )
 from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
@@ -391,7 +390,7 @@ async def test_public_retry_is_clamped_to_the_shared_deadline(
         return
     assert await client.call("open", {"url": "https://example.test"}) == {"replaced": True}
     # Remainder case: attempt1 health + POST, then attempt2 health + POST.
-    assert (gets, posts) == (2, 2), "a changed-record pre-delivery refusal redispatches exactly once"
+    assert (gets, posts) == (2, 2), "a changed-record refusal redispatches exactly once"
     assert len(timeouts) == 4, "two attempts x (health, post)"
     assert timeouts[2] > 0 and timeouts[3] > 0
     assert timeouts[2] < timeouts[0] and timeouts[3] < timeouts[1], (

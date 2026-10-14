@@ -20297,8 +20297,9 @@ def _pinned_host_for_access(context: ToolContext | None) -> str:
     Why the durable pin and not availability: a refused fresh navigation saves
     its actual transport in `pending_access_host`; a resumed/refused owned scope
     also carries its host in the record. Availability cannot choose which jar
-    owes an approval, and never confers ownership of a foreign tab. `_surface_host_or_first` still handles the no-pin
-    case, so a session with no durable host keeps the availability order.
+    owes an approval, and never confers ownership of a foreign tab.
+    `_surface_host_or_first` still handles the no-pin case, so a session with
+    no durable host keeps the availability order.
     """
     resource = getattr(getattr(context, "browser", None), "resource", None)
     if resource is None:
