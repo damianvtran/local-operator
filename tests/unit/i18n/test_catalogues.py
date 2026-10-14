@@ -30,7 +30,10 @@ def test_shipped_wire_namespaces_exist() -> None:
     # `wire.errors.desktop` (also a child of `wire.errors`) the same way,
     # `wire.exec` by E2b, `wire.errors.agents` by E2c, and `wire.errors.media`
     # by E2d; the files slice adds populated `wire.errors.files`. The rest stay empty
-    # until their own slices land. The TUI wave writes `tui.*` files instead —
+    # until their own slices land. The console-capacity slice adds populated
+    # `wire.console` (its `wire.console.context` is an en-only context SIDECAR,
+    # not a namespace, so it is absent from `namespaces()` by construction).
+    # The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
     # The held Chinese candidate lives on a separate remote ref, not in the
@@ -53,6 +56,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.settings.hub_defaults",
         "wire.slash",
         "wire.aida_cadence",
+        # Populated by the console-capacity slice (this PR), the same way the
+        # extraction slices added wire.settings/wire.errors.*/wire.exec.
+        "wire.console",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -71,6 +77,8 @@ def test_shipped_wire_namespaces_exist() -> None:
     # hashes stay valid; pinned populated here for the same reason the other
     # populated namespaces are.
     assert catalogues.load_catalogue("en", "wire.aida_cadence") != {}
+    # Populated, never a stub, so it is NOT in _PENDING_EXTRACTION.
+    assert catalogues.load_catalogue("en", "wire.console") != {}
     assert "tui.welcome" in catalogues.namespaces("en")
     assert catalogues.load_catalogue("en", "tui.welcome") != {}
 
