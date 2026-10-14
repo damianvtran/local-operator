@@ -12865,6 +12865,9 @@ def _pending_wake_ids(scheduler: WakeSchedulerProtocol) -> frozenset[str]:
     probe = getattr(scheduler, "pending_ids", None)
     if not callable(probe):
         return frozenset()
+    # ``getattr`` erases the capability's type; the ``cast`` names what the probe
+    # returns so ``frozenset(...)`` type-checks. Runtime behaviour is unchanged.
+    probe = cast("Callable[[], Iterable[str]]", probe)
     try:
         return frozenset(probe())
     except Exception:  # noqa: BLE001 — a listing must survive a broken phase probe
