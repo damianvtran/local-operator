@@ -43,6 +43,8 @@ handle from `list`/`create`.
 | method | what it does |
 |---|---|
 | `list` | Every surface in this session, including the ones the user opened (`origin`, `command`, `cwd`, grid, running/exited, last output). |
+| `resources` | App-wide aggregate admission/resource counts, without another owner's handles, commands or output. Older hosts refuse this additive method. |
+| `cleanup` | Release this owner's completed agent surfaces, preserving retained files. Running, secure, user-controlled, adopted or displayed surfaces stay protected. |
 | `create` | Start a surface: `command`/`args`/`cwd`/`env`, plus `cols`/`rows` (default 100x30), `reveal`, `retain`. Returns the handle. |
 | `status` | `running`, `exit_code`, grid, `live`, whether the log was `truncated`, `secure`, `retain`, and how long since the last output. |
 | `read` | The text. `mode='viewport'` (default) is the visible screen — what a person looking at the pane sees; `mode='scrollback'` is a history window positioned by `start`/`count`. |
@@ -250,6 +252,30 @@ working is the failure this feature is designed to avoid.
 
 ## Housekeeping
 
-Close what you opened. A surface outlives your turn by design, so a forgotten
-one keeps a process running on the user's machine; `close` ends it and
-`retain=false` discards its output when the history is not worth keeping.
+A live process is not garbage merely because your turn ended or its output is
+idle. Never close a running auth prompt, REPL, background job or user terminal
+as generic housekeeping. Close only work whose termination was intended.
+
+After a process exits, read its result or status. That acknowledgement starts a
+30-second read window for an unretained agent surface; automatic release applies
+only while it remains completed, unsecure, unadopted and undisplayed. Retained
+history and user-controlled surfaces are never automatically closed. Ordinary
+and delegated owner teardown use the same completed-only cleanup seam; no live
+PTY is killed by that hook. `cleanup` explicitly releases eligible completed
+surfaces for this owner while keeping retained output on disk.
+
+Completed and restored surfaces do not consume live admission. Their handles and
+history remain readable, hydrated on demand into a bounded replay cache. A
+`tab_limit` refusal includes only aggregate diagnostics: use `resources`, inspect
+your own surfaces and clean up completed work rather than searching for another
+owner's terminal or retrying blindly. The configured `console.max_live` ceiling
+(default 128, range 32–256) is resource-gated, not a promise that every grid fits;
+`console.max_owner` defaults to 8, and `console.user_reserved` defaults to 16.
+The host preserves 5,000 scrollback lines and accounts for log reservations,
+callback-drained parser and delivery queues, and modeled terminal-cell storage.
+The planning charge is 16 bytes per cell: pinned xterm stores three Uint32 values
+(12 bytes) before object/extended-attribute overhead. The 768 MiB modeled envelope
+admits fewer than 64 default grids under its conservative reservations; 48 is the
+validation target, not a promise about arbitrary process output. Managed budgets are not limits
+on arbitrary child RSS; unknown OS FD/PTY availability is reported as unknown.
+Changing configuration affects future admission, never retroactively kills work.

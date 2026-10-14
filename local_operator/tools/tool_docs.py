@@ -286,6 +286,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "those rather than asking the user to repeat their output."
                 ),
             ),
+            ToolDocOp(op="resources", blurb="Aggregate live/history/resource counts only; no foreign handles or output."),
+            ToolDocOp(op="cleanup", blurb="Release this owner's completed agent surfaces, preserving retained files and live work."),
             ToolDocOp(op="create", blurb="Start a pty (command, args, cwd, env, cols, rows)."),
             ToolDocOp(op="status", blurb="Where a surface and its process stand."),
             ToolDocOp(op="read", blurb="Text: viewport (default) or scrollback."),
@@ -310,7 +312,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "behind the turn (that is what the console is for), and the "
             "surface outlives the call — which is also why it is NOT for "
             "ordinary commands.\n"
-            "- The user can toggle the same secure switch from the pane."
+            "- The user can toggle the same secure switch from the pane.\n"
+            "- Read/status acknowledges an exit; eligible unretained agent output has a "
+            "30-second read window. Never clean up live idle/auth/REPL/background work "
+            "merely because a turn ended. Retained/user/secure/adopted views are protected."
         ),
     ),
     # -- hub ----------------------------------------------------------------
