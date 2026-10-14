@@ -1478,6 +1478,92 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     assert inflight, "the read waited the hung pass out instead of returning with it in flight"
 
 
+def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounded read whose kicked pass is still running must SAY SO.
+
+    The last completed pass below FAILED ("no table came back"), while the peer
+    is reachable on the live probe. Re-presenting that failure headline beside
+    `peers` saying reachable reads as a contradiction: the truth at the moment
+    the bounded wait expires is that a NEW read is in flight, neither verified
+    nor failed. After the pull is released, the next read reports verified.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    admit_seq = a.server._membership_seq  # noqa: SLF001
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001
+    assert a_link is not None
+    # Quiesce unprompted writers (same derivation as the hung-pass sibling):
+    # establishment stamp, admit-time pass, and every inbound handshake.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+    ), "a's admit-time contact_peers pass never completed"
+
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
+    def _row(payload: dict[str, Any]) -> dict[str, Any]:
+        return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
+
+    # The last COMPLETED pass fails: its headline is the stale verdict.
+    monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    a_link.member_pulled_at = 0.0
+    failed = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
+    assert failed.answered == [], failed
+    assert "no table came back" in failed.sentence(), failed.sentence()
+
+    # The next pull blocks past the bounded status wait, then really answers.
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked(link: Any) -> str:
+        entered.set()
+        release.wait(10.0)
+        return relay.RelayServer._pull_members(a.server, link)  # noqa: SLF001
+
+    monkeypatch.setattr(a.server, "_pull_members", _blocked)
+    a_link.member_pulled_at = 0.0
+    seq_before = a.server._membership_seq  # noqa: SLF001
+    try:
+        payload = a.server.status(refresh=True)  # noqa: SLF001
+        inflight = a.server._membership_seq == seq_before  # noqa: SLF001
+        peers = a.server.peer_status()  # noqa: SLF001
+    finally:
+        release.set()
+    assert entered.is_set(), "the kicked pass never entered the pull"
+    assert inflight, "the read waited the blocked pull out instead of returning bounded"
+    assert peers and peers[0]["reachable"] is True, peers
+    row = _row(payload)
+    table = row["membership"]["table"]
+    sentence = table["sentence"]
+    assert "table read still running" in sentence, sentence
+    assert "retrying" in sentence, sentence
+    assert "no table came back" not in sentence, sentence
+    assert "members verified" not in sentence, sentence
+    assert "still running" in relay.membership_marker(row), relay.membership_marker(row)
+
+    # After the pull lands, the next read is the verified completed pass.
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > seq_before, timeout_s=10.0  # noqa: SLF001
+    ), "the blocked pass never completed after release"
+    after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
+    assert after["complete"] is True, after
+    assert "verified with all 1 peer(s)" in after["sentence"], after["sentence"]
+
+
 def test_a_row_no_read_has_fed_says_so_on_every_surface(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
