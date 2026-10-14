@@ -183,6 +183,30 @@ async def test_old_to_old_encodes_byte_identically_and_mutations_change_the_pref
 
 @SHAPES
 @pytest.mark.asyncio
+async def test_encoders_never_emit_capture_bookkeeping(tmp_path, model, base):
+    """The metadata is harness bookkeeping; the wire carries image bytes only.
+
+    The transport contract the protection rules rest on: a producer can
+    replace only its own earlier capture claims, and no reader could be
+    misled by a provider-visible copy of the scope/revision fields. Pinned
+    against the real encoder under both counter-shapes, beside the positive
+    control that the image itself is still a normal image block.
+    """
+    stream = ScriptedStream(["reply"] * 4)
+    session = make_session(tmp_path, stream, model)
+    await session.prompt("look", images=[_capture(revision="1")])
+
+    encoded = _encode(stream.requests[-1], base)
+
+    assert b"captured_frame" not in encoded
+    assert b"producer_scope" not in encoded
+    assert _CAPTURE_DATA["1"].encode() in encoded
+
+    await session.dispose()
+
+
+@SHAPES
+@pytest.mark.asyncio
 async def test_consecutive_requests_share_the_settled_prefix_and_differ_by_the_turn(
     tmp_path, model, base
 ):
