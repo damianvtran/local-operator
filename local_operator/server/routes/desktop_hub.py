@@ -246,7 +246,12 @@ async def apply(
                     "source": record.identity.hub_source,
                     "visibility": record.identity.visibility,
                     "tenant_id": record.identity.tenant_id,
-                    "baseline": record.recorded_by,
+                    # The ACTUAL baseline provenance literal this arm writes. The
+                    # resolve arm always records "adopt-unknown" (a source/scope
+                    #  confirmed but no content common-ancestor vouched for); the
+                    # separate equal-text path records "adopt". Exposed under a
+                    # stable key so a client keys on the enum, not on a field name.
+                    "baseline_state": record.recorded_by,
                     "scope_known": record.scope_known,
                 },
             }
