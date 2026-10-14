@@ -368,6 +368,20 @@ class MeshCredentialBroker:
             detail = self.report(link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
+        elif str(kind).startswith("lifecycle_"):
+            # ADVERTISED, NOT YET SERVED: ``wire.LINK_CAPABILITIES`` carries
+            # ``credential-lifecycle-v1`` so the negotiation bit is truthful, but the
+            # transport slice that reads announce/read/ack does not exist yet. This is
+            # the interim answer BY NAME, and it must never fall through to the
+            # ``internal`` else-branch below — that reads as an owner build fault, and
+            # an advertised capability that answers a fault on use is a false promise.
+            detail = BrokerError(
+                code="unsupported",
+                message=(
+                    f"this build advertises {kind!r} in its link capabilities but does not "
+                    "serve lifecycle metadata yet; nothing was read or changed"
+                ),
+            ).to_detail()
         else:
             detail = BrokerError(
                 code="internal",
