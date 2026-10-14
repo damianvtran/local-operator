@@ -531,8 +531,13 @@ def test_sender_rotates_retry_prefix_and_reannounces_new_link(rig):
 
     def selective(frame):
         reply = _echo_applied(frame)
+        # _native_contexts is Optional; the seeded rig must always yield contexts, so a None
+        # here is a real failure, not something to iterate past.
+        contexts = L._native_contexts(rig.root, P)
+        assert contexts is not None
+        first_eight = sorted(contexts)[:8]
         for result, item in zip(reply["detail"]["entries"], frame["entries"]):
-            if item["account_scope_ref"] in sorted(L._native_contexts(rig.root, P))[:8]:
+            if item["account_scope_ref"] in first_eight:
                 result.update(applied=False, reason=L.OBSERVED_TABLE_FULL)
         return reply
 
