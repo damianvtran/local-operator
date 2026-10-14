@@ -190,7 +190,7 @@ async def test_xai_on_demand_is_alternative(plan, paid, expected) -> None:
 @pytest.mark.asyncio
 async def test_xai_monthly_response_owns_its_on_demand_meter() -> None:
     def handler(request):
-        config = {"isUnifiedBillingUser": True}
+        config: dict[str, Any] = {"isUnifiedBillingUser": True}
         if not request.url.query:
             config.update(
                 monthlyLimit={"val": 100},

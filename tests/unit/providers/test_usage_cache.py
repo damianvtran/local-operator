@@ -573,7 +573,7 @@ def test_paid_metadata_cache_roundtrip_and_legacy_defaults() -> None:
     )
     encoded = report_to_dict(report)
     decoded = report_from_dict(encoded)
-    assert decoded == report
+    assert decoded is not None and decoded == report
     assert usage_health(decoded, "gpt-codex").state == "healthy"
     assert usage_health(decoded, "gpt-codex").remaining_fraction is None
     for field in ("paid_fallback", "available", "supersedes_tiers", "unlimited"):
@@ -582,3 +582,39 @@ def test_paid_metadata_cache_roundtrip_and_legacy_defaults() -> None:
     assert legacy is not None
     assert legacy.limits[0].paid_fallback is False
     assert usage_health(legacy, "gpt-codex").state == "unknown"
+
+
+@pytest.mark.parametrize(
+    "plan,paid,status,expected",
+    [
+        (1, 0.25, None, "healthy"),
+        (0.25, 1, None, "healthy"),
+        (1, 0.25, "disabled", "depleted"),
+        (1, None, None, "depleted"),
+    ],
+)
+def test_legacy_anthropic_paid_semantic_migration(plan, paid, status, expected) -> None:
+    from local_operator.providers.usage import usage_health
+    from local_operator.providers.usage_cache import report_from_dict
+
+    report = report_from_dict(
+        {
+            "provider": "anthropic",
+            "limits": [
+                {
+                    "id": "anthropic:7d",
+                    "label": "Plan",
+                    "amount": {"used_fraction": plan},
+                    "shared": True,
+                },
+                {
+                    "id": "anthropic:extra",
+                    "label": "Extra",
+                    "amount": {"used_fraction": paid, "unit": "usd"},
+                    "status": status,
+                },
+            ],
+        }
+    )
+    assert report is not None
+    assert usage_health(report, "claude-opus").state == expected
