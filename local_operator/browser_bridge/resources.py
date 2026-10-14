@@ -659,15 +659,23 @@ class BrowserResource:
         return self._lane().discovery.peer_identity()
 
     def refresh_identity(self) -> None:
-        """Invalidate both caches when the peer identity actually CHANGED.
+        """Invalidate the cached verdict when the peer identity actually CHANGED.
 
         Discovery is never proof, and an unknown discovery is not proof of a
         changed incarnation either. ``_peer_identity`` returns ``None`` for
-        "cannot tell" (the record is gone or unreadable), so a ``None`` result
-        must NOT be compared against a learned peer: a host that flaps
-        A -> None -> A would otherwise invalidate twice and force a needless
+        "cannot tell" (the record is gone or unreadable), so WITHIN ONE LANE a
+        ``None`` result must NOT be compared against a learned peer: a host that
+        flaps A -> None -> A would otherwise invalidate twice and force a needless
         re-recovery each time. Reset only when a RESOLVED peer differs from the
         learned one; a transient ``None`` leaves the learned verdict intact.
+
+        That rule is per-lane and deliberately NOT absolute. Two other outcomes
+        are intended and are the opposite of "no churn": this method still CLEARS
+        ``recovered`` (forcing a reconcile) on a resolved same-lane peer change,
+        which is exactly the CR1 defect's cure; and it drops the cached
+        ``ownership`` verdict on a LANE move without resetting ``recovered`` (see
+        the lane-scope branch below). "Does not churn on None" governs the
+        same-lane unresolvable case only.
 
         The cache is LANE-SCOPED. ``_peer_identity`` reads the CURRENT lane's
         discovery while ``_ownership_peer`` may have been learned on the other
