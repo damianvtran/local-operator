@@ -3527,6 +3527,13 @@ class OpenAICompatClient:
     def _observe_responses_headers(self, headers: httpx.Headers) -> None:
         """Dialect hook for request attribution; never copy all response headers."""
 
+    def _observe_responses_error(self, response: httpx.Response) -> None:
+        """Dialect hook for bounded safe diagnostics before HTTP classification.
+
+        The body has been read, but may reflect credentials or submitted content.
+        Implementations must not retain raw prose or change failover classification.
+        """
+
     async def _stream_responses(
         self,
         request: ChatRequest,
@@ -3571,6 +3578,8 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
+                self._observe_responses_headers(response.headers)
+                self._observe_responses_error(response)
                 raise_for_status(response)
             self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
