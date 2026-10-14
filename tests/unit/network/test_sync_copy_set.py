@@ -60,6 +60,7 @@ def _entry_owners() -> dict[str, str]:
     """
     from local_operator.browser_bridge.resources import RESOURCE_NAME
     from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -89,6 +90,7 @@ def _entry_owners() -> dict[str, str]:
 
     return {
         TRANSCRIPT_FILENAME: "session.transcript",
+        SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_NAME: "resume",
         ATTACHMENT_SIDECAR_FILENAME: "resume",
