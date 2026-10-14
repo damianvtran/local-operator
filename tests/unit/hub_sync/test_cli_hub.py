@@ -318,12 +318,16 @@ def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) 
     assert "error:" in capsys.readouterr().out
 
 
-def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = "pull") -> str:
+def _seed_public_link(
+    root: Path, *, lineage: str = "clean", recorded_by: str = "pull", cas: bool = True
+) -> str:
     """A CONFIRMED public link the way a real pull + capability probe leaves it.
 
     A baseline record with a source-scoped remote revision and known scope, plus
-    the persisted revision-CAS attestation — the facts ``_eligibility`` reads.
-    ``lineage``/``recorded_by`` are varied to exercise the earlier gates.
+    (unless ``cas`` is False) the persisted revision-CAS attestation — the facts
+    ``_eligibility`` reads. ``lineage``/``recorded_by``/``cas`` are varied to
+    reach each earlier gate in order: capability first (unsupported-
+    precondition), then the baseline (baseline-unknown), then lineage.
     """
 
     import dataclasses
@@ -351,7 +355,7 @@ def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = 
     cm.set_config_value(
         "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
     )
-    if recorded_by != "adopt-unknown":
+    if cas:
         svc.record_server_capabilities(
             svc.HubSyncContext(
                 config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None

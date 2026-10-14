@@ -341,12 +341,16 @@ async def _resolved_link_id(client: Any, root: Path) -> str:
     return resolved.json()["result"]["link"]["link_id"]
 
 
-def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = "pull") -> str:
+def _seed_public_link(
+    root: Path, *, lineage: str = "clean", recorded_by: str = "pull", cas: bool = True
+) -> str:
     """A CONFIRMED public link as a real pull + capability probe leaves it.
 
     Baseline record with a source-scoped remote revision and known scope, plus
-    the persisted revision-CAS attestation — the facts ``_eligibility`` reads.
-    ``lineage``/``recorded_by`` are varied to exercise the earlier gates.
+    (unless ``cas`` is False) the persisted revision-CAS attestation — the facts
+    ``_eligibility`` reads. ``lineage``/``recorded_by``/``cas`` are varied to
+    reach each earlier gate in order: capability first (unsupported-
+    precondition), then the baseline (baseline-unknown), then lineage.
     """
 
     import dataclasses
@@ -373,7 +377,7 @@ def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = 
     cm.set_config_value(
         "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
     )
-    if recorded_by != "adopt-unknown":
+    if cas:
         svc.record_server_capabilities(
             svc.HubSyncContext(
                 config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
@@ -445,6 +449,7 @@ async def test_desktop_patch_refuses_when_an_earlier_gate_fails_even_with_consen
         ),
     )
     assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == "baseline-unknown"
     assert not _grant_written(root, link_id)
     assert _auto_push_persisted(root, link_id) is False
     assert _auto_push_persisted(root, link_id) is False
@@ -464,6 +469,7 @@ async def test_desktop_patch_refuses_mixed_lineage_with_consent(api):
         ),
     )
     assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == "mixed-lineage"
     assert not _grant_written(root, link_id)
     assert _auto_push_persisted(root, link_id) is False
 
@@ -505,3 +511,64 @@ async def test_desktop_second_write_after_the_grant_uses_the_served_revision(api
 def _policy_values_desktop(root: Path, link_id: str) -> dict[str, Any]:
     hub = ConfigManager(root).get_config().values.get("hub", {})
     return dict((hub.get("links") or {}).get(link_id) or {})
+
+
+async def test_policy_patch_no_confirm_refusal_is_typed_unsafe_publication(api):
+    """F3: the no-consent refusal carries detail.code == "unsafe-publication".
+
+    The renderer reads `detail.code` (a declared code always wins in
+    desktop-api.ts) and the desktop panel branches on `write.error.code`; the
+    old string detail dropped the category entirely.
+    """
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "unsafe-publication", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()
+
+
+async def test_policy_patch_stale_revision_refusal_is_typed(api):
+    """F3: a stale revision is a 409 whose detail carries policy-revision-changed."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    stale = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_policy_revision="not-the-revision"),
+    )
+    assert stale.status_code == 409, stale.text
+    detail = stale.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "policy-revision-changed", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()
+
+
+async def test_policy_patch_no_cas_refusal_is_typed_unsupported_precondition(api):
+    """F3: the FIRST gate's refusal carries its own code even with consent."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, cas=False)
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "unsupported-precondition", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()

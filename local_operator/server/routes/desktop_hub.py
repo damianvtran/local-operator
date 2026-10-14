@@ -118,8 +118,21 @@ async def _run(
         raise _refusal(409, str(busy)) from None
 
 
-def _refusal(status: int, message: str) -> HTTPException:
-    return HTTPException(status, message)
+def _refusal(status: int, message: str, *, code: str | None = None) -> HTTPException:
+    """A refusal, TYPED when it carries a category code.
+
+    The desktop plane's refusals carry ``{"code", "message"}`` as the detail
+    (the desktop_mesh.py precedent): the renderer keys on
+    ``DesktopControlError.code``, which desktop-api.ts reads from
+    ``detail.code`` when detail is an object, and a declared code always wins
+    over a status-derived one. A plain string body drops the category, so
+    every refusal whose error has a LinkError-style ``code`` must use this
+    form; routes without a code keep the plain string body unchanged.
+    """
+
+    if code is None:
+        return HTTPException(status, message)
+    return HTTPException(status, {"code": code, "message": message})
 
 
 def _raise_for(reports: Any) -> None:
@@ -231,17 +244,20 @@ async def apply(
             try:
                 source = approve_source(body.hub_source, approved)
             except _IdentityError as error:
-                raise _refusal(422, str(error)) from None
+                raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
             if ctx.credential == "none":
                 raise _refusal(401, "no hub credential is configured for this destination")
-            record = svc.resolve_source(
-                ctx,
-                kind=body.kind,
-                name=body.name,
-                hub_source=source,
-                visibility=body.visibility,
-                tenant_id=body.tenant_id,
-            )
+            try:
+                record = svc.resolve_source(
+                    ctx,
+                    kind=body.kind,
+                    name=body.name,
+                    hub_source=source,
+                    visibility=body.visibility,
+                    tenant_id=body.tenant_id,
+                )
+            except _IdentityError as error:
+                raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
             return {
                 "link": record.identity.to_json(),
                 "resolved": {
@@ -412,6 +428,7 @@ async def links(
     """
 
     from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
 
     kinds: tuple[str, ...] | None = None
     if kind:
@@ -432,6 +449,11 @@ async def links(
             return reply(await asyncio.to_thread(read))
         except OSError as exc:
             raise _refusal(503, f"the hub link store is unreadable: {exc}") from None
+        except LinkError as error:
+            # A malformed local policy/grant (read_policy validation) refuses the
+            # INVENTORY with its own code instead of surfacing a bare 500; the
+            # renderer keys on the code (F3).
+            raise _refusal(422, str(error), code=getattr(error, "code", "") or None) from None
 
 
 @router.patch("/v1/desktop/hub/links/{link_id}", response_model=CRUDResponse)
@@ -493,9 +515,13 @@ async def patch_link(
             )
         except LinkError as error:
             code = getattr(error, "code", "") or ""
+            # TYPED refusal: the renderer branches on `write.error.code` (e.g.
+            # policy-revision-changed vs unsafe-publication), so the code must
+            # ride the detail — a string body would flatten every refusal into
+            # one untyped shape (F3).
             if code == "policy-revision-changed":
-                raise _refusal(409, str(error)) from None
-            raise _refusal(422, str(error)) from None
+                raise _refusal(409, str(error), code=code) from None
+            raise _refusal(422, str(error), code=code or None) from None
         return {"link_id": link_id, "policy": snapshot.to_json()}
 
     async def mutate() -> dict[str, Any]:
