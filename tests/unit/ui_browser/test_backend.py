@@ -393,9 +393,9 @@ async def test_public_retry_is_clamped_to_the_shared_deadline(
     assert (gets, posts) == (2, 2), "a changed-record refusal redispatches exactly once"
     assert len(timeouts) == 4, "two attempts x (health, post)"
     assert timeouts[2] > 0 and timeouts[3] > 0
-    assert timeouts[2] < timeouts[0] and timeouts[3] < timeouts[1], (
-        "the retry is clamped to the REMAINDER, never a renewed full budget"
-    )
+    assert (
+        timeouts[2] < timeouts[0] and timeouts[3] < timeouts[1]
+    ), "the retry is clamped to the REMAINDER, never a renewed full budget"
 
 
 @pytest.mark.asyncio
