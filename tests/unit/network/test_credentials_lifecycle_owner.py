@@ -48,7 +48,13 @@ def _call(
     rig: Any, kind: str, entries: list[dict[str, Any]] | None, *, device: str = "", **extra: Any
 ):
     device = device or rig.peer.device_id
-    link = SimpleNamespace(device_id=device, network_id=N, epoch=1)
+    link = SimpleNamespace(
+        device_id=device,
+        network_id=N,
+        epoch=1,
+        capabilities={"credential-lifecycle-v1"},
+        local_capabilities={"credential-lifecycle-v1"},
+    )
     frame = {"op": "net_broker", "kind": kind, "req": 1, "from_device": device, **extra}
     if entries is not None:
         frame["entries"] = entries

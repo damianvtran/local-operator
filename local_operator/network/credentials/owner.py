@@ -364,7 +364,11 @@ class MeshCredentialBroker:
                 "nothing was refreshed or lent",
             )
         kind = str(frame.get("kind") or "")
-        if kind in ("announce", "copy", "ack"):
+        from local_operator.network.credentials.lifecycle import negotiated
+
+        if kind.startswith("lifecycle_") and not negotiated(link):
+            detail = _lifecycle_unsupported(kind)
+        elif kind in ("announce", "copy", "ack"):
             # THE SYNC KINDS (S3). One import for the three branches; the module
             # is stdlib-only at import, the package's stated rule.
             from local_operator.network.credentials import sync as sync_mod

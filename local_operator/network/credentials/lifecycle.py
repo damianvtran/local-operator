@@ -3,8 +3,8 @@
 ``<config>/network/credentials/<network_id>/lifecycle.json``, 0600, METADATA ONLY:
 integers, booleans and reference strings. Design authority:
 ``docs/design/mesh-credential-lifecycle.md`` ("Generations and metadata-only
-transport"). This slice has no wire handler, owner dispatch or capability
-advertisement; it is the persistence + arithmetic those later slices call.
+transport"). Native metadata observation, bounded owner announcements and recipient
+high-water application share this persistence and forward-only arithmetic.
 
 Two independent counters per ``(credential key, account_scope_ref)`` on the OWNER:
 
@@ -50,6 +50,7 @@ Pure derivation (:func:`derive`: facts -> next row) is separate from persistence
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from contextlib import contextmanager
@@ -74,6 +75,9 @@ MAX_REVISION = consent.MAX_REVISION
 MAX_RECOVERY_JUMP = 2**20
 #: Bounds on the document, mirroring the lifecycle frame's own small caps.
 MAX_ROWS = 4096
+# One owner cannot consume the entire recipient table; retain the global disk
+# bound as a second guard rather than growing state with the number of owners.
+MAX_OWNER_OBSERVATIONS = 1024
 MAX_FILE_BYTES = 1_048_576
 
 #: The named unprovable state. Also the ``MeshRefusal`` code on the owner side.
@@ -105,6 +109,7 @@ class CounterRow:
     present: bool
     withdrawn: bool = False
     row_updated_at: Optional[float] = None
+    native_login_ref: Optional[str] = None
 
     @property
     def state(self) -> str:
@@ -120,6 +125,7 @@ class NativeFacts:
 
     present: bool
     row_updated_at: Optional[float] = None
+    native_login_ref: Optional[str] = None
     new_login: bool = False
     scope_changed: bool = False
     authorised_reenable: bool = False
@@ -161,6 +167,7 @@ def derive(prev: Optional[CounterRow], key: str, scope: str, facts: NativeFacts)
             facts.present,
             facts.withdrawn,
             facts.row_updated_at if facts.present else None,
+            facts.native_login_ref,
         )
     presence_changed = prev.present != facts.present
     rotated = (
@@ -169,10 +176,16 @@ def derive(prev: Optional[CounterRow], key: str, scope: str, facts: NativeFacts)
         and facts.row_updated_at is not None
         and facts.row_updated_at != prev.row_updated_at
     )
-    material_bump = presence_changed or rotated
+    native_login = (
+        facts.present
+        and facts.native_login_ref is not None
+        and facts.native_login_ref != prev.native_login_ref
+    )
+    material_bump = presence_changed or rotated or native_login
     login = (
         (facts.present and not prev.present)
         or (facts.present and facts.new_login)
+        or native_login
         or facts.authorised_reenable
         or facts.scope_changed
     )
@@ -191,6 +204,7 @@ def derive(prev: Optional[CounterRow], key: str, scope: str, facts: NativeFacts)
         present=facts.present,
         withdrawn=withdrawn,
         row_updated_at=facts.row_updated_at if facts.present else None,
+        native_login_ref=facts.native_login_ref or prev.native_login_ref,
     )
 
 
@@ -261,6 +275,7 @@ class LifecycleDocument:
                     "present": r.present,
                     "withdrawn": r.withdrawn,
                     "row_updated_at": r.row_updated_at,
+                    "native_login_ref": r.native_login_ref,
                 }
                 for _, r in sorted(self.rows.items())
             ],
@@ -303,7 +318,13 @@ class LifecycleDocument:
                 "row_updated_at",
             }
             for item in data["counters"]:
-                if not isinstance(item, dict) or set(item) != row_fields:
+                if not isinstance(item, dict) or set(item) not in (
+                    row_fields,
+                    row_fields | {"native_login_ref"},
+                ):
+                    raise ValueError
+                native_ref = item.get("native_login_ref")
+                if native_ref is not None and not _ref_ok(native_ref):
                     raise ValueError
                 updated = item["row_updated_at"]
                 if (
@@ -465,7 +486,11 @@ class LifecycleStore:
             if reason == OBSERVED:
                 # A fresh ident grows the table; an existing one only moves forward,
                 # so restrictive updates still apply when the table is full.
-                if ident not in doc.high_water and len(doc.high_water) >= MAX_ROWS:
+                if ident not in doc.high_water and (
+                    len(doc.high_water) >= MAX_ROWS
+                    or sum(owner == obs.owner for owner, _, _ in doc.high_water)
+                    >= min(MAX_ROWS, MAX_OWNER_OBSERVATIONS)
+                ):
                     return ObservationResult(False, OBSERVED_TABLE_FULL)
                 doc.high_water[ident] = hw
                 try:
@@ -568,6 +593,8 @@ def checked_reply_detail(reply: Any) -> dict[str, Any]:
     """
     from local_operator.network.credentials.types import validate_lifecycle_frame
 
+    if getattr(reply, "duplicate_json_keys", False):
+        raise ValueError("duplicate keys in credential lifecycle reply")
     detail = reply.get("detail") if isinstance(reply, dict) else None
     if not isinstance(detail, dict):
         raise ValueError("lifecycle reply carries no detail object")
@@ -598,6 +625,9 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
     only through ``grant``, and only a successful resolve marks access usable.
     """
     from local_operator.network.credentials import effective
+
+    if not negotiated(link):
+        return _announce_error("unsupported", "", "credential lifecycle was not negotiated")
     from local_operator.network.credentials.placement import PlacementDocument
     from local_operator.network.credentials.types import validate_lifecycle_frame
 
@@ -662,24 +692,33 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
             )
         providers[item["credential_key"]] = str(entry.provider or item["credential_key"])
     life = LifecycleStore(document.network_id, root)
+    if life.load().needs_baseline:
+        return _announce_error(
+            NEEDS_AUTHORITATIVE_BASELINE,
+            "",
+            "this device's lifecycle record needs an authoritative baseline; nothing applied",
+        )
     results: list[dict[str, Any]] = []
     for item in entries:
         key, scope = item["credential_key"], item["account_scope_ref"]
-        result = life.observe(
-            Observation(
-                sender, key, scope, item["login_chain_revision"], item["material_generation"]
+        try:
+            result = life.observe(
+                Observation(
+                    sender, key, scope, item["login_chain_revision"], item["material_generation"]
+                )
             )
-        )
-        if result.reason == NEEDS_AUTHORITATIVE_BASELINE:
-            return _announce_error(
-                NEEDS_AUTHORITATIVE_BASELINE,
-                key,
-                "this device's lifecycle record needs an authoritative baseline; nothing applied",
-            )
+        except (MeshRefusal, OSError) as exc:
+            # Entries commit individually. Preserve earlier truthful acks rather
+            # than turning a later transient failure into 'nothing applied'.
+            result = ObservationResult(False, getattr(exc, "code", "observation_unavailable"))
         applied = result.applied or (
             result.reason == OBSERVED_REPLAY and item["state"] in _RESTRICTIVE_STATES
         )
-        if applied:
+        # Capacity cannot leave a restrictive new identity usable. This local
+        # block remains retry-later, never falsely acknowledged as durable.
+        if result.reason == OBSERVED_TABLE_FULL and item["state"] in _RESTRICTIVE_STATES:
+            effective.note_lifecycle_observation(root, providers[key], item["state"], owner=sender)
+        if applied or result.reason == OBSERVED_REPLAY:
             effective.note_lifecycle_observation(root, providers[key], item["state"], owner=sender)
         results.append(
             {
@@ -697,7 +736,7 @@ def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) 
 # ---------------------------------------------------------------------------
 
 #: Per-relay memory of what each recipient has ACKNOWLEDGED, so a quiet owner does not
-#: re-send an unchanged row to every holder every 60 s. Deliberately in-memory only:
+#: re-send an unchanged row on each cadence. Deliberately in-memory only:
 #: nothing is queued or persisted (a restart makes the first tick re-announce to every
 #: active member, which the recipient's forward-only high-water absorbs as a replay),
 #: and the durable owner-side ack ledger is a later slice.
@@ -721,13 +760,64 @@ def _sent_ledger(server: Any) -> dict[tuple[str, str, str], tuple[str, int, int]
     return ledger
 
 
+def negotiated(link: Any) -> bool:
+    """Raw peer advertisements alone are not bilateral feature negotiation."""
+    from local_operator.network import wire
+
+    local = getattr(link, "local_capabilities", ())
+    return wire.CREDENTIAL_LIFECYCLE_V1 in local and wire.CREDENTIAL_LIFECYCLE_V1 in getattr(
+        link, "capabilities", ()
+    )
+
+
+def _native_contexts(
+    root: Path, provider: str
+) -> dict[str, tuple[NativeFacts, dict[str, str]]] | None:
+    """Read only native AuthStore identities; never fingerprint or copy material.
+
+    A pre-stamp login, borrowed row, ambiguous identity or unreadable database is
+    UNKNOWN, not logout. Only explicit AuthStore login writes stamp an incarnation;
+    its refresh path retains that stamp. MCP upsert cannot distinguish the two yet.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    if provider == "mcp-oauth":
+        return None
+    rows = AuthStore.native_lifecycle_snapshot(root / "auth.db", provider)
+    if rows is None:
+        return None
+    contexts: dict[str, tuple[NativeFacts, dict[str, str]]] = {}
+    for _, updated, marker, disabled, _, account, email, org, mesh_origin in rows:
+        if mesh_origin is not None:
+            continue  # sync.MESH_ORIGIN_KEY is copied provenance, never native login
+        if not isinstance(marker, str) or not marker:
+            return None
+        if disabled is not None:
+            continue
+        context = {
+            name: str(value)
+            for name, value in (("account_id", account), ("email", email), ("org_id", org))
+            if value
+        }
+        identity = context.get("account_id") or context.get("email") or "provider"
+        # Reversible encoding of a public identity, NOT a material-derived hash.
+        # Email/IdP subjects may contain characters forbidden in protocol refs.
+        encoded = base64.urlsafe_b64encode(identity.encode()).decode().rstrip("=")
+        scope = f"native:{provider}:{encoded}"
+        if not _ref_ok(scope) or scope in contexts:
+            return None
+        contexts[scope] = (NativeFacts(True, updated, native_login_ref=marker), context)
+    return contexts
+
+
 def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, Any]]]:
     """``(network_id, entries)`` this owner owes ``device_id``, at most one frame's worth.
 
-    Recomputed from the persisted counters and the placement document on every call
-    (nothing is queued). Only keys this device OWNS and that ``device_id`` HOLDS are
-    announced — the recipient re-checks both — and only for an ACTIVE member, so a
-    removed member learns nothing here. An unreadable counter file
+    Recomputed from native metadata, consent, persisted counters and placement on
+    every call (nothing is queued). Only owned keys with finite holder or verified
+    future coverage are announced, to ACTIVE members. Denials/fences gate native
+    observation; sticky denials may only withdraw already disclosed evidence.
+    An unreadable counter file
     (``needs_baseline``) announces nothing: its numbers are not provable.
     """
     from local_operator.network.credentials import sync as sync_mod
@@ -744,50 +834,123 @@ def _pending_entries(server: Any, device_id: str) -> tuple[str, list[dict[str, A
     network_id = str(document.network_id)
     if not sync_mod._member_is_active(root, network_id, device_id):  # noqa: SLF001
         return network_id, []
-    owned: set[str] = set()
-    for key in document.keys_owned_by(self_device):
-        entry = document.entry(key)
-        if entry is not None and key not in DEVICE_BOUND_PROVIDERS and entry.is_holder(device_id):
-            owned.add(key)
-    if not owned:
-        return network_id, []
-    doc = LifecycleStore(network_id, root).load()
-    if doc.needs_baseline:
-        return network_id, []
+    life = LifecycleStore(network_id, root)
     ledger = _sent_ledger(server)
     entries: list[dict[str, Any]] = []
-    cap = min(sync_mod.ANNOUNCE_CAP, MAX_ENTRIES)
-    for (key, scope), row in sorted(doc.rows.items()):
-        if key not in owned:
+    for key in sorted(document.keys_owned_by(self_device)):
+        # A stale positive placement never bypasses provider denial or the fence.
+        # Native identity is then needed for the final ACCOUNT gate; no scope is
+        # inferred from peer strings or from the encoded lifecycle reference.
+        try:
+            consent.check_borrow(network_id, self_device, device_id, key, None, root)
+        except MeshRefusal as refusal:
+            if refusal.code != "not_a_holder":
+                continue  # a fence/unreadable authority is UNKNOWN, not sticky withdrawal
+            # No new metadata is read after refusal. Previously acknowledged
+            # evidence can only be made MORE restrictive, using the same counters
+            # and references this recipient already saw. This also makes a deny
+            # observable without accidentally publishing a fresh native snapshot.
+            for ident, sent in list(ledger.items()):
+                if ident[:2] == (device_id, key) and sent[0] != STATE_WITHDRAWN:
+                    entries.append(
+                        {
+                            "credential_key": key,
+                            "account_scope_ref": ident[2],
+                            "state": STATE_WITHDRAWN,
+                            "login_chain_revision": sent[1],
+                            "material_generation": sent[2],
+                        }
+                    )
             continue
-        if ledger.get((device_id, key, scope)) == (
-            row.state,
-            row.login_chain_revision,
-            row.material_generation,
+        entry = document.entry(key)
+        if (
+            entry is None
+            or key in DEVICE_BOUND_PROVIDERS
+            or entry.provider in DEVICE_BOUND_PROVIDERS
         ):
             continue
-        entries.append(
-            {
-                "credential_key": key,
-                "account_scope_ref": scope,
-                "state": row.state,
-                "material_generation": row.material_generation,
-                "login_chain_revision": row.login_chain_revision,
-            }
-        )
-        if len(entries) >= cap:
-            break
-    return network_id, entries
+        native = _native_contexts(root, str(entry.provider or key))
+        if native is None:
+            continue
+        doc = life.load()
+        if doc.needs_baseline:
+            continue
+        scopes = set(native) | {
+            scope
+            for (row_key, scope), row in doc.rows.items()
+            if row_key == key and row.native_login_ref is not None
+        }
+        for scope in sorted(scopes):
+            facts, context = native.get(scope, (NativeFacts(False), {}))
+            try:
+                consent.check_borrow(network_id, self_device, device_id, key, context, root)
+                if not entry.is_holder(device_id):
+                    consent.verified_permission(
+                        network_id, self_device, device_id, key, context, root
+                    )
+                row = life.record_native(key, scope, facts)
+            except MeshRefusal as refusal:
+                sent = ledger.get((device_id, key, scope))
+                if refusal.code == "not_a_holder" and sent and sent[0] != STATE_WITHDRAWN:
+                    entries.append(
+                        {
+                            "credential_key": key,
+                            "account_scope_ref": scope,
+                            "state": STATE_WITHDRAWN,
+                            "login_chain_revision": sent[1],
+                            "material_generation": sent[2],
+                        }
+                    )
+                continue
+            if ledger.get((device_id, key, scope)) == (
+                row.state,
+                row.login_chain_revision,
+                row.material_generation,
+            ):
+                continue
+            entries.append(
+                {
+                    "credential_key": key,
+                    "account_scope_ref": scope,
+                    "state": row.state,
+                    "material_generation": row.material_generation,
+                    "login_chain_revision": row.login_chain_revision,
+                }
+            )
+    # Rotate independently of ack success: a permanently refused prefix cannot
+    # monopolise every bounded exchange. Only one cursor per active target lives.
+    cursors = getattr(server, "_lifecycle_cursors", None)
+    if not isinstance(cursors, dict):
+        cursors = {}
+        setattr(server, "_lifecycle_cursors", cursors)
+    active = {m.device_id for m in store.load(network_id, root).members if m.active}
+    for table in (cursors, getattr(server, "_lifecycle_links", {})):
+        for target in list(table):
+            if target not in active:
+                del table[target]
+    for ident in list(ledger):
+        if ident[0] not in active:
+            del ledger[ident]
+    entries.sort(key=lambda entry: (entry["credential_key"], entry["account_scope_ref"]))
+    cursor = cursors.get(device_id)
+    if cursor is not None:
+        entries = [e for e in entries if (e["credential_key"], e["account_scope_ref"]) > cursor] + [
+            e for e in entries if (e["credential_key"], e["account_scope_ref"]) <= cursor
+        ]
+    batch = entries[: min(sync_mod.ANNOUNCE_CAP, MAX_ENTRIES)]
+    if batch:
+        cursors[device_id] = (batch[-1]["credential_key"], batch[-1]["account_scope_ref"])
+    return network_id, batch
 
 
 def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     """One member's lifecycle announcement, run INSIDE the mesh-definitions tick.
 
     Registered with ``definitions.add_tick_step`` beside ``sync.credentials_sync_step``
-    so it rides the same thread and floors (15 s tick, 60 s to a reachable member) and
-    adds no thread, queue or dialer. The order is cheap-before-costly: the capability
-    table check (``net_broker`` needs ``broker_credential``) and the local pending
-    computation come first, so a member owed nothing costs no dial.
+    with an independent 15 s floor, not definitions' admin/refusal/60 s parking.
+    It adds no thread, queue or dialer. The local capability table gates dialing;
+    the authenticated link's bilateral advertisement gates native observation.
+    Link identity is checked before deduplication so reconnect can restore receipts.
 
     THE NEGOTIATED CAPABILITY IS THE GATE. After the dial, a peer whose LINK did not
     negotiate ``credential-lifecycle-v1`` gets ZERO frames — an old peer would answer
@@ -798,21 +961,34 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     The returned string is the outcome for the tick's log only; none is a policy
     refusal, so a failed exchange is retried on the next tick rather than parked.
     """
-    from local_operator.network import definitions, wire
+    from local_operator.network import definitions
     from local_operator.network.credentials import sync as sync_mod
     from local_operator.network.credentials.types import validate_lifecycle_frame
 
     blocked = definitions.unholdable_capability(step_server, device_id, "net_broker")
     if blocked:
         return f"skipped:no_{blocked}"
-    network_id, entries = _pending_entries(step_server, device_id)
-    if not entries:
-        return "in_sync"
     link = step_server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
         return "unreachable"
-    if wire.CREDENTIAL_LIFECYCLE_V1 not in link.capabilities:
+    if not negotiated(link):
         return "skipped:peer_lacks_lifecycle"
+    # Ack evidence belongs to this authenticated connection; a recipient restart
+    # loses process receipts even while its persisted counters remain unchanged.
+    links = getattr(step_server, "_lifecycle_links", None)
+    if not isinstance(links, dict):
+        links = {}
+        setattr(step_server, "_lifecycle_links", links)
+    incarnation = getattr(link, "link_id", None) or id(link)
+    if links.get(device_id) != incarnation:
+        ledger = _sent_ledger(step_server)
+        for ident in list(ledger):
+            if ident[0] == device_id:
+                del ledger[ident]
+        links[device_id] = incarnation
+    network_id, entries = _pending_entries(step_server, device_id)
+    if not entries:
+        return "in_sync"
     identity = step_server.identity
     self_device = str(identity.device_id)
     frame = {
@@ -895,4 +1071,5 @@ def install() -> None:
     """
     from local_operator.network import definitions
 
+    setattr(lifecycle_tick_step, "independent_cadence", True)
     definitions.add_tick_step(lifecycle_tick_step)
