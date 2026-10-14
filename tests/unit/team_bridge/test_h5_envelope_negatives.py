@@ -24,6 +24,7 @@ import json
 import sqlite3
 import time
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -46,7 +47,8 @@ from local_operator.team_bridge.ask_issuance import (
 from local_operator.team_bridge.asks_bridge import (
     enqueue_bridge_request_ask as _real_enqueue_bridge_request_ask,
 )
-from local_operator.team_bridge.store import Store, StoreRefused
+from local_operator.team_bridge.store import OwnerSnapshot, Store, StoreRefused
+from local_operator.team_bridge.tool import BridgeRuntime
 
 BODY_HASH = "9f2a" * 16
 TEMPLATE = "aa11" * 16
@@ -73,7 +75,7 @@ DREF = "dref_" + "ab" * 16
 LOCAL_ROW_ID = "peer-" + "ab" * 16
 
 
-def _owner(**overrides) -> SimpleNamespace:
+def _owner(**overrides) -> OwnerSnapshot:
     values = {
         "canonical_base_url": "https://hub.example",
         "account_id": "acc_1",
@@ -83,7 +85,7 @@ def _owner(**overrides) -> SimpleNamespace:
         "enrollment_generation": 7,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return cast(OwnerSnapshot, SimpleNamespace(**values))
 
 
 def _seed_store(tmp_path, *, kind: str = "request", expires: str = "") -> Store:
@@ -223,7 +225,9 @@ def _seed_note_envelope(tmp_path) -> None:
         conn.close()
 
 
-def _stamp(store: Store, *, advance_phase: bool = True, sender_account_id: str = "acc_1") -> dict:
+def _stamp(
+    store: Store, *, advance_phase: bool = True, sender_account_id: str = "acc_1"
+) -> dict[str, Any]:
     """The REAL write path (+ the confirmed-handoff phase), for the seeds.
 
     ``sender_account_id`` is the REMOTE sender's account — distinct from the
@@ -270,18 +274,21 @@ class _StubSession(Session):
         return self._test_queue
 
 
-def _runtime(config_dir, owner=None) -> SimpleNamespace:
-    return SimpleNamespace(
-        owner=owner or _owner(),
-        config_dir=config_dir,
-        tenant_id="ten_1",
-        session_id="s1",
+def _runtime(config_dir, owner=None) -> BridgeRuntime:
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=owner or _owner(),
+            config_dir=config_dir,
+            tenant_id="ten_1",
+            session_id="s1",
+        ),
     )
 
 
 @pytest.fixture(autouse=True)
-def _no_enqueue(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    calls: list[dict] = []
+def _no_enqueue(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
 
     def _recorder(queue, **kwargs):
         calls.append(kwargs)
@@ -291,7 +298,7 @@ def _no_enqueue(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return calls
 
 
-def _meta(**overrides) -> dict:
+def _meta(**overrides) -> dict[str, Any]:
     meta = {
         "v": "1",
         "delivery_ref": DREF,
@@ -576,7 +583,7 @@ def test_the_valid_stamp_enqueues_through_the_real_validator(tmp_path, _no_enque
 def test_unavailable_lookup_holds_instead_of_enqueueing(tmp_path, monkeypatch) -> None:
     store = _seed_store(tmp_path)
     _stamp(store)
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
 
     def _recorder(queue, **kwargs):
         calls.append(kwargs)
@@ -630,7 +637,7 @@ def test_found_exact_ask_terminalizes_without_a_second_enqueue(tmp_path, monkeyp
         },
     )
     assert outcome["ok"] is True
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
 
     def _recorder(queue_, **kwargs):
         calls.append(kwargs)

@@ -405,7 +405,7 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
 
     from local_operator.team_bridge.store import Store as _AckStore
 
-    def _arm(case: Path, *, record_kwargs: dict, record_owner=None):
+    def _arm(case: Path, *, record_kwargs: dict[str, Any], record_owner=None):
         case.mkdir()
         store, owner = _enroll(case)
         record, body = _wire_spine(monkeypatch, case)

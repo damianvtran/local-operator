@@ -14,6 +14,7 @@ that drifted with it.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
@@ -24,7 +25,7 @@ from local_operator.session.transcript import (
 ENTRY_MESSAGE = "message"
 
 
-def _row(entry_id: str, *, payload: dict, ts: float = 1.0) -> TranscriptEntry:
+def _row(entry_id: str, *, payload: dict[str, Any], ts: float = 1.0) -> TranscriptEntry:
     return TranscriptEntry(entry_id, ts, ENTRY_MESSAGE, payload)
 
 

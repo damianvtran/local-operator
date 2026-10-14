@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -323,7 +324,7 @@ def _baseline(tmp_path: Path) -> Path:
     return path
 
 
-def _snapshot(path: Path) -> dict[str, list[tuple]]:
+def _snapshot(path: Path) -> dict[str, list[tuple[Any, ...]]]:
     conn = sqlite3.connect(path)
     try:
         return {

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from typing import Any
 
 import pytest
 
@@ -121,11 +122,11 @@ def _seed_full_store(tmp_path) -> Store:
     return store
 
 
-def _snapshot(path) -> tuple[dict[str, list[dict]], str]:
+def _snapshot(path) -> tuple[dict[str, list[dict[str, Any]]], str]:
     conn = sqlite3.connect(path)
     try:
         conn.row_factory = sqlite3.Row
-        out: dict[str, list[dict]] = {}
+        out: dict[str, list[dict[str, Any]]] = {}
         for table in PRESERVED_TABLES:
             out[table] = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
         version = str(

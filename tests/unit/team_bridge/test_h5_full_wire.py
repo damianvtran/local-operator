@@ -33,6 +33,7 @@ import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -214,7 +215,7 @@ async def _full_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return session, record
 
 
-def _asks_for(session, message_id: str) -> list[dict]:
+def _asks_for(session, message_id: str) -> list[dict[str, Any]]:
     """REAL queue rows from the BRIDGE builder for one message id."""
 
     rows = []
@@ -260,7 +261,7 @@ async def _settled_after_receive(session, *, asks: int | None = None) -> None:
         await wait_for(lambda: len(_asks_for(session, MESSAGE_ID)) == asks, 5.0)
 
 
-def _seed_second_envelope(session) -> dict:
+def _seed_second_envelope(session) -> dict[str, Any]:
     """A FULLY-BOUND second producer message through the REAL store APIs.
 
     Own delivery ref, body hash, display digest (over its own hint fields) and

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -36,26 +37,30 @@ from local_operator.team_bridge.decide_intents import (
     retry_from_human_action,
     scope_owner_key,
 )
+from local_operator.team_bridge.tool import BridgeRuntime
 
 pytestmark = pytest.mark.asyncio
 
 OWNER_KEY = json.dumps(["https://hub.example", "acc_1", "ten_1"])
 
 
-def _runtime(tmp_path) -> SimpleNamespace:
-    return SimpleNamespace(
-        owner=SimpleNamespace(
-            canonical_base_url="https://hub.example",
-            account_id="acc_1",
+def _runtime(tmp_path) -> BridgeRuntime:
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=SimpleNamespace(
+                canonical_base_url="https://hub.example",
+                account_id="acc_1",
+                tenant_id="ten_1",
+                endpoint_id="ep_1",
+                credential_id=7,
+                enrollment_generation=7,
+            ),
+            config_dir=tmp_path,
             tenant_id="ten_1",
-            endpoint_id="ep_1",
-            credential_id=7,
-            enrollment_generation=7,
+            session_id="sess-1",
+            client=object(),
         ),
-        config_dir=tmp_path,
-        tenant_id="ten_1",
-        session_id="sess-1",
-        client=object(),
     )
 
 
@@ -186,7 +191,7 @@ async def test_attempt_refuses_terminal_and_empty_generation(
 
 def _patch_consumed(
     monkeypatch: pytest.MonkeyPatch,
-    details: dict | None,
+    details: dict[str, Any] | None,
     *,
     entry_id: str = "",
     custom_type: str = "ask_response",

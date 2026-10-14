@@ -13,6 +13,7 @@ works without touching the implementation).
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -22,11 +23,13 @@ from local_operator.team_bridge.authority import (
     scope_from_runtime,
     scope_matches_runtime,
 )
+from local_operator.team_bridge.store import OwnerSnapshot
+from local_operator.team_bridge.tool import BridgeRuntime
 
 pytestmark = pytest.mark.asyncio
 
 
-def _owner(**over: object) -> SimpleNamespace:
+def _owner(**over: object) -> OwnerSnapshot:
     base = dict(
         canonical_base_url="https://hub.example",
         account_id="acc_1",
@@ -36,10 +39,10 @@ def _owner(**over: object) -> SimpleNamespace:
         enrollment_generation=3,
     )
     base.update(over)
-    return SimpleNamespace(**base)
+    return cast(OwnerSnapshot, SimpleNamespace(**base))
 
 
-def _runtime(owner: object | None = None, **over: object) -> SimpleNamespace:
+def _runtime(owner: object | None = None, **over: object) -> BridgeRuntime:
     base = dict(
         owner=owner if owner is not None else _owner(),
         config_dir="/tmp/fence-test",
@@ -47,7 +50,7 @@ def _runtime(owner: object | None = None, **over: object) -> SimpleNamespace:
         session_id="sess-1",
     )
     base.update(over)
-    return SimpleNamespace(**base)
+    return cast(BridgeRuntime, SimpleNamespace(**base))
 
 
 class _Store:
@@ -146,7 +149,7 @@ async def test_consent_loss_is_typed_consent_revoked(
     ],
 )
 async def test_binding_drift_is_owner_changed(
-    _enabled: None, monkeypatch: pytest.MonkeyPatch, drift: dict
+    _enabled: None, monkeypatch: pytest.MonkeyPatch, drift: dict[str, Any]
 ) -> None:
     live = _owner(**drift)
     # The committed side is the DRIFTED one; the runtime still holds the old

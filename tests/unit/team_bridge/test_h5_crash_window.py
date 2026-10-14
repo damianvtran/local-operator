@@ -14,6 +14,7 @@ keyed queue door and its interprocess lock:
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.store import OwnerReceipt, Store
@@ -36,7 +37,7 @@ def _enrolled_store(tmp_path) -> Store:
     return store
 
 
-def _keyed(queue, *, key: str = "iss-crash", fingerprint: str = FP) -> dict:
+def _keyed(queue, *, key: str = "iss-crash", fingerprint: str = FP) -> dict[str, Any]:
     return queue.enqueue_idempotent(
         issuance_key=key, fingerprint=fingerprint, questions=[_question()]
     )
@@ -76,7 +77,7 @@ def test_a_conflicting_fingerprint_refuses_instead_of_minting(tmp_path) -> None:
 
 def test_two_writers_on_the_same_key_settle_on_one_row(tmp_path) -> None:
     _enrolled_store(tmp_path)
-    outcomes: list[dict] = []
+    outcomes: list[dict[str, Any]] = []
     barrier = threading.Barrier(2)
 
     def writer() -> None:
@@ -100,7 +101,7 @@ def test_two_writers_on_the_same_key_settle_on_one_row(tmp_path) -> None:
 
 def test_two_writers_with_conflicting_fingerprints_mint_exactly_one(tmp_path) -> None:
     _enrolled_store(tmp_path)
-    outcomes: list[dict] = []
+    outcomes: list[dict[str, Any]] = []
     barrier = threading.Barrier(2)
     fingerprints = [FP, "cc" * 32]
 

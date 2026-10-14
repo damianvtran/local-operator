@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 from local_operator.asks.queue import AskQueue
 from local_operator.team_bridge.asks_bridge import bridge_request_question
@@ -43,7 +44,7 @@ def _queue(tmp_path) -> AskQueue:
     return AskQueue(QueueFakeSession(), config_dir=tmp_path, session_id="s1", clock=lambda: BASE)
 
 
-def _question() -> dict:
+def _question() -> dict[str, Any]:
     return bridge_request_question(
         message_id=MESSAGE_ID, sender="dana@acme.example", summary="t-1", excerpt="", scope=SCOPE
     )

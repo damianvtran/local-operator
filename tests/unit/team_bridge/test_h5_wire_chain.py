@@ -16,6 +16,7 @@ import asyncio
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -102,7 +103,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _spool_roundtrip(meta: dict) -> dict:
+def _spool_roundtrip(meta: dict[str, Any]) -> dict[str, Any]:
     """The REAL spool serialization boundary: what the successor reads back."""
 
     line = InboxLine(
