@@ -696,3 +696,45 @@ def test_epoch_and_pairing_secret_frames_are_never_compressed() -> None:
         assert record_bytes == legacy.seal(frame), name
         assert not _decrypt_raw(receiver, record_bytes).startswith(wire.COMPRESSED_MARKER)
         assert receiver.open(record_bytes[4:]) == frame
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        '"recipient_device":"wrong","recipient_device":"right"',
+        '"recipient_device":"right","recipient_device":"right"',
+    ],
+)
+def test_lifecycle_rejects_aead_valid_duplicate_keys(values):
+    dialer, listener = _pair(dialer_zlib=False, listener_zlib=False)
+    raw = ('{"op":"net_broker","kind":"lifecycle_announce",' + values + ',"entries":[]}').encode()
+    with pytest.raises(wire.LinkCryptoError, match="JSON frame"):
+        listener.open(_seal_raw(dialer, raw)[4:])
+
+
+@pytest.mark.parametrize("values", ["false,true", "true,true"])
+def test_lifecycle_reply_retains_duplicate_provenance_until_protocol_validation(values):
+    from local_operator.network.credentials.lifecycle import checked_reply_detail
+
+    dialer, listener = _pair(dialer_zlib=False, listener_zlib=False)
+    first, second = values.split(",")
+    raw = (
+        '{"op":"ack","req":1,"detail":{"kind":"ack","entries":['
+        '{"credential_key":"openai","account_scope_ref":"native:openai:account",'
+        f'"applied":{first},"applied":{second}' + "}]}}"
+    ).encode()
+    reply = listener.open(_seal_raw(dialer, raw)[4:])
+    with pytest.raises(ValueError, match="duplicate keys"):
+        checked_reply_detail(reply)
+    # Legacy request/reply callers do not opt into lifecycle ambiguity rejection.
+    assert reply["detail"]["entries"][0]["applied"] is True
+
+
+def test_unrelated_legacy_duplicate_keys_preserve_last_wins():
+    dialer, listener = _pair(dialer_zlib=False, listener_zlib=False)
+    raw = b'{"op":"net_ping","req":1,"req":2,"detail":{"x":0,"x":1}}'
+    assert listener.open(_seal_raw(dialer, raw)[4:]) == {
+        "op": "net_ping",
+        "req": 2,
+        "detail": {"x": 1},
+    }

@@ -3643,3 +3643,90 @@ async def test_paid_ranking_keeps_true_unknown_neutral(tmp_path, monkeypatch) ->
         assert set(picks) == {rows[0].id, rows[1].id}
     finally:
         store.close()
+
+
+async def test_native_lifecycle_snapshot_reads_committed_wal_and_keeps_payload_shape(store):
+    row = store.upsert_credential("openai", {**_oauth(), "email": "native@example.test"})
+    stamp = store.native_login_incarnation(row.id)
+    assert stamp and "login_incarnation" not in row.data
+    snapshot = AuthStore.native_lifecycle_snapshot(store._db_path, "openai")
+    assert snapshot is not None and snapshot[0][2] == stamp
+    # Do not checkpoint: another read-only connection must see this committed WAL.
+    store._conn.execute(
+        "UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE id = ?", (row.id,)
+    )
+    store._conn.commit()
+    rotated = AuthStore.native_lifecycle_snapshot(store._db_path, "openai")
+    assert rotated and rotated[0][1] == snapshot[0][1] + 1 and rotated[0][2] == stamp
+    back = store.upsert_credential("openai", {**_oauth(), "email": "native@example.test"})
+    assert back.id == row.id and store.native_login_incarnation(row.id) != stamp
+
+
+async def test_native_lifecycle_legacy_and_null_baselines_stay_unknown(tmp_path):
+    import sqlite3
+
+    missing = tmp_path / "missing.db"
+    assert AuthStore.native_lifecycle_snapshot(missing, "openai") is None
+    assert not missing.exists()
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, "
+            "credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, "
+            "created_at INTEGER, updated_at INTEGER)"
+        )
+        conn.execute("INSERT INTO auth_credentials VALUES (1,'openai','oauth','{}',NULL,NULL,1,1)")
+    before = path.read_bytes()
+    assert AuthStore.native_lifecycle_snapshot(path, "openai") is None
+    assert path.read_bytes() == before  # observational path did NOT migrate
+    writer = AuthStore(db_path=path)
+    try:
+        snapshot = AuthStore.native_lifecycle_snapshot(path, "openai")
+        assert snapshot and snapshot[0][2] is None
+        assert writer.native_login_incarnation(1) is None
+    finally:
+        writer.close()
+
+
+async def test_native_lifecycle_concurrent_migration_serializes_check_and_alter(tmp_path):
+    import concurrent.futures
+    import sqlite3
+    import threading
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, "
+            "credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, "
+            "created_at INTEGER, updated_at INTEGER)"
+        )
+    barrier = threading.Barrier(2)
+
+    def migrate():
+        barrier.wait(timeout=5)
+        auth = AuthStore(db_path=path)
+        auth.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(migrate) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+    with sqlite3.connect(path) as conn:
+        assert [r[1] for r in conn.execute("PRAGMA table_info(auth_credentials)")].count(
+            "login_incarnation"
+        ) == 1
+
+
+async def test_native_lifecycle_mcp_and_copied_rows_are_not_native(store):
+    from local_operator.network.credentials import lifecycle
+    from local_operator.network.credentials.sync import MESH_ORIGIN_KEY
+
+    store.upsert_credential(
+        "openai", {**_oauth(), MESH_ORIGIN_KEY: {"owner_device": "synthetic-peer"}}
+    )
+    assert lifecycle._native_contexts(store._db_path.parent, "openai") == {}
+    mcp = store.upsert_credential(
+        "mcp-oauth", {**_oauth(), "server_url": "https://example.test/mcp"}
+    )
+    assert store.native_login_incarnation(mcp.id) is None
+    assert lifecycle._native_contexts(store._db_path.parent, "mcp-oauth") is None

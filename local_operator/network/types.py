@@ -1974,4 +1974,6 @@ class HandshakeResult:
     session_protocol: int = PROTOCOL_VERSION
     peer_build: dict[str, Any] = field(default_factory=dict)
     peer_capabilities: list[str] = field(default_factory=list)
+    # Keep the local MAC-covered advertisement without changing raw peer semantics.
+    local_capabilities: list[str] = field(default_factory=list)
     network_name: str = ""
