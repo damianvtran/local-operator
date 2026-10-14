@@ -54,12 +54,12 @@
   "relay.shell.usage.window_month": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
   "relay.shell.usage.window_lifetime": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
   "relay.shell.usage.window_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.remaining": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.used": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.fraction": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.reset": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.remaining": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; translators may reorder/rephrase the complete message to avoid forced gender/plural agreement with this invariant label. Never display a raw API unit token."},
+  "relay.shell.usage.used": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; rephrase/reorder the complete sentence as needed to avoid forced gender/plural agreement."},
+  "relay.shell.usage.fraction": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric FRACTION, e.g. 0.29 means 29 percent used. ICU percent owns rounding, spacing and percent sign in the actual catalogue locale. Never multiply or append a second percent sign."},
+  "relay.shell.usage.reset": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is the reset timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and the phone time zone, consistently with as_of; not an ISO machine token."},
   "relay.shell.usage.command": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.as_of": {"role": "cache freshness disclosure", "tone": "Factual timestamp, no live-refresh promise.", "note": "value is the immutable read-only cache timestamp in epoch milliseconds, formatted for the phone locale."},
+  "relay.shell.usage.as_of": {"role": "cache freshness disclosure", "tone": "Factual timestamp, no live-refresh promise.", "note": "{value} is the immutable cached timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and phone time zone, consistently with reset; not the browser default locale."},
   "relay.shell.usage.stale": {"role": "cache freshness warning", "tone": "Clear and non-alarmist.", "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."},
   "relay.shell.usage.row": {
     "role": "complete usage allowance row without a named model family",
@@ -70,5 +70,45 @@
     "role": "complete usage allowance row with a named model family",
     "tone": "Compact, neutral status summary.",
     "note": "Own the entire field order and punctuation, including parentheses and the separator before the value. {label}, {window}, and {value} are already localized text as in relay.shell.usage.row. {family} is the provider's machine model-family identifier (for example opus), not prose to translate. Reorder all placeholders and use locale-appropriate punctuation. Used only when family_cap is true and the family identifier is known. All parameters are strings; preserve their names."
+  },
+  "relay.shell.usage.unit_credits": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized measurement label for API token credits. Supplied to a complete amount message, which may reorder/rephrase to avoid gender or grammatical agreement with this invariant label. USD denotes US dollars, not a conversion. Never interpolate the raw API token in place of this label."
+  },
+  "relay.shell.usage.unit_usd": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized measurement label for API token usd. Supplied to a complete amount message, which may reorder/rephrase to avoid gender or grammatical agreement with this invariant label. USD denotes US dollars, not a conversion. Never interpolate the raw API token in place of this label."
+  },
+  "relay.shell.usage.unit_tokens": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized measurement label for API token tokens. Supplied to a complete amount message, which may reorder/rephrase to avoid gender or grammatical agreement with this invariant label. USD denotes US dollars, not a conversion. Never interpolate the raw API token in place of this label."
+  },
+  "relay.shell.usage.unit_requests": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized measurement label for API token requests. Supplied to a complete amount message, which may reorder/rephrase to avoid gender or grammatical agreement with this invariant label. USD denotes US dollars, not a conversion. Never interpolate the raw API token in place of this label."
+  },
+  "relay.shell.usage.remaining_percent": {
+    "role": "complete percent amount status",
+    "tone": "Neutral.",
+    "note": "{value} is a numeric FRACTION (0.29 is 29 percent). ICU percent formatting uses the actual catalogue locale and rounds to an integer; do not add another percent sign or scale the placeholder. API percent-unit amounts are percent points and normalized to fractions by the caller."
+  },
+  "relay.shell.usage.used_percent": {
+    "role": "complete percent amount status",
+    "tone": "Neutral.",
+    "note": "{value} is a numeric FRACTION (0.29 is 29 percent). ICU percent formatting uses the actual catalogue locale and rounds to an integer; do not add another percent sign or scale the placeholder. API percent-unit amounts are percent points and normalized to fractions by the caller."
+  },
+  "relay.shell.usage.remaining_unknown_unit": {
+    "role": "amount with unknown measurement unit",
+    "tone": "Neutral.",
+    "note": "{value} is the numeric amount. Deliberately omit unrecognized/unknown API unit tokens rather than inventing currency, translating untrusted metadata or discarding a measured value."
+  },
+  "relay.shell.usage.used_unknown_unit": {
+    "role": "amount with unknown measurement unit",
+    "tone": "Neutral.",
+    "note": "{value} is the numeric amount. Deliberately omit unrecognized/unknown API unit tokens rather than inventing currency, translating untrusted metadata or discarding a measured value."
   }
 }
