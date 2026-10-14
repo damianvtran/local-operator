@@ -215,16 +215,23 @@ def _price_text(cost_usd: float | None, cost_source: str | None, billing_basis: 
     return f"${cost_usd:g} ({source})"
 
 
-def _register_video_assets(assets: Sequence[Any], model: str) -> tuple[list[str], list[str]]:
-    """Register every asset once; ``(digests, failed_source_urls)``.
+def _register_video_assets(
+    assets: Sequence[Any], model: str
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    """Register every asset once; ``(digests, failed_source_urls, artifacts)``.
+
+    ``artifacts`` is the durable ``details.artifacts`` list (``artifact_details``): the receipt
+    mirrors it so the per-session file index can list the video after compaction blanks the
+    result text. Empty when nothing registered.
 
     Lazy import of the attachment store (import weight): the store's contract
     is that a refusal is a caption note, never a raise.
     """
-    from local_operator.session.attachments import cache_media
+    from local_operator.session.attachments import artifact_details, cache_media
 
     digests: list[str] = []
     failed: list[str] = []
+    blocks: list[Any] = []
     for index, asset in enumerate(assets, start=1):
         block = cache_media(
             asset.data,
@@ -241,7 +248,8 @@ def _register_video_assets(assets: Sequence[Any], model: str) -> tuple[list[str]
             continue
         if block.attachment:
             digests.append(block.attachment)
-    return digests, failed
+            blocks.append(block)
+    return digests, failed, artifact_details(blocks)
 
 
 def finish_video_result(
@@ -263,13 +271,15 @@ def finish_video_result(
     submit path (a walk ``JobOutcome``) and the watcher path (a single-rung
     ``RungResult``) end here.
     """
-    digests, failed = _register_video_assets(assets, model)
+    digests, failed, artifacts = _register_video_assets(assets, model)
     duration = next((asset.duration_s for asset in assets if asset.duration_s is not None), None)
     content_type = next((asset.content_type for asset in assets if asset.content_type), None)
     receipt: dict[str, Any] = {
         "job": record_job_id,
         "digest": digests[0] if digests else None,
         "digests": list(digests),
+        # Durable, additive: name/size/dimensions per digest, for the file index.
+        "artifacts": artifacts,
         "content_type": content_type or "video/mp4",
         "duration_s": duration,
         "model": model,

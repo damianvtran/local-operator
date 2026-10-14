@@ -229,6 +229,30 @@ def session_copy_terminal_only(*, flag: str) -> Msg:
     return Msg("wire.errors.desktop.session_copy_terminal_only", {"flag": flag})
 
 
+def session_files_artifact_missing() -> Msg:
+    return Msg("wire.errors.desktop.session_files_artifact_missing", {})
+
+
+def session_files_bad_cursor() -> Msg:
+    return Msg("wire.errors.desktop.session_files_bad_cursor", {})
+
+
+def session_files_bad_filter(*, field: str, value: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_bad_filter", {"field": field, "value": value})
+
+
+def session_files_file_not_found() -> Msg:
+    return Msg("wire.errors.desktop.session_files_file_not_found", {})
+
+
+def session_files_materialise_failed(*, reason: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_materialise_failed", {"reason": reason})
+
+
+def session_files_not_an_artifact() -> Msg:
+    return Msg("wire.errors.desktop.session_files_not_an_artifact", {})
+
+
 def session_is_remote_open(*, session_id: str, label: str) -> Msg:
     return Msg(
         "wire.errors.desktop.session_is_remote_open",
