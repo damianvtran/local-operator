@@ -84,6 +84,7 @@ from local_operator.interpreter import SAFE_PATH_FLAG
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger("local_operator.server.reload")
 
@@ -103,6 +104,93 @@ LISTENER_FD_ATTR = "serve_listener_fd"
 #: process's private intent, set by the signal handler and cleared only when the
 #: reload it asked for is either done (which ends the process) or refused.
 PENDING_ATTR = "serve_reload_pending"
+
+#: Loop-local admission, not a second install lock. Existing requests/tasks drain
+#: while new requests receive a retryable refusal; detached runtime turns and
+#: established replayable desktop relays are never treated as owned computation.
+ADMISSION_ATTR = "serve_reload_admission_closed"
+REQUESTS_ATTR = "serve_reload_owned_requests"
+FENCE_ATTR = "serve_reload_request_fence"
+ROLLING_CONTRACT = "local-work-v1"
+
+
+class ReloadAdmissionMiddleware:
+    """Keep daemon-owned HTTP work alive across the final reload decision.
+
+    Whole response lifetimes count except the TWO replayable desktop feeds.
+    Their binding phase still counts until response headers; the pool's existing
+    spawn predicate then owns any independent runtime handshake. Other streaming
+    routes may compute in-process, so unknown streams are never called recoverable.
+    """
+
+    def __init__(self, app: ASGIApp, *, owner: Any) -> None:
+        self.app = app
+        self.state = owner.state
+        setattr(self.state, REQUESTS_ATTR, 0)
+        setattr(self.state, ADMISSION_ATTR, False)
+        setattr(self.state, FENCE_ATTR, True)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("path") == "/health":
+            await self.app(scope, receive, send)
+            return
+        if getattr(self.state, ADMISSION_ATTR, False):
+            from starlette.responses import JSONResponse
+
+            await JSONResponse(
+                {"detail": "service is preparing a safe reload; retry shortly"},
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        parts = path.strip("/").split("/")
+        replayable = scope.get("method") == "GET" and (
+            path == "/v1/desktop/events"
+            or (
+                len(parts) == 5
+                and parts[:3] == ["v1", "desktop", "sessions"]
+                and parts[4] == "events"
+            )
+        )
+        setattr(self.state, REQUESTS_ATTR, getattr(self.state, REQUESTS_ATTR) + 1)
+        counted = True
+
+        def release() -> None:
+            nonlocal counted
+            if counted:
+                counted = False
+                setattr(self.state, REQUESTS_ATTR, getattr(self.state, REQUESTS_ATTR) - 1)
+
+        async def relay(message: Message) -> None:
+            if replayable and message["type"] == "http.response.start":
+                release()
+            await send(message)
+
+        try:
+            await self.app(scope, receive, relay)
+        finally:
+            release()
+
+
+def rolling_contract(app: Any) -> str:
+    """Only the actual installed request/scheduler fence may advertise safety."""
+    state = getattr(app, "state", None)
+    scheduler = getattr(state, "scheduler_service", None)
+    hooks = ("begin_reload", "end_reload", "reload_blocker")
+    if getattr(state, FENCE_ATTR, False) is not True:
+        return ""
+    if scheduler is not None and not all(
+        callable(getattr(scheduler, hook, None)) for hook in hooks
+    ):
+        return ""
+    hub = getattr(state, "hub_sync", None)
+    # The absent-runner route falls back to untracked to_thread work. Unknown is
+    # unsupported, not proof that there are no outstanding profile operations.
+    if hub is None or not all(callable(getattr(hub, hook, None)) for hook in hooks):
+        return ""
+    return ROLLING_CONTRACT
+
 
 #: The signal that asks a daemon to move itself onto ``current``.
 #:
@@ -127,6 +215,7 @@ PENDING_ATTR = "serve_reload_pending"
 #: somebody else's, and a platform where a process cannot be asked politely is a
 #: platform where it must not be asked at all.
 RELOAD_SIGNAL: signal.Signals | None = getattr(signal, "SIGUSR1", None)
+
 
 #: How long a requested reload may wait for the narrow drain before giving up.
 #:
@@ -307,48 +396,49 @@ class ReloadWatch:
             setattr(self.app.state, PENDING_ATTR, False)
 
     async def perform(self) -> None:
-        """Drain, announce, then ``execve`` onto the current build.
-
-        Never returns on success: the ``execve`` at the end of :func:`_exec`
-        either replaces this image or raises.
-        """
+        """Drain this daemon's own work, then replace the image without a kill."""
         plan = self.plan()
-        await self.drain()
-        # OFF THE EVENT LOOP (serve-reload review round 2, R2-3). The check spawns a process
-        # and waits for it, measured at 0.20-0.35 s cold; run inline it would stop
-        # this daemon answering HTTP for that whole time, which is the opposite of
-        # what a reload is for. `to_thread` rather than a second loop: the body is
-        # a single bounded subprocess call, so there is nothing to serialise.
-        await asyncio.to_thread(_smoke, plan.interpreter)
-        # THE DRAIN DOES NOT COVER THAT AWAIT, SO IT IS RE-ASKED (serve-reload review
-        # round 3, R3-1). Moving the smoke off the loop made the pre-exec phase longer than
-        # the wait that guards it, and the term the wait exists for — a runtime
-        # being SPAWNED, whose ~1.2 s handshake is the one cut this module calls
-        # unrecoverable — can begin inside that window. A first drain that returned
-        # at t=0 says nothing about t=0.3, so the predicate is asked again rather
-        # than assumed to still hold: the budget restarts, and a spawn that arrived
-        # in between is waited for on the same terms as one that was already there.
-        # It refuses rather than proceeds if the second budget expires, which is
-        # the fail-closed direction: staying on the loaded build costs a skew, and
-        # cutting a handshake costs a runtime.
-        #
-        # AND IT NARROWS THE WINDOW RATHER THAN CLOSING IT (serve-reload review round
-        # 5, R5-1, whose last named edit this is). A spawn can still begin between the
-        # second drain's final poll and the `execve` — one poll period, `DRAIN_POLL_S`,
-        # because a predicate cannot be sampled at the same instant it is acted on.
-        # The first version left the whole smoke duration (up to `SMOKE_TIMEOUT_S`)
-        # exposed; this leaves 0.1 s of it, and the honest statement is that one, not
-        # "closed".
-        await self.drain()
-        logger.info(
-            "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
-            os.getpid(),
-            plan.loaded_root,
-            plan.target_root,
-            plan.interpreter,
-            plan.listener_fd,
-        )
-        _exec(plan)
+        if rolling_contract(self.app) != ROLLING_CONTRACT:
+            raise ReloadRefusal(
+                "local-work-safe reload capability is unavailable; still serving old build"
+            )
+        state = self.app.state
+        scheduler = getattr(state, "scheduler_service", None)
+        hub = state.hub_sync
+        setattr(state, ADMISSION_ATTR, True)
+        try:
+            hub.begin_reload()
+            if scheduler is not None:
+                scheduler.begin_reload()
+            await self.drain()
+            # Smoke may await a worker thread; the admission fence remains closed
+            # across it. Health and established replayable relays keep answering.
+            await asyncio.to_thread(_smoke, plan.interpreter)
+            await self.drain()
+            fresh = self.plan()
+            if fresh.target_root != plan.target_root:
+                raise ReloadRefusal(
+                    "current changed during reload preparation; retry its new target"
+                )
+            # No await after this FINAL verdict: tasks on the daemon loop cannot
+            # start new work in a sampled-predicate-to-exec gap.
+            reason = self.blocker()
+            if reason is not None:
+                raise ReloadRefusal(reason)
+            logger.info(
+                "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
+                os.getpid(), plan.loaded_root, plan.target_root, plan.interpreter, plan.listener_fd,
+            )
+            _exec(plan)
+        finally:
+            # Successful exec never returns. Every refusal restores the SAME old
+            # daemon, without cancelling runs or rolling back installed B.
+            setattr(state, ADMISSION_ATTR, False)
+            try:
+                if scheduler is not None:
+                    scheduler.end_reload()
+            finally:
+                hub.end_reload()
 
     def plan(self) -> ReloadPlan:
         """Resolve what the replacement will be, or refuse with the reason.
@@ -418,28 +508,58 @@ class ReloadWatch:
             await asyncio.sleep(min(DRAIN_POLL_S, remaining))
 
     def blocker(self) -> str | None:
-        """Why the reload should wait, or ``None``. An unreadable probe is ``None``.
-
-        "Absent" and "unreadable" both mean this process has no reason to wait:
-        a pool that was never built has no spawn in flight, and a probe that
-        raises is not evidence about work — the same rule ``retire.in_flight``
-        states for its own probes, in the direction that keeps the daemon alive.
-        """
-        pool = getattr(getattr(self.app, "state", None), "desktop_sessions", None)
-        check = getattr(pool, "reload_blocker", None)
-        if not callable(check):
-            return None
+        """Positive local work inventory; unreadable/unsupported always defers."""
+        state = getattr(self.app, "state", None)
         try:
+            pool = getattr(state, "desktop_sessions", None)
+            if pool is not None:
+                check = getattr(pool, "reload_blocker", None)
+                if not callable(check):
+                    return "desktop reload safety capability is unavailable"
+                reason = check()
+                if reason is not None and not isinstance(reason, str):
+                    return "desktop reload safety probe is unreadable"
+                if reason:
+                    return reason
+            if getattr(state, FENCE_ATTR, False) is not True:
+                return "request admission inventory is unavailable"
+            requests = int(getattr(state, REQUESTS_ATTR))
+            if requests:
+                return f"{requests} daemon-owned request(s)"
+            scheduler = getattr(state, "scheduler_service", None)
+            if scheduler is not None:
+                check = getattr(scheduler, "reload_blocker", None)
+                if not callable(check):
+                    return "scheduler reload safety capability is unavailable"
+                reason = check()
+                if reason is not None and not isinstance(reason, str):
+                    return "scheduler reload safety probe is unreadable"
+                if reason:
+                    return reason
+            manager = getattr(state, "job_manager", None)
+            if manager is not None:
+                for job in manager.jobs.values():
+                    task = getattr(job, "task", None)
+                    if task is not None and not task.done():
+                        return "daemon-owned legacy job is active"
+                    if getattr(job, "status", None) in ("pending", "processing"):
+                        return "daemon-owned legacy job is pending"
+            hub = getattr(state, "hub_sync", None)
+            check = getattr(hub, "reload_blocker", None)
+            if not callable(check):
+                return "hub continuity is unsupported; handoff deferred"
             reason = check()
-        except Exception:  # noqa: BLE001 — an unreadable probe may not decide this
-            logger.warning("serve reload: the drain probe could not be read", exc_info=True)
-            return None
-        # A PROBE THAT ANSWERS WITH SOMETHING THAT IS NOT A REASON HAS NOT ANSWERED, which
-        # is the same rule as an absent or raising one and the reason this is not a bare
-        # `return check()`: the value is formatted into a refusal message and compared for
-        # truth, so anything but a string is unreadable rather than a blocker. (pyright
-        # flagged the bare form: `getattr` types the callable as `object`.)
-        return reason if isinstance(reason, str) else None
+            if reason is not None and not isinstance(reason, str):
+                return "hub reload safety probe is unreadable"
+            if reason:
+                return reason
+            boot = getattr(state, "aida_boot_task", None)
+            if boot is not None and not boot.done():
+                return "daemon bootstrap work is active"
+        except Exception:  # noqa: BLE001 — unreadable is never permission to exec
+            logger.warning("serve reload: local work inventory is unreadable", exc_info=True)
+            return "daemon-owned work inventory is unreadable; handoff deferred"
+        return None
 
 
 def _same_tree(left: Path, right: Path) -> bool:

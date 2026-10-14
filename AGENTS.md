@@ -1583,9 +1583,9 @@ unchanged, advance the clone's own `main` first.
 
 ### Installing over a live fleet
 
-**The install must not run against a busy fleet.** That is the rule; the command
-that carries it out is the host's business. An install replaces site-packages
-inside the shared uv-tool environment **under whatever runtimes are running**,
+**Mutable/in-place installs must not run against a busy fleet.** The command
+that carries this out is the host's business. An in-place install replaces
+site-packages inside a shared environment **under whatever runtimes are running**,
 and a runtime that is mid-turn never checks for a newer build — by design, only
 an idle runtime notices one — so it goes on importing from a tree that is being
 deleted beneath it, dies torn, and writes no exit record. Measured on
@@ -1595,16 +1595,34 @@ eagerly, the unwatched half — the `daemon`-kind sessions, woken by `lop send`
 or a wake, as against the `attach` viewers a frontend is holding open — stayed
 down until they were resumed by hand.
 
-So the step is: **wait until no session reports `busy`, install, then re-engage
+For that mutable route the step is: **wait until no session reports `busy`, install, then re-engage
 whatever the swap displaced** — turns that were in flight when it landed, and
 the sessions no frontend is holding open. A host that has a drain wrapper for
 exactly this may use it, and it is the convenient way to do those three things
 in order; the wrapper is a host-local convenience, not part of the protocol,
 and the release owner owes the behaviour above whether or not one exists.
 
+**Immutable rolling promotion is a separate route.** Prepare and verify a new
+isolated generation, then commit `current` under the existing install-root
+transaction; busy runtimes retain their loaded package/dependency/resource roots
+and move individually only when their existing idle latch admits it. Do not
+weaken fresh-artifact/signature, duplicate-attempt, stale-target, root ownership
+or conditional rollback checks. Automatic generation collection is frozen in
+both PyPI and snapshot update tails: an absent discovery/argv/open-file reference
+is not proof that a runtime will never read a bundled asset later. An unreadable
+fleet census must not veto isolated preparation, and must never license deletion.
+
+Installed/current and actual service-serving builds are different outcomes.
+Daemon-owned work and unsupported old reload capabilities must defer service
+handoff, not trigger forced restarts or a blanket rollback of a committed newer
+pointer. A legacy frontend executing an old updater still needs the reviewed
+capable controller route; downloading a release or hot-editing installed code is
+not an activation proof. Live activation remains separately authorized and
+verified; these source rules do not grant a live install, prune, or forced kill.
+
 Two cautions that hold wherever the install runs:
 
-- **Never force an install past a busy fleet to save time.** Displacing
+- **Never force an in-place install past a busy fleet to save time.** Displacing
 someone's turn is a real cost, and an expired drain budget means waiting and
 running it again, not forcing it.
 - **Verify the build; do not read it off an installer's own summary.** A

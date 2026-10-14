@@ -139,6 +139,11 @@ class SchedulerService:
 
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._run_tasks: set[asyncio.Task[Any]] = set()
+        # Normal APScheduler dispatch and replay triggers share this loop-local
+        # fence. A trigger already dispatched at pause remains tracked/blocked,
+        # making reload defer rather than losing an unrecorded scheduled run.
+        self._reload_admission = asyncio.Event()
+        self._reload_admission.set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -513,6 +518,20 @@ class SchedulerService:
     # Run execution (new engine, in-process)
     # ------------------------------------------------------------------
 
+    def begin_reload(self) -> None:
+        """Pause new timer dispatch without cancelling any owned run."""
+        self._reload_admission.clear()
+        self.scheduler.pause()
+
+    def end_reload(self) -> None:
+        """A deferred/failed handoff resumes the SAME scheduler and waiting runs."""
+        self._reload_admission.set()
+        self.scheduler.resume()
+
+    def reload_blocker(self) -> str | None:
+        active = sum(not task.done() for task in self._run_tasks)
+        return f"{active} scheduler-owned run(s)" if active else None
+
     def _spawn_trigger(self, agent_id_str: str, schedule_id_str: str, prompt: str) -> None:
         """Trigger a run now, non-blocking (used by load-time replays)."""
         task = asyncio.create_task(
@@ -535,7 +554,14 @@ class SchedulerService:
         on success, and records outcomes in the job manager. NEVER raises:
         a failing run must not kill the scheduler loop.
         """
+        # APScheduler invokes this coroutine DIRECTLY, bypassing _spawn_trigger.
+        # Track at its real entry before the first await, including admission
+        # waiters; replay-only tracking would falsely declare ordinary runs idle.
+        task = asyncio.current_task()
+        if task is not None:
+            self._run_tasks.add(task)
         try:
+            await self._reload_admission.wait()
             await self._trigger_agent_task_inner(agent_id_str, schedule_id_str, prompt)
         except asyncio.CancelledError:
             logger.info(
@@ -561,6 +587,9 @@ class SchedulerService:
                 f"schedule {schedule_id_str}: {str(e)}",
                 exc_info=True,
             )
+        finally:
+            if task is not None:
+                self._run_tasks.discard(task)
 
     async def _trigger_agent_task_inner(
         self, agent_id_str: str, schedule_id_str: str, prompt: str

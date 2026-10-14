@@ -258,6 +258,173 @@ def transaction(
         mutex.release()
 
 
+OPERATION_DIR = ".update-operations"
+_OPERATION_PHASES = {
+    "queued",
+    "preparing",
+    "prepared",
+    "promoted",
+    "services",
+    "partial",
+    "failed",
+    "capacity",
+}
+
+
+def _operation_path(root: Path, identifier: str, *, create: bool = False) -> Path:
+    if len(identifier) != 32 or any(
+        character not in "0123456789abcdef" for character in identifier
+    ):
+        raise InstallTransactionError("update operation identity is invalid")
+    directory = root / OPERATION_DIR
+    if create and not directory.exists() and not directory.is_symlink():
+        directory.mkdir(mode=0o700)
+    if directory.exists() or directory.is_symlink():
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise InstallTransactionError(
+                "update operation directory is unsafe; no record was written"
+            )
+    return directory / f"{identifier}.json"
+
+
+def _persist_operation(path: Path, record: dict[str, Any]) -> None:
+    data = json.dumps(record, sort_keys=True).encode("utf-8")
+    if len(data) > 64 * 1024:
+        raise InstallTransactionError("update operation exceeds its bounded recovery record")
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    staged = f".{uuid.uuid4().hex}.tmp"
+    try:
+        before = os.fstat(directory)
+        after = path.parent.lstat()
+        if (before.st_dev, before.st_ino) != (
+            after.st_dev, after.st_ino
+        ) or before.st_uid != os.getuid():
+            raise InstallTransactionError(
+                "update operation directory identity changed; no record written"
+            )
+        descriptor = os.open(
+            staged,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        after = path.parent.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise InstallTransactionError(
+                "update operation directory moved; preserve prior recovery"
+            )
+        os.replace(staged, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(staged, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+@dataclass(frozen=True)
+class UpdateOperation:
+    """Durable intent/receipts, not proof of OS ownership or service completion.
+
+    One record is advanced under the EXISTING canonical-root mutex, while builds
+    remain outside it. A crash cannot erase the last committed phase/receipts;
+    recovery still owes fresh publication/current/leadership checks. No caller
+    may turn an unknown or pending central observation into a complete phase.
+    """
+
+    root: Path
+    identifier: str
+
+    def advance(self, phase: str, **observations: Any) -> None:
+        if phase not in _OPERATION_PHASES:
+            raise InstallTransactionError(
+                "update operation phase has no verified completion contract"
+            )
+        if set(observations) - {"candidate", "current", "receipts", "continuations", "failure"}:
+            raise InstallTransactionError("update operation observation is unsupported")
+        with transaction(self.root, operation=f"update operation {phase}") as held:
+            held.validate(self.root)
+            path = _operation_path(self.root, self.identifier)
+            record = read_record(path)
+            if record is None or record.get("operation_id") != self.identifier:
+                raise InstallTransactionError(
+                    "durable update operation is unreadable; retry recovery"
+                )
+            record.update(observations)
+            record.update(phase=phase, updated_at=time.time(), phase_actor=_identity())
+            _persist_operation(path, record)
+            held.validate(self.root)
+
+
+def start_operation(root: Path, *, baseline: str, target: str, route: str) -> UpdateOperation:
+    identifier = uuid.uuid4().hex
+    with transaction(root, operation="register durable update operation") as held:
+        held.validate(root)
+        path = _operation_path(root, identifier, create=True)
+        # Bound namespace growth without deleting unknown/unfinished operations.
+        for index, _path in enumerate(path.parent.iterdir()):
+            if index >= 255:
+                raise InstallTransactionError(
+                    "update recovery records are at capacity; inspect pending operations"
+                )
+        _persist_operation(path, {
+            **_identity(), "operation_id": identifier, "baseline": baseline,
+            "target": target, "route": route, "phase": "queued",
+            "candidate": "", "receipts": [], "continuations": [], "updated_at": time.time(),
+        })
+    return UpdateOperation(root, identifier)
+
+
+def operation_for_generation(generation: Path) -> UpdateOperation | None:
+    """Find the immutable candidate's operation, not 'latest operation' by time.
+
+    A service tail may run in another process after C supersedes B. Selecting by
+    timestamp would overwrite C's recovery receipts on B's behalf. The candidate
+    sidecar only identifies intent; it grants no install/collection permission.
+    """
+    record = read_record(generation / ".update-operation.json")
+    if record is None or not isinstance(record.get("operation_id"), str):
+        return None
+    root = generation.parent.parent
+    path = _operation_path(root, record["operation_id"])
+    saved = read_record(path)
+    if saved is None or saved.get("candidate") != str(generation):
+        raise InstallTransactionError("candidate recovery identity disagrees; preserve operation")
+    return UpdateOperation(root, record["operation_id"])
+
+
+def link_operation(operation: UpdateOperation, generation: Path) -> None:
+    with transaction(operation.root, operation="link candidate recovery identity") as held:
+        held.validate(operation.root)
+        if generation.is_symlink() or generation.parent != operation.root / "generations":
+            raise InstallTransactionError(
+                "candidate recovery is outside the canonical generation store"
+            )
+        _persist_operation(
+            generation / ".update-operation.json",
+            {"operation_id": operation.identifier},
+        )
+
+
+def operation_status(root: Path, identifier: str) -> dict[str, Any] | None:
+    """Observe only; never acquire/create/clear the transaction or its records."""
+    path = _operation_path(root, identifier)
+    if not path.exists() and not path.is_symlink():
+        return None
+    record = read_record(path)
+    if record is None or record.get("operation_id") != identifier:
+        raise InstallTransactionError("update operation status is unreadable; ownership is unknown")
+    alive = owner_alive(record)
+    state = "live" if alive is True else "gone" if alive is False else "unknown"
+    return {**record, "owner_state": state}
+
+
 def register_attempt(
     generation: Path, *, target: str, mode: str, baseline: str, source_identity: str = ""
 ) -> str:
@@ -300,7 +467,31 @@ def attempt_protected(generation: Path) -> bool:
     if not path.exists():
         return False
     record = read_record(path)
-    return record is None or attempt_alive(record) is not False
+    return record is None or bool(record.get("ever_exposed")) or attempt_alive(record) is not False
+
+
+def preserve_publication(generation: Path, nonce: str) -> None:
+    """Conservatively retain a failed candidate once a pointer write is possible.
+
+    This existing attempt record grants NO lifetime-index completeness. Write
+    before flip: a rollback/current change cannot prove no runtime observed B.
+    Failed exposure stays protected; successful completion removes the attempt
+    normally, while rolling automatic GC remains frozen for all loaded roots.
+    """
+    path = generation / ATTEMPT_NAME
+    record = read_record(path)
+    if record is None or record.get("nonce") != nonce or record.get("pid") != os.getpid():
+        raise InstallTransactionError("candidate publication ownership could not be verified")
+    record["ever_exposed"] = True
+    staged = path.with_name(f"{ATTEMPT_NAME}.{uuid.uuid4().hex}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(staged, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def finish_attempt(generation: Path, nonce: str) -> None:

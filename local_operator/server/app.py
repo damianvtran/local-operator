@@ -382,6 +382,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # signal handlers all answer None, and all three would be lying if
             # this read `listener_fd is not None` instead.
             reloadable=reload_watch is not None,
+            rolling_reload_contract=serve_reload.rolling_contract(app),
             access_token=surface_keys.access_token,
             boot_generation=surface_keys.generation,
         )
@@ -483,6 +484,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - auto-update is optional; the daemon is not
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
+
+    # The record was created before the autonomous hub producer. Publish safety
+    # only AFTER every real hook exists; absent/failed hub startup stays unknown.
+    if serve_publisher is not None and reload_watch is not None:
+        try:
+            serve_publisher.heartbeat(rolling_reload_contract=serve_reload.rolling_contract(app))
+        except Exception:  # noqa: BLE001 — failed publication never authorizes reload
+            logger.warning("rolling reload capability could not be published", exc_info=True)
 
     yield
     try:
@@ -890,6 +899,11 @@ app.include_router(desktop_approvals.router)
 # `/code-requests` child of a session, and the two-segment `/refresh` path is declared
 # after its own parent here, so the literal suffix cannot be swallowed.
 app.include_router(desktop_code_requests.router)
+
+# Install the loop-local work fence before lifespan publishes its reload
+# capability. It drains real request bodies, not just endpoint construction;
+# established replayable desktop feeds retain their independent runtime owners.
+app.add_middleware(serve_reload.ReloadAdmissionMiddleware, owner=app)
 
 # Add CORS middleware
 app.add_middleware(

@@ -73,6 +73,19 @@ def source_runner(target: str):
     return run
 
 
+def test_immutable_install_records_durable_operation_at_real_mutation_boundary(
+    isolated: Path,
+) -> None:
+    generation = update.install_into_generation(
+        isolated, version="0.70.7", runner=source_runner("0.70.7")
+    )
+    operation = tx.operation_for_generation(generation)
+    assert operation is not None, "actual immutable installer must persist its operation identity"
+    row = tx.operation_status(update.stable_root(), operation.identifier)
+    assert row["phase"] == "promoted" and row["candidate"] == str(generation)
+    assert row["target"] == "0.70.7" and update.current_generation() == generation
+
+
 def test_permanent_inode_and_nested_actual_handle(isolated: Path) -> None:
     root = update.stable_root()
     with tx.transaction(root, operation="outer") as outer:
@@ -177,6 +190,16 @@ def test_live_candidate_survives_marker_age_and_prune(isolated: Path) -> None:
     assert not update._remove_tree(generation)
     update._discard_candidate(generation, nonce)
     assert not generation.exists()
+
+
+def test_failed_publication_never_becomes_unreferenced_delete_permission(isolated: Path) -> None:
+    candidate, nonce, _baseline = update._register_candidate("exposed", "0.70.7", "source")
+    with tx.transaction(update.stable_root(), operation="owned publication regression"):
+        tx.preserve_publication(candidate, nonce)
+    # Neither a current-pointer absence nor a dead-owner inference proves a
+    # runtime never observed B. This marker is preservation-only, not an index.
+    update._discard_candidate(candidate, nonce)
+    assert candidate.exists() and tx.attempt_protected(candidate)
 
 
 def test_duplicate_target_refuses_before_second_build(isolated: Path) -> None:
@@ -397,7 +420,9 @@ def test_same_published_target_registration_refuses_latest_exact_duplicate(isola
     assert not candidate.exists()
 
 
-def test_real_busy_record_refuses_before_build_and_again_before_promotion(isolated: Path) -> None:
+def test_real_busy_record_allows_immutable_build_and_promotion(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from local_operator.session.runtime import registry
     from local_operator.session.runtime.types import SessionRecord
 
@@ -421,31 +446,55 @@ def test_real_busy_record_refuses_before_build_and_again_before_promotion(isolat
         called = True
         return source_runner("0.70.7")(argv, env)
 
-    with pytest.raises(update.UpdateError, match="sessions are busy"):
-        update.install_into_generation(isolated, version="0.70.7", runner=run)
-    assert not called and path.exists()
+    # The discovery record and PID are real, not an injected idle verdict. Only
+    # the installer transport is synthetic; no native wheel/signature claim.
+    generation = update.install_into_generation(isolated, version="0.70.7", runner=run)
+    assert called and path.exists()
+    assert update.current_generation() == generation
+    assert registry.scan(root, parse=SessionRecord.from_json, reap=False)[0][0].busy
+
     path.unlink()
+    called = False
 
     def become_busy(argv: list[str], env: dict[str, str]) -> int:
-        code = run(argv, env)
+        code = source_runner("0.70.8")(argv, env)
         registry.publish(record, root)
         return code
 
+    next_generation = update.install_into_generation(
+        isolated, version="0.70.8", runner=become_busy
+    )
+    assert update.current_generation() == next_generation
+    assert generation.is_dir() and path.exists()
+
+    # The policy exception never reaches the in-place route. A real busy census
+    # refuses the production entry BEFORE the mocked native installer boundary.
+    installer_calls: list[list[str]] = []
+
+    def observe_installer(argv: list[str], **kwargs: object) -> int:
+        installer_calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(update, "_run_installer", observe_installer)
     with pytest.raises(update.UpdateError, match="sessions are busy"):
-        update.install_into_generation(isolated, version="0.70.7", runner=become_busy)
-    assert called and update.current_generation() is None
-    assert not list(update.generations_dir().iterdir())
+        update.perform_upgrade(target="0.70.9", kind=update.InstallKind.PIP)
+    assert not installer_calls
 
 
-def test_unparseable_session_namespace_is_not_idle(isolated: Path) -> None:
+def test_unparseable_census_does_not_block_isolated_immutable_preparation(isolated: Path) -> None:
     from local_operator.session.runtime import registry
 
     directory = registry.ensure_run_dir(isolated / "config")
     bad = directory / "12345.json"
     bad.write_text("{broken")
-    with pytest.raises(update.UpdateError, match="cannot prove fleet idle"):
-        update.install_into_generation(isolated, version="0.70.7", runner=source_runner("0.70.7"))
+    generation = update.install_into_generation(
+        isolated, version="0.70.7", runner=source_runner("0.70.7")
+    )
+    assert update.current_generation() == generation
     assert bad.read_text() == "{broken"
+    # Unreadable still refuses the mutable policy; it is NOT interpreted as idle.
+    with pytest.raises(update.UpdateError, match="cannot prove fleet idle"):
+        update._admit_install()
 
 
 def test_lock_identity_nonposix_refuses_before_any_filesystem_access(
