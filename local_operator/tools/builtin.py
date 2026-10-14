@@ -12854,6 +12854,24 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
     return f"next at {due}{every}{fired}"
 
 
+def _pending_wake_ids(scheduler: WakeSchedulerProtocol) -> frozenset[str]:
+    """The handles the scheduler is holding for a successor, or the empty set.
+
+    A probed OPTIONAL capability (``WakeSchedulerProtocol`` documents it): a host
+    without a live reservation concept simply cannot answer, and "no pending" is
+    the honest reading of that — never a fabricated phase. Failure is swallowed
+    the same way: an unreadable phase must not cost the model its listing.
+    """
+    probe = getattr(scheduler, "pending_ids", None)
+    if not callable(probe):
+        return frozenset()
+    try:
+        return frozenset(probe())
+    except Exception:  # noqa: BLE001 — a listing must survive a broken phase probe
+        logger.debug("wake pending_ids probe failed; listing rows as ordinary", exc_info=True)
+        return frozenset()
+
+
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
     # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
     # 5): one shared filter with the panel and the CLI
@@ -12870,7 +12888,19 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
             useless=True,
             details={"useless": True},
         )
-    lines = [f'- {s.id}: "{s.message}" {_wake_due_label(s)}' for s in schedules]
+    # Pending handles render EXPLICITLY, not as an imminent fire. A held row is a
+    # schedule this runtime still owns for a successor to run (a departing fire
+    # reserved its occurrence); the timer here will NOT fire it, so "next at
+    # <soon>" would promise a delivery that is not coming from this list. The
+    # capability is probed, not required: a scheduler that cannot report a live
+    # reservation (a snapshot facade, a reduced host) yields the empty set and
+    # every row reads as ordinary.
+    pending = _pending_wake_ids(scheduler)
+    lines = [
+        f'- {s.id}: "{s.message}" '
+        + ("awaiting runtime handover" if s.id in pending else _wake_due_label(s))
+        for s in schedules
+    ]
     return _text(tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines))
 
 
