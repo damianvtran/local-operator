@@ -172,8 +172,10 @@ async def test_settlement_interleavings_are_terminal_safe(
     intent, _ = _record(intents, runtime)
     _SETTLE[first](intents, intent)
     settled = intents.get(intent.intent_id)
+    assert settled is not None
     _SETTLE[second](intents, intent)
     after = intents.get(intent.intent_id)
+    assert after is not None
     assert after.state == expected
     if keeps_receipt:
         # m8: the recorded outcome's receipt is authoritative and byte-stable

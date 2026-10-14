@@ -373,7 +373,9 @@ async def test_live_full_chain_ask_can_only_come_from_the_received_frame(
     ask_id = str(asks[0].get("ask_id"))
     serialized = json.dumps(asks[0])
     assert DREF in serialized and str(_owner().account_id) in serialized
-    assert AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)["state"] == "raised"
+    row_live = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row_live is not None
+    assert row_live["state"] == "raised"
     # H5-D2/A: capture the SESSION's own monotonic intake count BEFORE the
     # re-send. The re-send carries the SAME valid LOCAL peer id, so the
     # RECEIVER's duplicate branch is the expected production path — completion
@@ -500,6 +502,7 @@ async def test_negative_b_altered_hints_never_ask(tmp_path, isolated_config, mon
     )
     assert _asks_for(session, MESSAGE_ID) == []
     row = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["reason"] == "display_context_mismatch"
     await session.dispose()
 
@@ -530,7 +533,9 @@ async def test_cold_errand_consumer_and_spool_drain_reach_the_same_queue(
     )
     serialized = json.dumps(_asks_for(session, MESSAGE_ID)[0])
     assert DREF in serialized and str(_owner().account_id) in serialized
-    assert AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)["state"] == "raised"
+    row_live = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row_live is not None
+    assert row_live["state"] == "raised"
     # COLD 2 — a SECOND, FULLY-BOUND producer message (own ref/body/digest/
     # claim/phase) through the REAL spool writer and the REAL drain, which
     # drives the same wake turn: the hook runs on the persisted row only.
@@ -564,7 +569,9 @@ async def test_cold_errand_consumer_and_spool_drain_reach_the_same_queue(
     assert len(cold) == 1
     serialized2 = json.dumps(cold[0])
     assert DREF2 in serialized2 and str(_owner().account_id) in serialized2
-    assert AskIssuance(tmp_path).read(_owner(), MESSAGE_ID_2)["state"] == "raised"
+    row_second = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID_2)
+    assert row_second is not None
+    assert row_second["state"] == "raised"
     await session.dispose()
 
 

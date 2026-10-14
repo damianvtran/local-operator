@@ -55,7 +55,9 @@ def test_crash_after_append_before_mark_replays_to_the_same_ask(tmp_path) -> Non
     ask_id = str(first["details"]["ask_id"])
     # The intentional interruption: the ask row IS durable, the issuance row is
     # still 'claimed' — the crash window the repair must close.
-    assert issuance.read(OWNER, MESSAGE_ID)["state"] == "claimed"
+    claimed = issuance.read(OWNER, MESSAGE_ID)
+    assert claimed is not None
+    assert claimed["state"] == "claimed"
     again = _keyed(queue)  # LIVE replay
     assert again["ok"] is True
     assert str(again["details"]["ask_id"]) == ask_id

@@ -225,6 +225,7 @@ def test_legacy_omit_keeps_the_old_byte_shape_and_never_mints(
     from local_operator.team_bridge.ask_issuance import AskIssuance
 
     row = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["state"] == "unrecoverable"
     assert row["reason"] == "no_original_envelope"
 
@@ -252,6 +253,7 @@ def test_copied_digest_with_changed_hints_never_raises_over_the_wire(
     from local_operator.team_bridge.ask_issuance import AskIssuance
 
     row = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["state"] == "unrecoverable"
     assert row["reason"] == "display_context_mismatch"
 
@@ -380,6 +382,7 @@ def test_a_stale_scope_over_the_wire_never_raises(
     from local_operator.team_bridge.ask_issuance import AskIssuance
 
     row = AskIssuance(tmp_path).read(_owner(), MESSAGE_ID)
+    assert row is not None
     assert row["state"] == "unrecoverable"
     assert row["reason"] == "original_scope_drift"
 

@@ -100,6 +100,13 @@ def _runtime(tmp_path) -> BridgeRuntime:
     )
 
 
+def _read(ledger, owner, message_id: str = "bmsg_1") -> dict[str, Any]:
+    """The ledger row, refusing a miss (``read`` returns ``dict | None``)."""
+    row = ledger.read(owner, message_id)
+    assert row is not None
+    return row
+
+
 def _meta(**overrides) -> dict[str, Any]:
     meta = {
         "v": "1",
@@ -278,9 +285,9 @@ def test_the_issuance_ledger_is_generation_scoped_and_frozen_scope(tmp_path) -> 
     # (SELECT, then UPDATE), so the returned dict lags the durable count by one
     # and no caller reads it; the DURABLE counter is what the ledger promises:
     # one increment per claim, the scope untouched.
-    assert int(ledger.read(owner, "bmsg_1")["attempts"]) == 2
+    assert int(_read(ledger, owner, "bmsg_1")["attempts"]) == 2
     ledger.mark_raised(owner, "bmsg_1", "a-9")
-    assert ledger.read(owner, "bmsg_1")["state"] == "raised"
+    assert _read(ledger, owner, "bmsg_1")["state"] == "raised"
     assert ledger.pending(owner) == []
     # A NEW generation is a different identity: the old row is not its to
     # retry, and it does not block a fresh claim.
@@ -353,6 +360,7 @@ def test_the_receipt_trust_matrix(tmp_path, monkeypatch) -> None:
     _stamp(store)
     owner = _env_owner()
     envelope = store.screened_request_delivery(owner, delivery_ref=DREF, message_id=MESSAGE_ID)
+    assert envelope is not None
     assert store.verify_original_envelope_current(owner, envelope) == ("", "")
 
     def _mutate(sql: str, *params) -> None:
@@ -390,7 +398,7 @@ def test_the_hook_raises_once_and_is_terminal_for_a_repeat(
     assert len(calls) == 1
     assert calls[0]["message_id"] == "bmsg_1"
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), "bmsg_1")["state"] == "raised"
+    assert _read(ledger, _owner(), "bmsg_1")["state"] == "raised"
     # Re-delivery / reconcile of the SAME message: durable record ends it.
     Session._maybe_raise_bridge_ask(stub, message)
     assert len(calls) == 1
@@ -418,6 +426,7 @@ def test_the_hook_refuses_without_a_trusted_arm(tmp_path, monkeypatch: pytest.Mo
     assert calls == []
     ledger = AskIssuance(tmp_path)
     row = ledger.read(_owner(), "bmsg_1")
+    assert row is not None
     assert row["state"] == "unrecoverable"
     assert row["reason"] == "no_original_envelope"
 
@@ -438,8 +447,8 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
         stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
     )
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), "bmsg_1")["state"] == "pending"
-    assert "cap" in ledger.read(_owner(), "bmsg_1")["reason"]
+    assert _read(ledger, _owner(), "bmsg_1")["state"] == "pending"
+    assert "cap" in _read(ledger, _owner(), "bmsg_1")["reason"]
     # The trusted local boundary retries it as an ASK only.
     calls: list[dict[str, Any]] = []
     _recorder(monkeypatch, calls)
@@ -460,7 +469,7 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
     }
     Session._retry_pending_bridge_issuances(stub)
     assert len(calls) == 1
-    assert ledger.read(_owner(), "bmsg_1")["state"] == "raised"
+    assert _read(ledger, _owner(), "bmsg_1")["state"] == "raised"
 
 
 def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -473,8 +482,8 @@ def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyP
     )
     assert calls == []
     ledger = AskIssuance(tmp_path)
-    assert ledger.read(_owner(), "bmsg_1")["state"] == "pending"
-    assert "queue" in ledger.read(_owner(), "bmsg_1")["reason"]
+    assert _read(ledger, _owner(), "bmsg_1")["state"] == "pending"
+    assert "queue" in _read(ledger, _owner(), "bmsg_1")["reason"]
 
 
 def test_the_ledger_schema_is_what_it_claims(tmp_path) -> None:

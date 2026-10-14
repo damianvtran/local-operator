@@ -141,11 +141,13 @@ async def test_sent_is_terminal_and_receipt_is_byte_identical(tmp_path) -> None:
     intent, _ = _record(intents, runtime)
     intents.mark_sent(intent.intent_id, {"id": "req_original"})
     before = intents.get(intent.intent_id)
+    assert before is not None
     assert before.state == "sent"
     intents.mark_transient(intent.intent_id, "bridge_unreachable")
     intents.mark_signin(intent.intent_id)
     intents.mark_refused(intent.intent_id, "bridge_disabled")
     after = intents.get(intent.intent_id)
+    assert after is not None
     assert after.state == "sent"
     assert after.receipt_json == before.receipt_json  # byte-identical, m8
     assert json.loads(after.receipt_json)["id"] == "req_original"
@@ -158,6 +160,7 @@ async def test_refused_is_terminal_for_later_success(tmp_path) -> None:
     intents.mark_refused(intent.intent_id, "bridge_disabled")
     intents.mark_sent(intent.intent_id, {"id": "should_not_apply"})
     after = intents.get(intent.intent_id)
+    assert after is not None
     assert after.state == "refused"
 
 
