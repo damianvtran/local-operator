@@ -1,0 +1,92 @@
+{
+  "tui.projects.send.empty": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Empty linked-target picker; keep esc and /project link literal because they are executable controls. Single row; wraps only as existing widget permits."
+  },
+  "tui.projects.send.no_match": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Filtered-empty picker; backspace names the existing keyboard control, not a project-link failure. Single row."
+  },
+  "tui.projects.send.compose": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Recipient composer strip; handle is the already displayed short session identifier. Keep esc literal; one clipped line."
+  },
+  "tui.projects.send.pending": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "In-flight composer receipt; handle is the selected recipient, ellipsis signals pending, not successful delivery. One line."
+  },
+  "tui.projects.send.sent": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Completed band receipt; handle and state_word are opaque identity and upstream delivery vocabulary, not parsed English. One line."
+  },
+  "tui.projects.send.wake_unconfirmed": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Amber caution; do not remove resend warning. Notice fits a 56-cell narrow box, may truncate."
+  },
+  "tui.projects.send.delivery_unconfirmed": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Amber caution; directs transcript verification rather than resending. Notice fits a 56-cell narrow box."
+  },
+  "tui.projects.send.fault": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Local failure notice, distinct from delivery refusal; preserve retry action within 56 cells."
+  },
+  "tui.projects.send.refusal": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Delivery refusal; reason is opaque upstream text, never parse it. Handle omitted to preserve reason in 56-cell box."
+  },
+  "tui.projects.send.error": {
+    "role": "status text",
+    "tone": "plain",
+    "note": "Pre-delivery error; reason is opaque upstream text. Handle omitted to preserve reason in 56-cell box."
+  },
+  "tui.projects.send.session": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Target-row identity fallback; short is an opaque 12-cell session identifier. Used both in row and measured tail budget."
+  },
+  "tui.projects.send.title": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Picker title; short lowercase label, no recipient duplicated here."
+  },
+  "tui.projects.send.filter": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Input placeholder; short instruction, no key binding introduced."
+  },
+  "tui.projects.send.legend": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Picker grammar; preserve ↑↓, ↵ and esc as working controls. Fixed chrome row, no new interaction."
+  },
+  "tui.projects.send.more": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Hidden-row count; count selects the plural; label is its preformatted ASCII integer string, deliberately ungrouped to preserve English bytes. Identical English plural branches deliberately retain original noun-less copy."
+  },
+  "tui.projects.send.binding_move": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Textual binding description for existing up/down action; one short word."
+  },
+  "tui.projects.send.binding_choose": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Textual binding description for existing Enter action; one short word."
+  },
+  "tui.projects.send.binding_close": {
+    "role": "picker copy",
+    "tone": "plain",
+    "note": "Textual binding description for existing Escape action; one short word."
+  }
+}

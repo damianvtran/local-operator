@@ -37,12 +37,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable
+from weakref import WeakSet
 
 from rich.style import Style
 from rich.text import Text
+from textual.binding import BindingsMap
 from textual.containers import Container
 from textual.message import Message
 from textual.widgets import Input, Static
+
+from local_operator.i18n.keys import tui_projects as copy
+from local_operator.i18n.text import register_refresh, tr
+
+_t = tr("tui.projects")
+# Weak references let an open picker follow backend locale changes without
+# keeping dismissed cards alive. Commands and runtime-state tokens stay opaque.
+_cards: WeakSet[SendTargetCard] = WeakSet()
 
 #: The footer line the card paints when it has no rows at all, and the last row
 #: of every list (spec §7.5.1). It is a ROW rather than a hint because it is
@@ -58,14 +68,14 @@ from textual.widgets import Input, Static
 #: ``link_session`` call exists under ``local_operator/tui/`` — so it now names
 #: the route that works (`/project link`; UX round 2, U1). P5b rebinds it to the
 #: real start-session flow.
-NO_TARGET_FOOTER = "no targets — esc closes · /project link adds one"
+NO_TARGET_FOOTER = _t(copy.send_empty())
 
 #: The note when the FILTER matched nothing — a different nothing from
 #: :data:`NO_TARGET_FOOTER` (a mistyped filter is a keystroke to take back,
 #: not a session to go link). Reachable the moment typing reached the filter
 #: at all (UX round 1, N2; the model picker draws the same line — "no
 #: matching models" vs "no models available").
-NO_MATCH_FOOTER = "no matching targets — backspace to widen"
+NO_MATCH_FOOTER = _t(copy.send_no_match())
 
 #: How many of a session id's characters name it in a row. The row also carries
 #: the conversation name when there is one, so this is only the fallback handle
@@ -112,7 +122,7 @@ def compose_band(target: SendTarget) -> str:
     hinted key that types your sentence is the worst version of the
     hinted-key-that-does-nothing defect (UX round 1, Q3/U5).
     """
-    return f"send to: {target_handle(target)} · esc cancel"
+    return _t(copy.send_compose(handle=target_handle(target)))
 
 
 def pending_line(target: SendTarget) -> str:
@@ -122,7 +132,7 @@ def pending_line(target: SendTarget) -> str:
     Without it the draft vanished and the band kept inviting another send, so
     for the seconds a delivery takes the surface said nothing had happened.
     """
-    return f"sending to {target_handle(target)}…"
+    return _t(copy.send_pending(handle=target_handle(target)))
 
 
 def sent_line(target: SendTarget, state_word: str) -> str:
@@ -136,7 +146,7 @@ def sent_line(target: SendTarget, state_word: str) -> str:
     This is the BAND's receipt (the strip under the composer), which has room
     for the handle; the amber NOTICE row uses :func:`amber_notice` instead.
     """
-    return f"sent to {target_handle(target)} · {state_word}"
+    return _t(copy.send_sent(handle=target_handle(target), state_word=state_word))
 
 
 #: The notice row is ONE ``no_wrap`` line, fitted to its MEASURED box
@@ -151,15 +161,20 @@ def sent_line(target: SendTarget, state_word: str) -> str:
 #: is exactly the double-send the caution exists to prevent (UX round 3, U2:
 #: measured invisible at 100x30, 80x24 and 60x24).
 AMBER_NOTICE: dict[str, str] = {
-    "wake unconfirmed": "wake unconfirmed — don't resend; it may have landed",
-    "delivery unconfirmed": "delivery unconfirmed — check its transcript first",
+    "wake unconfirmed": _t(copy.send_wake_unconfirmed()),
+    "delivery unconfirmed": _t(copy.send_delivery_unconfirmed()),
 }
 
 #: The fault sentence as the notice row carries it, same budget: the rung it
 #: replaces (``could not send to ◆ <id>: something went wrong on this end —
 #: retry``) measures 74 cells, so at 60x24 the ``retry`` — the one thing to DO —
 #: was the part that clipped.
-SEND_FAULT_NOTICE = "send faulted on this end — retry"
+SEND_FAULT_NOTICE = _t(copy.send_fault())
+
+
+def send_fault_notice() -> str:
+    """Resolve on use: consumers importing a string cannot follow locale rebinding."""
+    return _t(copy.send_fault())
 
 
 def amber_notice(state_word: str) -> str:
@@ -179,7 +194,7 @@ def refusal_notice(reason: str) -> str:
     (UX round 3: the refusal measured 84 cells, so its tail — the resolver's
     own reason — clipped at 80x24 and 60x24 alike).
     """
-    return f"could not deliver: {reason}"
+    return _t(copy.send_refusal(reason=reason))
 
 
 def error_notice(reason: str) -> str:
@@ -189,7 +204,7 @@ def error_notice(reason: str) -> str:
     :data:`AMBER_NOTICE` for why the target's handle is the band's job, not
     this row's.
     """
-    return f"could not send: {reason}"
+    return _t(copy.send_error(reason=reason))
 
 
 #: How a row's state chip inks itself (design review round 1, D4): the page's
@@ -259,7 +274,7 @@ class SendTarget:
         short = self.session_id[:SHORT_ID_CELLS] if self.session_id else ""
         parts = [self.label]
         if short and self.label != short:
-            parts.append(f"session {short}")
+            parts.append(_t(copy.send_session(short=short)))
         if self.state:
             parts.append(f"[{self.state}]")
         return "  · ".join(parts)
@@ -371,10 +386,10 @@ class SendTargetCard(Container):
     can_focus = True
 
     BINDINGS = [
-        ("up", "move(-1)", "Move"),
-        ("down", "move(1)", "Move"),
-        ("enter", "choose", "Choose"),
-        ("escape", "close", "Close"),
+        ("up", "move(-1)", _t(copy.send_binding_move())),
+        ("down", "move(1)", _t(copy.send_binding_move())),
+        ("enter", "choose", _t(copy.send_binding_choose())),
+        ("escape", "close", _t(copy.send_binding_close())),
     ]
 
     class Chosen(Message):
@@ -399,6 +414,7 @@ class SendTargetCard(Container):
         style_for: Any = None,
     ) -> None:
         super().__init__(classes="projects-send-card")
+        _cards.add(self)
         self._all = list(rows)
         self._rows: list[SendTarget] = list(rows)
         self._index = 0
@@ -413,20 +429,21 @@ class SendTargetCard(Container):
         self._available = SEND_CARD_CHROME_ROWS + SEND_CARD_ROW_CAP
 
     def compose(self):
-        yield Static("send to", classes="projects-send-title")
+        yield Static(_t(copy.send_title()), classes="projects-send-title")
         # The one rule every surface here uses under its title (design D2's
         # "one rule or box", in this sheet's separator vocabulary).
         yield Static("", id="projects-send-rule", classes="projects-send-rule")
-        yield Input(placeholder="type to filter", id="projects-send-filter")
+        yield Input(placeholder=_t(copy.send_filter()), id="projects-send-filter")
         yield Static("", id="projects-send-rows", classes="projects-send-rows")
         yield Static("", id="projects-send-note", classes="projects-send-note")
         yield Static(
-            "type to filter · ↑↓ move · ↵ select · esc close",
+            _t(copy.send_legend()),
             id="projects-send-legend",
             classes="projects-send-hints",
         )
 
     def on_mount(self) -> None:
+        self._refresh_copy()
         self._repaint()
         # The INPUT takes focus, not the card: the card's grammar is "type to
         # filter", and with the card itself focused every printable key died
@@ -534,7 +551,7 @@ class SendTargetCard(Container):
             short = row.session_id[:SHORT_ID_CELLS] if row.session_id else ""
             tail = ""
             if short and row.label != short:
-                tail += f"  · session {short}"
+                tail += "  · " + _t(copy.send_session(short=short))
             if row.state:
                 tail += f"  · [{row.state}]"
             label = row.label
@@ -545,7 +562,7 @@ class SendTargetCard(Container):
             line.append(label)
             if short and row.label != short:
                 line.append("  · ")
-                line.append(f"session {short}")
+                line.append(_t(copy.send_session(short=short)))
             if row.state:
                 line.append("  · ")
                 line.append(f"[{row.state}]", style=self._ink(state_ink_key(row.state)))
@@ -589,12 +606,37 @@ class SendTargetCard(Container):
             # reads as the whole list. `muted`, not `dim`: on the card's own
             # `$lo-overlay` ground `dim` measured 3.43:1, below AA (D5).
             hidden = len(self._rows) - self._visible
-            note.update(Text(f"+{hidden} more" if hidden > 0 else "", style=self._ink("muted")))
+            note.update(
+                Text(
+                    _t(copy.send_more(count=hidden, label=str(hidden))) if hidden > 0 else "",
+                    style=self._ink("muted"),
+                )
+            )
         # The rule is cut to the card's own measured width; before the first
         # layout there is no measurement and this paints nothing (the next
         # repaint cuts it — `on_resize` guarantees one).
         width = self.content_size.width
         rule.update(Text("─" * width if width > 0 else "", style=self._ink("dim")))
+
+    def _refresh_copy(self) -> None:
+        """Repaint chrome and binding descriptions, not the recipient/filter state."""
+        # ``DOMNode`` declares ``_merged_bindings`` as ``ClassVar[BindingsMap |
+        # None]`` — it is unset until ``__init_subclass__`` runs, so the type the
+        # analyzer sees is Optional even though it is always populated by the time
+        # a card is mounted. Guard the None arm the way ``transcript.py`` does: a
+        # card that somehow ran before its bindings merged keeps its own declared
+        # list rather than the parent's, which is the safe direction (the refresh
+        # then still rebinds the translated descriptions instead of raising).
+        merged = SendTargetCard._merged_bindings
+        self._bindings = (
+            merged if merged is not None else BindingsMap(SendTargetCard.BINDINGS)
+        ).copy()
+        if not self.is_mounted:
+            return
+        self.query_one(".projects-send-title", Static).update(_t(copy.send_title()))
+        self.query_one("#projects-send-filter", Input).placeholder = _t(copy.send_filter())
+        self.query_one("#projects-send-legend", Static).update(_t(copy.send_legend()))
+        self._repaint()
 
     def _ink(self, key: str) -> Any:
         """A resolved style, or ``None`` when the host supplied no resolver."""
@@ -672,3 +714,31 @@ class SendTargetCard(Container):
         except Exception:  # noqa: BLE001 — before layout there is no region
             # padding row + title + rule + filter
             return 3
+
+
+def _reload_copy() -> None:
+    """Follow backend locale moves without resetting a picker's draft or selection."""
+    global NO_TARGET_FOOTER, NO_MATCH_FOOTER, SEND_FAULT_NOTICE, AMBER_NOTICE
+    NO_TARGET_FOOTER = _t(copy.send_empty())
+    NO_MATCH_FOOTER = _t(copy.send_no_match())
+    SEND_FAULT_NOTICE = _t(copy.send_fault())
+    # These keys are upstream delivery-state vocabulary, not translated prose
+    # to parse. Only the human caution on the right is owned by this slice.
+    AMBER_NOTICE = {
+        "wake unconfirmed": _t(copy.send_wake_unconfirmed()),
+        "delivery unconfirmed": _t(copy.send_delivery_unconfirmed()),
+    }
+    SendTargetCard.BINDINGS = [
+        ("up", "move(-1)", _t(copy.send_binding_move())),
+        ("down", "move(1)", _t(copy.send_binding_move())),
+        ("enter", "choose", _t(copy.send_binding_choose())),
+        ("escape", "close", _t(copy.send_binding_close())),
+    ]
+    # Textual snapshots class declarations at class creation; updating BINDINGS
+    # alone would leave both new and already-open cards with stale descriptions.
+    SendTargetCard._merged_bindings = BindingsMap(SendTargetCard.BINDINGS)
+    for card in tuple(_cards):
+        card._refresh_copy()
+
+
+register_refresh(_reload_copy)
