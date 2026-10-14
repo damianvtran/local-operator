@@ -230,7 +230,9 @@ def _unmodelled_error_code(http_response: httpx.Response) -> str:
     return ""
 
 
-async def cleanup_owner_completed(session_id: str, root: Path | None = None) -> dict[str, Any] | None:
+async def cleanup_owner_completed(
+    session_id: str, root: Path | None = None
+) -> dict[str, Any] | None:
     """Best-effort owner teardown, shared by ordinary and delegated sessions.
 
     Never falls back to enumerating/closing handles: only the host can atomically
@@ -367,7 +369,12 @@ def aggregate_console_metrics(value: Any) -> dict[str, Any]:
         result: dict[str, int | float | None] = {}
         for key in keys:
             item = raw.get(key)
-            if isinstance(item, (int, float)) and not isinstance(item, bool) and 0 <= item <= 2**53 - 1 and math.isfinite(item):
+            if (
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and 0 <= item <= 2**53 - 1
+                and math.isfinite(item)
+            ):
                 result[key] = item
             elif key in ("fd_available", "pty_available") and key in raw and item is None:
                 result[key] = None
@@ -392,8 +399,34 @@ def aggregate_console_metrics(value: Any) -> dict[str, Any]:
         }
     for group, keys in (
         ("caps", ("maxLive", "maxOwner", "userReserved")),
-        ("resources", ("ptys", "log_bytes", "pending_bytes", "emulator_cells", "protected", "modeled_managed_bytes", "fd_available", "pty_available", "pty_reservations", "native_sampled_at", "pending_allocations", "user_reserved_vacant", "user_remaining_modeled_units")),
-        ("resource_caps", ("log_bytes", "pending_bytes", "emulator_cells", "modeled_managed_bytes", "native_ptys")),
+        (
+            "resources",
+            (
+                "ptys",
+                "log_bytes",
+                "pending_bytes",
+                "emulator_cells",
+                "protected",
+                "modeled_managed_bytes",
+                "fd_available",
+                "pty_available",
+                "pty_reservations",
+                "native_sampled_at",
+                "pending_allocations",
+                "user_reserved_vacant",
+                "user_remaining_modeled_units",
+            ),
+        ),
+        (
+            "resource_caps",
+            (
+                "log_bytes",
+                "pending_bytes",
+                "emulator_cells",
+                "modeled_managed_bytes",
+                "native_ptys",
+            ),
+        ),
     ):
         projected = counters(value.get(group), keys)
         if projected:
@@ -444,7 +477,9 @@ def console_error_text(error: BridgeError) -> str:
             return (
                 f"tab_limit: {message}\nAggregate capacity: "
                 + json.dumps(metrics, separators=(",", ":"))
-                + ". Use resources; inspect only your own surfaces and cleanup completed work. Never close another owner's or merely idle live terminal."
+                + ". Use resources; inspect only your own surfaces and cleanup "
+                "completed work. Never close another owner's or merely idle "
+                "live terminal."
             )
     if code == ErrorCode.UNSUPPORTED_METHOD:
         return (

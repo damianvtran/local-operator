@@ -65,7 +65,11 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
-from local_operator.ui_console.policy import DEFAULT_LIVE_LIMIT, DEFAULT_OWNER_LIMIT, DEFAULT_USER_RESERVED
+from local_operator.ui_console.policy import (
+    DEFAULT_LIVE_LIMIT,
+    DEFAULT_OWNER_LIMIT,
+    DEFAULT_USER_RESERVED,
+)
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS

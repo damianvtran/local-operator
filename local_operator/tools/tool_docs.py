@@ -286,8 +286,20 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "those rather than asking the user to repeat their output."
                 ),
             ),
-            ToolDocOp(op="resources", blurb="Aggregate live/history/resource counts only; no foreign handles or output."),
-            ToolDocOp(op="cleanup", blurb="Release this owner's completed agent surfaces, preserving retained files and live work."),
+            ToolDocOp(
+                op="resources",
+                blurb=(
+                    "Aggregate live/history/resource counts only; no foreign "
+                    "handles or output."
+                ),
+            ),
+            ToolDocOp(
+                op="cleanup",
+                blurb=(
+                    "Release this owner's completed agent surfaces, preserving "
+                    "retained files and live work."
+                ),
+            ),
             ToolDocOp(op="create", blurb="Start a pty (command, args, cwd, env, cols, rows)."),
             ToolDocOp(op="status", blurb="Where a surface and its process stand."),
             ToolDocOp(op="read", blurb="Text: viewport (default) or scrollback."),
