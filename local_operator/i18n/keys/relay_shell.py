@@ -36,3 +36,103 @@ def session_connecting() -> Msg:
 
 def session_waiting() -> Msg:
     return Msg("relay.shell.session.waiting", {})
+
+
+def usage_amount_unknown() -> Msg:
+    return Msg("relay.shell.usage.amount_unknown", {})
+
+
+def usage_blocked() -> Msg:
+    return Msg("relay.shell.usage.blocked", {})
+
+
+def usage_cached() -> Msg:
+    return Msg("relay.shell.usage.cached", {})
+
+
+def usage_command() -> Msg:
+    return Msg("relay.shell.usage.command", {})
+
+
+def usage_continue() -> Msg:
+    return Msg("relay.shell.usage.continue", {})
+
+
+def usage_eligibility_unknown() -> Msg:
+    return Msg("relay.shell.usage.eligibility_unknown", {})
+
+
+def usage_empty() -> Msg:
+    return Msg("relay.shell.usage.empty", {})
+
+
+def usage_family() -> Msg:
+    return Msg("relay.shell.usage.family", {})
+
+
+def usage_family_caps() -> Msg:
+    return Msg("relay.shell.usage.family_caps", {})
+
+
+def usage_fraction(*, value: str) -> Msg:
+    return Msg("relay.shell.usage.fraction", {"value": value})
+
+
+def usage_included() -> Msg:
+    return Msg("relay.shell.usage.included", {})
+
+
+def usage_last_known() -> Msg:
+    return Msg("relay.shell.usage.last_known", {})
+
+
+def usage_loading() -> Msg:
+    return Msg("relay.shell.usage.loading", {})
+
+
+def usage_paid() -> Msg:
+    return Msg("relay.shell.usage.paid", {})
+
+
+def usage_remaining(*, value: str, unit: str) -> Msg:
+    return Msg("relay.shell.usage.remaining", {"value": value, "unit": unit})
+
+
+def usage_reset(*, value: str) -> Msg:
+    return Msg("relay.shell.usage.reset", {"value": value})
+
+
+def usage_title() -> Msg:
+    return Msg("relay.shell.usage.title", {})
+
+
+def usage_unavailable() -> Msg:
+    return Msg("relay.shell.usage.unavailable", {})
+
+
+def usage_unlimited() -> Msg:
+    return Msg("relay.shell.usage.unlimited", {})
+
+
+def usage_used(*, value: str, unit: str) -> Msg:
+    return Msg("relay.shell.usage.used", {"value": value, "unit": unit})
+
+
+def usage_window_five() -> Msg:
+    return Msg("relay.shell.usage.window_five", {})
+
+
+def usage_window_lifetime() -> Msg:
+    return Msg("relay.shell.usage.window_lifetime", {})
+
+
+def usage_window_month() -> Msg:
+    return Msg("relay.shell.usage.window_month", {})
+
+
+def usage_window_unknown() -> Msg:
+    return Msg("relay.shell.usage.window_unknown", {})
+
+
+def usage_window_week() -> Msg:
+    return Msg("relay.shell.usage.window_week", {})
