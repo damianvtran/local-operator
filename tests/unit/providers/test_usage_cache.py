@@ -618,3 +618,32 @@ def test_legacy_anthropic_paid_semantic_migration(plan, paid, status, expected) 
     )
     assert report is not None
     assert usage_health(report, "claude-opus").state == expected
+
+
+@pytest.mark.parametrize("used,expected", [(12.5, "healthy"), (100, "depleted")])
+def test_new_paid_wire_preserves_amount_health(used, expected) -> None:
+    from local_operator.providers.usage import (
+        UsageAmount,
+        UsageLimit,
+        UsageReport,
+        usage_health,
+    )
+    from local_operator.providers.usage_cache import report_from_dict, report_to_dict
+
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit("anthropic:7d", "Plan", UsageAmount(used_fraction=1), shared=True),
+            UsageLimit(
+                "anthropic:extra",
+                "Extra",
+                UsageAmount(used=used, limit=100),
+                paid_fallback=True,
+                available=True,
+                supersedes_tiers=True,
+            ),
+        ],
+    )
+    decoded = report_from_dict(report_to_dict(report))
+    assert decoded is not None
+    assert usage_health(decoded, "claude-opus").state == expected

@@ -5802,3 +5802,95 @@ async def test_legacy_paid_cache_preflight_keeps_serviceable_account(tmp_path, p
         cache.close()
         peer.close()
         store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("used,remaining", [(1250, -1150), (10000, -9900), (12.5, 87.5), (100, 0)])
+@pytest.mark.parametrize("refresh", [False, True])
+@pytest.mark.parametrize("stale", [False, True])
+async def test_genuine_historical_paid_wire_requires_trustworthy_refresh(
+    tmp_path, monkeypatch, used, remaining, refresh, stale
+) -> None:
+    import json
+
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.providers.usage_cache import (
+        UsageCacheStore,
+        account_preflight_key,
+    )
+
+    # Exact outputs derived by executing f49df9fcf's actual producer: legacy
+    # used_credits1250/10000 and modern spend1250/10000 (cap10000, places2).
+    # Old wire omits producer provenance; even apparently correct amounts cannot
+    # safely establish whether the legacy parser's unscaled units were involved.
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential("anthropic", _oauth("synthetic", "historical-account"))
+    stream = create_stream_fn(
+        store, {"retry": {"usageAwareFallback": True}}, session_id="fake-historical"
+    )
+    cache = UsageCacheStore(tmp_path / "usage.db")
+    peer = UsageCacheStore(tmp_path / "usage.db")
+    stream._usage_cache = cache
+    monkeypatch.setattr(store, "_usage_cache_store", lambda: cache)
+    key = account_preflight_key("anthropic", row.data.get("email") or row.data["account_id"])
+    wire = {
+        "provider": "anthropic",
+        "fetched_at": store._now_ms() - (3600000 if stale else 0),
+        "limits": [
+            {"id": "anthropic:7d", "label": "Plan", "shared": True, "amount": {"used_fraction": 1}},
+            {
+                "id": "anthropic:extra",
+                "label": "Extra",
+                "amount": {
+                    "used": used,
+                    "limit": 100,
+                    "remaining": remaining,
+                    "used_fraction": None,
+                    "unit": "usd",
+                },
+            },
+        ],
+    }
+    conn = cache._connect()
+    assert conn is not None
+    conn.execute(
+        "INSERT INTO usage_reports VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            key,
+            "anthropic",
+            json.dumps([wire]),
+            store._now_ms(),
+            store._now_ms() + 60000,
+            store._now_ms(),
+        ),
+    )
+    conn.commit()
+    assert peer.try_lease(key)
+    trusted = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit("anthropic:7d", "Plan", UsageAmount(used_fraction=1), shared=True),
+            UsageLimit(
+                "anthropic:extra",
+                "Extra",
+                UsageAmount(used=12.5, limit=100),
+                paid_fallback=True,
+                available=True,
+                supersedes_tiers=True,
+            ),
+        ],
+    )
+    try:
+        assert not cache.get(key, include_expired=True)
+        assert store._cached_quota_health(row, "anthropic", "claude-opus", store._now_ms()) is None
+        with patch(
+            "local_operator.providers.usage.fetch_usage", return_value=trusted if refresh else None
+        ) as fetch:
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus"))
+        fetch.assert_awaited_once()
+        assert not store.is_blocked_for_model(row.id, "anthropic", "claude-opus")
+        assert stream._route_state.active is None
+    finally:
+        await stream.close()
+        peer.close()
+        store.close()

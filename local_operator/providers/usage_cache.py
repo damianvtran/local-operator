@@ -221,6 +221,18 @@ def report_from_dict(data: Any) -> UsageReport | None:
             for raw, limit in zip(data.get("limits", []), limits):
                 if limit.id != "anthropic:extra" or "paid_fallback" in raw:
                     continue
+                if (
+                    limit.amount.used_fraction is None
+                    and (limit.amount.used is not None or limit.amount.limit is not None)
+                    and limit.status != "disabled"
+                ):
+                    # Historical extra_usage scaled only the cap; spend scaled
+                    # both. The wire carries neither producer nor precision, so
+                    # even plausible values cannot prove which units were used.
+                    # Invalidate the whole report: keeping the exhausted plan
+                    # alone would still strand payable headroom. Cache miss
+                    # refreshes where possible; unavailable refresh fails open.
+                    return None
                 limit.paid_fallback = True
                 limit.supersedes_tiers = True
                 fraction = limit.amount.fraction()
