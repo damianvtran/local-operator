@@ -24,8 +24,8 @@ spelling, imported rather than duplicated.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from .connector.wake import parse_event_ref
 

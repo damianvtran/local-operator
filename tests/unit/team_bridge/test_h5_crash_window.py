@@ -16,8 +16,7 @@ from __future__ import annotations
 import threading
 
 from local_operator.team_bridge.ask_issuance import AskIssuance
-from local_operator.team_bridge.store import Store
-from local_operator.team_bridge.store import OwnerReceipt
+from local_operator.team_bridge.store import OwnerReceipt, Store
 from local_operator.team_bridge.types import OwnerSnapshot
 from tests.unit.team_bridge.test_h5_queue_idem import FP, MESSAGE_ID, _question, _queue
 
@@ -33,9 +32,7 @@ OWNER = OwnerSnapshot(
 
 def _enrolled_store(tmp_path) -> Store:
     store = Store(tmp_path)
-    store.commit_enrollment(
-        OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1"
-    )
+    store.commit_enrollment(OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1")
     return store
 
 

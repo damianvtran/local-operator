@@ -130,9 +130,7 @@ def _row_to_intent(row: sqlite3.Row) -> DecideIntent:
         word=str(row["word"]),
         generation=(str(row["generation"]) if "generation" in keys else ""),
         scope_json=(str(row["scope_json"]) if "scope_json" in keys else ""),
-        consumption_row_id=(
-            str(row["consumption_row_id"]) if "consumption_row_id" in keys else ""
-        ),
+        consumption_row_id=(str(row["consumption_row_id"]) if "consumption_row_id" in keys else ""),
         state=str(row["state"]),
         attempts=int(row["attempts"]),
         error_code=row["error_code"],
@@ -174,9 +172,7 @@ class DecideIntents:
                 "refusing authority (re-running DDL is not repair)",
             )
         if version:
-            columns = {
-                row["name"] for row in conn.execute("PRAGMA table_info(decide_intents)")
-            }
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(decide_intents)")}
             if columns and not _REQUIRED_COLUMNS <= columns:
                 # A pre-amend WIP database (no scope/consumption binding):
                 # refusing is the NON-AUTHORIZING answer — there is no
@@ -378,9 +374,7 @@ class DecideIntents:
             (json.dumps(receipt, sort_keys=True), intent_id),
         )
 
-    def mark_transient(
-        self, intent_id: str, code: str, retry_after: int | None = None
-    ) -> None:
+    def mark_transient(self, intent_id: str, code: str, retry_after: int | None = None) -> None:
         """Keep the intent in the retry pool; nothing was recorded server-side.
 
         Applied only to a ``pending`` row: a ``signin`` park keeps its signal,
@@ -451,8 +445,7 @@ def _validated_for_transport(intent: DecideIntent, runtime: Any) -> None:
     if not scope_matches_runtime(scope, runtime):
         raise DecideIntentsRefused(
             "owner_changed",
-            "the frozen intent carries no ORIGINAL scope for this binding — "
-            "non-authorizing",
+            "the frozen intent carries no ORIGINAL scope for this binding — " "non-authorizing",
         )
 
 
@@ -667,9 +660,7 @@ async def recover_from_durable_answer(
             f"no CONSUMED human-answer row for {ask_id!r} in this session",
         )
     questions = [q for q in (details.get("questions") or []) if isinstance(q, Mapping)]
-    matched = [
-        q for q in questions if str(q.get("question_id") or "") == str(question_id)
-    ]
+    matched = [q for q in questions if str(q.get("question_id") or "") == str(question_id)]
     if not matched:
         raise DecideIntentsRefused(
             "frozen_mismatch", f"the durable ask has no question {question_id!r}"

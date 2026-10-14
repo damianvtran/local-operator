@@ -86,9 +86,7 @@ __all__ = [
 ]
 
 
-def bridge_runtime_for_session(
-    *, config_manager: Any, session_id: str
-) -> BridgeRuntime | None:
+def bridge_runtime_for_session(*, config_manager: Any, session_id: str) -> BridgeRuntime | None:
     """Build the session's bridge runtime, or ``None`` — a gate miss is not an error.
 
     No network, no fetch, no spawn: the client is cheap until its first
@@ -214,7 +212,7 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
     """The ONE in-flight fetch: fence → GET → fence → settle."""
 
     from .authority import authority_fence
-    from .client import BridgeSignInRequired, BridgeRefusal, BridgeUnreachable
+    from .client import BridgeRefusal, BridgeSignInRequired, BridgeUnreachable
 
     if authority_fence(runtime) is not None:
         return  # revoked between scheduling and the GET: zero traffic
@@ -337,8 +335,7 @@ def admission_refusal(runtime: BridgeRuntime, *, is_read: bool = False) -> dict[
     return {
         "code": "bridge_not_ready",
         "error": (
-            "agent messages eligibility has not been confirmed yet — "
-            "try again in a moment"
+            "agent messages eligibility has not been confirmed yet — " "try again in a moment"
         ),
     }
 

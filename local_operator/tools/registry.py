@@ -18,6 +18,7 @@ from local_operator.code_requests.tool import build_code_requests_tool
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
 from local_operator.network.tool import build_network_tool
+from local_operator.team_bridge.tool import build_bridge_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
@@ -33,8 +34,6 @@ from local_operator.tools.video_tool import (
     build_generate_video_tool,
     build_video_status_tool,
 )
-from local_operator.team_bridge.tool import build_bridge_tool
-
 from local_operator.web_fetch.tool import build_web_fetch_tool
 from local_operator.web_search.read_tool import build_web_read_tool
 from local_operator.web_search.tool import build_web_search_tool

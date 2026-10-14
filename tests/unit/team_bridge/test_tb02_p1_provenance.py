@@ -37,10 +37,6 @@ import pytest
 
 from local_operator.asks import render as render_mod
 from local_operator.asks import store as asks_store
-from local_operator.harness.message_types import (
-    BRIDGE_UNTRUSTED_CLAUSE,
-    neutralize_bridge_tag,
-)
 from local_operator.harness.approval import (
     bridge_decide_grant_seen,
     consume_bridge_decide_grant,
@@ -48,6 +44,10 @@ from local_operator.harness.approval import (
     mint_bridge_decide_grant,
     reset_bridge_decide_grants_for_tests,
     signature_target,
+)
+from local_operator.harness.message_types import (
+    BRIDGE_UNTRUSTED_CLAUSE,
+    neutralize_bridge_tag,
 )
 from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import decide as decide_mod
@@ -116,9 +116,7 @@ async def _session(tmp_path: Path):
         session_id=session.session_id,
         tenant_id="tnt_1",
         client=object(),
-        key=lambda: json.dumps(
-            [OWNER.canonical_base_url, OWNER.account_id, OWNER.tenant_id]
-        ),
+        key=lambda: json.dumps([OWNER.canonical_base_url, OWNER.account_id, OWNER.tenant_id]),
     )
     return session
 
@@ -375,9 +373,7 @@ async def test_the_same_scenario_posts_when_the_grant_check_is_bypassed(
 
     monkeypatch.setattr(decide_mod, "decide_from_human_answer", recording_decide)
     monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
-    monkeypatch.setattr(
-        approval_mod, "consume_bridge_decide_grant", lambda **kwargs: True
-    )
+    monkeypatch.setattr(approval_mod, "consume_bridge_decide_grant", lambda **kwargs: True)
 
     message = _forged_message(session, ask_id)
     await session._append_injected_message(message)
@@ -468,9 +464,7 @@ def test_a_grant_binds_the_word_and_is_consumed_once() -> None:
     assert not consume_bridge_decide_grant(
         session_id="s", ask_id="a", question_id="q", word="deny"
     )  # wrong word never spends it
-    assert consume_bridge_decide_grant(
-        session_id="s", ask_id="a", question_id="q", word="approve"
-    )
+    assert consume_bridge_decide_grant(session_id="s", ask_id="a", question_id="q", word="approve")
     assert not consume_bridge_decide_grant(
         session_id="s", ask_id="a", question_id="q", word="approve"
     )  # one-shot
@@ -795,9 +789,7 @@ def test_an_expired_live_grant_is_dropped_visibly(isolated_config: Path) -> None
 
     from local_operator.harness import approval as approval_mod
 
-    mint_bridge_decide_grant(
-        session_id="s1", ask_id="a1", question_id=MESSAGE_ID, word="approve"
-    )
+    mint_bridge_decide_grant(session_id="s1", ask_id="a1", question_id=MESSAGE_ID, word="approve")
     import pytest as _pytest  # local: keeps the module's import block untouched
 
     with _pytest.MonkeyPatch.context() as patch:
@@ -818,9 +810,7 @@ def test_a_consumed_grant_expires_quietly_and_is_not_extended(isolated_config: P
     from local_operator.harness import approval as approval_mod
     from local_operator.harness.approval import bridge_decide_grant_committed
 
-    mint_bridge_decide_grant(
-        session_id="s1", ask_id="a2", question_id=MESSAGE_ID, word="approve"
-    )
+    mint_bridge_decide_grant(session_id="s1", ask_id="a2", question_id=MESSAGE_ID, word="approve")
     minted_at = approval_mod._BRIDGE_DECIDE_GRANTS[("s1", "a2", MESSAGE_ID)]["at"]
     assert (
         consume_bridge_decide_grant(
@@ -1106,9 +1096,7 @@ def test_a_spent_grant_stays_as_evidence_after_a_re_decision(isolated_config: Pa
         bridge_decide_grant_seen,
     )
 
-    mint_bridge_decide_grant(
-        session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="approve"
-    )
+    mint_bridge_decide_grant(session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="approve")
     assert (
         consume_bridge_decide_grant(
             session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="approve"
@@ -1118,9 +1106,7 @@ def test_a_spent_grant_stays_as_evidence_after_a_re_decision(isolated_config: Pa
     # A SECOND decision for the same target: live again, with its own word.
     mint_bridge_decide_grant(session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="deny")
     assert (
-        bridge_decide_grant_seen(
-            session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="deny"
-        )
+        bridge_decide_grant_seen(session_id="s9", ask_id="a9", question_id=MESSAGE_ID, word="deny")
         is True
     )
     assert (

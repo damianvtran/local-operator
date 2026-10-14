@@ -41,7 +41,8 @@ from local_operator.team_bridge.decide_intents import (
     recover_from_durable_answer,
 )
 from local_operator.team_bridge.store import _owner_key
-from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
+from tests.unit.asks.test_queue import BASE
+from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
 pytestmark = pytest.mark.asyncio
 
@@ -92,9 +93,7 @@ def _answered_queue(tmp_path) -> tuple[AskQueue, str]:
     # produce (round-4 R3-5).
     from local_operator.harness.approval import mint_bridge_decide_grant
 
-    mint_bridge_decide_grant(
-        session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="approve"
-    )
+    mint_bridge_decide_grant(session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="approve")
     answered = queue.respond(ask_id, {QUESTION_UID: ["approve"]}, by="human")
     assert answered.get("ok") is True
     return queue, ask_id
@@ -138,9 +137,7 @@ async def test_real_chain_recovers_once_with_the_frozen_final_selection(
     # a shape the product cannot produce).
     from local_operator.harness.approval import mint_bridge_decide_grant
 
-    mint_bridge_decide_grant(
-        session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="deny"
-    )
+    mint_bridge_decide_grant(session_id="s1", ask_id=ask_id, question_id=MESSAGE_ID, word="deny")
     revised = queue.revise(ask_id, {QUESTION_UID: ["deny"]}, by="human")
     assert revised.get("ok") is not False
     message, directory, transcript = _consume(queue, ask_id, tmp_path)

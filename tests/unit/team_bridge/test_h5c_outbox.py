@@ -10,7 +10,6 @@ import pytest
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
 from local_operator.team_bridge.outbox import Outbox, OutboxRefused, send_from_outbox
-
 from tests.unit.team_bridge.test_client import FakeStore, _err, _ok
 
 TENANT = "ten_1"

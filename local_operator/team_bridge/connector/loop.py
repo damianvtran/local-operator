@@ -167,9 +167,7 @@ def _persist_hold_backoff(store: Any, owner: Any, message_id: str, code: str) ->
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
     gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
     try:
-        store.persist_hold(
-            owner, message_id, str(code)[:64] or "hold", retry_at=_time.time() + gap
-        )
+        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=_time.time() + gap)
     except StoreRefused:
         pass  # fenced owner: the next live pass owns the row
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
