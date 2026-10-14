@@ -1510,8 +1510,7 @@ class AgentRegistry:
         same profile projection the write path rebuilds from.
         """
         from local_operator.action_class import normalize as _normalize
-        from local_operator.agent_profiles import is_specialist
-        from local_operator.agent_profiles import profile_from_agent
+        from local_operator.agent_profiles import is_specialist, profile_from_agent
 
         row = self.get_agent(agent_id)
         profile = profile_from_agent(self, row)

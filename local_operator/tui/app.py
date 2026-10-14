@@ -414,6 +414,7 @@ from local_operator.tui.widgets.goal_panel import (
     GoalMarkDone,
     GoalPanel,
 )
+from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.keys_legend import KeysLegend, KeysLegendDismissed
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
@@ -527,9 +528,6 @@ from local_operator.tui.widgets.usage_panel import (
     UsageDismissed,
     UsagePanel,
     UsageRefreshRequested,
-)
-from local_operator.tui.widgets.hub_links_panel import (
-    HubLinksPanel,
 )
 from local_operator.tui.widgets.wake_panel import WakePanel
 
@@ -46343,9 +46341,7 @@ class OperatorApp(App[None]):
             self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
         )
 
-    def on_hub_links_panel_refusal_raised(
-        self, message: "HubLinksPanel.RefusalRaised"
-    ) -> None:
+    def on_hub_links_panel_refusal_raised(self, message: "HubLinksPanel.RefusalRaised") -> None:
         """A policy action was refused: paint it ON the card (round-3 D19).
 
         The old handler printed a transcript notice, which sits BEHIND the
