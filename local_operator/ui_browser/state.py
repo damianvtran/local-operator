@@ -73,6 +73,9 @@ class UiHostState(HeartbeatState):
     proto: int
     host: str = HOST
     app_version: str = ""
+    # Optional for legacy UI builds. A modern record labels the UI process
+    # generation, not permission or tab ownership; a reused PID is insufficient.
+    instance_id: str | None = Field(default=None, min_length=1, max_length=128)
     profile_dir: str = ""
     tabs: int = 0
     agent_tabs: int = 0

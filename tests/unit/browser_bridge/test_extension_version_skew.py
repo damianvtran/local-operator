@@ -830,6 +830,20 @@ class _DegradedResource:
     def initialize(self) -> None:
         return None
 
+    def refresh_identity(self) -> None:
+        # `ownership_mode()` here is the constant `False` a known-legacy link
+        # reports, so there is no peer identity to refresh in this double.
+        return None
+
+    async def ensure_recovered(self) -> None:
+        # The production entry `execute_browser` uses. Mirrors it exactly:
+        # refresh first, then recover only if the verdict is not held — so a
+        # `recovered=True` double never reaches the raising `recover()` below.
+        self.refresh_identity()
+        if self.recovered:
+            return
+        await self.recover()
+
     async def recover(self) -> dict[str, Any]:
         raise AssertionError("a known-legacy link must not re-probe owner_recover")
 
