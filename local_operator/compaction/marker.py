@@ -16,6 +16,7 @@ compaction package is consumed by hosts that are forbidden those imports.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from local_operator.harness.types import (
@@ -29,13 +30,16 @@ from local_operator.harness.types import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CAPTURE_ELISION_FRONTIER_KEY",
     "COMPACTION_MARKER_TYPE",
     "build_compaction_marker",
+    "capture_elision_frontier",
     "marker_details",
     "marker_exists",
     "render_compaction_marker",
     "replayed_user_message",
     "split_leading_marker",
+    "with_capture_elision_frontier",
 ]
 
 #: ``CustomMessage.custom_type`` of the entry a compaction pass leaves behind.
@@ -67,6 +71,59 @@ def build_compaction_marker(
     if preserve_data is not None:
         details["preserve_data"] = preserve_data
     return CustomMessage(custom_type=COMPACTION_MARKER_TYPE, attribution="system", details=details)
+
+
+#: ``preserve_data`` key for the CAPTURE-ELISION FRONTIER an epoch commits:
+#: ``{"applied": <int>}`` -- how many superseded-capture blocks the pass
+#: elided under the byte band. ADDITIVE and optional: a record without the
+#: key (every record written before this existed) replays with NO capture
+#: elisions, which is exactly the old behaviour, and a writer with nothing to
+#: record omits the key rather than spelling a zero. The count is the same
+#: number :func:`local_operator.compaction.pruning.apply_capture_elisions`
+#: takes as its limit, so replay needs no second interpretation.
+CAPTURE_ELISION_FRONTIER_KEY = "capture_elisions"
+
+
+def capture_elision_frontier(details: Mapping[str, Any] | None) -> int | None:
+    """How many superseded captures a marker's epoch elided, or ``None``.
+
+    ``None`` covers both "this record predates capture elision" and "the
+    value is malformed"; replay then applies NOTHING, which is the
+    conservative reading -- an unknown frontier must never elide more than
+    the epoch did, and older readers ignore the key entirely either way.
+    """
+    if not isinstance(details, Mapping):
+        return None
+    preserve = details.get("preserve_data")
+    if not isinstance(preserve, Mapping):
+        return None
+    frontier = preserve.get(CAPTURE_ELISION_FRONTIER_KEY)
+    if not isinstance(frontier, Mapping):
+        return None
+    applied = frontier.get("applied")
+    # ``bool`` is an ``int``: a spelling of ``True`` here is a malformed
+    # record, not a count of one.
+    if isinstance(applied, bool) or not isinstance(applied, int) or applied < 0:
+        return None
+    return applied
+
+
+def with_capture_elision_frontier(
+    preserve_data: Mapping[str, Any] | None, applied: int
+) -> dict[str, Any] | None:
+    """``preserve_data`` with the capture-elision frontier merged in.
+
+    A pass that elided nothing commits NOTHING new: the key is omitted rather
+    than written as zero, so a text-only or legacy pass's marker payload
+    stays byte-identical to what it was before this existed. Inputs are
+    copied, never mutated -- the caller's payload may be shared with a
+    strategy archive.
+    """
+    if applied <= 0:
+        return dict(preserve_data) if preserve_data is not None else None
+    merged: dict[str, Any] = dict(preserve_data) if preserve_data else {}
+    merged[CAPTURE_ELISION_FRONTIER_KEY] = {"applied": applied}
+    return merged
 
 
 def replayed_user_message(content: list[Content], entry_id: str | None) -> Message:

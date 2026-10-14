@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from local_operator.compaction.marker import (
     build_compaction_marker,
+    capture_elision_frontier,
     render_compaction_marker,
     split_leading_marker,
+    with_capture_elision_frontier,
 )
 from local_operator.harness.types import CustomMessage, Message
 
@@ -52,6 +54,48 @@ def test_a_context_full_marker_folds_its_summary() -> None:
 
     assert previous == "THE OLD SUMMARY"
     assert remaining == [new_turn]
+
+
+def test_capture_elision_frontier_round_trips_through_a_marker() -> None:
+    """The frontier persists on the marker, beside any strategy payload."""
+    preserve = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, 3)
+    assert preserve is not None
+    marker = build_compaction_marker("A SUMMARY", preserve)
+
+    assert marker.details["preserve_data"]["snapcompact"] == {"text": "x"}
+    assert capture_elision_frontier(marker.details) == 3
+
+
+def test_capture_elision_frontier_is_omitted_when_unset_or_zero() -> None:
+    """Legacy and elision-free payloads keep their exact old shape."""
+    bare = build_compaction_marker("A SUMMARY")
+    assert "preserve_data" not in bare.details
+    assert capture_elision_frontier(bare.details) is None
+
+    # A zero-elision pass commits NOTHING rather than spelling a zero.
+    assert with_capture_elision_frontier(None, 0) is None
+    kept = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, 0)
+    assert kept == {"snapcompact": {"text": "x"}}
+    assert "capture_elisions" not in kept
+    zero = build_compaction_marker("A SUMMARY", with_capture_elision_frontier(None, 0))
+    assert "preserve_data" not in zero.details
+
+
+def test_capture_elision_frontier_malformed_values_degrade_to_none() -> None:
+    """Unknown or malformed frontiers must elide NOTHING on replay."""
+    for frontier in ("3", -1, True, 2.5, {}, None):
+        details = {"preserve_data": {"capture_elisions": frontier}}
+        assert capture_elision_frontier(details) is None
+    assert capture_elision_frontier({"preserve_data": "nope"}) is None
+    assert capture_elision_frontier(None) is None
+
+
+def test_with_capture_elision_frontier_copies_its_input() -> None:
+    original = {"snapcompact": {"text": "x"}}
+    merged = with_capture_elision_frontier(original, 4)
+
+    assert merged == {"snapcompact": {"text": "x"}, "capture_elisions": {"applied": 4}}
+    assert original == {"snapcompact": {"text": "x"}}
 
 
 def test_plain_and_empty_heads_come_back_untouched() -> None:
