@@ -906,10 +906,18 @@ async def open_session(
     viewer's side without touching the owner.
     """
     if mode not in ("own", "attach"):
-        raise SessionSpecError(f"mode must be 'own' or 'attach', not {mode!r}")
+        from local_operator.i18n.keys import wire_errors_sdk_spec
+
+        raise SessionSpecError(
+            wire_errors_sdk_spec.mode_invalid(mode=repr(mode)).envelope(locale="en")["text"]
+        )
     if mode == "attach":
         if spec.resume is None:
-            raise SessionSpecError("mode='attach' needs spec.resume: a viewer attaches to an id")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.attach_resume_required().envelope(locale="en")["text"]
+            )
         _refuse_attach_extras(spec)
     else:
         _guard_agent_shell()
@@ -976,8 +984,10 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         # carried enforcement would be inert by construction (the viewer
         # cannot install it), and an inert setting a caller believes in is the
         # failure shape this surface refuses to have.
+        from local_operator.i18n.keys import wire_errors_sdk_spec
+
         raise SessionSpecError(
-            "output enforcement cannot be set on an attached session; the owning " "runtime decides"
+            wire_errors_sdk_spec.attach_output_unsupported().envelope(locale="en")["text"]
         )
     # Value equality, deliberately: ``refuse()`` is the default, so a caller
     # who spells it out is indistinguishable from one who does not — and every
@@ -986,12 +996,12 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
     if spec.approvals != ApprovalPolicy.refuse():
         set_fields.append("approvals")
     if spec.yolo or spec.train or spec.workstream or set_fields:
+        from local_operator.i18n.keys import wire_errors_sdk_spec
+
         raise SessionSpecError(
-            "mode='attach' opens a viewer for spec.resume; it does not attach teams, "
-            "profiles, tools, names, goals or approval policies — that is the "
-            f"owner's side. Set only resume on this spec (or use mode='own'). "
-            f"Offending fields: "
-            f"{', '.join(set_fields) if set_fields else 'yolo/train/workstream'}."
+            wire_errors_sdk_spec.attach_fields_unsupported(
+                fields=", ".join(set_fields) if set_fields else "yolo/train/workstream"
+            ).envelope(locale="en")["text"]
         )
 
 
@@ -1038,10 +1048,12 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         # post-open session state and has no sanctioned channel to a NEW child
         # (same rule as team/profile/tools/goal). The composition that works
         # is named in the remedy below and in the module docstring.
+        from local_operator.i18n.keys import wire_errors_sdk_spec
+
         raise SessionSpecError(
-            "spawn_session() cannot carry output enforcement "
-            f"({', '.join(output_fields)}); open the session with "
-            "open_session(..., mode='own') and engage it afterwards"
+            wire_errors_sdk_spec.spawn_output_unsupported(fields=", ".join(output_fields)).envelope(
+                locale="en"
+            )["text"]
         )
     if spec.yolo:
         blockers.append("yolo")
@@ -1052,12 +1064,12 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
     ):
         blockers.append("approvals")
     if blockers:
+        from local_operator.i18n.keys import wire_errors_sdk_spec
+
         raise SessionSpecError(
-            "spawn_session() cannot deliver post-open state to a new runtime child; "
-            f"unsupported fields on this spec: {', '.join(blockers)}. Open the session "
-            "in-process (open_session), attach what you need, dispose, then "
-            "spawn_session() the same id — resume restores the attachment; or spawn "
-            "without these fields."
+            wire_errors_sdk_spec.spawn_fields_unsupported(fields=", ".join(blockers)).envelope(
+                locale="en"
+            )["text"]
         )
 
 
@@ -1131,17 +1143,18 @@ async def spawn_session(
             # caller believing the child was born on their selection. Refused
             # with the remedies named.
             if (spec.hosting is None) != (spec.model is None):
+                from local_operator.i18n.keys import wire_errors_sdk_spec
+
                 raise SessionSpecError(
-                    "spawn_session() routes hosting/model to a NEW runtime as one birth "
-                    "sample; state both, or neither (the child then resolves its model "
-                    "from the root's config)."
+                    wire_errors_sdk_spec.spawn_model_pair_required().envelope(locale="en")["text"]
                 )
             if spec.birth_effort and not (spec.hosting and spec.model):
+                from local_operator.i18n.keys import wire_errors_sdk_spec
+
                 raise SessionSpecError(
-                    "birth_effort for a new spawned session rides the birth sample and "
-                    "needs the hosting/model pair alongside it; state all three, or "
-                    "open the session in-process (open_session) to set a birth level "
-                    "without a model pair."
+                    wire_errors_sdk_spec.spawn_birth_effort_pair_required().envelope(locale="en")[
+                        "text"
+                    ]
                 )
             session_id = uuid.uuid4().hex[:12]
         else:
