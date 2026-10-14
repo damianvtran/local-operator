@@ -83,8 +83,7 @@ def test_read_fresh_sees_merge_model_and_never_moves_a_torn_config(tmp_path, mon
     cfg = tmp_path / "config.yml"
     cfg.write_text("values: [unterminated\n  : :", encoding="utf-8")
     before = cfg.read_bytes()
+    files_before = sorted(p.name for p in tmp_path.iterdir())
     fallback = HubSyncSettings.read_fresh(held)  # torn read -> the held manager's view
     assert fallback == HubSyncSettings.from_config(held)
-    assert cfg.read_bytes() == before and sorted(p.name for p in tmp_path.iterdir()) == [
-        "config.yml"
-    ]
+    assert cfg.read_bytes() == before and sorted(p.name for p in tmp_path.iterdir()) == files_before

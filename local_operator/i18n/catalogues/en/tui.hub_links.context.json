@@ -1,0 +1,177 @@
+{
+  "tui.hub_links.action.cancel": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.action.check": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.action.enable": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.action.pull": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.action.retry": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.confirm.concurrent": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "publication consent explanation",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.confirm.private": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "publication consent explanation",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.confirm.public": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "publication consent explanation",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.confirm.title": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "publication consent explanation",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.detail.title": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.mark.available": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "accessible status description",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.mark.healthy": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "accessible status description",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.mark.retry": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "accessible status description",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.auto_push.help": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.auto_push.label": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.off": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.on": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.paused": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.save_failed": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.saving": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.subscribe.help": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.policy.subscribe.label": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.section.agents": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.section.skills": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.section.teams": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.source.private": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.source.public": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.source.unavailable": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.available": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.empty": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.loading": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.preview_changed": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.published": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.unsubscribed": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "tui.hub_links.state.updated": {
+    "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  }
+}

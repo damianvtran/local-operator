@@ -469,6 +469,34 @@ def test_migration_is_a_no_op_on_a_final_shape_config(tmp_path):
     assert migrate_session_cleanup(tmp_path) == []
     assert path.read_bytes() == before
     assert not list(tmp_path.glob("config.yml.pre-cleanup-migration.*"))
+    assert {entry.name for entry in tmp_path.iterdir()} == {"config.yml"}
+
+
+def test_absent_startup_migration_creates_no_directory_or_mutex(tmp_path: Path) -> None:
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    root = tmp_path / "absent-profile"
+    assert migrate_session_cleanup(root) == []
+    assert not root.exists()
+
+
+def test_migration_locked_recheck_preserves_intervening_unrelated_setting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from local_operator import config_migrations
+
+    _write_config(tmp_path, {"session": {"reap_unused": True}})
+    original = config_migrations._migrate_session_cleanup_locked
+
+    def intervene(root: Path):
+        # The eligibility read is not the mutation base: a sibling setting
+        # changed after it must survive the actual locked fresh-read/write.
+        ConfigManager(root).set_config_value("language", "fr")
+        return original(root)
+
+    monkeypatch.setattr(config_migrations, "_migrate_session_cleanup_locked", intervene)
+    assert config_migrations.migrate_session_cleanup(tmp_path)
+    assert ConfigManager(tmp_path).get_config_value("language") == "fr"
 
 
 def test_migration_is_debug_only_under_a_redirected_home(tmp_path, caplog, monkeypatch):
