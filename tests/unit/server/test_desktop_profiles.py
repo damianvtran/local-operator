@@ -626,3 +626,53 @@ async def test_profile_payloads_carry_the_class_in_its_effective_spelling(api):
     rows = (await client.get("/v1/desktop/profiles")).json()["result"]["profiles"]
     row = next(candidate for candidate in rows if candidate["name"] == "reviewer")
     assert row["action_class"] == "proactive"
+
+
+async def test_team_detail_exposes_definition_revision_and_stale_write_is_409(api):
+    """The editor round-trips the token; a stale token is refused, not applied."""
+    client, root = api
+    created = await client.post("/v1/desktop/teams", json=mutation(name="audit", manager="manager"))
+    assert created.status_code == 200, created.text
+    detail = (await client.get("/v1/desktop/teams/audit")).json()["result"]
+    token = detail["definition_revision"]
+    assert isinstance(token, str) and token.startswith("definition-revision:v1:")
+
+    # A write carrying the CURRENT token succeeds.
+    ok = await client.patch(
+        "/v1/desktop/teams/audit",
+        json=mutation(description="Audit contracts", expected_definition_revision=token),
+    )
+    assert ok.status_code == 200, ok.text
+
+    # The same token is now STALE (description changed) -> 409, row untouched.
+    before = TeamRegistry(root).get_team_by_name("audit").description
+    stale = await client.patch(
+        "/v1/desktop/teams/audit",
+        json=mutation(description="Overwrite", expected_definition_revision=token),
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "local-concurrent-edit"
+    assert TeamRegistry(root).get_team_by_name("audit").description == before
+
+
+async def test_profile_detail_exposes_definition_revision_and_stale_write_is_409(api):
+    client, root = api
+    from local_operator.agent_profiles import install_seed
+
+    install_seed("reviewer", registry=AgentRegistry(root))
+    detail = (await client.get("/v1/desktop/profiles/reviewer")).json()["result"]
+    token = detail["definition_revision"]
+    assert isinstance(token, str) and token.startswith("definition-revision:v1:")
+
+    ok = await client.patch(
+        "/v1/desktop/profiles/reviewer",
+        json=mutation(description="Reviews carefully", expected_definition_revision=token),
+    )
+    assert ok.status_code == 200, ok.text
+
+    stale = await client.patch(
+        "/v1/desktop/profiles/reviewer",
+        json=mutation(description="Overwrite", expected_definition_revision=token),
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "local-concurrent-edit"

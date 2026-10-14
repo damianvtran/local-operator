@@ -431,9 +431,33 @@ async def update_agent(
     """
     Update an existing agent.
     """
+    from local_operator.hub_sync.definition import (
+        DefinitionRevisionMismatch,
+        definition_revision,
+    )
+
     try:
-        agent_edit_data = AgentEditFields.model_validate(agent_data.model_dump(exclude_unset=True))
-        updated_agent = agent_registry.update_agent(agent_id, agent_edit_data)
+        payload = agent_data.model_dump(exclude_unset=True)
+        expected = payload.pop("expected_definition_revision", None)
+        agent_edit_data = AgentEditFields.model_validate(payload)
+        precondition = None
+        if expected is not None:
+
+            def _stale_check(current: Any) -> None:
+                if expected != definition_revision(
+                    "agent",
+                    str(current.id),
+                    agent_registry.definition_revision_fields(str(current.id)),
+                ):
+                    raise DefinitionRevisionMismatch("the definition changed since it was read")
+
+            precondition = _stale_check
+
+        updated_agent = agent_registry.update_agent(
+            agent_id, agent_edit_data, precondition=precondition
+        )
+    except DefinitionRevisionMismatch as e:
+        raise HTTPException(status_code=409, detail={"code": e.code, "message": str(e)})
     except KeyError as e:
         logger.exception("Agent not found")
         raise HTTPException(

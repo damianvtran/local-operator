@@ -404,6 +404,12 @@ class AgentCreate(BaseModel):
 class AgentUpdate(BaseModel):
     """Data for updating an existing agent."""
 
+    #: Optional definition-CAS token from the agent detail this edit was based
+    #: on. Absent/null is the documented legacy unconditional write; stale or
+    #: malformed is refused 409 under the definition lock (``hub_sync.definition``).
+    expected_definition_revision: str | None = Field(
+        None, description="Opaque revision of the snapshot this edit was based on."
+    )
     name: str | None = Field(None, description="Agent's name")
     #: See ``Agent.label``: default AND description, for the two different
     #: reasons documented there. Omit to leave the stored label alone; an empty
