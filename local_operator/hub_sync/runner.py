@@ -376,8 +376,8 @@ class HubSyncRunner:
             checked = _parse_sortable(item.get("last_checked_at"))
             return (0 if retry else 1, retry, checked)
 
-        picked: dict[str, set[str]] = {"agent": set(), "team": set()}
-        for kind in ("agent", "team"):
+        picked: dict[str, set[str]] = {"agent": set(), "team": set(), "skill": set()}
+        for kind in ("agent", "team", "skill"):
             eligible = [
                 link
                 for link in links
@@ -414,7 +414,7 @@ class HubSyncRunner:
                     )
                 )
 
-        await asyncio.gather(one("agent"), one("team"))
+        await asyncio.gather(one("agent"), one("team"), one("skill"))
         await self._offload(svc.record_checks, ctx, results)
         return results
 
@@ -570,11 +570,14 @@ class HubSyncRunner:
         return await self._dispatch(operation)
 
     async def check_now(
-        self, *, kind: Literal["agent", "team", "all"] = "all", names: Sequence[str] | None = None
+        self,
+        *,
+        kind: Literal["agent", "team", "skill", "all"] = "all",
+        names: Sequence[str] | None = None,
     ) -> list[Any]:
         """A user-requested check: applies nothing, ignores the schedule (B5.1)."""
 
-        kinds = ("agent", "team") if kind == "all" else (kind,)
+        kinds = ("agent", "team", "skill") if kind == "all" else (kind,)
         return await self.run_exclusive(lambda ctx: svc.check_items(ctx, kinds=kinds, names=names))
 
     async def context(self) -> svc.HubSyncContext:

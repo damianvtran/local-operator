@@ -1446,6 +1446,50 @@ class RadientClient:
             ) from e
         return self._publication_result(response, action="pull the team")
 
+    def get_skill(
+        self,
+        skill_id: str,
+        *,
+        timeout: Optional[float] = None,
+        with_credential: bool = True,
+    ) -> Dict[str, Any]:
+        """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
+
+        The skill sibling of :meth:`get_team`: no tenant in the URL so a client
+        can pull by the id it holds, and the full strict manifest -- every
+        reference/script/asset file -- for a readable row. Optional-auth and
+        scope-resolved from the ROW: a public skill is served to anyone, an org
+        skill only to an entitled member; everyone else is answered 404 so
+        existence is not disclosed. ``with_credential=False`` is the anonymous
+        public arm.
+
+        Returns:
+            The skill document: ``id``, ``tenant_id``, ``name``,
+            ``description``, ``files`` (path/content pairs), ``version`` and the
+            moderation record.
+
+        Raises:
+            APIError: When the hub refuses (404 for a missing skill or a caller
+                who may not read it).
+        """
+
+        url = f"{self.base_url}/skills/{skill_id}"
+        headers = self._get_headers(
+            content_type="application/json", require_api_key=with_credential
+        )
+        try:
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(url, headers=headers, allow_redirects=False, **extra)
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not pull the skill from the Radient Agent Hub",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="pull the skill")
+
     def publish_team_document(
         self,
         document: Mapping[str, Any],

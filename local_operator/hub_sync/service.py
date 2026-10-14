@@ -319,7 +319,7 @@ def _local_fields_for(ctx: HubSyncContext, kind: str, row: Any) -> Mapping[str, 
 def check_items(
     ctx: HubSyncContext,
     *,
-    kinds: Sequence[str] = ("agent", "team"),
+    kinds: Sequence[str] = ("agent", "team", "skill"),
     names: Sequence[str] | None = None,
     only_ids: set[str] | None = None,
     record: bool = True,
@@ -340,6 +340,15 @@ def check_items(
         out.extend(
             chk.check_hub_teams(
                 ctx.teams(), client_for_tenant=ctx.client_for_tenant, names=names, only_ids=only_ids
+            )
+        )
+    if "skill" in kinds:
+        out.extend(
+            chk.check_hub_skills(
+                config_dir=ctx.config_dir,
+                client_for_tenant=ctx.client_for_tenant,
+                names=names,
+                only_ids=only_ids,
             )
         )
     for c in out:

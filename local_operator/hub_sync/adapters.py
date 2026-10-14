@@ -193,14 +193,24 @@ class SkillAdapter:
         return None
 
     def snapshot(self, config_dir: Path, row: Any) -> Snapshot:
-        from local_operator.hub_sync.skill_document import SkillDocument
+        """Read a managed skill through its storage (recovering a crashed transaction first).
 
-        document = SkillDocument.from_directory(Path(row))
-        fields = document.to_json()
+        ``row`` is the managed skill's opaque local id; the alias and the content
+        live in ``ManagedSkillStorage``/``SkillDocument``. Going through the
+        storage (never a raw directory read) keeps the journal/recovery discipline
+        the pull path relies on, so a snapshot is never taken mid-swap.
+        """
+
+        from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+        local_id = str(row)
+        storage = ManagedSkillStorage(config_dir)
+        snapshot = storage.snapshot(local_id)
+        fields = snapshot.document.to_json()
         return Snapshot(
             self.kind,
-            str(document.name),
-            document.name,
+            local_id,
+            snapshot.alias,
             fields,
             fingerprint_fields("skill", fields),
         )

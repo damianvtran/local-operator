@@ -257,7 +257,7 @@ async def test_pick_never_mixes_agent_and_team_ids(rig) -> None:
     picked = runner._pick(links, {"items": {}}, {})
     assert picked["agent"] == {"shared"} and picked["team"] == {"shared"}
     # Both kinds are addressed independently; the runner hands each its own set.
-    assert set(picked) == {"agent", "team"}
+    assert set(picked) == {"agent", "team", "skill"}
 
 
 async def test_pick_skips_a_both_off_link_and_orders_retry_first(rig) -> None:

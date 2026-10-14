@@ -255,3 +255,41 @@ def test_rename_ancestors_are_fsynced_before_swap(tmp_path: Path, monkeypatch) -
     # collection and the staged operation's parent.
     assert (hub / "backups") in calls
     assert any(path.parent == hub / "staging" for path in calls)
+
+
+def test_check_hub_skills_reports_available_when_the_remote_manifest_moved(tmp_path: Path) -> None:
+    """The skill check path: a linked skill compared against a changed remote manifest."""
+    from local_operator.hub_sync import check as chk
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+
+    # A remote manifest whose body differs from the linked baseline.
+    changed = manifest("# REMOTE move\n")
+
+    class _Client:
+        def get_skill(self, skill_id, **_kw):
+            # The server returns the strict manifest; the adapter canonicalizes it.
+            return changed
+
+    checks = chk.check_hub_skills(
+        config_dir=storage.config_dir,
+        client_for_tenant=lambda _t: _Client(),
+    )
+    assert len(checks) == 1
+    check = checks[0]
+    assert check.kind == "skill" and check.local_id == identity.local_id
+    assert check.verdict == "available"
+    assert check.remote is not None and "REMOTE move" in check.remote["files"][0]["content"]
+
+
+def test_check_hub_skills_is_unavailable_without_a_client(tmp_path: Path) -> None:
+    from local_operator.hub_sync import check as chk
+
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+
+    checks = chk.check_hub_skills(config_dir=storage.config_dir, client_for_tenant=lambda _t: None)
+    assert checks and checks[0].reason == "no-credential"

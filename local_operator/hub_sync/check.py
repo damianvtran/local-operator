@@ -67,7 +67,7 @@ def classify(
 class ItemCheck:
     """One linked item, compared with the hub. ``remote`` is not persisted."""
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     local_id: str
     name: str
     hub_id: str
@@ -461,7 +461,7 @@ class Link:
     and is enumerated by ``(kind, local_id)`` instead -- the two are never mixed.
     """
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     local_id: str
     name: str
     hub_id: str
@@ -472,6 +472,133 @@ class Link:
     def item_key(self) -> str:
         """The (kind, local_id) key a store row and a check both address by."""
         return f"{self.kind}:{self.local_id}"
+
+
+def check_hub_skills(
+    *,
+    config_dir: Path,
+    client_for_tenant: ClientFor,
+    names: Sequence[str] | None = None,
+    only_ids: "set[str] | None" = None,
+    fetch: Callable[..., dict[str, Any]] | None = None,
+) -> list[ItemCheck]:
+    """Compare every LINKED skill (one with a baseline record) with the hub.
+
+    A skill's local content lives in a managed alias directory, read through
+    ``ManagedSkillStorage.snapshot`` (which recovers a crashed transaction first).
+    The remote document is a strict manifest; its canonical projection is
+    ``adapters.SkillAdapter.canonical_fields`` so a check and an outbound
+    projection exclude the same local-only bytes. A skill with no baseline was
+    never linked (or was made locally) and is not touched.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    adapter = SkillAdapter()
+    storage = ManagedSkillStorage(config_dir)
+    wanted = {str(n).strip().lower() for n in names} if names else None
+    checks: list[ItemCheck] = []
+    for record in prov.iter_baselines(config_dir):
+        if record.kind != "skill":
+            continue
+        alias = record.local_alias or record.local_id
+        if wanted is not None and alias.strip().lower() not in wanted:
+            continue
+        if only_ids is not None and record.local_id not in only_ids:
+            continue
+        tenant = record.tenant_id
+        try:
+            snapshot = storage.snapshot(record.local_id)
+        except Exception as error:  # noqa: BLE001
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    reason="local-concurrent-edit",
+                    detail=f"could not read the local skill: {error}",
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                )
+            )
+            continue
+        local = adapter.canonical_fields(snapshot.document.to_json())
+        local_fp = prov.fingerprint_snapshot("skill", local)
+        client = client_for_tenant(tenant)
+        if client is None:
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason="no-credential",
+                    detail="skills need `lop login radient` (organization sign-in)",
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                )
+            )
+            continue
+        fetcher = fetch or _fetch_skill
+        try:
+            document = fetcher(client, record.hub_id, timeout=REQUEST_TIMEOUT_S)
+        except Exception as error:  # noqa: BLE001
+            reason, detail = _failure_reason(error)
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason=reason,
+                    detail=detail,
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                )
+            )
+            continue
+        remote = adapter.canonical_fields(document)
+        remote_fp = prov.fingerprint_snapshot("skill", remote)
+        known = record.recorded_by != prov.UNKNOWN_BASELINE
+        base_fp = prov.fingerprint_fields("skill", record.fields) if known else None
+        classification = classify(base_fp, local_fp, remote_fp, baseline_known=known)
+        checks.append(
+            ItemCheck(
+                "skill",
+                record.local_id,
+                alias,
+                record.hub_id,
+                tenant,
+                (
+                    "up-to-date"
+                    if classification.state in ("up-to-date", "local-only")
+                    else "available"
+                ),
+                classification=classification,
+                local_fp=local_fp,
+                remote_fp=remote_fp,
+                local=local,
+                remote=remote,
+                base=record.fields if known else None,
+                link_id=record.identity.link_id if record.identity is not None else None,
+            )
+        )
+    return checks
+
+
+def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
+    """Default skill fetch: the client's manifest pull, through the tested seam."""
+
+    return client.get_skill(skill_id, timeout=timeout)
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
@@ -515,4 +642,20 @@ def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
                         link_id=record.identity.link_id if record.identity is not None else None,
                     )
                 )
+    # SKILLS: a linked skill IS one with a baseline record; the alias lives on the
+    # record, not on a registry row. One kind adapter's worth of enumeration, kept
+    # here so the runner sees skills through the SAME link list as agents/teams.
+    for record in prov.iter_baselines(config_dir):
+        if record.kind != "skill":
+            continue
+        links.append(
+            Link(
+                "skill",
+                record.local_id,
+                record.local_alias or record.local_id,
+                record.hub_id,
+                record.tenant_id,
+                link_id=record.identity.link_id if record.identity is not None else None,
+            )
+        )
     return links
