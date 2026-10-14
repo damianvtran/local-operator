@@ -460,10 +460,6 @@ class ReadOnlyUsageMetadataStore(Protocol):
         self, provider: str | None = None
     ) -> list["StoredCredential"]: ...  # pragma: no cover
 
-    def is_blocked_for_model(
-        self, credential_id: int, provider: str, model_id: str
-    ) -> bool: ...  # pragma: no cover
-
 
 @dataclasses.dataclass
 class ReadOnlyUsageSnapshot:
