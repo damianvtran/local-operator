@@ -1010,7 +1010,7 @@ class ProviderController:
                 return ReadOnlyUsageSnapshot(
                     reports=[self._without_identity(report) for report in reports],
                     may_be_stale=bool(getattr(store, "read_only_sidecar_present", lambda: False)()),
-                    cached_at=max((report.fetched_at for report in reports), default=0),
+                    cached_at=max((report.fetched_at for report in reports), default=None),
                 )
             return ReadOnlyUsageSnapshot()
 

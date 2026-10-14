@@ -8,6 +8,8 @@ import sqlite3
 import time
 
 import pytest
+from rich.text import Text
+from textual.content import Content
 
 from local_operator.providers.auth_store import AuthStore, OAuthAccess
 from local_operator.providers.controller import ProviderController
@@ -82,7 +84,9 @@ async def test_old_zero_cache_never_shadows_current_metadata_on_any_projection(t
     )
     # Make the seeded legacy schema/row visible to the intentionally immutable
     # metadata-only reader; an uncheckpointed foreign schema is unavailable.
-    cache._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection = cache._conn
+    assert connection is not None
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     assert store.record_muse_usage(
         OAuthAccess(access_token="fixture", credential_id=row.id, raw=row.data), observation()
     )
@@ -99,6 +103,25 @@ async def test_old_zero_cache_never_shadows_current_metadata_on_any_projection(t
     finally:
         controller.close()
         store.close()
+
+
+@pytest.mark.parametrize("provider", [None, "meta-muse"])
+def test_absent_metadata_and_usage_cache_keep_null_cached_at_without_writes(tmp_path, provider):
+    auth = tmp_path / "absent-auth.db"
+    usage = tmp_path / "absent-usage.db"
+    controller = ProviderController.read_only_for_persisted_usage(auth, usage)
+    try:
+        snapshot = controller.cached_persisted_usage_reports_read_only(provider)
+        assert snapshot.reports == []
+        assert snapshot.cached_at is None
+        assert not snapshot.unavailable
+        assert not auth.exists() and not usage.exists()
+    finally:
+        controller.close()
+        # The read-only factory's protocol omits close, but its concrete store
+        # owns the metadata handle. Narrow rather than suppress that contract.
+        assert isinstance(controller.auth_store, AuthStore)
+        controller.auth_store.close()
 
 
 @pytest.mark.parametrize("race_before", ["SELECT data FROM", "UPDATE auth_credentials SET data"])
@@ -130,7 +153,9 @@ def test_cas_lost_race_preserves_concurrent_metadata(tmp_path, monkeypatch, race
         assert not store.record_muse_usage(
             OAuthAccess(access_token="fixture", credential_id=row.id, raw=row.data), observation()
         )
-        assert store.get_credential(row.id).data == concurrent
+        retained = store.get_credential(row.id)
+        assert retained is not None
+        assert retained.data == concurrent
     finally:
         store.close()
 
@@ -150,7 +175,7 @@ async def test_real_usage_command_refresh_and_idle_expiry(tmp_path, monkeypatch)
         async with app.run_test(size=(120, 38)) as pilot:
             await pilot.pause()
             app._providers = controller
-            app._cmd_usage("meta-muse", lambda *_: None)
+            app._cmd_usage("meta-muse", app._system_notice)
             await app.workers.wait_for_complete()
             panel = app.query_one(UsagePanel)
             assert panel.display
@@ -173,7 +198,9 @@ async def test_real_usage_command_refresh_and_idle_expiry(tmp_path, monkeypatch)
             monkeypatch.setattr(panel, "_repaint", observe_repaint)
             panel.set_clock(raw["observedAtMs"] + 300_001)
             await asyncio.wait_for(repainted.wait(), 3)
-            text = panel.render().plain
+            rendered = panel.render()
+            assert isinstance(rendered, (Text, Content))
+            text = rendered.plain
             assert "unknown" in text.lower()
             assert "47%" not in text
             assert "r won't query Muse" in text

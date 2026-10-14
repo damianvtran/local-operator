@@ -132,7 +132,9 @@ async def test_serving_dispatch_persists_sanitized_receipt_and_refresh_reads_it(
         events = [e async for e in stream_with_failover(request, store, {}, client_for)]
         assert any(isinstance(e, StreamEndEvent) for e in events)
     try:
-        data = store.get_credential(row.id).data
+        retained = store.get_credential(row.id)
+        assert retained is not None
+        data = retained.data
         if broken_cache:
             assert "subscription_observation" not in data
             assert "secret-bearing" not in caplog.text
@@ -141,7 +143,9 @@ async def test_serving_dispatch_persists_sanitized_receipt_and_refresh_reads_it(
         assert writer_threads and all(t != threading.get_ident() for t in writer_threads)
         assert data["subscription_observation"]["source"] == "responses"
         assert "must-not-be-saved" not in json.dumps(data)
-        assert "subscription_observation" not in store.get_credential(other.id).data
+        untouched = store.get_credential(other.id)
+        assert untouched is not None
+        assert "subscription_observation" not in untouched.data
         reports = await controller.fetch_usage(force_refresh=True)
         served = next(r for r in reports if r.identity == "a@example.test")
         assert [x.amount.fraction() for x in served.limits] == [0.47, 0.72]
@@ -191,13 +195,17 @@ def test_receipt_rejects_wrong_key_and_older_stream_without_resealing(tmp_path):
         )
         access = OAuthAccess(access_token="fixture", credential_id=row.id, raw=row.data)
         assert store.record_muse_usage(access, observation())
-        current = store.get_credential(row.id).data
+        retained = store.get_credential(row.id)
+        assert retained is not None
+        current = retained.data
         assert current["access_secret_ref"] == row.data["access_secret_ref"]
         assert not store.record_muse_usage(access, observation(1000))
         wrong = OAuthAccess(
             access_token="fixture", credential_id=row.id, raw={"access_secret_ref": "wrong"}
         )
         assert not store.record_muse_usage(wrong, observation())
-        assert store.get_credential(row.id).data == current
+        unchanged = store.get_credential(row.id)
+        assert unchanged is not None
+        assert unchanged.data == current
     finally:
         store.close()
