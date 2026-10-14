@@ -33,9 +33,10 @@ import {
 	withdrawPendingEcho,
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
+import { UsageSheet } from "./usage-sheet";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
-import { useCapabilities, useDraft } from "../store";
+import { messageRuntime, useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -196,7 +197,12 @@ function SlashSheet({
 		setLoaded(false);
 		getCommands()
 			.then((r) => {
-				setCommands(r.commands);
+				// The phone owns this read-only sheet; it never routes a terminal
+				// frontend-local command to the authoritative session dispatcher.
+				setCommands([...r.commands.filter((item) => item.name !== "usage"), {
+					name: "usage", description: messageRuntime.t("relay.shell.usage.command"),
+					aliases: [], arguments: "none",
+				}]);
 				setLoaded(true);
 			})
 			.catch(() => {
@@ -548,6 +554,7 @@ export function Composer({
 	   slash draft at all — so typing arguments is never fought by a re-opening
 	   sheet, while a fresh `/x` still opens it. */
 	const [slashDismissed, setSlashDismissed] = useState(false);
+	const [usageOpen, setUsageOpen] = useState(false);
 	const slashOpen = slashTokenOnly(text) && !slashDismissed;
 	const [sending, setSending] = useState(false);
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
@@ -987,6 +994,11 @@ export function Composer({
 				const command =
 					space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
 				const args = space === -1 ? "" : trimmed.slice(space + 1);
+				if (command === "usage" && !args) {
+					setUsageOpen(true);
+					setText("");
+					return;
+				}
 				/* THE ROUTED OP, not `slash`. `slash` is the owner's off-terminal subset
 				   (`/goal`, `/compact`) and refuses every other word with "terminal-only
 				   here"; `slash_result` is the seam the runtime's dispatcher answers for
@@ -1533,6 +1545,7 @@ export function Composer({
 				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
 			/>
+			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}

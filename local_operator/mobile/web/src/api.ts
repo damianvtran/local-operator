@@ -103,6 +103,30 @@ export function getSessions(): Promise<{
 	return request("/api/sessions");
 }
 
+export type PhoneUsageLimit = {
+	amount: { used: number | null; limit: number | null; remaining: number | null;
+		used_fraction: number | null; unit: string };
+	paid_fallback: boolean;
+	available: boolean | null;
+	unlimited: boolean;
+	supersedes_tiers: boolean;
+	family_cap: boolean;
+	shared: boolean;
+	window: "5h" | "7d" | "1mo" | "lifetime" | "unknown";
+	family: "opus" | "sonnet" | "fable" | "zread" | "unknown";
+	resets_at_ms: number | null;
+	payable: boolean;
+	exhausted: boolean;
+};
+export type PhoneUsageReport = {
+	provider: string; limits: PhoneUsageLimit[]; unavailable: boolean; fetched_at: number;
+};
+/** The paired gate and persisted-account admission remain server-owned. */
+export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cached";
+	may_be_stale?: boolean; cached_at?: number | null }> {
+	return request("/api/usage");
+}
+
 export function getCommands(): Promise<{ commands: SlashCommand[] }> {
 	return request("/api/commands");
 }
