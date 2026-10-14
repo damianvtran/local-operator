@@ -90,6 +90,17 @@ PREVIOUS_ENGLISH: dict[str, str] = {
 }
 
 
+#: Descriptions whose REGISTRY entry has not landed yet. ``hub`` is the /hub
+#: command's line: the key ships ahead of the command (hub-streams core
+#: consumes it, then registers the command in the same window), so the
+#: catalogue legitimately carries one description the registry cannot show.
+#: REMOVE WITH THE /hub ENTRY: when the command registers, fold ``hub`` into
+#: PREVIOUS_ENGLISH and delete this mapping.
+SHIPPED_AHEAD: dict[str, str] = {
+    "hub": "Open Hub links — per-link subscribe and auto-push policy",
+}
+
+
 def test_every_registry_description_is_the_pre_slice_english() -> None:
     # The migrated SITES: the registry field the picker, /help, the desktop
     # catalogue and the phone sheet all read. A missing/extra command raises a
@@ -106,6 +117,10 @@ def test_the_catalogue_carries_exactly_the_command_descriptions() -> None:
     # key that is not a registry description.
     messages = catalogues.load_catalogue("en", "wire.slash")
     expected = {f"wire.slash.{name}": text for name, text in PREVIOUS_ENGLISH.items()}
+    # The shipped-ahead set is EXACTLY the keys with no registry entry yet —
+    # disjoint from the pinned table, so a stale allowance cannot hide there.
+    assert not (set(SHIPPED_AHEAD) & set(PREVIOUS_ENGLISH))
+    expected.update({f"wire.slash.{name}": text for name, text in SHIPPED_AHEAD.items()})
     assert messages == expected
 
 

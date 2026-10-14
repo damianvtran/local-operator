@@ -20,6 +20,7 @@
   "wire.slash.goal": "Задать цель и начать работу; /goal --clear убирает её",
   "wire.slash.help": "Показать все команды",
   "wire.slash.highlights": "Отменить, повторить или скорректировать дополнения под ответом",
+  "wire.slash.hub": "Open Hub links — per-link subscribe and auto-push policy",
   "wire.slash.info": "Установка, версия и запущенные сессии на этой машине",
   "wire.slash.keys": "Показать легенду клавиатуры",
   "wire.slash.language": "Показать или задать язык интерфейса; auto — как в системе",
