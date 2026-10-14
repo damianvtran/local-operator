@@ -554,34 +554,90 @@ def test_parallel_processes_write_atomically(tmp_path):
     store.close()
 
 
+def _assert_single_new_writer(rec: AnalyticsRecorder, before: set[threading.Thread]) -> None:
+    # Names are shared by every recorder, including the process singleton a
+    # preceding stream test can legitimately leave alive. Subtract objects so
+    # that predecessor cannot hide a new writer, while two new same-name
+    # writers still violate the original one-writer invariant.
+    writers = {
+        thread
+        for thread in set(threading.enumerate()) - before
+        if thread.name == "lo-analytics-writer"
+    }
+    owned = rec._thread
+    assert owned is not None and owned.ident is not None and owned.is_alive()
+    assert writers == {owned}, f"expected ONE new writer thread, got {writers}"
+
+
 def test_tool_calls_ride_the_same_queue_and_writer_thread(tmp_path):
-    """One writer, never two.
+    """Call samples, tool calls and names share exactly one live writer.
 
-    ``AGENTS.md`` is explicit that a second thread writing to the store is
-    forbidden: two threads opening their first connection to a fresh database
-    race in a way that leaves the writer unable to see its own commits. Tool
-    calls therefore share the queue, the thread and the connection that call
-    samples and name upserts already use \u2014 asserted here by counting the
-    recorder's threads, not by trusting the implementation.
+    Two first connections to a fresh store can race, so merely finding the
+    recorder's declared thread is insufficient: enumerate the newly started
+    writers as well, and prove all three task kinds reached the same store.
     """
-    import threading
-
     store = AnalyticsStore(tmp_path / "a.db")
     rec = AnalyticsRecorder(store=store)
-    before = {t.name for t in threading.enumerate()}
-    rec.record(_snap(session_id="s1"))
-    for i in range(10):
-        rec.record_tool_call("s1", "read", "model", "" if i % 2 else "execution", 12.0)
-    rec.note_session_name("s1", "named")
-    rec.flush_for_test()
-    writers = {t.name for t in threading.enumerate()} - before
-    assert writers == {"lo-analytics-writer"}, f"expected ONE writer thread, got {writers}"
+    before = set(threading.enumerate())
+    try:
+        rec.record(_snap(session_id="s1"))
+        for i in range(10):
+            rec.record_tool_call("s1", "read", "model", "" if i % 2 else "execution", 12.0)
+        rec.note_session_name("s1", "named")
+        rec.flush_for_test()
+        _assert_single_new_writer(rec, before)
 
-    stats = store.session_report("s1").tool_calls
-    assert stats is not None
-    assert stats.total == 10 and stats.ok == 5
-    assert stats.faults == {"execution": 5}
-    rec.close()
+        aggregate = store.aggregate()
+        assert aggregate.calls == 1
+        assert getattr(aggregate, "session_names", {}).get("s1") == "named"
+        stats = store.session_report("s1").tool_calls
+        assert stats is not None
+        assert stats.total == 10 and stats.ok == 5
+        assert stats.faults == {"execution": 5}
+    finally:
+        # A failed barrier or assertion must not leak this writer into the next
+        # test and turn one failure into an order-dependent name collision.
+        rec.close()
+
+
+def test_tool_writer_ignores_a_preceding_same_name_singleton(tmp_path):
+    """Replay the stream-recorder predecessor that made name subtraction lie."""
+    store = AnalyticsStore(tmp_path / "predecessor.db")
+    predecessor = reset_recorder_for_test(store)
+    try:
+        predecessor.record(_snap(session_id="predecessor"))
+        predecessor.flush_for_test()
+        assert store.aggregate().calls == 1
+        thread = predecessor._thread
+        assert thread is not None and thread.is_alive()
+        assert thread.name == "lo-analytics-writer"
+
+        test_tool_calls_ride_the_same_queue_and_writer_thread(tmp_path / "subject")
+        # The subject's cleanup must not stop an unrelated predecessor.
+        assert thread.is_alive()
+    finally:
+        predecessor.close()
+
+
+def test_single_writer_check_rejects_two_real_same_name_writers(tmp_path):
+    """An identity-based fix must still reject the defect the old test guarded."""
+    stores = [AnalyticsStore(tmp_path / f"writer-{i}.db") for i in range(2)]
+    recorders = [AnalyticsRecorder(store=store) for store in stores]
+    before = set(threading.enumerate())
+    try:
+        for i, rec in enumerate(recorders):
+            rec.record(_snap(session_id=f"writer-{i}"))
+            rec.flush_for_test()
+            assert stores[i].aggregate().calls == 1
+        threads = [rec._thread for rec in recorders]
+        assert all(thread is not None and thread.is_alive() for thread in threads)
+        assert threads[0] is not threads[1]
+        assert {thread.name for thread in threads if thread is not None} == {"lo-analytics-writer"}
+        with pytest.raises(AssertionError, match="expected ONE new writer thread"):
+            _assert_single_new_writer(recorders[0], before)
+    finally:
+        for rec in recorders:
+            rec.close()
 
 
 def test_record_tool_call_never_raises(tmp_path):
