@@ -124,7 +124,7 @@ import json
 import logging
 import os
 import time
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2646,6 +2646,125 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     return entry
 
 
+def _journal_order_doc(
+    index: TranscriptIndex, entry_id: str, seq: int, role: str
+) -> MessageDoc | None:
+    """Exact existing doc at a raw ordinal; no body/history scan or role guess."""
+    if type(seq) is not int or seq < 0 or index.journal_rows.get(entry_id) != seq:
+        return None
+    at = bisect_left(index.messages, seq, key=lambda doc: doc.seq)
+    if at == len(index.messages):
+        return None
+    doc = index.messages[at]
+    return (
+        doc
+        if doc.id == entry_id and doc.seq == seq and doc.role == role and not doc.injected
+        else None
+    )
+
+
+def journal_order_opener(index: TranscriptIndex, entry_id: str, seq: int) -> tuple[str, int] | None:
+    """The genuine run opener of an exact source assistant, not a viewer guess.
+
+    Sparse ready corrections previously stated an assistant's coordinate while
+    its optimistic opening user still had none. The desktop then correctly put
+    the known assistant before the unknown suffix. Close that metadata dependency
+    with the user's REAL coordinate; do not invent its slot, re-rank the known
+    reply, or infer a parent from a last-user/admission/frame/generation scan.
+
+    MessageDoc.seq, RunRecord.first_seq/last_seq and journal_rows all derive from
+    the SAME _Row.ordinal, which counts every complete journal line (including
+    invisible/prune/tool rows). These are not display/turn ordinals. Exact role,
+    raw ID, membership and opener-first equality are each necessary: run_key can
+    name a tool/marker, a steer does not become a new opener, and head-cut/injected
+    inputs have no genuine opening user to contribute. The existing source
+    signature/freshness gate belongs to the caller; this helper never grants it.
+
+    Both sequences are scan ordered. Keyed bisects read only a bounded number of
+    existing records, with no whole-history walk, new cache, body or journal read.
+    Missing proof (including an old cache without docs/runs) contributes nothing.
+    """
+    if not index.journal_generation or type(seq) is not int or seq < 0:
+        return None
+    if _journal_order_doc(index, entry_id, seq, "assistant") is None:
+        return None
+    run_at = bisect_right(index.runs, seq, key=lambda run: run.first_seq) - 1
+    if run_at < 0:
+        return None
+    run = index.runs[run_at]
+    if not (run.first_seq <= seq <= run.last_seq) or not run.opening_user_id:
+        return None
+    opener_id = run.opening_user_id
+    opener_seq = index.journal_rows.get(opener_id)
+    if not isinstance(opener_id, str) or not 1 <= len(opener_id) <= 128:
+        return None  # the existing source-metadata raw-ID wire bound, not truncation
+    if type(opener_seq) is not int or opener_seq != run.first_seq or not (0 <= opener_seq < seq):
+        return None
+    if _journal_order_doc(index, opener_id, opener_seq, "user") is None:
+        return None
+    return opener_id, opener_seq
+
+
+def journal_order_correction_batches(
+    index: TranscriptIndex, rows: list[dict[str, Any]]
+) -> Iterator[list[dict[str, Any]]]:
+    """Pack existing ready metadata into <=128-row dependency-closed events.
+
+    Call only after every descriptor's original page signature matches this fresh
+    index, as DesktopSessionBridge's correction already requires. A newly known
+    assistant travels with its exact run-opening user's coordinate in the SAME
+    event: flushing 127 rows before a pair is intentional. Re-include the opener
+    in each new event rather than globally deduplicating it, since a viewer may
+    join/replay from a later receipt. No user body/new record is published here.
+    """
+    # Also send already-supplied genuine user facts first. A requested steer U2
+    # is not the run opener, but splitting its true coordinate behind A2 at a
+    # frame boundary would repeat the race. This partitions only bounded INPUT
+    # descriptors by exact source proof; it never selects a last user from history.
+    users: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
+    for row in rows:
+        entry_id = row.get("id")
+        seq = row.get("journal_seq")
+        # The `type(seq) is int` guard is required for type narrowing only: the
+        # underlying lookup already rejects non-int ordinals, so it adds no
+        # authority — it just lets the callers below type-check.
+        is_user = (
+            isinstance(entry_id, str)
+            and type(seq) is int
+            and _journal_order_doc(index, entry_id, seq, "user") is not None
+        )
+        (users if is_user else others).append(row)
+    chunk: list[dict[str, Any]] = []
+    in_chunk: set[str] = set()
+    for row in users + others:
+        entry_id = row.get("id")
+        seq = row.get("journal_seq")
+        opener = (
+            journal_order_opener(index, entry_id, seq)
+            if isinstance(entry_id, str) and type(seq) is int
+            else None
+        )
+        dependency = (
+            {"id": opener[0], "type": "message", "role": "user", "journal_seq": opener[1]}
+            if opener is not None
+            else None
+        )
+        unit = (
+            [dependency] if dependency is not None and dependency["id"] not in in_chunk else []
+        ) + [row]
+        if len(chunk) + len(unit) > 128:
+            yield chunk
+            chunk = []
+            in_chunk.clear()
+            # A dependency present in the old chunk is not proof in this event.
+            unit = ([dependency] if dependency is not None else []) + [row]
+        chunk.extend(unit)
+        in_chunk.update(item["id"] for item in unit)
+    if chunk:
+        yield chunk
+
+
 def apply_journal_order(
     root: Path,
     session_id: str,
@@ -2674,6 +2793,17 @@ def apply_journal_order(
     answer["journal_ordinals"] = {
         id_: index.journal_rows[id_] for id_ in ids if id_ in index.journal_rows
     }
+    # The synchronous ready page has the same sparse-A race as the asynchronous
+    # correction. Carry actual opener coordinates as bounded source sidecars,
+    # never user bodies: at most one extra ID per bounded page/request identity.
+    # Missing-ID reporting still describes ONLY the IDs the caller requested.
+    for id_ in dict.fromkeys([row["id"] for row in answer["entries"]] + ids):
+        seq = index.journal_rows.get(id_)
+        if seq is None:
+            continue
+        opener = journal_order_opener(index, id_, seq)
+        if opener is not None:
+            answer["journal_ordinals"][opener[0]] = opener[1]
     answer["journal_missing_ids"] = [id_ for id_ in ids if id_ not in index.journal_rows]
     return True
 

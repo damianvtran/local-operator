@@ -4107,13 +4107,18 @@ class DesktopSessionBridge:
                         seq = index.journal_rows.get(id_)
                         if seq is not None:
                             rows.append({**descriptor, "journal_seq": seq})
-                    for at in range(0, len(rows), 128):
+                    # Keep an assistant's newly known coordinate with its exact
+                    # source opening user's coordinate. Plain 128-row slicing
+                    # could put A in front of a held U (or split a pair at127).
+                    # Only the signature-verified rows above may gain this
+                    # dependency; the helper does no scan/authority promotion.
+                    for batch in transcript_index.journal_order_correction_batches(index, rows):
                         self.publish(
                             "event",
                             {
                                 "type": JOURNAL_ORDER_EVENT,
                                 "journal_generation": index.journal_generation,
-                                "rows": rows[at : at + 128],
+                                "rows": batch,
                             },
                         )
                     if mismatch:
