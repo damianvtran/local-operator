@@ -277,6 +277,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/team_bridge/connector/lock.py": (
+        1,
+        "``CONNECTOR_LOCK_NAME`` ('connector.lock'): the machine-wide connector "
+        "singleton under ``<config>/team_bridge/`` — beside the bridge state "
+        "database, the same family as the wake lock's dotted sidecars. Outside "
+        "``sessions/``, keyed to a long-lived process rather than to a "
+        "conversation, and deliberately dotted so a listing that walks the config "
+        "dir cannot mistake it for a user file",
+    ),
     "local_operator/session/runtime/stop_ledger.py": (
         1,
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "

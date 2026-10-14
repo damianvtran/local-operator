@@ -330,11 +330,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Read and answer organization bridge messages: take_up fetches the full "
-            "screened body (verified against body_sha256), ack claims (working) or "
-            "releases (done) the message for this session, send/reply post outbound "
-            "messages. Decisions on requests are made ONLY by the human through the "
-            "ask queue — this tool cannot approve or deny."
+            "Read and answer organization messages: take_up fetches the screened body "
+            "(verified against body_sha256), ack claims (working) or releases (done) it, "
+            "send/reply post. Deciding a request is the human’s, through the ask queue "
+            "— this tool cannot approve or deny."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",

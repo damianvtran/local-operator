@@ -487,7 +487,7 @@ def test_v2_store_migrates_additively_preserving_owner_and_intent(tmp_path) -> N
         ).fetchone()[0]
     finally:
         version.close()
-    assert stamp == "5"
+    assert stamp == "6"
 
 
 def test_attempt_binding_and_write_once(tmp_path) -> None:
@@ -733,7 +733,7 @@ def test_v2_store_migrates_additively_preserving_owner_and_tuple(tmp_path) -> No
     )
     conn = sqlite3.connect(state_db_path(tmp_path))
     assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone() == (
-        "5",
+        "6",
     )
 
 
