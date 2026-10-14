@@ -32,6 +32,7 @@ EXTRAS: dict[str, str] = {
     "tokenizer": "exact BPE token counting for context management",
     "lsp": "Python symbol-aware navigation and rename previews (jedi)",
     "fetch": "clean HTML→markdown rendering for web_fetch (markdownify)",
+    "cloud": "cloud compute provisioning on ECS Fargate (boto3)",
     "all": "every optional feature",
 }
 

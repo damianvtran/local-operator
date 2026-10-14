@@ -107,3 +107,17 @@ def test_every_message_is_one_line_and_mentions_pip(extra: str) -> None:
     message = missing_extra_error(extra, "Feature")
     assert "\n" not in message
     assert re.search(r'pip install "local-operator\[' + re.escape(extra) + r'\]"', message)
+
+
+@pytest.mark.parametrize("extra", ["cloud"])
+def test_the_cloud_extra_says_which_command_installs_it(extra: str) -> None:
+    """The extra cloud compute provisioning refuses without (cloud/aws.py).
+
+    Pinned BY NAME as well as through the parametrisation over ``EXTRAS``: the
+    refusal a user meets when they reach a provider without the SDK is this exact
+    sentence, and the sync tests above only prove the two LISTS agree.
+    """
+    message = missing_extra_error(extra, "Cloud task provisioning")
+    assert "Cloud task provisioning" in message
+    assert '"cloud" extra' in message
+    assert 'pip install "local-operator[cloud]"' in message

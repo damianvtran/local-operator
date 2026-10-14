@@ -8,6 +8,7 @@ one place that matters is isolation — a test that wrote into the operator's re
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -50,3 +51,20 @@ def request_factory() -> Callable[..., PoolRequest]:
         return PoolRequest(**values)
 
     return build
+
+
+@pytest.fixture(autouse=True)
+def hermetic_aws(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No ambient AWS configuration may reach these tests.
+
+    A developer's shell may export ``AWS_PROFILE`` or a default region, and botocore
+    reads both at client construction. Pointing the config and credentials files at
+    empty paths and dropping the ambient variables makes the tests hermetic, and it
+    also pins the property the providers rely on: they are built from explicit
+    values, never from the environment.
+    """
+
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_DEFAULT_REGION", "AWS_REGION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))

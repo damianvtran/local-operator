@@ -153,6 +153,14 @@ lsp = ["jedi>=0.19"]
 # stdlib html.parser renderer when this extra is absent, so a bare install stays
 # fully functional — the extra only upgrades render quality.
 fetch = ["markdownify"]
+# Cloud compute provisioning, tier 1: one ECS Fargate task per run
+# (``local_operator/cloud/``). boto3 is deliberately NOT folded into `all` below,
+# for the reason the dev extra's own comment gives: an end user who never runs a
+# benchmark or provisions cloud compute should not install an AWS SDK. The
+# package imports it lazily, behind `optional.require_extra`, so a default install
+# imports `local_operator.cloud` cleanly and only a caller that asks for a real
+# client meets the name of this extra.
+cloud = ["boto3>=1.34"]
 # `lsp` belongs here for the same reason `fetch` does: jedi is pure Python
 # with no compiled wheel, so it carries none of the Windows sdist-build
 # fragility the other extras are kept lean to avoid. Omitting it meant

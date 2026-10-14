@@ -27,14 +27,51 @@ from local_operator.cloud.types import PoolRequest
 #: the set is pinned rather than described.
 PROTOCOL_METHODS = frozenset({"describe", "submit", "status", "cancel", "drain"})
 
-#: Every provider class this build ships, by name. Slice 2 adds ``fargate`` and
-#: slice 4 adds ``k8s``; a new backend that is not listed here is a backend
-#: nothing checks against the seam.
-PROVIDERS: dict[str, Callable[[], Any]] = {"fake": FakeComputeProvider}
-
 
 def _request() -> PoolRequest:
     return PoolRequest(request_id="req_0f0f0f0f", budget_usd=1.0, mock=True)
+
+
+def _fargate_provider() -> Any:
+    """A ``FargateProvider`` built on clients nothing calls.
+
+    Imported here rather than at module scope so this file stays importable on an
+    install without the ``cloud`` extra: the SDK is needed only by the factory, and
+    only when the fargate case actually runs.
+    """
+    import boto3
+
+    from local_operator.cloud.aws import AwsCredentials, FargateClients
+    from local_operator.cloud.fargate import FargateProvider, FargateTargets
+
+    credentials = AwsCredentials(access_key_id="AKIA-MARKER", secret_access_key="[redacted]")
+
+    def client(service: str) -> Any:
+        return boto3.client(
+            service,
+            region_name="ca-central-1",
+            aws_access_key_id=credentials.access_key_id,
+            aws_secret_access_key=credentials.secret_access_key,
+        )
+
+    return FargateProvider(
+        credentials,
+        cluster="lop-poc",
+        task_definition="lop-poc-agent:7",
+        targets=FargateTargets(
+            bucket="lop-poc-artifacts", subnets=("subnet-a",), security_group="sg-1"
+        ),
+        clients=FargateClients(ecs=client("ecs"), sts=client("sts"), s3=client("s3")),
+    )
+
+
+#: Every provider class this build ships, by name. A new backend that is not
+#: listed here is a backend nothing checks against the seam (§3.2 wants them
+#: interchangeable), and slice 4's ``K8sWorkloadProvider`` joins it there.
+PROVIDERS: dict[str, Callable[[], Any]] = {
+    "fake": FakeComputeProvider,
+    "fargate": _fargate_provider,
+}
 
 
 def test_the_seam_is_exactly_the_five_async_methods() -> None:

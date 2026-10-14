@@ -16,7 +16,24 @@ simulated absent).
 
 from __future__ import annotations
 
+from local_operator.cloud.aws import (
+    EXPECTED_POC_ACCOUNT,
+    REGION,
+    AwsCredentials,
+    CloudBlobs,
+    FargateClients,
+    assume_role,
+    build_clients,
+    sdk_exceptions,
+    verify_account,
+)
 from local_operator.cloud.fake import FakeComputeProvider
+from local_operator.cloud.fargate import (
+    OVERRIDES_LIMIT_BYTES,
+    RUN_DEADLINE_SECONDS,
+    FargateProvider,
+    FargateTargets,
+)
 from local_operator.cloud.ledger import (
     MAX_CLOUD_TASKS,
     PROVISION_DEADLINE_S,
@@ -52,14 +69,22 @@ from local_operator.cloud.types import (
     Tier,
     member_lifecycle_for,
 )
+from local_operator.cloud.workload import TASK_ENV_NAMES, task_environment
 
 __all__ = [
     "COMPUTE_TASK_VERSION",
+    "EXPECTED_POC_ACCOUNT",
     "MAX_CLOUD_TASKS",
+    "OVERRIDES_LIMIT_BYTES",
     "POOL_REQUEST_VERSION",
     "PROVISION_DEADLINE_S",
+    "REGION",
+    "RUN_DEADLINE_SECONDS",
     "SIZES",
+    "TASK_ENV_NAMES",
     "TASK_TTL_S",
+    "AwsCredentials",
+    "CloudBlobs",
     "CloudLedger",
     "CloudRefused",
     "ComputeProvider",
@@ -67,6 +92,9 @@ __all__ = [
     "ComputeTask",
     "DrainOutcome",
     "FakeComputeProvider",
+    "FargateClients",
+    "FargateProvider",
+    "FargateTargets",
     "Hosting",
     "PoolRequest",
     "ProviderCapacity",
@@ -75,13 +103,18 @@ __all__ = [
     "SizeClass",
     "TaskState",
     "Tier",
+    "assume_role",
+    "build_clients",
     "cloud_dir",
     "lock_for",
     "member_lifecycle_for",
     "read_request",
     "read_task",
     "request_path",
+    "sdk_exceptions",
     "state_for_status",
+    "task_environment",
     "task_path",
     "tasks_dir",
+    "verify_account",
 ]
