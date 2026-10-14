@@ -1346,7 +1346,9 @@ async def test_a_late_admitted_decision_never_renders_as_a_decline(
     slot = f"bridge-{MESSAGE_ID}"
     _append_row(queue, ask_id, asks_store.EVENT_DECLINED, at=expires - 500, answers={})
     # The human's admitted decision, one second past the window.
-    _append_row(queue, ask_id, asks_store.EVENT_ANSWERED, at=expires + 1, answers={slot: ["approve"]})
+    _append_row(
+        queue, ask_id, asks_store.EVENT_ANSWERED, at=expires + 1, answers={slot: ["approve"]}
+    )
     record = [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]
     mint_bridge_decide_grant(
         session_id=session.session_id,
