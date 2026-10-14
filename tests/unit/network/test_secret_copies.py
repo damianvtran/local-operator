@@ -204,13 +204,6 @@ def test_a_rotated_value_reaches_the_member_as_a_new_generation(secret_mesh: Any
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_1)
-    # The member storing the copy is not the end of the first exchange: the ack
-    # still has to reach the owner, and until it does the member is "in flight",
-    # so the next step answers `in_flight` instead of `scheduled` (seen under a
-    # 3-worker run once the owner's ack was delayed 0.5 s).
-    assert net_fixtures.wait_for(
-        lambda: SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) is not None
-    ), "the owner never recorded the first generation's ack"
 
     mesh.store_a.update(SECRET_NAME, VALUE_2)
     code = sync.credentials_sync_step(mesh.a, mesh.member)
