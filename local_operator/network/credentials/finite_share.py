@@ -236,6 +236,9 @@ def _complete_capability(data: dict[str, Any], root: Path | None) -> None:
     # Revoke legitimately removes this capability when its last key goes away.
     # Complete the existing local capability producer under its write lock, not
     # the CLI's relay-first variant (no socket/native I/O under journal locks).
+    # The caller (apply) already holds this record lock ahead of placement in
+    # the declared order; this nested acquisition is a same-thread RLock
+    # re-entry, never a first acquisition under placement (R4-1).
     target = store.record_path(data["network_id"], root)
     with store._write_lock(target):
         if (
@@ -372,10 +375,21 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
     journal = finite_journal.Journal(data["network_id"], data["owner_device"], root)
     # Writers below are existing factored LOCKED entrypoints. No await/network,
     # SSH/onboarding/copy work or reentrant record flock occurs in this transaction.
+    #
+    # LOCK ORDER (R4-1): the network record lock is taken BEFORE the placement
+    # document lock and held across the transaction, matching relay pairing
+    # admission (record -> placement, relay.py store.mutate -> placement.mutate).
+    # _complete_capability later re-enters this same record lock from the same
+    # thread (threading.RLock, store._write_lock) while placement is held; that
+    # re-entry is safe only because the outer acquisition already ordered
+    # record -> placement. Taking record for the first time under placement
+    # (the previous shape) deadlocked against a concurrent pairing admission:
+    # each thread held one lock and waited, unbounded, for the other.
     with (
         approvals._record_lock(approval_id, root),
         authority.locked(),
         journal.locked(),
+        store._write_lock(store.record_path(data["network_id"], root)),
         placement._document_lock(projection_path),
     ):
         admitted = consent._admitted(approval_id, run.run_id, root)

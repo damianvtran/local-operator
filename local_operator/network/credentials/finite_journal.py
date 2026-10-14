@@ -6,7 +6,9 @@ mutable policy/projection, and keep it until exact signed completion readbacks.
 The sentinel distinguishes untouched legacy owners from a missing/corrupt journal
 on an initialized owner. Losing BOTH stores is not recoverable proof of authority.
 
-Lock order: source record -> consent -> journal -> placement. Positive producers
+Lock order: source record -> consent -> journal -> network record -> placement
+(the network-record step is what relay pairing admission takes first, so finite
+apply must take it ahead of placement too, never first under it — R4-1). Positive producers
 already holding placement read the atomic negative snapshot WITHOUT reverse locks;
 actual serving serializes consent/journal and refuses unknown durability. Never
 sync these records, export a bearer/hash, or hold locks over native/network work.

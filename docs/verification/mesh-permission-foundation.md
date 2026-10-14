@@ -267,6 +267,43 @@ wrapper relabels `approval_denied`/`approval_expired`/`approval_already_connecte
 and the mismatch/CAS codes, leaving the normal onboarding surfaces unchanged. A
 journal is refused as its own durable fence, not an onboarding error.
 
+### Round-4 lock-order fix (R4-1) and fresh capture (D2)
+
+**R4-1 fixed.** Reproduced first at e448efac with a deterministic two-thread
+driver (relay-order writer holding the network record lock then attempting
+placement, versus a real `finite_share.apply`): **both threads still alive
+after the join timeout, no refusal — the hang signature**. Cause: apply held
+`placement._document_lock` then took the network record lock in
+`_complete_capability`, inverting relay pairing admission
+(record → placement). Fix: apply now takes `store._write_lock(record_path)`
+**before** the placement lock in the same outer transaction and holds it
+across; `_complete_capability`'s nested acquisition is a same-thread
+`threading.RLock` re-entry, never a first acquisition under placement.
+Journal-clear-last and every readback are unchanged. The same driver after
+the fix: **NO-HANG in 2.0 s**, writer entered, apply done. A bounded pytest
+regression (`test_finite_apply_and_pair_order_writer_do_not_deadlock`, daemon
+threads, 15 s hard joins) fails rather than hangs if this regresses.
+Delta lanes at this head: journal **31 passed** (incl. the concurrency
+regression), finite **27**, consent **31**, encrypted real-link **10**;
+scoped black/isort/flake8 pass, pyright **0 errors**. The test file's import
+was put in the pinned isort 5.13.2 single-line form
+(`from local_operator.network.credentials import consent`); local isort
+9.0.2 accepts both forms, so CI's pinned version is the deciding check.
+
+**D2 capture refreshed.** The previous committed capture predated the
+current wording. Fresh capture at this head
+(`core2354-r4-public-cli-capture.log`, software file-only signer):
+request → human `approvals show` → `approve --json` with **2 withdrawals**,
+showing "clear only the withdrawals listed below", the signed policy
+revision, and both selector/revision/reference tuples; JSON stdout stays a
+single object, disclosure on stderr. It also records one U2 wrong-scope
+apply: code `finite_subject_mismatch` with the finite regenerate remedy.
+No credential/token/material values in the capture. This delta changes **no
+CLI text or disclosure bytes** (`git diff` on `cli.py` is empty; the only
+`finite_share.py` changes are the lock acquisition and comments), so the
+round-2 design/UX conclusions on unchanged text are retained by byte proof;
+the capture is refreshed evidence, not a new text change.
+
 ## Explicit deferrals / activation holds
 
 - **Deferred — next reviewed lifecycle slice:** positive inventory reconciliation,

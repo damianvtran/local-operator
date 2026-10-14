@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import time
 from typing import Any
 
 import pytest
 
 from local_operator.network import approvals as A
-from local_operator.network.credentials import (
-    consent,
-)
+from local_operator.network import store
+from local_operator.network.credentials import consent
 from local_operator.network.credentials import finite_journal as J
 from local_operator.network.credentials import finite_share as F
 from local_operator.network.credentials import owner, placement
@@ -450,3 +450,50 @@ def test_legacy_owner_without_fence_files_is_unchanged(rig: Any) -> None:
     consent.check_borrow(N, rig.own.device_id, rig.peer.device_id, P, {}, rig.root)
     assert not journal.path.exists() and not journal.sentinel.exists()
     assert journal.peek(rig.peer.device_id, P) is None
+
+
+def test_finite_apply_and_pair_order_writer_do_not_deadlock(
+    rig: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-1 regression: record->placement (relay) vs finite apply, same process.
+
+    Both threads are daemons joined with a HARD timeout: a lock-order
+    regression FAILS this test instead of hanging CI. At the pre-fix head both
+    threads were still alive after the timeout with no refusal (reproduced
+    outside pytest); after the fix apply completes and the writer proceeds.
+    """
+    rec = _approved(rig, monkeypatch)
+    record_path = store.record_path(N, rig.root)
+    proj_path = placement.placement_path(N, rig.root)
+    a_holds = threading.Event()
+    outcome: dict[str, Any] = {}
+
+    def relay_order_writer() -> None:
+        # Relay pairing admission order: network record, then placement.
+        with store._write_lock(record_path):
+            a_holds.set()
+            time.sleep(1.0)
+            with placement._document_lock(proj_path):
+                outcome["writer"] = "entered"
+
+    def finite_apply() -> None:
+        try:
+            _apply(rig, rec)
+            outcome["apply"] = "done"
+        except Exception as exc:  # failure is data here; asserted below
+            outcome["apply"] = f"{type(exc).__name__}:{getattr(exc, 'code', exc)}"
+
+    ta = threading.Thread(target=relay_order_writer, daemon=True)
+    tb = threading.Thread(target=finite_apply, daemon=True)
+    ta.start()
+    assert a_holds.wait(5), "writer never acquired the record lock"
+    tb.start()
+    tb.join(timeout=15)
+    ta.join(timeout=15)
+    assert not tb.is_alive(), "finite apply hung: lock-order deadlock (R4-1)"
+    assert not ta.is_alive(), "pair-order writer hung: lock-order deadlock (R4-1)"
+    assert outcome.get("apply") == "done", outcome
+    assert outcome.get("writer") == "entered", outcome
+    entry = placement.PlacementDocument.load(N, rig.root).entry(P)
+    assert entry is not None and entry.is_holder(rig.peer.device_id)
+    assert J.Journal(N, rig.own.device_id, rig.root).pending(rig.peer.device_id, P) is None
