@@ -46412,18 +46412,14 @@ class OperatorApp(App[None]):
                 None,
             )
             eligible = bool(row and row["eligibility"]["can_auto_push"])
-            # PUBLIC ENABLE + CONSENT: the service marks a public origin
-            # ``unsafe-publication`` precisely BECAUSE no egress grant exists yet
-            # — that grant is the thing the explicit consent CREATES. So when
-            # the caller has given consent for a public origin, eligibility is
-            # satisfied by that consent, and ``update_policy`` then binds the
-            # grant (its own public branch). Without this the consent flow could
-            # never complete. Every other ineligibility stays a refusal.
+            # The service's ineligibility reason is PASSED THROUGH so
+            # ``update_policy`` can apply its ONE public-consent carve-out
+            # (round-4 cross-surface fix): a public origin with no grant is
+            # ``unsafe-publication``, which the confirm mints, while every EARLIER
+            # gate still refuses. The TUI no longer carries its own
+            # ``consent_completes`` special case — it passes the same
+            # ``can_enable_auto_push`` the CLI and the desktop PATCH do.
             reason = str((row or {}).get("eligibility", {}).get("reason") or "")
-            visibility = str((row or {}).get("visibility") or "")
-            consent_completes = (
-                message.confirm_egress and visibility == "public" and reason == "unsafe-publication"
-            )
             subscribe = message.value if message.policy == "subscribe" else None
             auto_push = message.value if message.policy == "auto_push" else None
             try:
@@ -46433,8 +46429,9 @@ class OperatorApp(App[None]):
                     expected_revision=message.revision,
                     subscribe=subscribe,
                     auto_push=auto_push,
-                    can_enable_auto_push=eligible or consent_completes,
+                    can_enable_auto_push=eligible,
                     confirm_public_egress=message.confirm_egress,
+                    ineligible_reason=reason or "unsupported-precondition",
                 )
             except LinkError as error:
                 # Humanize the service code; the raw code in a notice is exactly

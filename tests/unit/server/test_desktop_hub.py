@@ -339,3 +339,101 @@ async def _resolved_link_id(client: Any, root: Path) -> str:
     )
     assert resolved.status_code == 200, resolved.text
     return resolved.json()["result"]["link"]["link_id"]
+
+
+def _seed_public_link(root: Path, *, recorded_by: str = "pull") -> str:
+    """A CONFIRMED public link as a real pull + capability probe leaves it.
+
+    Baseline record with a source-scoped remote revision and known scope, plus
+    the persisted revision-CAS attestation — the facts ``_eligibility`` reads.
+    """
+
+    import dataclasses
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    source = "https://api.radienthq.com/v1"
+    identity = LinkIdentity("agent", "synthetic-local", source, "public", None, "h1")
+    record = prov.make_record(
+        "agent", "synthetic-local", "h1", None, {"instructions": "x"}, recorded_by
+    )
+    record = dataclasses.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage="clean",
+        scope_known=True,
+        local_alias="coder",
+    )
+    prov.write_baseline(root, record)
+    cm = ConfigManager(root)
+    cm.set_config_value(
+        "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
+    )
+    if recorded_by != "adopt-unknown":
+        svc.record_server_capabilities(
+            svc.HubSyncContext(
+                config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
+            ),
+            {"revision_cas": True},
+        )
+    return identity.link_id
+
+
+def _grant_written(root: Path, link_id: str) -> bool:
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return link_id in (hub.get("public_egress_grants") or {})
+
+
+async def _revision(client: Any, link_id: str) -> str:
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
+    return next(row["policy"]["revision"] for row in payload if row["link_id"] == link_id)
+
+
+async def test_desktop_patch_mints_the_first_public_grant_only_with_consent(api):
+    """The cross-surface fix on the REAL ASGI app: consent mints the first grant."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    # WITHOUT confirm: 422, no grant.
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert not _grant_written(root, link_id)
+    # WITH confirm: 200 and the grant persisted.
+    ok = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["result"]["policy"]["auto_push"] is True
+    assert _grant_written(root, link_id)
+
+
+async def test_desktop_patch_refuses_when_an_earlier_gate_fails_even_with_consent(api):
+    """An unknown baseline refuses even with consent — no grant, 422."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, recorded_by="adopt-unknown")
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert not _grant_written(root, link_id)

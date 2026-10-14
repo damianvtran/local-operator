@@ -234,3 +234,39 @@ def test_narrow_row_wraps_the_policy_pair_rather_than_truncating() -> None:
     rest = "\n".join(physical[1:])
     assert "Subscribe" in rest and "Auto-push" in rest
     assert "On" in rest and "Off" in rest
+
+
+def test_every_hinted_key_has_a_live_action() -> None:
+    """D17: every key the hint row teaches is a REAL binding, and vice versa.
+
+    The hint row once advertised `enter opens policy` for a stub with no effect.
+    This pins the invariant that the hinted keys and the panel's live key set are
+    the same set (the confirm key excepted: it is taught by the PROMPT, not the
+    ordinary row, because it only acts while the consent is armed).
+    """
+
+    from local_operator.i18n.keys import tui_hub_links as _k
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets import hub_links_panel as panel_mod
+
+    _t = tr("tui.hub_links")
+    bound = {str(binding[0]) for binding in panel_mod.HubLinksPanel.BINDINGS}
+    # The ordinary hint row teaches these ACTIONS; the confirm key is taught by
+    # the armed prompt's own block.
+    taught = {
+        "s": _t(_k.hint_subscribe()),
+        "a": _t(_k.hint_auto_push()),
+        "r": _t(_k.hint_refresh()),
+        "escape": _t(_k.hint_close()),
+    }
+    for key in taught:
+        assert key in bound, f"hinted key {key!r} has no binding"
+    # Every actionable binding is either taught on the row or is the prompt-only
+    # confirm / a navigation key.
+    navigation = {"up", "down"}
+    for key in bound:
+        assert (
+            key in taught or key in navigation or key == panel_mod.CONFIRM_EGRESS_KEY or key == "q"
+        ), f"binding {key!r} is neither hinted nor an intentional per-key exception"
+    # And the dead key is genuinely gone.
+    assert "enter" not in bound

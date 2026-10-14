@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -315,3 +316,99 @@ def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) 
     )
     assert bad == 1
     assert "error:" in capsys.readouterr().out
+
+
+def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = "pull") -> str:
+    """A CONFIRMED public link the way a real pull + capability probe leaves it.
+
+    A baseline record with a source-scoped remote revision and known scope, plus
+    the persisted revision-CAS attestation — the facts ``_eligibility`` reads.
+    ``lineage``/``recorded_by`` are varied to exercise the earlier gates.
+    """
+
+    import dataclasses
+
+    from local_operator.config import ConfigManager
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    source = "https://api.radienthq.com/v1"
+    identity = LinkIdentity("agent", "synthetic-local", source, "public", None, "h1")
+    record = prov.make_record(
+        "agent", "synthetic-local", "h1", None, {"instructions": "x"}, recorded_by
+    )
+    record = dataclasses.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage=lineage,
+        scope_known=True,
+        local_alias="coder",
+    )
+    prov.write_baseline(root, record)
+    cm = ConfigManager(root)
+    cm.set_config_value(
+        "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
+    )
+    if recorded_by != "adopt-unknown":
+        svc.record_server_capabilities(
+            svc.HubSyncContext(
+                config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
+            ),
+            {"revision_cas": True},
+        )
+    return identity.link_id
+
+
+def _set(root: Path, link_id: str, **over: Any) -> int:
+    base: dict[str, Any] = dict(
+        link_id=link_id,
+        subscribe=None,
+        auto_push=None,
+        expected_revision=None,
+        confirm_public_egress=False,
+        json=True,
+    )
+    base.update(over)
+    # The parser hands the command STRINGS ("true"/"false"); mirror that here.
+    for key in ("subscribe", "auto_push"):
+        if isinstance(base[key], bool):
+            base[key] = "true" if base[key] else "false"
+    return cli.hub_link_set_command(argparse.Namespace(**base), root)
+
+
+def _grant_written(root: Path, link_id: str) -> bool:
+    from local_operator.config import ConfigManager
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return link_id in (hub.get("public_egress_grants") or {})
+
+
+def test_cli_can_mint_the_first_public_grant_with_confirm(rig, capsys) -> None:
+    """The cross-surface fix: the REAL CLI can create a public link's first grant.
+
+    ``can_enable_auto_push`` is False for a public origin with no grant (reason
+    ``unsafe-publication``); the carve-out inside ``update_policy`` mints the
+    grant only when ``--confirm-public-egress`` is given.
+    """
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root)
+    # WITHOUT consent: refused, naming the missing public consent, NO grant.
+    assert _set(root, link_id, auto_push=True) == 1
+    assert "public publication consent is required" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)
+    # WITH consent: rc 0 and the grant persisted.
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 0
+    assert _grant_written(root, link_id)
+
+
+def test_cli_refuses_when_an_earlier_gate_fails_even_with_consent(rig, capsys) -> None:
+    """No CAS attestation ⇒ refused ``unsupported-precondition``, NO grant (consent and all)."""
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root, recorded_by="adopt-unknown")
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
+    assert "not eligible for this origin" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)

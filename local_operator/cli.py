@@ -10559,6 +10559,7 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
             print("error: could not read the current policy revision")
             return 1
     eligible = bool((row or {}).get("eligibility", {}).get("can_auto_push"))
+    reason = str((row or {}).get("eligibility", {}).get("reason") or "")
     try:
         result = update_policy(
             config_manager,
@@ -10567,9 +10568,13 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
             subscribe=subscribe,
             auto_push=auto_push,
             # The SERVICE-computed eligibility, same fact the inventory reports;
-            # public enable additionally demands --confirm-public-egress.
+            # public enable additionally demands --confirm-public-egress. The
+            # REASON is passed through so ``update_policy`` applies its one
+            # public-consent carve-out for the first grant (round-4 cross-surface
+            # fix), while every earlier gate still refuses.
             can_enable_auto_push=eligible,
             confirm_public_egress=getattr(args, "confirm_public_egress", False),
+            ineligible_reason=reason or "unsupported-precondition",
         )
     except LinkError as error:
         print(f"error: {error}")

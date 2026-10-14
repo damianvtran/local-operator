@@ -233,5 +233,15 @@
     "role": "refusal message",
     "tone": "plain, precise",
     "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
+  },
+  "tui.hub_links.confirm.alt": {
+    "role": "escape route",
+    "tone": "plain, precise",
+    "note": "A command-line fallback shown only when it fits unwrapped, for terminals that swallow ctrl+y. Names the CLI verb and its confirm flag; no secrets."
+  },
+  "tui.hub_links.refusal.revision_moved": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "Shown when the armed consent's policy revision differs from the row at confirm time; the user is confirming a value they never saw, so nothing is written."
   }
 }

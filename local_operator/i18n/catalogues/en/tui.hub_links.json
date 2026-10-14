@@ -45,5 +45,7 @@
   "tui.hub_links.hint.confirm": "ctrl+y",
   "tui.hub_links.hint.select": "↑↓ select",
   "tui.hub_links.refusal.ineligible": "Auto-push is not available for this link: {reason}.",
-  "tui.hub_links.refusal.resolve_first": "Resolve this link's source before acting on it."
+  "tui.hub_links.refusal.resolve_first": "Resolve this link's source before acting on it.",
+  "tui.hub_links.confirm.alt": "if ctrl+y is unavailable: lop hub link set --confirm-public-egress",
+  "tui.hub_links.refusal.revision_moved": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest."
 }

@@ -156,7 +156,22 @@ def update_policy(
         )
         grant = current.public_egress_grant
         if auto_push is True:
-            if not can_enable_auto_push:
+            # THE PUBLIC-CONSENT CARVE-OUT (round-4 cross-surface fix). A public
+            # origin with no grant yet reports ``unsafe-publication`` — that is
+            # not an ineligibility to refuse, it is the absence of the very grant
+            # ``confirm_public_egress`` MINTS below. Without this carve-out the
+            # CLI and the desktop PATCH (which pass can_enable_auto_push=False for
+            # such an origin) could never create the FIRST public grant, and the
+            # TUI carried a divergent special case to work around it. ONE rule
+            # here fixes all three surfaces. Every EARLIER gate
+            # (unsupported-precondition / baseline-unknown / mixed-lineage) still
+            # refuses: ``unsafe-publication`` is the LAST reason ``_eligibility``
+            # returns, only after capability, known baseline and clean lineage
+            # all pass.
+            consent_mints_grant = (
+                ineligible_reason == "unsafe-publication" and identity.visibility == "public"
+            )
+            if not can_enable_auto_push and not consent_mints_grant:
                 raise LinkError(
                     ineligible_reason, "automatic publication is not eligible for this origin"
                 )

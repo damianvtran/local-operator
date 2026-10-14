@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -157,6 +158,10 @@ class HubLinksPanel(Static):
         #: on the confirm key, and on ANY other key (`on_key`), so it cannot
         #: survive a stray keystroke.
         self._consent_link_id: str | None = None
+        #: The policy revision the prompt was ARMED against (round-4 D24). If the
+        #: row's revision differs at confirm time, the user is confirming a value
+        #: they never saw, so the prompt disarms and reports instead of writing.
+        self._consent_revision: str | None = None
         #: A refusal/notice shown on the card's status line (round-3 D19), with
         #: its severity, kept until the next action or repaint clears it.
         self._notice = ""
@@ -188,6 +193,10 @@ class HubLinksPanel(Static):
         self._error = ""
         self._engaged = False
         self._opened_at = time.monotonic()
+        # A re-fetch can change the revision under an armed prompt; drop it so a
+        # confirm can never write a value the user did not see (round-4 D24).
+        self._consent_link_id = None
+        self._consent_revision = None
         self.display = True
         self._repaint()
 
@@ -225,6 +234,7 @@ class HubLinksPanel(Static):
         self._refreshing = False
         self._offset = 0
         self._consent_link_id = None
+        self._consent_revision = None
         self._engaged = False
         self.display = False
 
@@ -265,16 +275,22 @@ class HubLinksPanel(Static):
         import time
 
         key = event.key
+        # A key is TYPED TEXT iff it produced a printable CHARACTER. Textual NAMES
+        # non-alphanumeric printables (`space`, `comma`, `full_stop`), so `key` is
+        # multi-char for exactly the characters a burst is full of — classifying on
+        # `len(key)` let a space/comma/period count as a "deliberate" control key
+        # and ENGAGE the panel, so `h<space>a` wrote policy (round-4 D23). The
+        # character is the reliable signal; `event.is_printable` is Textual's own.
+        printable = event.is_printable
         # 1. Typed-ahead: a printable key in the settle window, before
         # engagement, is swallowed entirely (no binding, no write).
-        if not self._engaged and len(key) == 1 and key.isprintable():
+        if not self._engaged and printable:
             if time.monotonic() - self._opened_at <= TYPED_AHEAD_WINDOW_S:
                 event.stop()
                 return
             self._engaged = True  # the burst settled; this keystroke is intent
-        # Anything that is not a printable character (a navigation/action/control
-        # key) is deliberate intent.
-        if len(key) != 1 or not key.isprintable():
+        elif not printable:
+            # A navigation/action/control key is deliberate intent.
             self._engaged = True
         # 2. Disarm an armed consent on any key but the confirm itself.
         if self._consent_link_id is not None and key != CONFIRM_EGRESS_KEY:
@@ -296,6 +312,9 @@ class HubLinksPanel(Static):
         if count == 0:
             return
         self._selected = max(0, min(count - 1, self._selected + delta))
+        # D25: a refusal names the link it was about, so moving off it clears the
+        # notice — otherwise a stale refusal appears to describe the new row.
+        self._notice = ""
         self._repaint()
 
     def action_toggle_subscribe(self) -> None:
@@ -352,6 +371,7 @@ class HubLinksPanel(Static):
             # genuine refusal, reported with its humanized reason.
             if row.visibility == "public" and row.eligibility_reason == "unsafe-publication":
                 self._consent_link_id = row.link_id
+                self._consent_revision = row.policy_revision
                 self._repaint()
                 return
             self.post_message(
@@ -364,6 +384,7 @@ class HubLinksPanel(Static):
         if row.visibility == "public":
             # Public egress: arm the consent prompt; only `ctrl+y` completes it.
             self._consent_link_id = row.link_id
+            self._consent_revision = row.policy_revision
             self._repaint()
             return
         self.post_message(
@@ -376,13 +397,23 @@ class HubLinksPanel(Static):
         """`ctrl+y` — the deliberate confirmation of an armed public egress.
 
         The ONLY key that completes a publication. Inert with nothing armed, so
-        a stray `ctrl+y` is a no-op rather than a write.
+        a stray `ctrl+y` is a no-op rather than a write. The revision the prompt
+        was ARMED against is checked first: if the row moved (an external edit or
+        a re-fetch), the user is confirming a value they never saw, so the
+        prompt disarms and reports instead (round-4 D24).
         """
         if self._consent_link_id is None:
             return
         row = next((r for r in self._rows if r.link_id == self._consent_link_id), None)
+        armed_revision = self._consent_revision
         self._consent_link_id = None
+        self._consent_revision = None
         if row is None:
+            self._repaint()
+            return
+        if armed_revision is not None and row.policy_revision != armed_revision:
+            self._notice = _t(_k.refusal_revision_moved())
+            self._notice_severity = "warning"
             self._repaint()
             return
         self.post_message(
@@ -401,67 +432,73 @@ class HubLinksPanel(Static):
     def _visible_rows(self) -> list[core.LinkRow]:
         return list(self._rows)
 
-    def _body_window(self, body: list[Text]) -> int:
-        """The first body ENTRY to paint so the SELECTED entry stays visible.
+    def _body_budget(self, consent_lines: int) -> int:
+        """Body rows available before the card would run off the screen (D22).
 
-        The window is bounded in PHYSICAL LINES (:data:`MAX_BODY_ROWS`), not in
-        entries: a narrow row now wraps its policy pair onto a second line, so
-        counting entries would let a wrapped list paint past the cap and leave
-        the selection off screen. Entries around the selected one are admitted
-        until the line budget is spent, biased toward showing what follows the
-        selection (the architect's third bug: entries past the cap were
-        unreachable; round-2 D8 added wrapped rows to the same accounting).
+        The body was capped by the CONSTANT :data:`MAX_BODY_ROWS`, so at a 24-row
+        terminal a card with several links extended past the bottom edge and its
+        consent keys were clipped. The real budget is what the card may occupy
+        (:func:`overlay.rows_above_dock`) less its own chrome, the consent block,
+        and the padding — floored so a tiny screen still shows some body.
+        """
+
+        available = overlay.rows_above_dock(self)
+        chrome = CHROME_ROWS + CARD_PADDING_ROWS + consent_lines + 1  # +1 hint row
+        return max(1, min(MAX_BODY_ROWS, available - chrome))
+
+    def _plan_window(self, body: list[Text], budget: int) -> tuple[int, int]:
+        """The inclusive ``[lo, hi]`` range of body ENTRIES to paint.
+
+        Budgeted in PHYSICAL LINES, and it ALWAYS contains the selection and
+        NEVER orphans a row from its section header (round-3 N3, round-4 D21).
+        The round-3 N3 fix pulled the header back in AFTER the line budget was
+        spent, so at exactly the cap the last entry — the selection — fell off
+        the window. Here the header is reserved against the budget BEFORE the
+        selection's neighbours are admitted, so expanding and painting agree.
         """
 
         counts = [_entry_lines(entry) for entry in body]
-        if sum(counts) <= MAX_BODY_ROWS:
-            return 0
+        if not counts:
+            return (0, -1)
         selected = self._painted_index()
         if not (0 <= selected < len(counts)):
-            return 0
+            selected = 0
         lo = hi = selected
         used = counts[selected]
-        # Take entries after the selection first, then before, until the budget
-        # is spent — the reader sees the neighbours that come next.
-        while hi + 1 < len(counts) and used + counts[hi + 1] <= MAX_BODY_ROWS:
-            hi += 1
-            used += counts[hi]
-        while lo - 1 >= 0 and used + counts[lo - 1] <= MAX_BODY_ROWS:
-            lo -= 1
-            used += counts[lo]
-        # N3 (round-3): never open a window on a link whose SECTION HEADER scrolled
-        # off above it — a row with no section is an orphan. If the entry just
-        # above the window is a header, ALWAYS include it (one extra chrome line
-        # is a fair trade for a labelled row); the header is a single line and
-        # the budget is a display cap, not a hard invariant.
+        # If the selection's own header sits just above, reserve its line first
+        # so it rides in with the row (N3) and cannot crowd the selection out.
         if lo > 0 and self._is_header(body[lo - 1]):
             lo -= 1
-        return lo
+            used += counts[lo]
+        # Admit following entries, then preceding ones, within the budget.
+        while hi + 1 < len(counts) and used + counts[hi + 1] <= budget:
+            hi += 1
+            used += counts[hi]
+        while lo - 1 >= 0 and used + counts[lo - 1] <= budget:
+            lo -= 1
+            used += counts[lo]
+            # Keep a preceding header with its first row.
+            if lo - 1 >= 0 and self._is_header(body[lo - 1]) and used + counts[lo - 1] <= budget:
+                lo -= 1
+                used += counts[lo]
+        # N3: if the entry just above the window is a header, include it too.
+        if lo > 0 and self._is_header(body[lo - 1]):
+            lo -= 1
+        return (lo, hi)
+
+    def _windowed_lines(self, body: list[Text], lo: int, hi: int) -> list[Text]:
+        """The physical lines of body entries ``[lo, hi]`` inclusive."""
+
+        lines: list[Text] = []
+        for entry in body[lo : hi + 1]:
+            lines.extend(_entry_lines_text(entry))
+        return lines
 
     @staticmethod
     def _is_header(entry: Text) -> bool:
         """Whether a body entry is a section HEADER (render_rows shows them bold)."""
 
         return str(entry.style) == "bold"
-
-    def _windowed_lines(self, body: list[Text], window: int) -> tuple[list[Text], bool]:
-        """Paint physical lines from ``window`` until the budget is spent.
-
-        Returns the lines and whether the window covered the WHOLE body (False
-        means the more-rows indicator must report that links are off screen).
-        """
-
-        counts = [_entry_lines(entry) for entry in body]
-        lines: list[Text] = []
-        used = 0
-        entry = window
-        while entry < len(body):
-            if lines and used + counts[entry] > MAX_BODY_ROWS:
-                break
-            lines.extend(_entry_lines_text(body[entry]))
-            used += counts[entry]
-            entry += 1
-        return lines, entry >= len(body)
 
     def _painted_index(self) -> int:
         """The body row the SELECTED link paints on (headers included).
@@ -508,6 +545,10 @@ class HubLinksPanel(Static):
             return
         outer = self.panel_width()
         width = self._content_width()
+        # The consent block is composed FIRST: its line count is part of the
+        # screen-derived body budget (D22), so it cannot be clipped.
+        consent = self._consent_lines(width)
+        budget = self._body_budget(len(consent))
         if self._error:
             body: list[Text] = [Text(self._error, style="dim")]
         else:
@@ -518,15 +559,14 @@ class HubLinksPanel(Static):
                 loading=self._loading,
                 tail_style=self._tail_style(),
             )
-        # WINDOW the body around the selection, in PHYSICAL LINES (a narrow row
-        # wraps its policy pair onto a second line, round-2 D8), so an entry past
-        # the cap is reachable and a wrapped list never paints past the budget.
-        window = self._body_window(body)
-        visible, whole = self._windowed_lines(body, window)
-        # The FIRST and LAST LINK visible: entries before `window` may be section
-        # headers, so count only LINK entries (not the headers render_rows
-        # interleaves) to report a truthful range.
-        first_link, last_link = self._visible_link_range(body, window, len(visible))
+        # WINDOW the body around the selection, in PHYSICAL LINES and within the
+        # SCREEN-derived budget (round-2 D8, round-4 D21/D22), so an entry past
+        # the cap is reachable, the selection is ALWAYS painted, and a wrapped
+        # list never runs off the bottom edge.
+        lo, hi = self._plan_window(body, budget)
+        visible = self._windowed_lines(body, lo, hi)
+        whole = lo == 0 and (hi == len(body) - 1)
+        first_link, last_link = self._visible_link_range(body, lo, hi)
         lines = [self._title()]
         lines.append(Text("─" * min(width, 60), style="dim"))
         lines.append(Text(""))
@@ -551,7 +591,6 @@ class HubLinksPanel(Static):
         # D16), not a segment squeezed into the one-row hint: it is a decision,
         # it must show in FULL at any width, and it needs priority ink (D20).
         # When it is not armed, the ordinary hint row is painted instead.
-        consent = self._consent_lines(width)
         if consent:
             lines.extend(consent)
         else:
@@ -565,26 +604,16 @@ class HubLinksPanel(Static):
         self.styles.height = len(lines) + CARD_PADDING_ROWS
         self.update(out)
 
-    def _visible_link_range(
-        self, body: list[Text], window: int, visible_len: int
-    ) -> tuple[int, int]:
-        """The 1-based first/last LINK the window shows, for the indicator.
+    def _visible_link_range(self, body: list[Text], lo: int, hi: int) -> tuple[int, int]:
+        """The 1-based first/last LINK the window ``[lo, hi]`` shows, for the indicator.
 
         ``body`` interleaves section HEADERS with link entries, so the painted
         window may open on a header; this counts only LINK entries to report a
-        truthful ``n–m`` range. Headers are identified by their rendered BOLD
-        style (render_rows' own marker), so a renamed section cannot break it.
+        truthful ``n–m`` range.
         """
 
-        def header(entry: Text) -> bool:
-            # render_rows builds a section title as ``Text(name, style="bold")``
-            # — a BASE style, not a span — while a link row's base style is
-            # unset and its first span carries the slot ink. So the header test
-            # is the entry's base style, not its spans.
-            return str(entry.style) == "bold"
-
-        before = sum(1 for entry in body[:window] if not header(entry))
-        shown = sum(1 for entry in body[window : window + visible_len] if not header(entry))
+        before = sum(1 for entry in body[:lo] if not self._is_header(entry))
+        shown = sum(1 for entry in body[lo : hi + 1] if not self._is_header(entry))
         if not shown:
             return (0, 0)
         return (before + 1, before + shown)
@@ -620,10 +649,17 @@ class HubLinksPanel(Static):
             _t(_k.confirm_keys(confirm=_t(_k.hint_confirm()), cancel=_t(_k.hint_cancel()))),
             style=warn,
         )
-        # Wrap lead/body/keys to the content width; every produced line is a
+        # D26: the escape route when a terminal swallows a control chord. Kept a
+        # SEPARATE paragraph and only when it fits the width unwrapped, so it can
+        # never break the D22 height budget or wrap the keys line.
+        paras = [lead, body, keys]
+        alt = _t(_k.confirm_alt())
+        if cell_len(alt) <= width:
+            paras.append(Text(alt, style=warn))
+        # Wrap each paragraph to the content width; every produced line is a
         # real painted line, so the caller's height sum stays honest.
         out: list[Text] = []
-        for para in (lead, body, keys):
+        for para in paras:
             for chunk in para.wrap(self, width) or [Text("")]:
                 out.append(chunk)
         return out

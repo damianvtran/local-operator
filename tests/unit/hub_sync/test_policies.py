@@ -199,3 +199,90 @@ def test_unknown_or_mixed_lineage_attestation_cannot_be_overridden_by_confirmati
             )
         assert refusal.value.code == reason
     assert read_policy(manager.get_config().values, link) == before
+
+
+def test_public_consent_carve_out_mints_the_first_grant_without_eligibility(
+    tmp_path: Path,
+) -> None:
+    """The cross-surface fix: a public origin with NO grant (reason
+    ``unsafe-publication``) mints the grant when consent is given, even though
+    ``can_enable_auto_push`` is False — the fact the CLI/desktop PATCH pass.
+
+    Before this, ``update_policy`` raised the ineligible reason BEFORE reaching
+    its own consent branch, so the CLI and desktop could never create the first
+    public grant; only the TUI's divergent path worked.
+    """
+
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    original = manager.config_file.read_bytes()
+    # WITHOUT consent: still refused, naming unsafe-publication, no grant.
+    with pytest.raises(LinkError) as refusal:
+        update_policy(
+            manager,
+            link,
+            expected_revision=before.revision,
+            auto_push=True,
+            can_enable_auto_push=False,
+            ineligible_reason="unsafe-publication",
+        )
+    assert refusal.value.code == "unsafe-publication"
+    assert manager.config_file.read_bytes() == original
+    # WITH consent: the carve-out mints the grant.
+    enabled = update_policy(
+        manager,
+        link,
+        expected_revision=before.revision,
+        auto_push=True,
+        can_enable_auto_push=False,
+        confirm_public_egress=True,
+        ineligible_reason="unsafe-publication",
+    )
+    assert enabled.policy.auto_push is True
+    assert enabled.public_egress_grant is not None
+
+
+@pytest.mark.parametrize(
+    "reason", ["unsupported-precondition", "baseline-unknown", "mixed-lineage"]
+)
+def test_public_consent_carve_out_does_not_bypass_an_earlier_gate(
+    tmp_path: Path, reason: str
+) -> None:
+    """EVERY earlier eligibility gate still refuses even with consent."""
+
+    manager = ConfigManager(tmp_path)
+    link = identity()
+    before = materialize_policy(manager, link)
+    original = manager.config_file.read_bytes()
+    with pytest.raises(LinkError) as refusal:
+        update_policy(
+            manager,
+            link,
+            expected_revision=before.revision,
+            auto_push=True,
+            can_enable_auto_push=False,
+            confirm_public_egress=True,
+            ineligible_reason=reason,
+        )
+    assert refusal.value.code == reason
+    assert manager.config_file.read_bytes() == original
+
+
+def test_private_link_is_unaffected_by_the_carve_out(tmp_path: Path) -> None:
+    """A PRIVATE origin with reason unsafe-publication is still refused."""
+
+    manager = ConfigManager(tmp_path)
+    link = replace(identity(), visibility="org", tenant_id="acme")
+    before = materialize_policy(manager, link)
+    with pytest.raises(LinkError) as refusal:
+        update_policy(
+            manager,
+            link,
+            expected_revision=before.revision,
+            auto_push=True,
+            can_enable_auto_push=False,
+            confirm_public_egress=True,
+            ineligible_reason="unsafe-publication",
+        )
+    assert refusal.value.code == "unsafe-publication"

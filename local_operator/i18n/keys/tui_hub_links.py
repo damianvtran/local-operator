@@ -30,6 +30,10 @@ def action_retry() -> Msg:
     return Msg("tui.hub_links.action.retry", {})
 
 
+def confirm_alt() -> Msg:
+    return Msg("tui.hub_links.confirm.alt", {})
+
+
 def confirm_concurrent() -> Msg:
     return Msg("tui.hub_links.confirm.concurrent", {})
 
@@ -147,6 +151,10 @@ def refusal_ineligible(*, reason: str) -> Msg:
 
 def refusal_resolve_first() -> Msg:
     return Msg("tui.hub_links.refusal.resolve_first", {})
+
+
+def refusal_revision_moved() -> Msg:
+    return Msg("tui.hub_links.refusal.revision_moved", {})
 
 
 def section_agents() -> Msg:

@@ -160,13 +160,28 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 # The public auto-push consent state (round-2 D7): open the
                 # overlay and arm the two-step consent on the focused public
                 # link, so the frame shows the deliberate confirmation prompt.
+                # A navigation key ENGAGES first (round-3 D15 typed-ahead guard),
+                # then `a` arms — the real user sequence.
                 app.action_hub_links()
                 await pilot.pause()
+                await pilot.pause()
+                await pilot.press("down")
                 await pilot.pause()
                 panel = app._hub_links_panel()
                 if panel is not None:
                     panel._selected = 0
                     panel.action_toggle_auto_push()
+                await pilot.pause()
+            elif contact_sheet == "select-last":
+                # D21: open the overlay and select the LAST link, so the frame
+                # proves the chosen row's name is painted at the row cap.
+                app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
+                panel = app._hub_links_panel()
+                if panel is not None:
+                    panel._selected = max(0, len(panel._rows) - 1)
+                    panel._repaint()
                 await pilot.pause()
             else:
                 # Drive the REAL open path: the sync action the binding, the
@@ -593,42 +608,6 @@ async def test_hint_row_is_painted_from_the_catalogue() -> None:
         shutil.rmtree(case_root, ignore_errors=True)
 
 
-def test_every_hinted_key_has_a_live_action() -> None:
-    """D17: every key the hint row teaches is a REAL binding, and vice versa.
-
-    The hint row once advertised `enter opens policy` for a stub with no effect.
-    This pins the invariant that the hinted keys and the panel's live key set are
-    the same set (the confirm key excepted: it is taught by the PROMPT, not the
-    ordinary row, because it only acts while the consent is armed).
-    """
-
-    from local_operator.i18n.keys import tui_hub_links as _k
-    from local_operator.i18n.text import tr
-    from local_operator.tui.widgets import hub_links_panel as panel_mod
-
-    _t = tr("tui.hub_links")
-    bound = {str(binding[0]) for binding in panel_mod.HubLinksPanel.BINDINGS}
-    # The ordinary hint row teaches these ACTIONS; the confirm key is taught by
-    # the armed prompt's own block.
-    taught = {
-        "s": _t(_k.hint_subscribe()),
-        "a": _t(_k.hint_auto_push()),
-        "r": _t(_k.hint_refresh()),
-        "escape": _t(_k.hint_close()),
-    }
-    for key in taught:
-        assert key in bound, f"hinted key {key!r} has no binding"
-    # Every actionable binding is either taught on the row or is the prompt-only
-    # confirm / a navigation key.
-    navigation = {"up", "down"}
-    for key in bound:
-        assert (
-            key in taught or key in navigation or key == panel_mod.CONFIRM_EGRESS_KEY or key == "q"
-        ), f"binding {key!r} is neither hinted nor an intentional per-key exception"
-    # And the dead key is genuinely gone.
-    assert "enter" not in bound
-
-
 async def test_more_rows_indicator_reports_the_window() -> None:
     """D11: a list longer than the body cap reports its range, not silence."""
 
@@ -665,3 +644,55 @@ async def test_more_rows_indicator_reports_the_window() -> None:
             assert re.search(r"\d+–\d+/20", painted), painted
     finally:
         shutil.rmtree(case_root, ignore_errors=True)
+
+
+async def test_capture_round4_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frames round-4 design review asked for (D21/D22).
+
+    * 16 links at 80x24 with the consent armed — the full block must paint.
+    * 16 links with the selection on the LAST row — the name must be visible
+      (D21: the round-3 N3 header fix dropped it at exactly the cap).
+    * 3 links at 40x24 with the consent armed — the tightest width.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    sixteen = [
+        dict(
+            local_id=f"a{i:02d}",
+            name=f"agent-{i:02d}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+            attest_revision_cas=True,
+        )
+        for i in range(16)
+    ]
+    # D22: 16 links at 80x24 with the consent armed (selected row 0, public).
+    await _capture(
+        "consent-16links-80x24",
+        size=(80, 24),
+        contact_sheet="consent",
+        links=sixteen,
+    )
+    # D21: 16 links, selection on the LAST row, painted (name visible).
+    await _capture(
+        "selection-last-16links",
+        size=(100, 40),
+        contact_sheet="select-last",
+        links=sixteen,
+    )
+    # D22: 3 links at 40x24 with the consent armed.
+    await _capture(
+        "consent-3links-40x24",
+        size=(40, 24),
+        contact_sheet="consent",
+        links=sixteen[:3],
+    )
+
+    for name in ("consent-16links-80x24", "selection-last-16links", "consent-3links-40x24"):
+        svg = OUT / f"{name}.svg"
+        assert svg.exists() and "<svg" in svg.read_text()[:200], name

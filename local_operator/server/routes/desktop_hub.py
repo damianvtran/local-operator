@@ -474,6 +474,7 @@ async def patch_link(
             None,
         )
         eligible = bool(row and row["eligibility"]["can_auto_push"])
+        reason = str((row or {}).get("eligibility", {}).get("reason") or "")
         try:
             snapshot = update_policy(
                 config_manager,
@@ -483,8 +484,12 @@ async def patch_link(
                 auto_push=body.auto_push,
                 # The attestation is the SERVICE-computed eligibility; public
                 # enable additionally demands the explicit egress consent below.
+                # The REASON is passed through so ``update_policy`` applies its
+                # ONE public-consent carve-out for the first grant (round-4
+                # cross-surface fix); every earlier gate still refuses.
                 can_enable_auto_push=eligible,
                 confirm_public_egress=body.confirm_public_egress,
+                ineligible_reason=reason or "unsupported-precondition",
             )
         except LinkError as error:
             code = getattr(error, "code", "") or ""

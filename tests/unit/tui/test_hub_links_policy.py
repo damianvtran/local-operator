@@ -303,11 +303,12 @@ async def test_tui_cannot_create_egress_grant_when_an_earlier_check_fails(
 ) -> None:
     """OBSERVATION guard: consent only completes AFTER every earlier gate.
 
-    The TUI's ``consent_completes`` path is reachable ONLY when the service
-    reason is ``unsafe-publication``, which ``_eligibility`` returns only after
+    The carve-out is reachable ONLY when the service reason is
+    ``unsafe-publication``, which ``_eligibility`` returns only after
     capability, baseline and lineage all pass (service.py). Here the link has
     NO revision-CAS attestation, so the reason is ``unsupported-precondition``;
-    a ``ctrl+y`` confirm must therefore write nothing and create no grant.
+    ``a`` refuses (not arms), and a ``ctrl+y`` confirm must therefore write
+    nothing and create no grant.
     """
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -359,3 +360,173 @@ def test_footer_drops_the_hub_door_before_the_asks_or_chip() -> None:
         assert "asks: 4" in line and "⌥4" in line, (floor, focused, line)
         assert "hub:" not in line, (floor, focused, line)
     assert painted(34, focused=False) == "f9 focus · asks: 4 · hub: 1 · ⌥4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [15, 16, 17, 18])
+async def test_selected_row_is_painted_at_every_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    """D21: the SELECTED row's name must be painted, at and around the cap.
+
+    The round-3 N3 header fix pulled a header back in AFTER the line budget was
+    spent, so at exactly the cap the LAST entry — the selection — fell off the
+    window while `s`/`a` would still write to it. This drives the real app with
+    the selection on the last link and asserts its NAME is on screen.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for i in range(count):
+        _seed_link(tmp_path, local_id=f"a{i:02d}", name=f"agent-{i:02d}", subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel._selected = count - 1
+        panel._repaint()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        last = f"agent-{count - 1:02d}"
+        assert last in painted, f"the selected last row {last!r} is not painted\n{painted}"
+
+
+@pytest.mark.asyncio
+async def test_selected_row_is_painted_with_wrapped_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D21 with WRAPPED rows: the selection survives when every row is 2 lines."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for i in range(20):
+        _seed_link(tmp_path, local_id=f"a{i:02d}", name=f"agent-{i:02d}", subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    # 40 cols wraps each row's policy pair onto a second line.
+    async with app.run_test(size=(40, 24)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel._selected = 19
+        panel._repaint()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "agent-19" in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_consent_block_is_fully_painted_at_small_screens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D22: the consent's full block (lead + body + keys) fits the screen.
+
+    The card height was capped by a constant, so at 24 rows a multi-link card ran
+    off the bottom and the consent keys line was clipped — a decision with no
+    stated way to take it. The body budget now derives from the screen rows.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for i in range(3):
+        _seed_link(
+            tmp_path,
+            local_id=f"a{i}",
+            name=f"agent-{i}",
+            subscribe=True,
+            attest_revision_cas=True,
+        )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(40, 24)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = app._hub_links_panel()
+        panel._selected = 0
+        await pilot.press("a")  # arm the consent
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Publish publicly?" in painted, painted
+        assert "published publicly" in painted, painted
+        assert "ctrl+y" in painted and "esc" in painted, painted
+        # Bottom edge within the screen.
+        assert panel.region.y + panel.region.height <= panel.screen.size.height, (
+            panel.region,
+            panel.screen.size,
+        )
+
+
+@pytest.mark.asyncio
+async def test_consent_block_is_fully_painted_with_many_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D22: 16 links at 80x24 still paints the full consent block."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for i in range(16):
+        _seed_link(
+            tmp_path,
+            local_id=f"a{i:02d}",
+            name=f"agent-{i:02d}",
+            subscribe=True,
+            attest_revision_cas=True,
+        )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = app._hub_links_panel()
+        panel._selected = 0
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Publish publicly?" in painted, painted
+        assert "published publicly" in painted, painted
+        assert "ctrl+y" in painted, painted
+        assert panel.region.y + panel.region.height <= panel.screen.size.height
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visibility,tenant", [("org", "acme"), ("public", None)])
+async def test_zero_spacing_burst_with_punctuation_never_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visibility: str, tenant: str | None
+) -> None:
+    """D23: a ZERO-SPACING burst containing space/comma/period never writes.
+
+    Textual NAMES space/comma/period (`space`/`comma`/`full_stop`), so the old
+    `len(key)==1` classifier treated them as deliberate control keys and engaged
+    the panel — `h<space>a` then wrote policy. This posts Key events with NO
+    pauses (a true burst) and asserts nothing is written.
+    """
+
+    from textual import events
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(
+        tmp_path,
+        visibility=visibility,
+        tenant=tenant,
+        subscribe=True,
+        auto_push=False,
+        attest_revision_cas=True,
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        # A zero-spacing burst: call the handler with no pilot.pause between.
+        # Textual names space/comma/period, so the event carries the NAMED key
+        # with its real printable CHARACTER — exactly what a terminal produces.
+        for ch in "h a,x.a":
+            from textual.keys import _character_to_key
+
+            panel.on_key(events.Key(_character_to_key(ch), ch))
+        await pilot.pause()
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["auto_push"] is False, "a burst must not enable auto-push"
+    assert values["subscribe"] is True, "a burst must not flip subscribe"
