@@ -3501,3 +3501,145 @@ def test_credential_identity_reads_a_row_and_ignores_the_dedupe_key() -> None:
         identity_key="a@b.c",
     )
     assert credential_identity(labelled) == "a@b.c"
+
+
+async def test_credit_only_cache_is_neutral_not_hidden_by_older_spent_plan(
+    tmp_path, monkeypatch
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.providers.usage_cache import (
+        UsageCacheStore,
+        account_preflight_key,
+    )
+
+    store = AuthStore(tmp_path / "auth.db")
+    cache = UsageCacheStore(tmp_path / "usage.db")
+    now = store._now_ms()
+    row = store.upsert_credential("openai", {**_oauth(), "email": "synthetic@example.test"})
+    monkeypatch.setattr(store, "_usage_cache_store", lambda: cache)
+    old = UsageReport(
+        provider="openai",
+        fetched_at=now - 1000,
+        limits=[UsageLimit("plan", "Plan", UsageAmount(used_fraction=1), shared=True)],
+    )
+    cache.set(
+        account_preflight_key("openai", row.data["email"]),
+        "openai",
+        [old],
+        expires_at_ms=now + 60000,
+    )
+    fresh = UsageReport(
+        provider="openai",
+        fetched_at=now,
+        identity=row.data["email"],
+        limits=[
+            UsageLimit(
+                "credits",
+                "Credits",
+                UsageAmount(remaining=10, unit="credits"),
+                paid_fallback=True,
+                available=True,
+            )
+        ],
+    )
+    cache.set("openai:synthetic", "openai", [fresh], expires_at_ms=now + 60000)
+    try:
+        assert store._cached_remaining_fraction(row, "openai", "gpt-codex", now) is None
+    finally:
+        cache.close()
+        store.close()
+
+
+@pytest.mark.parametrize("layout", ["preflight", "warmer"])
+@pytest.mark.parametrize("paid", [True, False])
+async def test_first_pick_prefers_definite_usable_capacity(
+    tmp_path, monkeypatch, layout, paid
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.providers.usage_cache import (
+        UsageCacheStore,
+        account_preflight_key,
+    )
+
+    store = AuthStore(tmp_path / "auth.db")
+    path = tmp_path / "usage.db"
+    monkeypatch.setattr(store, "_usage_cache_store", lambda: UsageCacheStore(path))
+    now = store._now_ms()
+    good = store.upsert_credential(
+        "openai", {**_oauth(access="synthetic-good"), "email": "good@example.test"}
+    )
+    spent = store.upsert_credential(
+        "openai", {**_oauth(access="synthetic-spent"), "email": "spent@example.test"}
+    )
+    cache = UsageCacheStore(path)
+    reports = []
+    for row in (good, spent):
+        usable = row.id == good.id
+        limits = [
+            UsageLimit(
+                "plan",
+                "Plan",
+                UsageAmount(used_fraction=1 if paid or not usable else 0.25),
+                shared=True,
+            )
+        ]
+        if paid:
+            limits.append(
+                UsageLimit(
+                    "paid",
+                    "Paid",
+                    UsageAmount(remaining=10 if usable else 0),
+                    paid_fallback=True,
+                    available=True,
+                )
+            )
+        report = UsageReport(
+            provider="openai", fetched_at=now, identity=row.data["email"], limits=limits
+        )
+        reports.append(report)
+        if layout == "preflight":
+            cache.set(
+                account_preflight_key("openai", row.data["email"]),
+                "openai",
+                [report],
+                expires_at_ms=now + 60000,
+            )
+    if layout == "warmer":
+        cache.set("openai:synthetic", "openai", reports, expires_at_ms=now + 60000)
+    cache.close()
+    try:
+        picks = [
+            await store.get_oauth_access("openai", f"synthetic-review-{i}", model_id="gpt-codex")
+            for i in range(12)
+        ]
+        assert all(pick is not None and pick.credential_id == good.id for pick in picks), [
+            pick.credential_id if pick else None for pick in picks
+        ]
+    finally:
+        store.close()
+
+
+async def test_paid_ranking_keeps_true_unknown_neutral(tmp_path, monkeypatch) -> None:
+    from local_operator.providers.usage import QuotaHealth
+
+    store = AuthStore(tmp_path / "auth.db")
+    rows = [
+        store.upsert_credential(
+            "openai", {**_oauth(access=f"synthetic-{i}"), "email": f"{i}@example.test"}
+        )
+        for i in range(3)
+    ]
+    verdicts = {
+        rows[0].id: QuotaHealth("healthy"),
+        rows[1].id: None,
+        rows[2].id: QuotaHealth("depleted", remaining_fraction=0),
+    }
+    monkeypatch.setattr(store, "_cached_quota_health", lambda row, *args: verdicts[row.id])
+    try:
+        picks = [
+            store._usage_ranked_order(rows, "openai", f"synthetic-neutral-{i}", "gpt-codex")[0].id
+            for i in range(24)
+        ]
+        assert set(picks) == {rows[0].id, rows[1].id}
+    finally:
+        store.close()

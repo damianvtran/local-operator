@@ -547,3 +547,103 @@ async def test_preflight_none_result_preserves_last_good_and_fails_open(tmp_path
         assert retained is not None and retained[0].limits[0].amount.used == 50.0
     finally:
         store.close()
+
+
+def test_paid_metadata_cache_roundtrip_and_legacy_defaults() -> None:
+    from local_operator.providers.usage import (
+        UsageAmount,
+        UsageLimit,
+        UsageReport,
+        usage_health,
+    )
+    from local_operator.providers.usage_cache import report_from_dict, report_to_dict
+
+    report = UsageReport(
+        provider="openai",
+        limits=[
+            UsageLimit(
+                "openai:credits",
+                "Credits",
+                UsageAmount(remaining=61899.95877, unit="credits"),
+                paid_fallback=True,
+                available=True,
+                unlimited=False,
+            ),
+        ],
+    )
+    encoded = report_to_dict(report)
+    decoded = report_from_dict(encoded)
+    assert decoded is not None and decoded == report
+    assert usage_health(decoded, "gpt-codex").state == "healthy"
+    assert usage_health(decoded, "gpt-codex").remaining_fraction is None
+    for field in ("paid_fallback", "available", "supersedes_tiers", "unlimited"):
+        encoded["limits"][0].pop(field)
+    legacy = report_from_dict(encoded)
+    assert legacy is not None
+    assert legacy.limits[0].paid_fallback is False
+    assert usage_health(legacy, "gpt-codex").state == "unknown"
+
+
+@pytest.mark.parametrize(
+    "plan,paid,status,expected",
+    [
+        (1, 0.25, None, "healthy"),
+        (0.25, 1, None, "healthy"),
+        (1, 0.25, "disabled", "depleted"),
+        (1, None, None, "depleted"),
+    ],
+)
+def test_legacy_anthropic_paid_semantic_migration(plan, paid, status, expected) -> None:
+    from local_operator.providers.usage import usage_health
+    from local_operator.providers.usage_cache import report_from_dict
+
+    report = report_from_dict(
+        {
+            "provider": "anthropic",
+            "limits": [
+                {
+                    "id": "anthropic:7d",
+                    "label": "Plan",
+                    "amount": {"used_fraction": plan},
+                    "shared": True,
+                },
+                {
+                    "id": "anthropic:extra",
+                    "label": "Extra",
+                    "amount": {"used_fraction": paid, "unit": "usd"},
+                    "status": status,
+                },
+            ],
+        }
+    )
+    assert report is not None
+    assert usage_health(report, "claude-opus").state == expected
+
+
+@pytest.mark.parametrize("used,expected", [(12.5, "healthy"), (100, "depleted")])
+def test_new_paid_wire_preserves_amount_health(used, expected) -> None:
+    from local_operator.providers.usage import (
+        UsageAmount,
+        UsageLimit,
+        UsageReport,
+        usage_health,
+    )
+    from local_operator.providers.usage_cache import report_from_dict, report_to_dict
+
+    report = UsageReport(
+        provider="anthropic",
+        limits=[
+            UsageLimit("anthropic:7d", "Plan", UsageAmount(used_fraction=1), shared=True),
+            UsageLimit(
+                "anthropic:extra",
+                "Extra",
+                UsageAmount(used=used, limit=100),
+                paid_fallback=True,
+                available=True,
+                supersedes_tiers=True,
+            ),
+        ],
+    )
+    decoded = report_from_dict(report_to_dict(report))
+    assert decoded is not None
+    assert usage_health(decoded, "claude-opus").state == expected
