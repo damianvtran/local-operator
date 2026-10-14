@@ -27312,17 +27312,29 @@ class OperatorApp(App[None]):
         """The row's questions as the CARD would draw them, or ``None`` when it cannot.
 
         ONE reader for the two seams that must agree about a row (Q-1, round 1):
-        the card mounts only for questions ``AskQuestion`` accepts, and the chat
+        the card mounts only for questions the ROW model accepts, and the chat
         refusal (``_head_ask_wants_a_secret``) may only point at a card that can
         exist. A row carrying something the validator refuses (a secret question
         with options, a truncated question) cannot be drawn anywhere, so a
         refusal would name a door that cannot open while protecting nothing —
         the row is still declinable from the list.
+
+        ``AskRowQuestion`` and NOT ``AskQuestion`` (round 13). The queue's own
+        projection (``asks/queue._question_shape``) stores the FULL question,
+        and a bridge carriage's row carries the seat — ``question_id``,
+        ``bridge``, ``human_required`` and each option's ``id``. Validating the
+        row against the TOOL's model therefore refused every real cross-member
+        ask (``extra="forbid"`` on the seat keys), ``_mount_ask_card`` gave up
+        with "carries questions this surface cannot draw", and no human decision
+        card ever mounted for the one ask kind that cannot be answered anywhere
+        else. The row model declares exactly those fields as optional, so the
+        seat is drawn-from rather than stripped, and the strict tool model stays
+        strict where it guards the model's own asks.
         """
-        from local_operator.harness.types import AskQuestion
+        from local_operator.harness.types import AskRowQuestion
 
         try:
-            return [AskQuestion.model_validate(dict(question)) for question in row.questions]
+            return [AskRowQuestion.model_validate(dict(question)) for question in row.questions]
         except Exception:  # noqa: BLE001 - a malformed row must not break the dock
             return None
 

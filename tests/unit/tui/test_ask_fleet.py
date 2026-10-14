@@ -90,6 +90,11 @@ def _bridge_row(ask_id: str, *, status: str = "open", **extra: Any) -> dict[str,
     The producer's ``question_id`` is what makes the row a request (the same
     predicate the session's door uses), and the options carry the wire ids the
     decision validates against.
+
+        ``persist`` is False, which is what the fold carries: the carriage is not a
+    credential question, and ``bridge_request_question`` does not stamp it
+    (round 13) — a row with ``persist`` and no ``secret`` is one the ask family's
+    validator refuses, which is how a real cross-member ask went undrawable.
     """
     return {
         "ask_id": ask_id,
@@ -110,7 +115,7 @@ def _bridge_row(ask_id: str, *, status: str = "open", **extra: Any) -> dict[str,
                 "multi": False,
                 "recommended": None,
                 "secret": False,
-                "persist": True,
+                "persist": False,
                 "human_required": True,
                 "question_id": "bmsg_1",
             }

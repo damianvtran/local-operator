@@ -50,6 +50,7 @@ from local_operator.harness.types import (
     ToolExecutionUpdateEvent,
     ToolResult,
 )
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import ToolComposing, ToolEnded, ToolStarted, ToolUpdated
 from local_operator.tui.quiet_groups import group_splitter_of
@@ -556,10 +557,7 @@ def _bridge_history_row() -> Any:
         text="",
         tool_calls=None,
         content=[],
-        details={
-            "body": "org note",
-            "sender": {"account_id": "acc_org", "source": TEAM_BRIDGE_MESSAGE_TYPE},
-        },
+        details=dict(BRIDGE_DETAILS),
     )
 
 
@@ -584,7 +582,13 @@ async def test_a_bridge_row_replays_as_its_own_card(hide_cross_session) -> None:
         )
         cards = [b for b in _blocks(app) if isinstance(b, TeamBridgeBlock)]
         assert len(cards) == 1
-        assert cards[0].text() == "org note"
+        # D1: the card paints what the RECEIVER validated, never the wire body
+        # the same row also carries. Round 13 corrected this assertion — it
+        # still expected "org note", i.e. the model's payload on the human card,
+        # which is the defect D1 exists to remove (the node was red on the
+        # branch head before this round).
+        assert cards[0].text() == BRIDGE_CARD_TEXT
+        assert "body_sha256" not in cards[0].text()
         assert "team-bridge-block" in cards[0].classes
         assert "peer-message-block" not in cards[0].classes
         # No PLAIN peer card for the bridge row: the kind is preserved, not
@@ -631,6 +635,25 @@ BRIDGE_SENDER: dict[str, object] = {
     "account_id": "acc_org",
     "source": TEAM_BRIDGE_MESSAGE_TYPE,
 }
+#: The persisted ``details`` of a STAMPED carriage: the wire body the model
+#: reads, the wake's own sender, and the provenance the RECEIVER validated. The
+#: human card is built from the last of those (D1), and the live receipt carries
+#: this same dict (round 13), so a delivery paints the same card live that the
+#: replay fold paints later.
+BRIDGE_DETAILS: dict[str, Any] = {
+    "body": "org note",
+    "sender": dict(BRIDGE_SENDER),
+    "bridge": {
+        "delivery_ref": "dref_1",
+        "sender_name": "Priya Raman",
+        "organization": "Acme Research",
+        "excerpt": "could you approve the Q3 spend?",
+        "body_sha256": "ab" * 32,
+    },
+}
+#: What the human card paints for :data:`BRIDGE_DETAILS`: the validated member,
+#: their organization and the screened excerpt — never the wire body.
+BRIDGE_CARD_TEXT = "Priya Raman · Acme Research — could you approve the Q3 spend?"
 #: Long enough that the expanded card wraps to several rows at 100 columns
 #: (the peer control's own growth measurement is 96x4 under the same toggle).
 LONG_BRIDGE_BODY = (
@@ -642,6 +665,59 @@ LONG_BRIDGE_BODY = (
 
 def _bridge_blocks(app: OperatorApp) -> list[TeamBridgeBlock]:
     return [b for b in _blocks(app) if type(b) is TeamBridgeBlock]
+
+
+def test_the_bridge_identity_names_the_member_and_their_organization() -> None:
+    """Round 13: the identity column names the HUMAN, not the transport.
+
+    ``bridge_card_sender`` enriches the wake's sender dict from the provenance
+    the receiver VALIDATED (``team_bridge/card.py``), and this card is the only
+    surface that reads it: the inherited ladder saw only ``conversation_name`` /
+    ``cwd`` / ``session_id``, none of which a bridge wake carries, so every org
+    card fell through to ``sender_unknown`` and read "another session". On the
+    one card whose whole subject is that a human is asking, the identity named
+    no human and no organization at all.
+
+    The row is built the production way — the same two helpers the live attach
+    and the replay fold call — so this pins the wiring, not the helpers alone.
+    """
+    details: dict[str, Any] = {
+        "body": "org note",
+        "sender": {"account_id": "acc_local", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+        "bridge": {
+            "delivery_ref": "dref_1",
+            "sender_name": "Priya Raman",
+            "organization": "Acme Research",
+            "excerpt": "could you approve the Q3 spend?",
+        },
+    }
+    block = TeamBridgeBlock(bridge_card_text(details), bridge_card_sender(details))
+    identity, _ = block._summary()
+    assert "Priya Raman" in identity, identity
+    assert "Acme Research" in identity, identity
+    assert "another session" not in identity, identity
+    header = block._header(100)
+    assert "Priya Raman" in header, header
+    assert "Acme Research" in header, header
+    assert "another session" not in header, header
+
+
+def test_a_bridge_row_without_a_validated_name_keeps_the_old_ladder() -> None:
+    """The enrichment is a JOIN, not a replacement: no meta name, no override.
+
+    A carriage whose provenance lacks the member fields must still render the
+    way it did before round 13 — the identity falls back to the inherited
+    ladder rather than to an invented name or an empty line.
+    """
+    details: dict[str, Any] = {
+        "body": "org note",
+        "sender": {"account_id": "acc_local", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+    }
+    block = TeamBridgeBlock(bridge_card_text(details), bridge_card_sender(details))
+    # The same sender dict through the PARENT class is the control: the override
+    # must make no difference when there is no validated name to show.
+    base = PeerMessageBlock(bridge_card_text(details), bridge_card_sender(details))
+    assert block._sender_name() == base._sender_name() == ("", False)
 
 
 @pytest.mark.asyncio
@@ -658,10 +734,17 @@ async def test_a_bridge_live_delivery_paints_the_bridge_card_once(hide_cross_ses
                 sender=BRIDGE_SENDER,
                 message_id="bridge-live-1",
                 custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                details=dict(BRIDGE_DETAILS),
             )
         )
         await _wait_for(pilot, lambda: _bridge_blocks(app), what="the live bridge card")
         assert len(_bridge_blocks(app)) == 1
+        # The live card is the SAME view the replay paints (the file's whole
+        # subject): the provenance view of the row, not the wire body. The live
+        # receipt carries the row's details for exactly this reason — without
+        # them the live paint read a field the TUI message did not have and
+        # painted nothing at all.
+        assert _bridge_blocks(app)[0].text() == BRIDGE_CARD_TEXT
         # Not a peer-typed card for the same delivery.
         assert [b for b in _blocks(app) if type(b) is PeerMessageBlock] == []
         # The dedup id is recorded, so a later REPLAY of this attach skips it
@@ -788,6 +871,7 @@ async def test_two_bridge_receipts_are_never_folded_into_a_bar(hide_cross_sessio
                     sender=BRIDGE_SENDER,
                     message_id=mid,
                     custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+                    details=dict(BRIDGE_DETAILS),
                 )
             )
         await _wait_for(pilot, lambda: len(_bridge_blocks(app)) == 2, what="both bridge cards")
