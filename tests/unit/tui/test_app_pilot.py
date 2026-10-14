@@ -3689,12 +3689,24 @@ async def test_a_replayed_bang_card_opens_and_ordinary_calls_stay_shut() -> None
         ),
     ]
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
-        assert len(cards) == 2
-        assert cards[0].expanded is True  # the bang receipt
-        assert cards[1].expanded is False  # an ordinary agent call
+    replay_ready = asyncio.Event()
+    render_history = app._render_resumed_history
+
+    def observe_replay(replayed_session: Any) -> None:
+        render_history(replayed_session)
+        # One pilot pause drains messages, not the asynchronous session factory.
+        # Binding _session also precedes replay. Observe the real replay then its
+        # paint, never the expected card count: missing cards must still fail.
+        app.call_after_refresh(replay_ready.set)
+
+    with patch.object(app, "_render_resumed_history", side_effect=observe_replay):
+        async with app.run_test(size=(80, 24)) as pilot:
+            await asyncio.wait_for(replay_ready.wait(), timeout=5.0)
+            await pilot.pause()
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+            assert len(cards) == 2
+            assert cards[0].expanded is True  # the bang receipt
+            assert cards[1].expanded is False  # an ordinary agent call
 
 
 @pytest.mark.asyncio
