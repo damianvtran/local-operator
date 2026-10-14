@@ -279,8 +279,13 @@ class HubSyncRunner:
         self.last_tick = report
         return report
 
-    def _pick(self, links: Sequence[Link], doc: dict[str, Any]) -> set[str]:
-        """At most :data:`MAX_ITEMS_PER_TICK` ids, oldest-checked first; 404'd items throttled."""
+    def _pick(self, links: Sequence[Link], doc: dict[str, Any]) -> dict[str, set[str]]:
+        """Per-kind local ids, oldest-checked first; never a shared bare-id set.
+
+        A bare ``local_id`` set handed to both kinds would let an agent id equal
+        to a team id select the wrong kind's rows. Keying by ``(kind, local_id)``
+        is what keeps one kind's due ids from bleeding into the other.
+        """
 
         items = doc.get("items", {})
 
@@ -289,18 +294,26 @@ class HubSyncRunner:
                 items.get(st.item_key(link.kind, link.local_id), {}).get("last_checked_at") or ""
             )
 
-        eligible = [
-            link
-            for link in links
-            if st.check_due(items.get(st.item_key(link.kind, link.local_id), {}))
-        ]
-        eligible.sort(key=last)
-        return {link.local_id for link in eligible[:MAX_ITEMS_PER_TICK]}
+        picked: dict[str, set[str]] = {"agent": set(), "team": set()}
+        for kind in ("agent", "team"):
+            eligible = [
+                link
+                for link in links
+                if link.kind == kind
+                and st.check_due(items.get(st.item_key(link.kind, link.local_id), {}))
+            ]
+            eligible.sort(key=last)
+            picked[kind] = {link.local_id for link in eligible[:MAX_ITEMS_PER_TICK]}
+        return picked
 
-    async def _check_bounded(self, ctx: svc.HubSyncContext, ids: set[str]) -> list[Any]:
-        """Checks run with concurrency 2, each off the loop (sync ``requests`` clients)."""
+    async def _check_bounded(self, ctx: svc.HubSyncContext, ids: dict[str, set[str]]) -> list[Any]:
+        """Checks run with concurrency 2, each off the loop (sync ``requests`` clients).
 
-        if not ids:
+        Each kind is checked with ONLY its own due ids, so a shared bare-id set
+        cannot select the wrong kind's rows.
+        """
+
+        if not any(ids.values()):
             return []
         gate = asyncio.Semaphore(CHECK_CONCURRENCY)
         results: list[Any] = []
@@ -309,7 +322,12 @@ class HubSyncRunner:
             async with gate:
                 results.extend(
                     await self._offload(
-                        svc.check_items, ctx, kinds=(kind,), only_ids=ids, record=False
+                        svc.check_items,
+                        ctx,
+                        kinds=(kind,),
+                        only_ids=ids.get(kind, set()),
+                        record=False,
+                    )
                     )
                 )
 

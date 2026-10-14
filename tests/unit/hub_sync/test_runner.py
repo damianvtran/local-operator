@@ -152,7 +152,8 @@ async def test_a_tick_is_bounded_to_fifty_items_oldest_checked_first(rig) -> Non
         }
     }
     picked = runner._pick(links, doc)
-    assert len(picked) == 50 and "id0" in picked and "id59" not in picked
+    assert len(picked["agent"]) == 50 and "id0" in picked["agent"] and "id59" not in picked["agent"]
+    assert picked["team"] == set()
 
 
 async def test_a_setting_written_by_another_process_is_read_on_the_next_tick(rig) -> None:
@@ -244,3 +245,15 @@ async def test_the_lease_heartbeat_outlives_its_ttl(tmp_path: Path) -> None:
     contender = st.RunnerLease(tmp_path, ttl_s=0.3)
     assert contender.acquire()
     contender.release()
+
+
+async def test_pick_never_mixes_agent_and_team_ids(rig) -> None:
+    """A bare-id set would let an agent id select a same-string team id."""
+    runner, hub, agents, root, *_ = rig
+    from local_operator.hub_sync.check import Link
+
+    links = [Link("agent", "shared", "a", "h", None), Link("team", "shared", "t", "h", None)]
+    picked = runner._pick(links, {"items": {}})
+    assert picked["agent"] == {"shared"} and picked["team"] == {"shared"}
+    # Both kinds are addressed independently; the runner hands each its own set.
+    assert set(picked) == {"agent", "team"}

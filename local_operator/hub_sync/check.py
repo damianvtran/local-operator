@@ -445,13 +445,24 @@ def check_hub_teams(
 
 @dataclass(frozen=True)
 class Link:
-    """A linked item, without any network: enough to order and bound a tick."""
+    """A linked item, without any network: enough to order and bound a tick.
+
+    ``link_id`` is present only when the record carries a confirmed source+scope
+    (an identity). A legacy row with a hub id but no identity has ``link_id=None``
+    and is enumerated by ``(kind, local_id)`` instead -- the two are never mixed.
+    """
 
     kind: Literal["agent", "team"]
     local_id: str
     name: str
     hub_id: str
     tenant_id: str | None
+    link_id: str | None = None
+
+    @property
+    def item_key(self) -> str:
+        """The (kind, local_id) key a store row and a check both address by."""
+        return f"{self.kind}:{self.local_id}"
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
@@ -474,11 +485,25 @@ def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
                     str(agent.name or ""),
                     hub_id,
                     record.tenant_id if record else None,
+                    link_id=(
+                        record.identity.link_id
+                        if record is not None and record.identity is not None
+                        else None
+                    ),
                 )
             )
     if team_registry is not None:
         for team in team_registry.list_teams():
             record = prov.read_baseline(config_dir, "team", team.id)
             if record is not None:
-                links.append(Link("team", team.id, team.name, record.hub_id, record.tenant_id))
+                links.append(
+                    Link(
+                        "team",
+                        team.id,
+                        team.name,
+                        record.hub_id,
+                        record.tenant_id,
+                        link_id=record.identity.link_id if record.identity is not None else None,
+                    )
+                )
     return links
