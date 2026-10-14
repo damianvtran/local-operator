@@ -687,6 +687,7 @@ def test_a_change_reaches_the_holder_and_the_ack_ledger_records_it(sync_mesh: An
     """
     mesh = sync_mesh
     _run_exchange(mesh)
+    _wait_for_owner_ack(mesh, VALUE_1)
 
     rows = _member_rows(mesh)
     assert (
@@ -712,6 +713,7 @@ def test_a_change_reaches_the_holder_and_the_ack_ledger_records_it(sync_mesh: An
     # before it runs).
     mesh.auth_a.upsert_credential(KEY, _payload(VALUE_2))
     _run_exchange_gen2(mesh)
+    _wait_for_owner_ack(mesh, VALUE_2)
 
     rows = _member_rows(mesh)
     assert len(rows) == 1, "the replaced copy must not accumulate rows"
@@ -722,6 +724,29 @@ def test_a_change_reaches_the_holder_and_the_ack_ledger_records_it(sync_mesh: An
     assert current is not None and acked is not None
     assert current.get("gen") == 2, current
     assert peer_int(acked["gen"]) == 2 and acked.get("digest") == current.get("digest")
+
+
+def _wait_for_owner_ack(mesh: Any, value: str) -> None:
+    """Block until the OWNER's ledger records the member's ack of ``value``.
+
+    The member's ``applied_for`` record (what ``_run_exchange`` waits on) and the
+    owner's ack row are written by two different parties in sequence: the member
+    applies the copy, THEN sends the ack frame, THEN the owner's broker records it.
+    A test that waits for the first and reads the second once is racing the ack
+    frame's round trip with a margin of zero. Reproduced by delaying the owner's
+    ``SyncState.record_ack`` by 0.5 s: ``acked is None`` / ``1 == 2`` every run.
+    The predicate is the condition the assertions read -- the ack carries the
+    expected digest -- not a proxy that merely becomes true first.
+    """
+    expected = sync.fingerprint(_payload(value))
+    assert net_fixtures.wait_for(
+        lambda: (
+            (SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) or {}).get(
+                "digest"
+            )
+        )
+        == expected
+    ), "the owner never recorded the member's ack"
 
 
 def _run_exchange_gen2(mesh: Any) -> None:
