@@ -393,6 +393,13 @@ class LifecycleStore:
             _baseline()
         return doc.rows.get((key, scope))
 
+    def scopes_for(self, key: str) -> frozenset[str]:
+        """Every account scope this owner holds a row for under ``key`` (may be empty)."""
+        doc = self.load()
+        if doc.needs_baseline:
+            _baseline()
+        return frozenset(scope for (row_key, scope) in doc.rows if row_key == key)
+
     def record_native(self, key: str, scope: str, facts: NativeFacts) -> CounterRow:
         """Owner side: fold one native observation into the counters and persist."""
         if not _ref_ok(key) or not _ref_ok(scope):
@@ -430,3 +437,59 @@ class LifecycleStore:
                 doc.high_water[ident] = hw
                 self._save(doc)
             return ObservationResult(reason == OBSERVED, reason, hw[0], hw[1])
+
+
+# ---------------------------------------------------------------------------
+# Wire entries (shared by the owner's read/ack handlers and the recipient's announce)
+# ---------------------------------------------------------------------------
+
+#: Per-key states the owner reports on ``lifecycle_read``. The design's enum
+#: (``available``/``absent``/``withdrawn``/``unsupported``/``non_portable``) plus
+#: ``scope_unknown``: an unresolved required scope is a REFUSAL to infer, reported
+#: by name so the recipient shows why instead of guessing a grant.
+STATE_UNSUPPORTED = "unsupported"
+STATE_NON_PORTABLE = "non_portable"
+STATE_SCOPE_UNKNOWN = "scope_unknown"
+WIRE_STATES = frozenset(
+    {
+        STATE_AVAILABLE,
+        STATE_ABSENT,
+        STATE_WITHDRAWN,
+        STATE_UNSUPPORTED,
+        STATE_NON_PORTABLE,
+        STATE_SCOPE_UNKNOWN,
+    }
+)
+
+#: Upper bound on entries per frame; the design's "1-8 unique entries".
+MAX_ENTRIES = 8
+
+
+def parse_entries(frame: Any, *, required: tuple[str, ...]) -> list[dict[str, Any]]:
+    """The frame's ``entries`` as validated dicts, or ``ValueError`` (nothing applied).
+
+    Every entry must carry exactly ``credential_key`` + ``account_scope_ref`` plus the
+    ``required`` extras and nothing else: unknown fields are REJECTED, not ignored,
+    because an ignored field is a side channel for material the protocol forbids.
+    ``(credential_key, account_scope_ref)`` pairs must be unique within a frame.
+    """
+    entries = frame.get("entries") if hasattr(frame, "get") else None
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_ENTRIES:
+        raise ValueError(f"lifecycle frame needs 1-{MAX_ENTRIES} entries")
+    allowed = {"credential_key", "account_scope_ref", *required}
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for item in entries:
+        if not isinstance(item, dict) or set(item) != allowed:
+            raise ValueError("lifecycle entry has missing or unknown fields")
+        key, scope = item["credential_key"], item["account_scope_ref"]
+        if not (_ref_ok(key) and _ref_ok(scope)):
+            raise ValueError("lifecycle entry has an invalid credential or scope reference")
+        for name in required:
+            if not _revision_ok(item[name]):
+                raise ValueError(f"lifecycle entry {name} is not a valid revision")
+        if (key, scope) in seen:
+            raise ValueError("lifecycle frame repeats an entry")
+        seen.add((key, scope))
+        out.append(dict(item))
+    return out
