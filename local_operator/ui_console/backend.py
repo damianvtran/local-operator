@@ -36,9 +36,9 @@ half's copy of it so a caller can validate a name before it reaches the wire.
 
 from __future__ import annotations
 
-from pathlib import Path
 import asyncio
 import math
+from pathlib import Path
 from typing import Any
 
 import httpx
