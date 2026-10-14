@@ -38,14 +38,23 @@ Prompt-cache guards (the whole point of doing this carefully):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Sequence
 
-from local_operator.harness.types import Content, ImageContent, Message, TextContent
+from local_operator.harness.types import (
+    CapturedFrame,
+    Content,
+    ImageContent,
+    Message,
+    TextContent,
+)
 
 from .marker import marker_exists
 from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
 
 __all__ = [
+    "CaptureElision",
+    "CapturePartition",
     "MIN_PRUNE_TOKENS",
     "SESSION_KEEP_RECENT_FRAMES",
     "STALE_FRAME_NOTICE",
@@ -56,6 +65,7 @@ __all__ = [
     "count_stale_observations",
     "downscale_stale_frames",
     "fit_frames_to_wire_budget",
+    "partition_captures",
     "prune_stale_frames",
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
@@ -446,6 +456,107 @@ def fit_frames_to_wire_budget(
             return working, downscaled_total, 0, edge
     working, dropped = shed_frames_to_wire_budget(working, budget=budget)
     return working, downscaled_total, dropped, IMAGE_CONTEXT_EDGES[-1]
+
+
+@dataclass(frozen=True)
+class CaptureElision:
+    """One reclaimable image block, addressed in the SOURCE message list.
+
+    Coordinates are source coordinates -- message index in the sequence and
+    content index inside that message's ``content`` -- so a commit or a
+    replay applies the same projection to the same source without carrying
+    copies of the image anywhere.
+    """
+
+    message_index: int
+    content_index: int
+    stream_id: str
+    revision_id: str
+    producer_scope: str
+
+
+@dataclass(frozen=True)
+class CapturePartition:
+    """Which image blocks an epoch may reclaim, and which are untouchable.
+
+    ``reclaimable`` is ordered OLDEST FIRST by canonical arrival, so a
+    consumer that must clear a byte band consumes a prefix of it -- the same
+    prefix on every run over the same source, which is what makes the
+    projection reproducible without a second registry. ``protected`` is
+    informational (evidence counts and tests): it lists absent-metadata
+    images first, then each stream's latest capture.
+    """
+
+    reclaimable: tuple[CaptureElision, ...]
+    protected: tuple[tuple[int, int], ...]
+
+
+def partition_captures(messages: Sequence[Message]) -> CapturePartition:
+    """Split image blocks into latest captures vs SUPERSEDED captures.
+
+    WHY. Image bytes dominate transport pressure, but until capture
+    provenance existed no image was distinguishable from any other, so the
+    only safe move was nothing -- and every image a session ever saw stayed
+    on the wire. This is the selection half of the fix: a pure, metadata-only
+    reading of the source that names exactly which blocks a later step MAY
+    reclaim and leaves everything else PROTECTED.
+
+    Rules, all deliberate:
+
+    - Every image WITHOUT capture provenance is protected: user uploads,
+      unknown images and legacy rows. Absence is not "probably a frame";
+      the safe reading of an unannotated image is retention.
+    - The LATEST capture for each ``(producer_scope, stream_id)`` is
+      protected -- the current pixels of every stream survive pressure,
+      including streams that have not been updated recently.
+    - An older capture is reclaimable IFF a newer capture of the SAME
+      ``(producer_scope, stream_id)`` exists. Supersession is strict: another
+      producer's claim never supersedes this producer's captures, even with
+      identical stream/revision strings.
+    - Ordering is canonical arrival (message order), never a revision sort:
+      the ids are bounded opaque strings with no ordered meaning, and a
+      producer's invented revision numbers must not reorder what history
+      says arrived first.
+
+    Pure metadata: no mutation, no copies, no decoding -- the caller decides
+    HOW MUCH of ``reclaimable`` to consume against the byte band, and the
+    result is deterministic for a given source.
+    """
+    protected: list[tuple[int, int]] = []
+    annotated: list[tuple[tuple[int, int], CapturedFrame]] = []
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            address = (message_index, content_index)
+            if frame is None:
+                protected.append(address)
+            else:
+                annotated.append((address, frame))
+
+    # Latest = highest arrival index per (scope, stream); computed over the
+    # annotated subset only, so an unannotated image between two captures
+    # cannot become anyone's "latest".
+    latest: dict[tuple[str, str], int] = {}
+    for index, (_address, frame) in enumerate(annotated):
+        latest[(frame.producer_scope, frame.stream_id)] = index
+
+    reclaimable: list[CaptureElision] = []
+    for index, (address, frame) in enumerate(annotated):
+        if latest[(frame.producer_scope, frame.stream_id)] == index:
+            protected.append(address)
+            continue
+        reclaimable.append(
+            CaptureElision(
+                message_index=address[0],
+                content_index=address[1],
+                stream_id=frame.stream_id,
+                revision_id=frame.revision_id,
+                producer_scope=frame.producer_scope,
+            )
+        )
+    return CapturePartition(reclaimable=tuple(reclaimable), protected=tuple(protected))
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

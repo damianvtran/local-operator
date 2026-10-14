@@ -8,11 +8,17 @@ from local_operator.compaction.pruning import (
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
     compute_suffix_tokens,
+    partition_captures,
     prune_stale_frames_in_place,
     prune_tool_outputs,
 )
 from local_operator.compaction.tokens import estimate_tokens
-from local_operator.harness.types import ImageContent, Message, TextContent
+from local_operator.harness.types import (
+    CapturedFrame,
+    ImageContent,
+    Message,
+    TextContent,
+)
 
 _PAYLOAD_FIELD = "".join(["[redacted]", "_payload"])
 
@@ -585,3 +591,99 @@ def test_guide_reads_protected():
     _, changed = prune_tool_outputs(messages, NOW, ACTIVE)
     assert changed is False
     assert guide_read.text.startswith("guide content")
+
+
+def _capture(*, stream: str, revision: str, scope: str) -> ImageContent:
+    """One image carrying harness-stamped capture provenance."""
+    return ImageContent(
+        data="aGVsbG8=",
+        mime_type="image/png",
+        captured_frame=CapturedFrame(stream_id=stream, revision_id=revision, producer_scope=scope),
+    )
+
+
+def test_partition_reclaims_only_superseded_captures_and_keeps_the_latest():
+    """Oldest-first, per stream: the newest capture of every stream stays."""
+    messages = [
+        Message.user("go", images=[_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.assistant("step"),
+        Message.user("see", images=[_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+        Message.user("doc", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")]),
+        Message.user("poll", images=[_capture(stream="camera", revision="9", scope="mcp:s:a")]),
+        Message.user("again", images=[_capture(stream="screen", revision="3", scope="mcp:s:a")]),
+    ]
+
+    partition = partition_captures(messages)
+
+    # ``Message.user`` orders text then images, so each image sits at index 1.
+    assert [(e.message_index, e.content_index) for e in partition.reclaimable] == [(0, 1), (2, 1)]
+    assert [e.revision_id for e in partition.reclaimable] == ["1", "2"]
+    assert all(e.producer_scope == "mcp:s:a" for e in partition.reclaimable)
+    protected = set(partition.protected)
+    # The latest screen capture, the camera capture and the unannotated image stay.
+    assert {(3, 1), (4, 1), (5, 1)} <= protected
+    assert (0, 1) not in protected and (2, 1) not in protected
+
+
+def test_partition_scopes_supersession_per_producer():
+    """Another producer's newer claim never supersedes this producer's captures.
+
+    Identical stream/revision strings across scopes are deliberately used: the
+    identity that matters is the scope the harness stamped, not the strings.
+    """
+    messages = [
+        Message.user("a", images=[_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("b", images=[_capture(stream="screen", revision="1", scope="mcp:s:b")]),
+        Message.user("a2", images=[_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+    ]
+
+    partition = partition_captures(messages)
+
+    assert [(e.message_index, e.producer_scope) for e in partition.reclaimable] == [(0, "mcp:s:a")]
+    assert (1, 1) in set(partition.protected)  # B's own capture is B's latest
+
+
+def test_partition_orders_by_arrival_not_revision_values():
+    """Canonical arrival decides "latest"; revision strings are opaque."""
+    messages = [
+        Message.user("x", images=[_capture(stream="screen", revision="9", scope="mcp:s:a")]),
+        Message.user("y", images=[_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+    ]
+
+    partition = partition_captures(messages)
+
+    assert [e.revision_id for e in partition.reclaimable] == ["9"]
+    assert (1, 1) in set(partition.protected)
+
+
+def test_partition_handles_several_blocks_in_one_message():
+    """Two captures in one message: the older block is the reclaimable one."""
+    messages = [
+        Message.user(
+            "pair",
+            images=[
+                _capture(stream="s", revision="1", scope="p"),
+                _capture(stream="s", revision="2", scope="p"),
+            ],
+        )
+    ]
+
+    partition = partition_captures(messages)
+
+    assert [(e.content_index, e.revision_id) for e in partition.reclaimable] == [(1, "1")]
+    assert (0, 2) in set(partition.protected)
+
+
+def test_partition_is_pure_and_deterministic():
+    """Same source, same plan, no mutation: replay must reproduce the projection."""
+    messages = [
+        Message.user("go", images=[_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("again", images=[_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+    ]
+    before = [message.model_dump() for message in messages]
+
+    first = partition_captures(messages)
+    second = partition_captures(messages)
+
+    assert first == second
+    assert [message.model_dump() for message in messages] == before
