@@ -17,31 +17,35 @@ harnesses must remain running and connected to the internet.
    New users review and acknowledge the linked terms and privacy policy in
    the browser, then return through native authorization. Existing users sign
    in with their current account. `lop login-status` shows the credential ID.
-2. Install `cloudflared` 2025.4.0 or later through your platform's package
-   manager. The connector uses its token-file option; no Cloudflare account
-   login or administrative API key is needed on your computer.
-3. Run `lop tunnel billing --credential-id <id> --json` to verify that exact
-   login and a strictly positive credit balance. `/usage` displays Radient
-   credits too, but its cache is not used to authorize setup. If credit is
-   zero or negative, add credit in the console and repeat the fresh check.
-   Existing starter credit counts; there is no required purchase when the
-   balance is already positive. Check the current monthly price (currently
-   **USD 0/month**, subject to the live quote). Billing uses
-   Radient's configured allocation of actual infrastructure cost with an 80%
-   gross margin, rather than a Cloudflare Access seat fee. The quote is one
-   owner-level monthly amount; it is not multiplied by the number of tunnels.
-4. Run `lop tunnel create --credential-id <id>`, then `lop tunnel install`.
-   If activation is required, add `--accept-monthly-price <quoted-USD-amount>`
-   only after accepting that exact quote. Positive credit is shared account
-   credit, not an additional tunnel fee. Initial setup requires positive
-   credit; existing subscriptions keep their −USD 1 suspension floor.
-5. Run `lop tunnel status`. Open the printed harness URL on your phone and
-   sign in with the same Radient account.
+2. Run `lop tunnel setup --credential-id <id> --json` for the read-only plan.
+   It reads the exact account and credit balance fresh, not the `/usage` cache.
+   Starter credit counts; setup never purchases credit. With multiple accounts,
+   choose the intended owner explicitly. Existing records stay pinned.
+3. Follow prerequisites: cloudflared >=2025.4.0 with token-file support and a
+   supported user supervisor. Install software through your normal approved
+   package-manager path, not silently through setup (macOS: `brew install
+   cloudflared`). These checks happen **before** cloud writes/billing activation.
+4. Use `lop tunnel setup apply --credential-id <id>` to advance setup. Only
+   when activation is required, accept the exact live USD monthly quote and add
+   `--accept-monthly-price <amount>`. An eligible subscription does not need
+   redundant price consent. Initial enrollment needs positive credit; existing
+   subscriptions retain their −USD 1 suspension floor. Flags on a plan alone
+   never mutate setup. Provider login/new-account terms remain human browser
+   interactions; no universally single-prompt or browser-free promise is made.
+5. Success is `verified:true` with the exact URL from a fresh active cloud
+   record, answering gateway, running connector and healthy mobile relay with
+   a closed gate. Open that URL on your phone and sign in to the same Radient
+   account. This machine's verification is not phone-side access proof.
 
-In the TUI, `/mobile billing` shows the quote and `/mobile enable <amount>`
-creates or reactivates the tunnel, then installs its connector. `/mobile status`, `/mobile stop`, and
-`/mobile start` use the same lifecycle as the CLI. Billing is never activated
-silently by a provider login.
+In the TUI `/mobile` or `/mobile status [--credential-id <id>]` observes the
+same plan. `/mobile enable [amount] [--credential-id <id>]` shows sanitized
+progress and accumulated receipts, uses the same quote binding and needs no
+terminal copy step. `/mobile billing`, `/mobile stop` and `/mobile start` remain
+available. Healthy existing setup is a no-op; deliberately stopped setup stays
+stopped. Interrupted creates resume the same saved key and original payload;
+a later failure preserves earlier successful receipts, not a rollback claim.
+The desktop setup surface is separate; this TUI work does not establish desktop
+or authenticated live-device acceptance.
 
 macOS installation prepares the existing mobile relay and installs a user
 LaunchAgent for the connector. Linux installs a user systemd unit; start the

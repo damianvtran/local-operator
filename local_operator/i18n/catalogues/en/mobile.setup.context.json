@@ -1,0 +1,132 @@
+{
+  "mobile.setup.owner_missing": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.owner_mismatch": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.stopped": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.invalid_response": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.balance": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.installed": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.choose_login": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.login": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.account_failed": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.complete": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.cloudflared": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.price_unavailable": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.reserved": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.verification": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.failed": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.activated": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.title": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.price": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.verified_url": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.credential_ids": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.quote": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.apply": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.usage": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.busy": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.checking": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+  },
+  "mobile.setup.billing_activated": {
+    "role": "Completed setup receipt",
+    "tone": "Factual",
+    "note": "Only after fresh exact-price activation succeeds; retained if later cloud reservation fails."
+  }
+}

@@ -37,7 +37,8 @@
     "local_operator/tui/widgets/analytics_panel.py",
     "local_operator/tui/widgets/status_line.py",
     "local_operator/tui/widgets/transcript.py",
-    "local_operator/tui/widgets/welcome.py"
+    "local_operator/tui/widgets/welcome.py",
+    "local_operator/tunnels/setup.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
