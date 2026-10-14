@@ -45,7 +45,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
-from local_operator.hub_sync.identity import LinkIdentity
+from local_operator.hub_sync.identity import PUBLICATION_CONTRACT, LinkIdentity
 from local_operator.hub_sync.merge import (
     FieldInput,
     MergeOptions,
@@ -1026,14 +1026,22 @@ def render_status(snapshot: Mapping[str, Any]) -> str:
 # -- links inventory (B5, new capability) ------------------------------------------------
 
 
-def links_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
+def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -> dict[str, Any]:
     """The ``GET /v1/desktop/hub/links`` payload: EVERY link, healthy or not.
 
-    Distinct from ``status_snapshot`` (which lists only items with attention):
-    this enumerates each confirmed link with its immutable identity, independent
-    per-link policy + revision, and its directional pull/push health, so a client
-    can show a healthy mark and offer a direct source-scoped toggle even with zero
-    pending changes. Local reads only; no network.
+    The FULL frozen row shape (architecture "full link row"): identity
+    (link_id/kind/local_id/name/hub_id/hub_source/visibility/tenant_id),
+    policy{subscribe,auto_push,revision}, service-computed
+    eligibility{can_auto_push,reason}, `auto_will_apply`/`auto_will_push`,
+    baseline_state, remote_revision, and INDEPENDENT `pull`/`push`
+    DirectionStatus objects. Distinct from ``status_snapshot`` (attention-only):
+    this lists a healthy idle link too, so the sidebar can show its quiet mark and
+    offer a source-scoped toggle with zero pending changes. Local reads only.
+
+    ``kinds`` filters the enumeration (the route's ``?kind=``); skill rows are
+    capability-gated by the route so old typed consumers never see them.
+    Identity-less (legacy) links are returned separately under ``unresolved``
+    with a named reason, never a synthetic link_id or policy.
     """
     from local_operator.hub_sync import policies as pol
     from local_operator.hub_sync import provenance as prov
@@ -1046,62 +1054,230 @@ def links_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     items = doc.get("items", {})
     now = datetime.now(timezone.utc)
     links: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
     for record in prov.iter_baselines(ctx.config_dir):
+        if kinds is not None and record.kind not in kinds:
+            continue
         item = items.get(st.item_key(record.kind, record.local_id), {})
         identity = record.identity
-        policy = (
-            pol.link_policy_for(values, identity.link_id, identity.kind)
-            if identity is not None
-            else None
-        )
+        name = record.local_alias or record.local_id
+        if identity is None:
+            # A legacy link with a hub id but no confirmed origin identity: it
+            # cannot carry a policy or a source. Listed separately so a client
+            # offers the resolve action instead of acting on a guessed origin.
+            unresolved.append(
+                {
+                    "kind": record.kind,
+                    "local_id": record.local_id,
+                    "name": name,
+                    "hub_id": record.hub_id,
+                    "reason": "source-unresolved",
+                }
+            )
+            continue
+        policy = pol.link_policy_for(values, identity.link_id, identity.kind)
         links.append(
             {
-                "kind": record.kind,
+                "link_id": identity.link_id,
+                "kind": identity.kind,
                 "local_id": record.local_id,
-                "name": record.local_alias or record.local_id,
+                "name": name,
                 "hub_id": record.hub_id,
-                "tenant_id": record.tenant_id,
-                # ``source``/``scope`` present only for a confirmed origin; a legacy
-                # link shows its state so the UI can offer the resolve action.
-                "link_id": identity.link_id if identity is not None else None,
-                "source": identity.hub_source if identity is not None else None,
-                "visibility": identity.visibility if identity is not None else None,
-                "baseline_state": record.recorded_by,
-                "scope_known": record.scope_known,
-                "policy": policy.to_json() if policy is not None else None,
-                "policy_revision": (
-                    policy.revision(identity)
-                    if policy is not None and identity is not None
-                    else None
+                "hub_source": identity.hub_source,
+                "visibility": identity.visibility,
+                "tenant_id": identity.tenant_id,
+                "tenant_name": _tenant_name(values, identity),
+                "policy": {
+                    **policy.to_json(),
+                    "revision": policy.revision(identity),
+                },
+                "eligibility": _eligibility(ctx, identity, policy, values, record, doc),
+                "auto_will_apply": _auto_will_apply(item, policy, ctx, now),
+                "auto_will_push": _auto_will_push(
+                    item, policy, ctx, now, _eligibility(ctx, identity, policy, values, record, doc)
                 ),
-                # Directional health: a healthy link shows a quiet mark; these are
-                # the facts a source-scoped toggle and a Retry/Direction action key on.
-                "pull": _direction_state(item, "pulled", now),
-                "push": _direction_state(item, "pushed", now),
-                "state": st.effective_state(item, now),
-                "error_class": item.get("error_class"),
-                "last_checked_at": item.get("last_checked_at"),
-                "last_pulled_at": item.get("last_pulled_at"),
-                "last_pushed_at": item.get("last_pushed_at"),
-                "next_retry_at": item.get("next_retry_at"),
+                "baseline_state": record.recorded_by,
+                "remote_revision": record.remote_revision,
+                "pull": _direction_status(item, "pull", policy, now, _capability_auto_push(doc)),
+                "push": _direction_status(item, "push", policy, now, _capability_auto_push(doc)),
             }
         )
     links.sort(key=lambda link: (link["kind"], str(link["name"]).casefold()))
+    unresolved.sort(key=lambda row: (row["kind"], str(row["name"]).casefold()))
     return {
         "generated_at": prov.now_iso(),
         "capability": "hub_links:1",
         "links": links,
+        "unresolved": unresolved,
     }
 
 
-def _direction_state(item: Mapping[str, Any], which: Literal["pulled", "pushed"], now: Any) -> str:
-    """One direction's health: ``healthy`` | ``pending`` | ``failed`` | ``never``."""
+def _tenant_name(values: Mapping[str, Any], identity: LinkIdentity) -> str | None:
+    """Persisted display metadata for the org, or None; never a network lookup."""
 
-    if item.get("error_class") and which == "pulled":
-        return "failed"
-    stamp = item.get(f"last_{which}_at")
-    if stamp:
-        return "healthy"
-    if st.effective_state(item, now) == "available":
-        return "pending"
-    return "never"
+    if identity.visibility != "org" or identity.tenant_id is None:
+        return None
+    hub = values.get("hub", {}) if isinstance(values, Mapping) else {}
+    names = hub.get("tenant_names", {}) if isinstance(hub, Mapping) else {}
+    if isinstance(names, Mapping):
+        value = names.get(identity.tenant_id)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _capability_auto_push(doc: Mapping[str, Any]) -> bool:
+    """Whether the deployed server's atomic revision-CAS is POSITIVELY attested.
+
+    A positive attestation, not a constant: a verification pass (run against the
+    deployed server) records ``content_revision`` + ``If-Match`` CAS support in
+    the status store, and this reads that persisted fact locally -- the inventory
+    is a local read and must never probe the network. Absent the attestation the
+    answer is honestly False, so an unattested server cannot be treated as if it
+    supported CAS. Enabling auto-push is a decision this gates; it never fakes the
+    capability.
+    """
+
+    server = doc.get("server", {}) if isinstance(doc, Mapping) else {}
+    return bool(isinstance(server, Mapping) and server.get("revision_cas") is True)
+
+
+def record_server_capabilities(ctx: HubSyncContext, capabilities: Mapping[str, Any]) -> None:
+    """Persist a verified server capability attestation (called by a probe, not a poll).
+
+    The revision-CAS flag is the ONLY fact eligibility needs here; the probe that
+    produces it lives with the outbound wiring and runs against the deployed
+    server. Recording it in the status store keeps the inventory a pure local read.
+    """
+
+    revision_cas = bool(capabilities.get("revision_cas") is True)
+
+    def fold(doc: dict[str, Any]) -> None:
+        server = doc.setdefault("server", {})
+        server["revision_cas"] = revision_cas
+        server["attested_at"] = prov.now_iso()
+
+    ctx.store().mutate(fold)
+
+
+def _eligibility(
+    ctx: HubSyncContext,
+    identity: LinkIdentity,
+    policy: Any,
+    values: Mapping[str, Any],
+    record: Any,
+    doc: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Service-computed publication eligibility: ``can_auto_push`` plus a reason.
+
+    Computed ONLY from verified facts, never a UI guess or a request field:
+    a POSITIVELY attested atomic revision-CAS on the deployed server (persisted
+    by a probe), a KNOWN baseline (an unknown-lineage origin cannot be published
+    unattended), clean lineage, and -- for public scope -- the persisted egress
+    grant bound to THIS link at the current publication-contract version. A
+    reason is always present when the answer is no.
+    """
+    if not _capability_auto_push(doc):
+        return {"can_auto_push": False, "reason": "unsupported-precondition"}
+    # SOURCE-SCOPED CAS ATTESTATION: eligibility is bound to this origin's
+    # recorded revision, so a link re-pointed at another origin cannot inherit a
+    # stale attestation. The recorded revision IS the source-scoped fact.
+    if not record.remote_revision:
+        return {"can_auto_push": False, "reason": "unsupported-precondition"}
+    if not record.scope_known or record.recorded_by == "adopt-unknown":
+        return {"can_auto_push": False, "reason": "baseline-unknown"}
+    if record.lineage not in (None, "clean"):
+        return {"can_auto_push": False, "reason": "mixed-lineage"}
+    if identity.visibility == "public":
+        # Public enable still requires a DELIBERATE egress consent bound into the
+        # policy/preview digest (the grant); a scope change cannot reuse it.
+        hub = values.get("hub", {}) if isinstance(values, Mapping) else {}
+        grants = hub.get("public_egress_grants", {}) if isinstance(hub, Mapping) else {}
+        grant = grants.get(identity.link_id) if isinstance(grants, Mapping) else None
+        if (
+            not isinstance(grant, Mapping)
+            or grant.get("publication_contract") != PUBLICATION_CONTRACT
+        ):
+            return {"can_auto_push": False, "reason": "unsafe-publication"}
+    return {"can_auto_push": True, "reason": "eligible"}
+
+
+def _auto_will_apply(item: Mapping[str, Any], policy: Any, ctx: HubSyncContext, now: Any) -> bool:
+    """Whether the next run would apply an incoming change: policy+backoff+grace."""
+
+    if not policy.subscribe:
+        return False
+    if st.effective_state(item, now) not in ("available", "updating"):
+        return False
+    return st.auto_apply_due(item)
+
+
+def _auto_will_push(
+    item: Mapping[str, Any],
+    policy: Any,
+    ctx: HubSyncContext,
+    now: Any,
+    eligibility: Mapping[str, Any],
+) -> bool:
+    """Whether the next run would PUSH, from actual service eligibility (not a UI guess)."""
+
+    if not policy.auto_push or not eligibility.get("can_auto_push"):
+        return False
+    return st.push_due(item, ctx.settings().interval_min, now) and st.auto_apply_due(item)
+
+
+def _direction_status(
+    item: Mapping[str, Any],
+    direction: Literal["pull", "push"],
+    policy: Any,
+    now: Any,
+    capability: bool,
+) -> dict[str, Any]:
+    """One direction's full status: pull and push are independent, never merged.
+
+    A failure in one direction cannot overwrite the other's receipt or error;
+    whole-row health is a derived view, not the source of truth.
+    """
+
+    pulled = direction == "pull"
+    enabled = policy.subscribe if pulled else bool(policy.auto_push)
+    last = item.get("last_pulled_at") if pulled else item.get("last_pushed_at")
+    error = item.get("error_class") if pulled or not pulled else None
+    state = st.effective_state(item, now)
+    if pulled:
+        if error:
+            direction_state = "failed"
+        elif state == "updating":
+            direction_state = "merging"
+        elif state == "available":
+            direction_state = "available"
+        elif last:
+            direction_state = "idle"
+        else:
+            direction_state = "idle"
+    else:
+        # The push side has no separate store row yet; report the pushed timestamp
+        # and the (currently unsupported) capability honestly.
+        direction_state = "idle" if last else "idle"
+        if not capability:
+            direction_state = "idle"
+    return {
+        "state": direction_state,
+        "classification": item.get("classification"),
+        "enabled": enabled,
+        "last_checked_at": item.get("last_checked_at"),
+        "last_success_at": last,
+        "attempts": int(item.get("attempts") or 0),
+        "next_retry_at": item.get("next_retry_at"),
+        "error_class": error if pulled else None,
+        "error_subclass": item.get("error_subclass") if pulled else None,
+        "safe_message": item.get("last_error") if pulled else None,
+        "operation_id": None,
+        "model_used": (
+            item.get("summary", {}).get("model")
+            if isinstance(item.get("summary"), Mapping)
+            else None
+        ),
+        "summary": item.get("summary") or {},
+        "backup_receipt": item.get("applied_backup"),
+    }

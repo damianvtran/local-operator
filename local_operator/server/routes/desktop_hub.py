@@ -219,9 +219,11 @@ async def apply(
             raise _refusal(422, "a public source resolution must not name an organization")
 
         def resolve_work(ctx: Any) -> dict[str, Any]:
-            from local_operator.providers.radient_credentials import configured_radient_base_url
             from local_operator.hub_sync.identity import LinkError as _IdentityError
             from local_operator.hub_sync.identity import approve_source
+            from local_operator.providers.radient_credentials import (
+                configured_radient_base_url,
+            )
 
             # The supplied source must match the ONE configured credential-free
             # base -- never an arbitrary URL gaining credential egress.
@@ -383,24 +385,39 @@ class LinkPolicyPatch(Input):
     #: other, but at least one must be present (validated in the service).
     subscribe: bool | None = None
     auto_push: bool | None = None
-    #: The authority for the write: the revision the editor last saw. A mismatch
-    #: is a named 409 (the config was edited by someone else), never a
-    #: last-write-wins clobber.
-    expected_revision: str = Field(min_length=1, max_length=256)
+    #: The DELIBERATE public-egress consent: enabling auto-push on a PUBLIC origin
+    #: additionally requires this explicit acknowledgement, which is bound into
+    #: the persisted grant. Strict bool -- a truthy string cannot stand in for
+    #: consent.
+    confirm_public_egress: bool = False
+    #: The authority for the write: the policy revision the editor last saw. A
+    #: mismatch is a named 409 (the config was edited by someone else), never a
+    #: last-write-wins clobber. Named ``expected_policy_revision`` so the client
+    #: cannot confuse it with any other revision token.
+    expected_policy_revision: str = Field(min_length=1, max_length=256)
 
 
 @router.get("/v1/desktop/hub/links", response_model=CRUDResponse)
 async def links(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
+    kind: str | None = None,
 ):
     """The full local-only links inventory: every link, healthy or not. No network.
 
     Gated on the ``hub_links:1`` capability so an older renderer never sees rows
-    it cannot act on; the legacy ``/hub/updates`` projection is unchanged.
+    it cannot act on; the legacy ``/hub/updates`` projection is unchanged. Skill
+    rows are NEW and capability-gated: an old typed agent/team-only consumer asks
+    for its kinds explicitly, so ``?kind=agent|team`` never returns a skill row.
     """
 
     from local_operator.hub_sync import service as svc
+
+    kinds: tuple[str, ...] | None = None
+    if kind:
+        if kind not in ("agent", "team", "skill"):
+            raise _refusal(422, f"unknown link kind {kind!r}")
+        kinds = (kind,)
 
     def read() -> dict[str, Any]:
         ctx = svc.HubSyncContext(
@@ -408,7 +425,7 @@ async def links(
             config_manager=config_manager,
             client_for_tenant=lambda _tenant: None,
         )
-        return svc.links_snapshot(ctx)
+        return svc.links_snapshot(ctx, kinds=kinds)
 
     async with errors(request):
         try:
@@ -432,6 +449,7 @@ async def patch_link(
     """
 
     from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
     from local_operator.hub_sync.identity import LinkError
     from local_operator.hub_sync.policies import update_policy
 
@@ -443,17 +461,30 @@ async def patch_link(
                 break
         if record is None or record.identity is None:
             raise _refusal(404, "no link with that id is known locally")
+        # SERVICE-COMPUTED eligibility, not a hardcoded refusal: the same
+        # fact the inventory reports, so a client that saw can_auto_push=true
+        # cannot be refused here, and one that saw false cannot force it.
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=lambda _t: None,
+        )
+        row = next(
+            (link for link in svc.links_snapshot(ctx)["links"] if link["link_id"] == link_id),
+            None,
+        )
+        eligible = bool(row and row["eligibility"]["can_auto_push"])
         try:
             snapshot = update_policy(
                 config_manager,
                 record.identity,
-                expected_revision=body.expected_revision,
+                expected_revision=body.expected_policy_revision,
                 subscribe=body.subscribe,
                 auto_push=body.auto_push,
-                # Eligibility for enabling auto_push is attested by the SERVER
-                # boundary in a later slice; until that exists, enabling is
-                # refused with the named precondition rather than faked.
-                can_enable_auto_push=False,
+                # The attestation is the SERVICE-computed eligibility; public
+                # enable additionally demands the explicit egress consent below.
+                can_enable_auto_push=eligible,
+                confirm_public_egress=body.confirm_public_egress,
             )
         except LinkError as error:
             code = getattr(error, "code", "") or ""

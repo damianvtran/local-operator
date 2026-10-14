@@ -262,19 +262,13 @@ async def test_links_inventory_lists_a_healthy_link_with_capability(api):
 
     payload = (await client.get("/v1/desktop/hub/links")).json()["result"]
     assert payload["capability"] == "hub_links:1"
-    assert len(payload["links"]) == 1
-    link = payload["links"][0]
-    assert link["kind"] == "agent"
-    assert link["hub_id"] == "h1"
-    # A healthy pass-through: a directional state and a discoverable source-scope
-    # field, so the sidebar can show a quiet mark with zero pending changes.
-    assert link["state"] in ("up-to-date", "available")
-    assert link["pull"] and link["push"]
-    # A LEGACY link has no confirmed origin identity yet (link_id present only
-    # when the record carries one); the row exposes that so the UI can offer the
-    # resolve action. ``scope_known`` tracks the tenant scope, not the full
-    # origin, so it is not the legacy marker.
-    assert link["link_id"] is None
+    # A LEGACY link (no confirmed identity) is listed under `unresolved`, not in
+    # `links`, so a client offers resolve instead of acting on a guessed origin.
+    assert payload["links"] == []
+    assert len(payload["unresolved"]) == 1
+    row = payload["unresolved"][0]
+    assert row["kind"] == "agent" and row["hub_id"] == "h1"
+    assert row["reason"] == "source-unresolved"
 
 
 async def test_link_policy_patch_is_revision_checked(api):
@@ -287,16 +281,16 @@ async def test_link_policy_patch_is_revision_checked(api):
 
     stale = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
-        json=mutation(subscribe=False, expected_revision="not-the-revision"),
+        json=mutation(subscribe=False, expected_policy_revision="not-the-revision"),
     )
     assert stale.status_code == 409, stale.text
 
     payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"][0]
-    revision = payload["policy_revision"]
+    revision = payload["policy"]["revision"]
 
     ok = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
-        json=mutation(subscribe=False, expected_revision=revision),
+        json=mutation(subscribe=False, expected_policy_revision=revision),
     )
     assert ok.status_code == 200, ok.text
     assert ok.json()["result"]["policy"]["subscribe"] is False
@@ -317,7 +311,7 @@ async def test_link_policy_patch_refuses_enabling_auto_push_without_eligibility(
 
     refused = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
-        json=mutation(auto_push=True, expected_revision=payload["policy_revision"]),
+        json=mutation(auto_push=True, expected_policy_revision=payload["policy"]["revision"]),
     )
     assert refused.status_code == 422, refused.text
 
@@ -326,7 +320,7 @@ async def test_link_policy_patch_404s_an_unknown_link(api):
     client, root, hub = api
     response = await client.patch(
         "/v1/desktop/hub/links/deadbeef",
-        json=mutation(subscribe=True, expected_revision="x"),
+        json=mutation(subscribe=True, expected_policy_revision="x"),
     )
     assert response.status_code == 404
 

@@ -723,6 +723,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help="The policy revision you last saw (CAS); omitted reads it fresh first",
     )
+    hub_link.add_argument(
+        "--confirm-public-egress",
+        action="store_true",
+        help="Explicit consent to publish authored changes to a PUBLIC origin",
+    )
     hub_link.add_argument("--json", action="store_true")
 
     # Serve command to start the API server
@@ -10496,15 +10501,21 @@ def hub_links_command(args: argparse.Namespace, base_dir: Path) -> int:
         return 0
     for link in links:
         policy = link.get("policy") or {}
-        origin = link.get("source") or "(unknown origin — resolve to confirm source/scope)"
+        origin = link.get("hub_source") or "(unresolved origin)"
         scope = link.get("visibility") or "unknown"
+        pull = link.get("pull") or {}
+        push = link.get("push") or {}
+        eligible = link.get("eligibility") or {}
         print(
-            f"{link['kind']}:{link['name']}  [{link['state']}]\n"
+            f"{link['kind']}:{link['name']}  [pull={pull.get('state')} push={push.get('state')}]\n"
             f"  link_id: {link.get('link_id') or '(unresolved)'}\n"
             f"  source:  {origin}  ({scope})\n"
             f"  policy:  subscribe={policy.get('subscribe')} auto_push={policy.get('auto_push')}\n"
-            f"  pull={link['pull']} push={link['push']}"
+            f"  eligible: auto_push={eligible.get('can_auto_push')} ({eligible.get('reason')})\n"
+            f"  will: apply={link.get('auto_will_apply')} push={link.get('auto_will_push')}"
         )
+    for row in snapshot.get("unresolved", []):
+        print(f"{row['kind']}:{row['name']}  [unresolved: {row['reason']}]")
     return 0
 
 
@@ -10534,16 +10545,15 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
         return 1
 
     revision = args.expected_revision
+    snapshot = _hub_links_snapshot(config_manager)
+    row = next((link for link in snapshot["links"] if link.get("link_id") == args.link_id), None)
     if not revision:
         # Read the current revision unless the caller supplied one (the CAS guard).
-        snapshot = _hub_links_snapshot(config_manager)
-        row = next(
-            (link for link in snapshot["links"] if link.get("link_id") == args.link_id), None
-        )
-        revision = (row or {}).get("policy_revision")
+        revision = ((row or {}).get("policy") or {}).get("revision")
         if not revision:
             print("error: could not read the current policy revision")
             return 1
+    eligible = bool((row or {}).get("eligibility", {}).get("can_auto_push"))
     try:
         result = update_policy(
             config_manager,
@@ -10551,9 +10561,10 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
             expected_revision=revision,
             subscribe=subscribe,
             auto_push=auto_push,
-            # Server eligibility attestation lands with the outbound surface; until
-            # then enabling auto_push is a named refusal, never a silent no-op.
-            can_enable_auto_push=False,
+            # The SERVICE-computed eligibility, same fact the inventory reports;
+            # public enable additionally demands --confirm-public-egress.
+            can_enable_auto_push=eligible,
+            confirm_public_egress=getattr(args, "confirm_public_egress", False),
         )
     except LinkError as error:
         print(f"error: {error}")

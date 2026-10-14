@@ -257,8 +257,9 @@ def test_hub_links_command_lists_a_local_link(rig, capsys) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["capability"] == "hub_links:1"
-    assert len(payload["links"]) == 1
-    assert payload["links"][0]["hub_id"] == "h1"
+    # A legacy link is under `unresolved` until its source is confirmed.
+    assert payload["links"] == [] and len(payload["unresolved"]) == 1
+    assert payload["unresolved"][0]["hub_id"] == "h1"
 
 
 def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) -> None:
@@ -289,6 +290,7 @@ def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) 
             subscribe="false",
             auto_push=None,
             expected_revision=None,
+            confirm_public_egress=False,
             json=True,
         ),
         root,
@@ -304,6 +306,7 @@ def test_hub_link_set_edits_subscribe_and_rejects_a_stale_revision(rig, capsys) 
             subscribe="true",
             auto_push=None,
             expected_revision="not-it",
+            confirm_public_egress=False,
             json=True,
         ),
         root,
