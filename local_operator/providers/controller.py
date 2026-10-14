@@ -446,6 +446,24 @@ class ProviderViewRow:
     credential_types: tuple[str, ...]
 
 
+class ReadOnlyUsageMetadataStore(Protocol):
+    """The metadata-only slice the read-only usage seam needs from a store.
+
+    Narrow on purpose: the paired-phone route must not reach a write, a refresh
+    or a broker call, so this contract exposes read-only accessors only and is
+    satisfied by :meth:`AuthStore.open_read_only` and by a lightweight test
+    stand-in with no database at all.
+    """
+
+    def list_credentials(
+        self, provider: str | None = None
+    ) -> list["StoredCredential"]: ...  # pragma: no cover
+
+    def is_blocked_for_model(
+        self, credential_id: int, provider: str, model_id: str
+    ) -> bool: ...  # pragma: no cover
+
+
 class ProviderController:
     """Provider/model/credential/usage facade for interactive front ends."""
 
@@ -846,6 +864,147 @@ class ProviderController:
     def usage_reportable_providers(self) -> list[str]:
         """Sorted provider ids that both have an endpoint and a way to reach it."""
         return [p for p in self.usage_enabled_providers() if self.can_report_usage(p)]
+
+    # -- read-only cached usage (paired-phone seam) ------------------------
+    @classmethod
+    def read_only_for_persisted_usage(
+        cls,
+        auth_db_path: "Path | None" = None,
+        usage_cache_path: "Path | None" = None,
+    ) -> "ProviderController":
+        """A controller that reads persisted cached usage and WRITES NOTHING.
+
+        Built for the paired-phone route, where a GET of quota must honour a
+        no-writes promise. The default :class:`AuthStore` constructor opens
+        (mkdir + O_CREAT + WAL PRAGMA + schema DDL + commit + chmod) and
+        :class:`UsageCacheStore` does the same on first use, so a route that
+        merely avoided calling write methods would still have mutated disk. The
+        metadata-only opens happen INSIDE this factory, so there is no window in
+        which a default writing store exists for the route to hold by mistake.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore.open_read_only(auth_db_path)
+        return cls(
+            store,
+            None,
+            usage_cache=(
+                UsageCacheStore(usage_cache_path, read_only=True)
+                if usage_cache_path is not None
+                else None
+            ),
+        )
+
+    def _read_only_usage_cache(self) -> "UsageCacheStore":
+        """The cache handle for the read-only seam, built on demand.
+
+        A caller that built the controller through the ordinary constructor has
+        a lazily-built WRITING cache; the seam must never reach it, so this
+        opens a dedicated read-only handle over the same default path instead.
+        """
+        cache = self._usage_cache
+        if cache is None:
+            cache = UsageCacheStore(read_only=True)
+            self._usage_cache = cache
+        return cache
+
+    @staticmethod
+    def _persisted_account_fingerprint(store: "ReadOnlyUsageMetadataStore", provider: str) -> str:
+        """The fingerprint of the PERSISTED account set for ``provider``.
+
+        Like :meth:`_account_fingerprint`, but WITHOUT the env/runtime/config
+        override keys. A phone read must describe the account the user actually
+        logged in with; an ambient ``ANTHROPIC_API_KEY`` winning the fetch in an
+        interactive session is not that login, and folding it into the key would
+        let the phone read a different account's numbers or miss its own.
+        """
+        parts: list[str] = []
+        try:
+            rows = store.list_credentials(provider)
+        except Exception:  # noqa: BLE001 — unreadable store fingerprints empty
+            rows = []
+        for row in rows:
+            if getattr(row, "credential_type", None) == "oauth":
+                identity = getattr(row, "identity_key", None)
+                parts.append(identity or f"cred:{getattr(row, 'id', 0)}")
+            else:
+                data = getattr(row, "data", None) or {}
+                key = data.get("key") if isinstance(data, dict) else None
+                if key:
+                    parts.append(fingerprint_secret(str(key)))
+        return fingerprint_accounts(parts) if parts else "none"
+
+    def cached_persisted_usage_reports_read_only(
+        self, provider: str | None = None
+    ) -> list[UsageReport] | None:
+        """Cached usage for the CURRENT PERSISTED account, read-only.
+
+        ONE method, because a two-flag variant (``read_only=``/
+        ``persisted_only=``) has a footgun: a caller that forgets the second flag
+        silently reintroduces the env/runtime/config override leak this exists to
+        avoid. Here the safe call is the only call.
+
+        ``provider=None`` returns the persisted-provider INVENTORY: the cached
+        reports of every provider that has a persisted credential. ``provider``
+        names one. Empty when there is no cache or no persisted account.
+
+        ``None`` — distinct from ``[]`` — is the UNAVAILABLE state: the cache or
+        store could not be read (absent, locked, corrupt). It must NOT be
+        rendered as zero credits, which would tell a user their quota is spent
+        when the truth is that the phone simply cannot see it.
+
+        The returned wire shape carries NO account identity: identity is stripped
+        here rather than trusted to the renderer.
+        """
+        try:
+            store = self.auth_store
+            cache = self._read_only_usage_cache()
+        except Exception:  # noqa: BLE001 — no cache/store = unavailable
+            return None
+        if getattr(cache, "_read_only", False):
+            if not cache._db_path.exists():
+                # An absent database is EMPTY, not unavailable: the seam must be
+                # able to say "nothing cached yet" without creating the file.
+                return []
+            if cache._connect() is None:
+                # The file exists but will not open (corrupt, locked, foreign
+                # schema). UNAVAILABLE, never empty: rendering this as ``[]``
+                # would tell the phone "no cached quota" when the truth is "the
+                # cache could not be read" — and the UI would show zero credits.
+                return None
+
+        providers = (
+            [self._storage_id(provider)]
+            if provider is not None
+            else self._persisted_providers(store)
+        )
+        out: list[UsageReport] = []
+        for storage in providers:
+            try:
+                key = provider_cache_key(
+                    storage, self._persisted_account_fingerprint(store, storage)
+                )
+                loaded = cache.get(key, include_expired=True)
+            except Exception:  # noqa: BLE001 — a read failure is UNAVAILABLE
+                return None
+            if loaded:
+                out.extend(loaded)
+        return [self._without_identity(report) for report in out]
+
+    def _persisted_providers(self, store: "ReadOnlyUsageMetadataStore") -> list[str]:
+        """Storage ids with at least one persisted credential, sorted."""
+        try:
+            rows = store.list_credentials(provider=None)
+        except Exception:  # noqa: BLE001 — unreadable store = no inventory
+            return []
+        return sorted(
+            {getattr(row, "provider", "") for row in rows if getattr(row, "provider", "")}
+        )
+
+    @staticmethod
+    def _without_identity(report: UsageReport) -> UsageReport:
+        """A copy of ``report`` with the account identity removed for the wire."""
+        return dataclasses.replace(report, identity=None, notes=None)
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
