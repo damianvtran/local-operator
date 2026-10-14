@@ -1519,13 +1519,17 @@ class MeshCredentialBroker:
             return by, [], BrokerError(code="malformed_frame", message=str(exc)).to_detail()
         named = frame.get("recipient_device")
         if named not in (None, "", by):
-            return by, [], self._refuse(
-                link,
-                "",
-                "lifecycle metadata",
+            return (
                 by,
-                "identity_mismatch",
-                "a recipient may read and acknowledge only its own lifecycle metadata",
+                [],
+                self._refuse(
+                    link,
+                    "",
+                    "lifecycle metadata",
+                    by,
+                    "identity_mismatch",
+                    "a recipient may read and acknowledge only its own lifecycle metadata",
+                ),
             )
         for item in entries:
             key = item["credential_key"]
@@ -1535,14 +1539,18 @@ class MeshCredentialBroker:
                 continue
             entry = self._entry(key)
             if entry is None or entry.owner_device != self.self_device:
-                return by, [], self._refuse(
-                    link,
-                    key,
-                    key,
+                return (
                     by,
-                    "not_owner",
-                    f"{self.self_device_name or self.self_device} does not hold {key!r}; "
-                    "ask the device that signed in to it",
+                    [],
+                    self._refuse(
+                        link,
+                        key,
+                        key,
+                        by,
+                        "not_owner",
+                        f"{self.self_device_name or self.self_device} does not hold {key!r}; "
+                        "ask the device that signed in to it",
+                    ),
                 )
         return by, entries, None
 

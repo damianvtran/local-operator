@@ -750,7 +750,9 @@ class LinkCrypto:
         if frame.get("op") == "net_broker" and str(frame.get("kind") or "").startswith(
             "lifecycle_"
         ):
-            from local_operator.network.credentials.types import validate_lifecycle_frame
+            from local_operator.network.credentials.types import (
+                validate_lifecycle_frame,
+            )
 
             try:
                 validate_lifecycle_frame(frame)
