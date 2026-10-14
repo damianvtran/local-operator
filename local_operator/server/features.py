@@ -839,6 +839,24 @@ def feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
+        # conversation and its subagents produced: written, edited, command outputs,
+        # screenshots, downloads, generated images/videos and Highlights callouts, derived
+        # from the journal, paged, filtered and sorted) plus its
+        # `POST …/files/{file_id}/materialise` child (copy a digest-only artifact out to a real
+        # file under the session scratchpad). ONE key for the pair, as `code_requests` does:
+        # a renderer that can list artifacts is the renderer that owns the "save/open" action.
+        #
+        # WHY A KEY: the routes are ADDITIVE, so this gates nothing for an old client. It is how
+        # a renderer learns the surface EXISTS before it issues a query that would 404 on a
+        # backend without it. ABSENT MEANS the Files view builds from its own transcript scan
+        # exactly as before, and the renderer MUST NOT call the route (it would 404). A 404 from
+        # a backend that advertised the key is a broken backend, not a slow one: treat it as
+        # definitive "unsupported" for the session.
+        #
+        # `1` is the feature's first contract revision; new row fields are additive and do not
+        # bump it.
+        "session_files": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a

@@ -44,6 +44,10 @@ FORBIDDEN_PREFIXES = (
     "local_operator.tui",
     "local_operator.mobile",
     "local_operator.session",
+    # The inventory service resolves paths against live config and reads the session store;
+    # it is application state, not a reproducible evaluation input. Dotted-prefix matching
+    # does not cover this underscore sibling through the session package's existing entry.
+    "local_operator.session_files",
     "local_operator.analytics",
     # Single modules: one file each, so no other entry can stand in for them.
     "local_operator.config",
@@ -526,6 +530,10 @@ PINNED_ENTRIES = (
     "local_operator.tui",
     "local_operator.mobile",
     "local_operator.session",
+    # The inventory service resolves paths against live config and reads the session store;
+    # it is application state, not a reproducible evaluation input. Dotted-prefix matching
+    # does not cover this underscore sibling through the session package's existing entry.
+    "local_operator.session_files",
     "local_operator.analytics",
     "local_operator.config",
     "local_operator.config_migrations",

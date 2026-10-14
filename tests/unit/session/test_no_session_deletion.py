@@ -151,6 +151,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops both derived files for one session id, on that session's own deletion",
     ),
+    # -- session-file index (derived cache + one confined copy) --------------------------
+    # ``_write_json``: the cache path is ``<config>/cache/session_files/<stem>.json`` where
+    # ``cache_path`` refuses any stem outside ``[A-Za-z0-9_-]{1,128}`` (no separator, no
+    # ``..``), and the temp is the same path with a pid/thread suffix. The file is DERIVED -
+    # the transcript is the truth, a deleted cache is rebuilt by the next scan.
+    (
+        "local_operator/session_files/ledger.py::_write_json",
+        "<path>.replace",
+        "Atomic pid-temp replace of one <config>/cache/session_files/<stem>.json (derived cache)",
+    ),
+    # The cleanup removes only the leaf THIS copy exclusively created, relative to its pinned
+    # generated-directory fd. The sanitized leaf cannot name a directory or transcript; even
+    # a concurrent parent swap cannot redirect the cleanup out of that pinned directory.
+    (
+        "local_operator/session_files/service.py::_copy_artifact",
+        "os.unlink",
+        "Removes a partial artifact leaf relative to its pinned generated directory fd",
+    ),
     # -- the code-request FETCH cache (1b): same derived-store argument as the
     # ledger entries above. Every path here is built from ``fetch_dir()``
     # (``<config>/cache/code_requests``) plus a sanitized host segment and a
