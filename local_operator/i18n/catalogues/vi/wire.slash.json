@@ -20,6 +20,7 @@
   "wire.slash.goal": "Đặt mục tiêu và vào việc; /goal --clear xóa mục tiêu",
   "wire.slash.help": "Liệt kê mọi lệnh",
   "wire.slash.highlights": "Hủy, thử lại, điều chỉnh điểm nhấn dưới câu trả lời",
+  "wire.slash.hub": "Open Hub links — per-link subscribe and auto-push policy",
   "wire.slash.info": "Bản cài đặt, phiên bản và phiên đang chạy trên máy này",
   "wire.slash.keys": "Xem chú giải bàn phím",
   "wire.slash.language": "Xem hoặc đặt ngôn ngữ giao diện; auto theo hệ thống",

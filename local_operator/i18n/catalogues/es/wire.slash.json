@@ -20,6 +20,7 @@
   "wire.slash.goal": "Fija el objetivo e inicia trabajo; /goal --clear lo borra",
   "wire.slash.help": "Lista todos los comandos",
   "wire.slash.highlights": "Cancela, reintenta o dirige los destacados bajo una respuesta",
+  "wire.slash.hub": "Open Hub links — per-link subscribe and auto-push policy",
   "wire.slash.info": "Instalación, versión y sesiones en ejecución en esta máquina",
   "wire.slash.keys": "Muestra la leyenda del teclado",
   "wire.slash.language": "Muestra o fija el idioma de la interfaz; auto sigue al sistema",
