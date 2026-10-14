@@ -13008,8 +13008,13 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # runtimes are children of the relay, so under systemd's default
         # (``control-group``) ANY relay restart — the manual verb, an update's
         # roll, the member pass — killed the node's sessions, including the
-        # session that asked. ``process`` kills only the main process and is
-        # macOS parity by design (launchd children survive). A survivor
+        # session that asked. ``process`` kills only the main process, and the
+        # same holds on macOS because this device's session runtimes are spawned
+        # DETACHED (``start_new_session=True``/``setsid``) — they leave the unit's
+        # process group and survive its restart on BOTH platforms. Survival rests
+        # on that DETACHMENT, not on launchd abandoning descendants (launchd's
+        # default would reap a same-group child; these plists carry no
+        # ``AbandonProcessGroup``). A survivor
         # reparents to ``systemd --user`` and re-attaches when the relay is
         # back; see ``supervisors.render_systemd_unit`` for the no-reap
         # decision (an ExecStop reaper would fire on RESTART too and recreate
