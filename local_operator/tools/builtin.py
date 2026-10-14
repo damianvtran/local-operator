@@ -17176,10 +17176,22 @@ def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[
             ("--name", params.name),
             ("--team", params.team),
             ("--profile", params.profile),
-            ("--model", params.model),
         ):
             if value and value.strip():
                 argv += [flag, value.strip()]
+        model = (params.model or "").strip()
+        if model:
+            # The CLI takes hosting separately. Leaving a qualified selector in
+            # --model pairs it with the configured provider; split only once so
+            # aggregator model IDs keep their own vendor/model slash. Bare IDs
+            # intentionally retain the configured hosting, unlike remote spawns.
+            from local_operator.providers.failover import parse_selector
+
+            provider, model_id = parse_selector(model)
+            if "/" in model:
+                argv += ["--hosting", provider.strip(), "--model", model_id.strip()]
+            else:
+                argv += ["--model", model]
     argv.append("--")
     argv.append(params.prompt or "")
     return argv
