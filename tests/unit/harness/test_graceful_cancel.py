@@ -69,6 +69,10 @@ class _Scripted:
             yield StreamToolCallDelta(index=0, argument_delta="{}")
             yield StreamEndEvent(stop_reason="toolUse")
             return
+        # The completion the docstring promises ("plain text on any later
+        # one"): prose, so this is a real end rather than the wordless-stop
+        # recovery's target.
+        yield StreamTextDelta(delta="done")
         yield StreamEndEvent(stop_reason="stop")
 
 
