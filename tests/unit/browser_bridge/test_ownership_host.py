@@ -146,8 +146,27 @@ def _hosts(monkeypatch: pytest.MonkeyPatch, *, ui: bool, bridge: bool) -> None:
     from local_operator.browser_bridge import state as bridge_state
     # A reachable successful transport has a record. Always-unknown fake peer
     # identity hid the pre-action refresh and could resurrect closed fake tabs.
-    monkeypatch.setattr(ui_state, "read", lambda root=None: ui_state.UiHostState(pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1) if ui else None)
-    monkeypatch.setattr(bridge_state, "read", lambda root=None: bridge_state.BridgeState(pid=2, port=52134, session_key="k" * 32, extension_version="1.31.0", proto=1, extension_connected=True) if bridge else None)
+    ui_host = (
+        ui_state.UiHostState(
+            pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1
+        )
+        if ui
+        else None
+    )
+    bridge_host = (
+        bridge_state.BridgeState(
+            pid=2,
+            port=52134,
+            session_key="k" * 32,
+            extension_version="1.31.0",
+            proto=1,
+            extension_connected=True,
+        )
+        if bridge
+        else None
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: ui_host)
+    monkeypatch.setattr(bridge_state, "read", lambda root=None: bridge_host)
 
     def reachable(answer: bool) -> Any:
         async def probe(classified: tuple[Any, Any] | None = None) -> bool:
@@ -396,11 +415,15 @@ async def test_public_action_and_finish_refresh_recovery_without_manual_recover(
     from local_operator.ui_browser import state as ui_state
 
     _ui_only(monkeypatch)
-    current = ui_state.UiHostState(pid=2, port=52133, session_key="k" * 32,
-        app_version="0.21.0", proto=1, instance_id="instance-a")
+    current = ui_state.UiHostState(
+        pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1,
+        instance_id="instance-a",
+    )
     monkeypatch.setattr(ui_state, "read", lambda root=None: current)
     context, resource = _context(tmp_path)
-    opened = await builtin.execute_browser("open", {"action": "open", "url": "https://example.com"}, None, None, context)
+    opened = await builtin.execute_browser(
+        "open", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
     assert not opened.is_error
     assert resource.recovered
     proof = resource.params()["owner_proof"]
@@ -415,7 +438,9 @@ async def test_public_action_and_finish_refresh_recovery_without_manual_recover(
     else:
         finished = await resource.finish(resource.generation, "completed")
         assert finished.state == "unresolved"
-        assert [method for method, _ in ui_client.calls] == ["owner_recover"], "unproven replacement must never receive destructive finish"
+        assert [method for method, _ in ui_client.calls] == [
+            "owner_recover"
+        ], "unproven replacement must never receive destructive finish"
     assert resource.params()["owner_proof"] == proof
     assert ui_client.calls[0][1]["owner_proof"] == proof
 
@@ -473,8 +498,10 @@ async def test_changed_ledger_success_recovery_runs_before_action_and_keeps_proo
     from local_operator.ui_browser import state as ui_state
 
     _ui_only(monkeypatch)
-    current = ui_state.UiHostState(pid=2, port=52133, session_key="k" * 32,
-        app_version="0.21.0", proto=1, instance_id="instance-a")
+    current = ui_state.UiHostState(
+        pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1,
+        instance_id="instance-a",
+    )
     monkeypatch.setattr(ui_state, "read", lambda root=None: current)
     context, resource = _context(tmp_path)
     opened = await builtin.execute_browser(
@@ -533,7 +560,8 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
                 "origin": "https://example.test", "url": params["url"],
             })
         if method in ("request_access", "await_access", "cancel_access"):
-            return {"origin": "https://example.test", "state": "cancelled" if method == "cancel_access" else "allowed"}
+            answer = "cancelled" if method == "cancel_access" else "allowed"
+            return {"origin": "https://example.test", "state": answer}
         return {"state": "closed"}
 
     monkeypatch.setattr(bridge_client, "call", transport)
@@ -553,7 +581,8 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
             "action": action, "url": "https://example.test", "timeout_s": 1,
         }, None, None, context)
         assert not result.is_error, result.text
-        assert (result.details or {}).get("state") == ("cancelled" if action == "cancel_access" else "allowed")
+        expected = "cancelled" if action == "cancel_access" else "allowed"
+        assert (result.details or {}).get("state") == expected
         assert context.browser is not None and context.browser.surface_id == ""
     assert ui_client.calls == []
     assert [method for method, _ in bridge_client.calls if method in (
