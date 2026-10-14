@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 from local_operator import procstate
 
@@ -328,6 +328,12 @@ def _persist_operation(path: Path, record: dict[str, Any]) -> None:
         os.close(directory)
 
 
+#: A capacity request's states. ``requested`` is open until the controller has
+#: acted; the others record the outcome so a re-entry is idempotent rather than a
+#: second request for the same pressure.
+CAPACITY_STATES = ("requested", "moved", "reclaimed", "partial")
+
+
 @dataclass(frozen=True)
 class UpdateOperation:
     """Durable intent/receipts, not proof of OS ownership or service completion.
@@ -484,6 +490,74 @@ def record_occurrence(
         record["updated_at"] = time.time()
         _persist_operation(path, record)
         held.validate(root)
+
+
+def note_capacity(
+    root: Path,
+    identifier: str,
+    *,
+    state: str,
+    threshold: str,
+    cohort: Sequence[str] = (),
+    requested_at: float | None = None,
+) -> dict[str, Any]:
+    """Write the capacity sub-map into the EXISTING durable operation record.
+
+    Rides ``handoff.capacity`` (never a new key), under the same root transaction
+    the operation already holds — the same vehicle as ``handoff.occurrences``, and
+    the reason a re-entry is idempotent rather than a second queue: the reader sees
+    an OPEN request and stands down. It MERGES into the existing ``handoff`` dict
+    rather than replacing it, because ``advance()`` sets the whole key and would
+    otherwise drop the occurrence map written beside it.
+
+    ``threshold`` and ``state`` are closed vocabularies so a torn or foreign record
+    cannot smuggle an unbounded request; ``cohort`` is the generation NAMES the
+    request is about, stored as strings because the record is JSON.
+    """
+    if state not in CAPACITY_STATES:
+        raise InstallTransactionError("capacity state has no verified contract")
+    if threshold not in ("count", "free", "both"):
+        raise InstallTransactionError("capacity threshold has no verified contract")
+    with transaction(root, operation=f"capacity {state}") as held:
+        held.validate(root)
+        path = _operation_path(root, identifier)
+        record = read_record(path)
+        if record is None or record.get("operation_id") != identifier:
+            raise InstallTransactionError("capacity has no durable operation; preserving roots")
+        handoff = record.get("handoff") if isinstance(record.get("handoff"), dict) else {}
+        previous = handoff.get("capacity") if isinstance(handoff.get("capacity"), dict) else {}
+        entry = dict(previous)
+        entry.update(
+            state=state,
+            threshold=threshold,
+            cohort=[str(name) for name in cohort],
+            # PRESERVE the original request time on a re-entry: the durable fact is
+            # when the pressure was first seen, not when the caller last looked.
+            requested_at=previous.get("requested_at") or time.time()
+            if requested_at is None
+            else requested_at,
+            recorded_at=time.time(),
+        )
+        handoff["capacity"] = entry
+        record["handoff"] = handoff
+        record["updated_at"] = time.time()
+        _persist_operation(path, record)
+        held.validate(root)
+        return entry
+
+
+def capacity_status(root: Path, identifier: str) -> dict[str, Any] | None:
+    """Read the capacity sub-map; ``None`` means unreadable/missing (not empty)."""
+    row = operation_status(root, identifier)
+    if row is None:
+        return None
+    handoff = row.get("handoff")
+    if not isinstance(handoff, dict):
+        return None
+    capacity = handoff.get("capacity")
+    if not isinstance(capacity, dict):
+        return None
+    return capacity
 
 
 def occurrence_status(root: Path, identifier: str) -> dict[str, dict[str, Any]] | None:
