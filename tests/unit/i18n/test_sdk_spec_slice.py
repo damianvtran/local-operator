@@ -20,7 +20,12 @@ import pytest
 from local_operator import sdk
 from local_operator.i18n import catalogues, messages, resolve
 from local_operator.i18n.keys import wire_errors_sdk_spec
-from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec, SessionSpecError
+from local_operator.session.spec import (
+    ApprovalPolicy,
+    SessionRoots,
+    SessionSpec,
+    SessionSpecError,
+)
 
 _EXPECTED = json.loads(
     (Path(__file__).parent / "fixtures" / "sdk_spec_en_golden.json").read_text(encoding="utf-8")
