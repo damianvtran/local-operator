@@ -202,6 +202,42 @@ def test_the_controller_reclaims_a_moved_cohort(home: Path) -> None:
     assert not cohort_root.exists()
 
 
+def test_the_controller_reports_moved_unreclaimed_when_no_reclaim_was_passed(
+    home: Path,
+) -> None:
+    """A decision-only call must NOT claim a deletion it did not make."""
+    cohort_root = _generation("20260101T000000Z-cohort")
+    for index in range(2):
+        _generation(f"2026010{index + 2}T000000Z-x{index}")
+    _session_record(home / ".local-operator", cohort_root)
+
+    def request_move(cohort: capacity_recovery.Cohort) -> bool:
+        (home / ".local-operator" / "run" / "mobile" / "4242.json").unlink()
+        return True
+
+    # No ``reclaim`` argument: the cohort moves and the roots are provably
+    # unreferenced, but nothing is deleted — so the state is moved-unreclaimed.
+    state = capacity_recovery.run_capacity_recovery(
+        request_move=request_move, wait_move=lambda _c: True
+    )
+    assert state == "moved-unreclaimed"
+    assert cohort_root.exists()
+
+
+def test_dry_run_does_not_sweep_staging_links(home: Path, monkeypatch) -> None:
+    """A dry run makes the DECISION only — the staging sweep is a mutation."""
+    calls: list[float] = []
+    monkeypatch.setattr(update_mod, "_sweep_staging_links", lambda moment: calls.append(moment))
+    for index in range(3):
+        _generation(f"2026010{index + 1}T000000Z-{index}")
+    update_mod.prune_generations(keep=0, dry_run=True)
+    assert calls == [], "a dry run must not sweep staging links"
+    # The normal path still sweeps, so the guard is scoped to dry_run, not the
+    # function.
+    update_mod.prune_generations(keep=0, dry_run=False)
+    assert len(calls) == 1
+
+
 def test_the_controller_reports_partial_when_a_cohort_will_not_move(home: Path) -> None:
     cohort_root = _generation("20260101T000000Z-cohort")
     _session_record(home / ".local-operator", cohort_root)

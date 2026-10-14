@@ -692,12 +692,17 @@ def attempt_protected(generation: Path) -> bool:
 
 
 def preserve_publication(generation: Path, nonce: str) -> None:
-    """Conservatively retain a failed candidate once a pointer write is possible.
+    """Conservatively retain a candidate the instant its pointer swap lands.
 
-    This existing attempt record grants NO lifetime-index completeness. Write
-    before flip: a rollback/current change cannot prove no runtime observed B.
-    Failed exposure stays protected; successful completion removes the attempt
-    normally, while rolling automatic GC remains frozen for all loaded roots.
+    This existing attempt record grants NO lifetime-index completeness. It is
+    written immediately AFTER a SUCCESSFUL ``flip_pointer`` return — the atomic
+    ``os.rename`` either swapped the pointer or raised before it did, so a
+    successful return IS the proof that a runtime can now observe B, and a flip
+    that raised (pointer never written) must NOT be marked exposed. Its caller
+    (``install_into_generation``) enforces that ordering; this function only
+    records the boundary. Failed exposure stays protected; successful completion
+    removes the attempt normally, while rolling automatic GC remains frozen for
+    all loaded roots.
     """
     path = generation / ATTEMPT_NAME
     record = read_record(path)
