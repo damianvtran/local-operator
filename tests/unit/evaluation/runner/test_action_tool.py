@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import httpx
@@ -405,14 +405,17 @@ async def test_fragmented_native_sse_preserves_frame_id_and_validated_refusal(
         client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
 
         class NativeSse(_ScriptedStream):
-            def __call__(self, request: ChatRequest, signal: Any):
-                return client.stream(request, "synthetic-no-network-key")
+            async def __call__(
+                self, request: ChatRequest, signal: Any
+            ) -> AsyncGenerator[StreamEvent, None]:
+                async for event in client.stream(request, "synthetic-no-network-key"):
+                    yield event
 
         events = await _drive(offline.tool, offline.token, NativeSse([]))
     call = next(
         call
         for event in events
-        if isinstance(event, MessageEndEvent)
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, Message)
         for call in event.message.tool_calls
     )
     assert call.raw_arguments == raw
