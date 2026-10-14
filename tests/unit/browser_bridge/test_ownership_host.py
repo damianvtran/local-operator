@@ -144,12 +144,11 @@ def _hosts(monkeypatch: pytest.MonkeyPatch, *, ui: bool, bridge: bool) -> None:
 
     from local_operator.ui_browser import state as ui_state
     from local_operator.browser_bridge import state as bridge_state
+
     # A reachable successful transport has a record. Always-unknown fake peer
     # identity hid the pre-action refresh and could resurrect closed fake tabs.
     ui_host = (
-        ui_state.UiHostState(
-            pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1
-        )
+        ui_state.UiHostState(pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1)
         if ui
         else None
     )
@@ -416,7 +415,11 @@ async def test_public_action_and_finish_refresh_recovery_without_manual_recover(
 
     _ui_only(monkeypatch)
     current = ui_state.UiHostState(
-        pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1,
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        app_version="0.21.0",
+        proto=1,
         instance_id="instance-a",
     )
     monkeypatch.setattr(ui_state, "read", lambda root=None: current)
@@ -499,7 +502,11 @@ async def test_changed_ledger_success_recovery_runs_before_action_and_keeps_proo
 
     _ui_only(monkeypatch)
     current = ui_state.UiHostState(
-        pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1,
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        app_version="0.21.0",
+        proto=1,
         instance_id="instance-a",
     )
     monkeypatch.setattr(ui_state, "read", lambda root=None: current)
@@ -556,9 +563,14 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
             assert "tab" not in params
             if permitted:
                 return {"tab": "bridge:5:permitted-capability", "url": params["url"]}
-            raise BridgeError(ErrorCode.ORIGIN_NOT_ALLOWED, "site not allowed", {
-                "origin": "https://example.test", "url": params["url"],
-            })
+            raise BridgeError(
+                ErrorCode.ORIGIN_NOT_ALLOWED,
+                "site not allowed",
+                {
+                    "origin": "https://example.test",
+                    "url": params["url"],
+                },
+            )
         if method in ("request_access", "await_access", "cancel_access"):
             answer = "cancelled" if method == "cancel_access" else "allowed"
             return {"origin": "https://example.test", "state": answer}
@@ -566,9 +578,17 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
 
     monkeypatch.setattr(bridge_client, "call", transport)
     context, resource = _context(tmp_path)
-    denied = await builtin.execute_browser("deny", {
-        "action": "open", "backend": "extension", "url": "https://example.test",
-    }, None, None, context)
+    denied = await builtin.execute_browser(
+        "deny",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
     assert denied.is_error
     assert (denied.details or {}).get("error_code") == "origin_not_allowed"
     assert context.browser is not None and context.browser.surface_id == ""
@@ -577,17 +597,32 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
     if resumed:
         context, resource = _context(tmp_path)
     for action in ("request_access", "await_access", "cancel_access"):
-        result = await builtin.execute_browser(action, {
-            "action": action, "url": "https://example.test", "timeout_s": 1,
-        }, None, None, context)
+        result = await builtin.execute_browser(
+            action,
+            {
+                "action": action,
+                "url": "https://example.test",
+                "timeout_s": 1,
+            },
+            None,
+            None,
+            context,
+        )
         assert not result.is_error, result.text
         expected = "cancelled" if action == "cancel_access" else "allowed"
         assert (result.details or {}).get("state") == expected
         assert context.browser is not None and context.browser.surface_id == ""
     assert ui_client.calls == []
-    assert [method for method, _ in bridge_client.calls if method in (
-        "request_access", "await_access", "cancel_access",
-    )] == ["request_access", "await_access", "cancel_access"]
+    assert [
+        method
+        for method, _ in bridge_client.calls
+        if method
+        in (
+            "request_access",
+            "await_access",
+            "cancel_access",
+        )
+    ] == ["request_access", "await_access", "cancel_access"]
     assert resource.params()["owner_proof"] == proof
     assert "pending_access_host" not in resource.record, "cancel discharges routing intent"
     assert "pending_access_host" not in resource._load(), "cancel also persists the removal"
@@ -596,16 +631,32 @@ async def test_failed_explicit_extension_open_keeps_public_approvals_on_extensio
     # seeding a record. A later permitted open must consume the routing marker:
     # its minted capability now names the host, so stale approval intent cannot
     # govern a future surface-free flow.
-    denied_again = await builtin.execute_browser("deny-again", {
-        "action": "open", "backend": "extension", "url": "https://example.test",
-    }, None, None, context)
+    denied_again = await builtin.execute_browser(
+        "deny-again",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
     assert denied_again.is_error
     assert (denied_again.details or {}).get("error_code") == "origin_not_allowed"
     assert resource.record.get("pending_access_host") == "bridge"
     permitted = True
-    opened = await builtin.execute_browser("permitted-open", {
-        "action": "open", "backend": "extension", "url": "https://example.test",
-    }, None, None, context)
+    opened = await builtin.execute_browser(
+        "permitted-open",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
     assert not opened.is_error, opened.text
     assert context.browser is not None
     assert context.browser.surface_id == "bridge:5:permitted-capability"
