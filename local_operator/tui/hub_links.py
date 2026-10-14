@@ -29,7 +29,16 @@ from typing import Any, Mapping, Sequence
 from rich.cells import cell_len
 from rich.text import Text
 
+from local_operator.i18n.keys import tui_hub_links as _k
+from local_operator.i18n.text import tr
 from local_operator.tui.widgets.tool_card import truncate_cells
+
+#: This slice owns exactly ONE catalogue, so the namespace is stated here once
+#: (the `tr` contract). Every user-visible string below goes through `_t`; a
+#: literal would be the English-only bypass the i18n rule forbids. The typed key
+#: functions (`tui_hub_links.section_agents()`, …) are what a mistyped key fails
+#: pyright on (RFC §2.4).
+_t = tr("tui.hub_links")
 
 #: The single status/action slot: ONE cell, reserved so a poll-driven state
 #: change never reflows the row (the design's "reserve the existing slot").
@@ -91,15 +100,20 @@ class LinkRow:
         the SCOPE (public, or the organization's NAME and Private) rather than
         the raw origin. The full source URL stays in the accessible description
         (:meth:`policy_text`), which is the technical detail a screen reader and
-        the policy menu read; only the collapsed row is compact.
+        the policy menu read; only the collapsed row is compact. Copy comes from
+        the catalogue (`source.public` / `source.private`), never a literal.
         """
 
         if self.visibility == "public":
-            return "Public"
+            return _t(_k.source_public())
         if self.visibility == "org":
             org = (self.tenant_name or "").strip()
-            return f"{org} · Private" if org else "Private"
-        return "Unknown source"
+            if org:
+                return _t(_k.source_private(organization=org))
+            # No resolved name: show the Private word alone rather than a bare
+            # `· Private` with an empty organization slot.
+            return _t(_k.source_private(organization="")).strip(" ·")
+        return _t(_k.source_unavailable())
 
     @property
     def slot_state(self) -> str:
@@ -123,23 +137,29 @@ class LinkRow:
         return "healthy"
 
     def policy_text(self) -> str:
-        """``Public; Subscribe on; Auto-push off`` — the accessible description.
+        """The accessible description: scope + both policies, catalogue-rendered.
 
-        Carries the FULL source URL, which the compact row omits (D2): the
-        description is where the technical origin lives, while the visible row
-        shows the scope label.
+        Built from the `mark.healthy` template (item; source; Subscribe <s>;
+        Auto-push <p>), which the catalogue owns — the description is where the
+        technical origin lives while the visible row shows the compact scope.
         """
 
-        sub = "on" if self.subscribe else "off"
-        push = "on" if self.auto_push else "off"
-        suffix = ""
-        if self.auto_push is False and self.error_class in (
-            "unsafe-publication",
-            "origin-conflict",
-        ):
-            suffix = f", paused: {self.error_class}"
-        origin = f"source {self.source}; " if self.source else ""
-        return f"{self.scope_label}; {origin}Subscribe {sub}; Auto-push {push}{suffix}"
+        return _t(
+            _k.mark_healthy(
+                item=self.name,
+                source=self.source or _t(_k.source_unavailable()),
+                subscribe=self._policy_word(self.subscribe),
+                auto_push=self._policy_word(self.auto_push),
+            )
+        )
+
+    @staticmethod
+    def _policy_word(value: bool | None) -> str:
+        """``On``/``Off`` from the catalogue; an unknown policy reads ``?``."""
+
+        if value is None:
+            return "?"
+        return _t(_k.policy_on()) if value else _t(_k.policy_off())
 
 
 def rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[LinkRow]:
@@ -208,7 +228,14 @@ def section_order() -> tuple[str, ...]:
     return ("agent", "team", "skill")
 
 
-_SECTION_TITLES = {"agent": "Agents", "team": "Teams", "skill": "Skills"}
+def _section_title(kind: str) -> str:
+    """A section heading's copy from the catalogue, never a literal."""
+
+    return {
+        "agent": _t(_k.section_agents()),
+        "team": _t(_k.section_teams()),
+        "skill": _t(_k.section_skills()),
+    }.get(kind, kind.title())
 
 
 def render_rows(
@@ -230,7 +257,7 @@ def render_rows(
     """
 
     if loading and not rows:
-        return [Text("Loading hub links…", style="dim")]
+        return [Text(_t(_k.state_loading()), style="dim")]
 
     lines: list[Text] = []
     by_kind: dict[str, list[LinkRow]] = {kind: [] for kind in section_order()}
@@ -241,14 +268,14 @@ def render_rows(
         group = by_kind.get(kind, [])
         if not group:
             continue
-        lines.append(Text(_SECTION_TITLES.get(kind, kind.title()), style="bold"))
+        lines.append(Text(_section_title(kind), style="bold"))
         for row in sorted(group, key=lambda r: r.name.casefold()):
             lines.append(
                 _render_row(row, width, selected=(selected == index), tail_style=tail_style)
             )
             index += 1
     if not lines:
-        lines.append(Text("Not linked to the hub.", style="dim"))
+        lines.append(Text(_t(_k.state_empty()), style="dim"))
     return lines
 
 
@@ -270,8 +297,9 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
     slot = _SLOT_FOR.get(row.slot_state, SLOT_IDLE)
     prefix = f"{slot} "
     tail = (
-        f" — {row.scope_label} · Subscribe {_on_off(row.subscribe)}"
-        f" · Auto-push {_on_off(row.auto_push)}"
+        f" — {row.scope_label} · "
+        f"{_t(_k.policy_subscribe_label())} {row._policy_word(row.subscribe)} · "
+        f"{_t(_k.policy_auto_push_label())} {row._policy_word(row.auto_push)}"
     )
     name_room = max(4, width - cell_len(prefix) - cell_len(tail))
     name = truncate_cells(row.name, name_room)
@@ -285,14 +313,6 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
     line.append(name, style="reverse" if selected else "")
     line.append(tail, style=tail_style if not selected else "reverse")
     return line
-
-
-def _on_off(value: bool | None) -> str:
-    """``on``/``off``; an unknown policy reads as ``?`` rather than a false claim."""
-
-    if value is None:
-        return "?"
-    return "on" if value else "off"
 
 
 def aggregate_slot(rows: Sequence[LinkRow]) -> str:

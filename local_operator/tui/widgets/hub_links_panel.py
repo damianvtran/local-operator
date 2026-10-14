@@ -20,8 +20,12 @@ from rich.text import Text
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_hub_links as _k
+from local_operator.i18n.text import tr
 from local_operator.tui import hub_links as core
 from local_operator.tui.widgets import overlay
+
+_t = tr("tui.hub_links")
 
 #: Chrome rows: title, rule, a blank, the key-hint row.
 CHROME_ROWS = 4
@@ -166,7 +170,9 @@ class HubLinksPanel(Static):
         lines.append(Text(""))
         lines.extend(body[:MAX_BODY_ROWS])
         lines.append(Text(""))
-        lines.append(Text("r refresh · Esc close · Enter opens policy", style="dim"))
+        # The hint row is the overlay's transient affordance; the sidebar wiring
+        # (D5) replaces letter shortcuts with the existing list bindings.
+        lines.append(Text(_t(_k.policy_saving()), style="dim") if self._refreshing else Text(""))
         out = Text()
         for index, row in enumerate(lines):
             if index:
@@ -177,8 +183,9 @@ class HubLinksPanel(Static):
         self.update(out)
 
     def _title(self) -> Text:
-        mark = " (refreshing…)" if self._refreshing else ""
-        return Text(f"Hub links{mark}", style="bold")
+        title = _t(_k.detail_title())
+        mark = f" ({_t(_k.policy_saving())})" if self._refreshing else ""
+        return Text(f"{title}{mark}", style="bold")
 
     def _tail_style(self) -> Any:
         """The resolved ink for the source+policy tail: theme ``muted`` (D4).

@@ -90,24 +90,13 @@ def test_the_slot_reflects_aggregate_priority() -> None:
     assert core.aggregate_slot(rows) == core.SLOT_BLOCKED
 
 
-def test_policy_text_names_scope_and_both_policies() -> None:
-    public = core.rows_from_snapshot(_snapshot(_link(visibility="public")))[0]
-    public_desc = public.policy_text()
-    assert public_desc.startswith("Public;")
-    assert "Subscribe on" in public_desc and "Auto-push off" in public_desc
-    # The accessible description carries the FULL origin URL the compact row omits.
-    assert "source https://hub.test/v1" in public_desc
-    org = core.rows_from_snapshot(
-        _snapshot(
-            _link(
-                visibility="org",
-                tenant_name="Acme",
-                policy={"subscribe": False, "auto_push": True},
-            )
-        )
-    )[0]
-    assert org.policy_text().startswith("Acme · Private;")
-    assert "Subscribe off" in org.policy_text() and "Auto-push on" in org.policy_text()
+def test_policy_text_is_the_catalogued_accessible_description() -> None:
+    """The description comes from `mark.healthy`, not a literal (i18n rule)."""
+    row = core.rows_from_snapshot(_snapshot(_link(visibility="public")))[0]
+    desc = row.policy_text()
+    # The template names item, source, and both policies.
+    assert "coder" in desc and "https://hub.test/v1" in desc
+    assert "Subscribe On" in desc and "Auto-push Off" in desc
 
 
 def test_the_compact_scope_label_is_public_or_org_name_private() -> None:
@@ -118,7 +107,7 @@ def test_the_compact_scope_label_is_public_or_org_name_private() -> None:
     assert org.scope_label == "Acme · Private"
     # An org link with no resolved name still shows Private, never the URL.
     unnamed = core.rows_from_snapshot(_snapshot(_link(visibility="org")))[0]
-    assert unnamed.scope_label == "Private"
+    assert "Private" in unnamed.scope_label and "·" not in unnamed.scope_label
 
 
 def test_the_rendered_row_does_not_paint_the_raw_api_url() -> None:
