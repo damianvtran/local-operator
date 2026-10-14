@@ -28,6 +28,10 @@ context sidecar; desktop new copy uses `ui.chat`. Their existing generators must
 run under a separately allocated lease before compilation: generated key maps
 and the phone bundled catalogue are deliberately not edited by hand.
 
+The route consumes the real `ReadOnlyUsageSnapshot.reports`, never iterates
+the snapshot as a list. Its envelope preserves `may_be_stale` and epoch-ms
+`cached_at`; the phone discloses the immutable-cache timestamp and any WAL
+staleness caveat. `unavailable=True` is a controlled 503, not an empty report.
 An absent cache means an empty display, never a measured zero-credit balance;
 an admission/read failure is a controlled unavailable response, not empty data.
 

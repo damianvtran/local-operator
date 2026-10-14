@@ -14,6 +14,7 @@ export type MessageParams = {
   "relay.shell.session.connecting": undefined;
   "relay.shell.session.waiting": undefined;
   "relay.shell.usage.amount_unknown": undefined;
+  "relay.shell.usage.as_of": { "value": string };
   "relay.shell.usage.blocked": undefined;
   "relay.shell.usage.cached": undefined;
   "relay.shell.usage.command": undefined;
@@ -29,6 +30,7 @@ export type MessageParams = {
   "relay.shell.usage.paid": undefined;
   "relay.shell.usage.remaining": { "value": string; "unit": string };
   "relay.shell.usage.reset": { "value": string };
+  "relay.shell.usage.stale": undefined;
   "relay.shell.usage.title": undefined;
   "relay.shell.usage.unavailable": undefined;
   "relay.shell.usage.unlimited": undefined;

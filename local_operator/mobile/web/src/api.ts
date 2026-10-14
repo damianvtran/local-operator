@@ -122,7 +122,8 @@ export type PhoneUsageReport = {
 	provider: string; limits: PhoneUsageLimit[]; unavailable: boolean; fetched_at: number;
 };
 /** The paired gate and persisted-account admission remain server-owned. */
-export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cached" }> {
+export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cached";
+	may_be_stale?: boolean; cached_at?: number | null }> {
 	return request("/api/usage");
 }
 

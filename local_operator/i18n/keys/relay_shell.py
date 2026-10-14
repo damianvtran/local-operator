@@ -42,6 +42,10 @@ def usage_amount_unknown() -> Msg:
     return Msg("relay.shell.usage.amount_unknown", {})
 
 
+def usage_as_of(*, value: str) -> Msg:
+    return Msg("relay.shell.usage.as_of", {"value": value})
+
+
 def usage_blocked() -> Msg:
     return Msg("relay.shell.usage.blocked", {})
 
@@ -100,6 +104,10 @@ def usage_remaining(*, value: str, unit: str) -> Msg:
 
 def usage_reset(*, value: str) -> Msg:
     return Msg("relay.shell.usage.reset", {"value": value})
+
+
+def usage_stale() -> Msg:
+    return Msg("relay.shell.usage.stale", {})
 
 
 def usage_title() -> Msg:

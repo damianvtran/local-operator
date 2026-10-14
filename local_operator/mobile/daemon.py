@@ -6784,10 +6784,10 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         try:
-            reports = await asyncio.to_thread(_cached_phone_usage)
+            snapshot = await asyncio.to_thread(_cached_phone_usage)
         except Exception:  # noqa: BLE001 — no raw store/vendor errors over the tunnel
             return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
-        return JSONResponse({"reports": reports, "source": "cached"})
+        return JSONResponse(snapshot)
 
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
@@ -7697,72 +7697,116 @@ def _default_start_cwd() -> str:
     return str(Path.home())
 
 
-def _cached_phone_usage() -> list[dict[str, Any]]:
+def _cached_phone_usage() -> dict[str, Any]:
     """Minimum paired-phone display payload, never credentials or live usage.
 
     The existing controller owns cache keys and normalized eligibility. Filtering
     by persisted providers follows the model sheet's remote boundary; unknown
     admission fails closed rather than advertising ambient accounts.
     """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.controller import ProviderController
 
     # The factory opens only read-only metadata handles. None requests the
     # persisted-only inventory, never environment/runtime/config accounts.
     controller = ProviderController.read_only_for_persisted_usage()
     try:
-        reports = controller.cached_persisted_usage_reports_read_only(None)
+        snapshot = controller.cached_persisted_usage_reports_read_only(None)
     finally:
         try:
             controller.close()
         finally:
-            controller.auth_store.close()
-    if reports is None:
+            # The facade types its store as the narrow ControllerAuthStore
+            # Protocol (no close); this factory always builds the concrete
+            # AuthStore.open_read_only handle, which owns the connection.
+            cast(AuthStore, controller.auth_store).close()
+    # Empty/absent is successful; unreadable is not. Preserve immutable-read
+    # freshness instead of guessing it from individual report timestamps.
+    if snapshot.unavailable:
         raise RuntimeError("cached usage unavailable")
     import math
+
     def finite(value: Any) -> float | None:
         # Invalid numeric data is unavailable, never a fake zero or JSON NaN.
-        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+        return (
+            value
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            else None
+        )
 
     result: list[dict[str, Any]] = []
-    for report in reports:
+    for report in snapshot.reports:
         provider = report.provider
         limits = []
         for limit in report.limits:
             amount = limit.amount
+            # fraction() is Optional; bind once so the comparison narrows.
+            fraction = amount.fraction()
             # Names/details/identity are not required for quota display.
             # Permit only normalized units; arbitrary vendor strings
             # must not become remote account/credential disclosures.
-            unit = amount.unit if amount.unit in {
-                "credits", "usd", "percent", "tokens", "requests", "unknown"
-            } else "unknown"
-            limits.append({
-                "amount": {"used": finite(amount.used), "limit": finite(amount.limit),
-                           "remaining": finite(amount.remaining),
-                           "used_fraction": finite(amount.used_fraction), "unit": unit},
-                "paid_fallback": limit.paid_fallback,
-                "available": limit.available,
-                "unlimited": limit.unlimited,
-                "supersedes_tiers": limit.supersedes_tiers,
-                "family_cap": bool(limit.tier),
-                "shared": bool(limit.shared) and not bool(limit.tier),
-                # Only exact canonical metadata can name a phone row. Unknown
-                # vendor strings stay unknown, never become remote account copy.
-                "window": {
-                    "5 hour": "5h", "five_hour": "5h", "5h": "5h",
-                    "7 day": "7d", "7d": "7d", "weekly": "7d",
-                    "1 month": "1mo", "monthly": "1mo",
-                    "lifetime": "lifetime",
-                }.get(limit.window, "unknown"),
-                "family": limit.tier if limit.tier in {"opus", "sonnet", "fable", "zread"} else "unknown",
-                "resets_at_ms": finite(limit.resets_at_ms),
-                # Python owns the exact fraction-first eligibility.
-                "payable": limit.paid_usable(),
-                "exhausted": amount.fraction() is not None and amount.fraction() >= 1,
-            })
-        result.append({"provider": provider, "limits": limits,
-                       "unavailable": report.usage_unavailable,
-                       "fetched_at": report.fetched_at})
-    return result
+            unit = (
+                amount.unit
+                if amount.unit in {"credits", "usd", "percent", "tokens", "requests", "unknown"}
+                else "unknown"
+            )
+            limits.append(
+                {
+                    "amount": {
+                        "used": finite(amount.used),
+                        "limit": finite(amount.limit),
+                        "remaining": finite(amount.remaining),
+                        "used_fraction": finite(amount.used_fraction),
+                        "unit": unit,
+                    },
+                    "paid_fallback": limit.paid_fallback,
+                    "available": limit.available,
+                    "unlimited": limit.unlimited,
+                    "supersedes_tiers": limit.supersedes_tiers,
+                    "family_cap": bool(limit.tier),
+                    "shared": bool(limit.shared) and not bool(limit.tier),
+                    # Only exact canonical metadata can name a phone row. Unknown
+                    # vendor strings stay unknown, never become remote account copy.
+                    "window": {
+                        "5 hour": "5h",
+                        "five_hour": "5h",
+                        "5h": "5h",
+                        "7 day": "7d",
+                        "7d": "7d",
+                        "weekly": "7d",
+                        "1 month": "1mo",
+                        "monthly": "1mo",
+                        "lifetime": "lifetime",
+                    }.get(limit.window, "unknown"),
+                    "family": (
+                        limit.tier
+                        if limit.tier in {"opus", "sonnet", "fable", "zread"}
+                        else "unknown"
+                    ),
+                    "resets_at_ms": finite(limit.resets_at_ms),
+                    # Python owns the exact fraction-first eligibility.
+                    "payable": limit.paid_usable(),
+                    "exhausted": fraction is not None and fraction >= 1,
+                }
+            )
+        result.append(
+            {
+                "provider": provider,
+                "limits": limits,
+                "unavailable": report.usage_unavailable,
+                "fetched_at": report.fetched_at,
+            }
+        )
+    return {
+        "reports": result,
+        "source": "cached",
+        "may_be_stale": snapshot.may_be_stale,
+        "cached_at": snapshot.cached_at,
+    }
 
 
 def _provider_display_name(provider_id: str) -> str:

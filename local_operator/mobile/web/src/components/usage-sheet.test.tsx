@@ -74,3 +74,12 @@ it("explicit shared exhaustion continues, but unknown shared metadata does not",
 	expect(await screen.findByText(/25 credits left/)).toBeTruthy();
 	expect(screen.queryByText(/credits will continue/)).toBeNull();
 });
+
+
+it("discloses the immutable snapshot timestamp and stale WAL caveat", async () => {
+    vi.mocked(getUsage).mockResolvedValue({ source: "cached", reports: [],
+        cached_at: 1700000000000, may_be_stale: true });
+    render(<UsageSheet open onClose={() => undefined} />);
+    expect(await screen.findByText(/May be out of date/)).toBeTruthy();
+    expect(screen.getByText(/As of/)).toBeTruthy();
+});

@@ -8,18 +8,23 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	useLanguage();
 	const [reports, setReports] = useState<PhoneUsageReport[] | null>(null);
 	const [error, setError] = useState(false);
+	const [freshness, setFreshness] = useState<{ cached_at?: number | null; may_be_stale?: boolean }>({});
 	useEffect(() => {
 		if (!open) return;
 		let active = true;
 		setReports(null);
 		setError(false);
-		getUsage().then((value) => { if (active) setReports(value.reports); })
+		setFreshness({});
+		getUsage().then((value) => { if (active) { setReports(value.reports); setFreshness(value); } })
 			.catch(() => { if (active) setError(true); });
 		return () => { active = false; };
 	}, [open]);
 	return <Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.shell.usage.title")}>
 		<div className="flex flex-col gap-3 p-3">
-			<p className="text-ink-muted">{messageRuntime.t("relay.shell.usage.cached")}</p>
+			<p className="text-ink">{messageRuntime.t("relay.shell.usage.cached")}
+				{freshness.cached_at != null && <> {messageRuntime.t("relay.shell.usage.as_of", { value: new Date(freshness.cached_at).toLocaleString() })}</>}
+				{freshness.may_be_stale && <> {messageRuntime.t("relay.shell.usage.stale")}</>}
+			</p>
 			{error ? <p role="alert">{messageRuntime.t("relay.shell.usage.unavailable")}</p> : reports === null
 				? <p role="status">{messageRuntime.t("relay.shell.usage.loading")}</p> : !reports.length
 					? <p>{messageRuntime.t("relay.shell.usage.empty")}</p> : reports.map((report, index) => {

@@ -30,5 +30,7 @@
   "relay.shell.usage.used": "{value} {unit} used",
   "relay.shell.usage.fraction": "{value}% used",
   "relay.shell.usage.reset": "Resets at {value}",
-  "relay.shell.usage.command": "Show cached provider usage"
+  "relay.shell.usage.command": "Show cached provider usage",
+  "relay.shell.usage.as_of": "As of {value}.",
+  "relay.shell.usage.stale": "May be out of date."
 }
