@@ -242,6 +242,7 @@ async def test_noncolliding_secret_names_and_read_variable_refusal_survive(
         assert session._redact_tool_result_text(result.text) == result.text
     shell_identifier = f'printf %s "${name}"'
     assert session._redact_tool_result_text(shell_identifier) == shell_identifier
+    assert stored.details is not None
     assert stored.details["name"] == name
 
 
