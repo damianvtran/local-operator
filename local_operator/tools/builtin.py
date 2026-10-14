@@ -20282,6 +20282,33 @@ def _surface_host_or_first(pinned: str, *, ui: bool) -> str:
     return HOST_UI_PREFIX if ui else HOST_BRIDGE_PREFIX
 
 
+def _pinned_host_for_access(context: ToolContext | None) -> str:
+    """The host a surface-free access action must use, or "" for none.
+
+    A fresh `open` that failed with origin-not-allowed is the ordinary reason
+    `request_access`/`await_access`/`cancel_access` arrive with no minted tab:
+    the operator has to approve the origin the open was refused on. The decision
+    of WHICH host that open was targeted at is durable
+    (`resource.pinned_host()`), and the approval must be raised on THAT host —
+    not re-picked from availability, which can land the prompt on a different
+    peer than the one the refused navigation belongs to (review R2 code GCP
+    neighbour: approval routing before tab creation).
+
+    Why the durable pin and not availability: a refused fresh navigation saves
+    its actual transport in `pending_access_host`; a resumed/refused owned scope
+    also carries its host in the record. Availability cannot choose which jar
+    owes an approval, and never confers ownership of a foreign tab. `_surface_host_or_first` still handles the no-pin
+    case, so a session with no durable host keeps the availability order.
+    """
+    resource = getattr(getattr(context, "browser", None), "resource", None)
+    if resource is None:
+        return ""
+    try:
+        return resource.pinned_host()
+    except (AttributeError, RuntimeError):
+        return ""
+
+
 def _non_cmux_host_hint(*, ui: bool, bridge: bool) -> str:
     """Which non-cmux host to use, and how to reach it — ONE spelling.
 
@@ -20471,7 +20498,8 @@ def _backend_unavailable_result(tool_call_id: str, backend: str) -> ToolResult:
     remedy = {
         "ui": (
             "the Local Operator desktop app's browser tab is not reachable right now — "
-            "open a browser tab in the desktop app (or restart it), then retry"
+            "check Browser in the desktop app; if it offers Retry, use that safe startup action, "
+            "then retry this tool. A missing ready host does not mean the app is closed"
         ),
         "extension": (
             "the paired Local Operator browser extension is not reachable right now — "
@@ -20687,6 +20715,17 @@ async def _bridge_open(
             client=client,
         )
     if problem is not None:
+        resource = getattr(state, "resource", None)
+        if (
+            resource is not None
+            and created_new
+            and not adopting
+            and (problem.details or {}).get("error_code") == "origin_not_allowed"
+        ):
+            # An approval obligation exists even when no tab was minted. Keep
+            # its actual transport across recovery/resume; this is routing
+            # metadata, NOT a capability or permission grant.
+            resource.record["pending_access_host"] = prefix
         pending = (problem.details or {}).pop("cleanup_surface", "")
         if isinstance(pending, str) and NON_CMUX_SURFACE_HANDLE_RE.fullmatch(pending):
             state.surface_id = pending
@@ -20700,6 +20739,9 @@ async def _bridge_open(
             f"{_host_label(prefix)} opened a tab but returned no valid handle",
         )
     state.surface_id = surface
+    resource = getattr(state, "resource", None)
+    if resource is not None:
+        resource.record.pop("pending_access_host", None)
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
     # Name the host that actually served the open (§16.1): the caller must be
@@ -22785,6 +22827,20 @@ async def execute_browser(
         # and of the session's own RECORD first, which is the one answer a
         # resumed session has (see `_ownership_lane_host`).
         lane_host = await _ownership_lane_host(state, resource)
+        # A fresh explicit navigation must reconcile on the host it will dial,
+        # not the availability-first peer. Held/adopted capabilities still win;
+        # an unavailable or invalid hint is refused by the normal dispatcher.
+        hinted = str(args.get("backend", "")).strip().lower()
+        if (
+            str(args.get("action", "")).strip().lower() == "open"
+            and not state.surface_id
+            and not str(args.get("tab", "")).strip()
+            and not resource.pinned_host()
+        ):
+            if hinted == "extension" and await bridge_browser_reachable():
+                lane_host = HOST_BRIDGE_PREFIX
+            elif hinted == "ui" and await ui_browser_reachable():
+                lane_host = HOST_UI_PREFIX
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
@@ -22815,9 +22871,8 @@ async def execute_browser(
     async with resource.lock:
         try:
             resource.initialize()
-            if not resource.recovered:
-                await resource.recover()
-                state.surface_id = str(resource.record.get("surface_id", ""))
+            await resource.ensure_recovered()
+            state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
             # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
             # here used to render a recovery timeout as the bare daemon message
@@ -22945,6 +23000,8 @@ async def execute_browser(
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
+                if action == "cancel_access" and not result.is_error:
+                    resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
                 elif access_state and resource.record.get("retention") == "pending site approval":
@@ -23058,7 +23115,7 @@ async def _execute_browser(
     # permission model at all, so it degrades with the same typed error as
     # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
-        pinned = _host_of_surface(state.surface_id)
+        pinned = _host_of_surface(state.surface_id) or _pinned_host_for_access(context)
         if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,

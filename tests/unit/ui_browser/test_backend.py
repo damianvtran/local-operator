@@ -13,6 +13,7 @@ Two kinds of test here, deliberately separated:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -27,6 +28,7 @@ import pytest
 from local_operator.browser_bridge.backend import (
     BridgeError,
     BridgeUnreachable,
+    HostPreDeliveryFailure,
     format_error,
 )
 from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
@@ -242,6 +244,36 @@ async def test_modern_ui_never_replays_ambiguous_action_even_after_record_rotati
 
 
 @pytest.mark.asyncio
+async def test_call_once_refuses_when_the_shared_deadline_is_already_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR2: only the REMAINING allowance is passed into each stage.
+
+    The one monotonic deadline is shared across health, the initial delivery and
+    a pre-delivery rediscovery. `call_once` therefore refuses, without sending,
+    when the deadline it is handed is already in the past — which is what stops
+    a retry from receiving a fresh full budget (the defect CR2 names). Pinned
+    deterministically on the injected deadline rather than on wall-clock sleeps.
+    """
+    publish(tmp_path, instance_id="instance-a")
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        posts += 1
+        pytest.fail("a spent deadline must refuse before dispatch")
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    current = client._read()
+    assert current is not None
+    # A deadline in the past: remaining allowance is spent.
+    past = asyncio.get_running_loop().time() - 1.0
+    with pytest.raises((TimeoutError, BridgeUnreachable)):
+        await client.call_once(current, "open", {"url": "https://x.test"}, deadline=past)
+    assert posts == 0, "a spent shared deadline must refuse before any dispatch"
+
+
+@pytest.mark.asyncio
 async def test_modern_ui_changed_instance_never_sends_command_to_wrong_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -261,6 +293,147 @@ async def test_modern_ui_changed_instance_never_sends_command_to_wrong_process(
     with pytest.raises(BridgeUnreachable, match="no command was sent"):
         await client.call("open", {"url": "https://example.test"})
     assert posts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("beyond", [False, True])
+async def test_public_retry_is_clamped_to_the_shared_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, beyond: bool
+) -> None:
+    """CR2 at the PUBLIC entry, deterministically.
+
+    A pre-delivery refusal must re-enter the transport with the REMAINDER of one
+    deadline, never a renewed full budget; and when the allowance is spent the
+    rediscovery must dispatch NOTHING.
+
+    HOW IT IS DETERMINISTIC: this test does not sleep and does not mutate the real
+    event loop. It installs a proxy in place of `asyncio` in BOTH browser modules
+    whose `get_running_loop().time()` is the REAL time plus a controlled offset,
+    while `asyncio.timeout` delegates to the REAL `asyncio.timeout` (a generous
+    real outer budget that never fires). The offset therefore moves only the
+    module's own deadline ARITHMETIC — the thing under test — with no wall-clock
+    race.
+
+      * `beyond=False`: after the first 401 the record is rotated AND the offset
+        is advanced to leave a small remainder; the replacement attempt is
+        clamped to that remainder (its health and POST httpx timeouts are both
+        captured, and both are strictly smaller than the first attempt's).
+      * `beyond=True`: the offset is advanced PAST the deadline; the replacement
+        preflight computes a non-positive allowance and refuses — ZERO second
+        health/POST.
+    """
+    from local_operator.browser_bridge import backend as bridge_backend
+    from local_operator.ui_browser import backend as ui_backend
+
+    BUDGET = 10.0
+    state_box = {"offset": 0.0}
+
+    class _Clock:
+        def time(self) -> float:
+            return asyncio.get_running_loop().time() + state_box["offset"]
+
+        def __getattr__(self, name: str) -> Any:  # any other loop API is real
+            return getattr(asyncio.get_running_loop(), name)
+
+    class _AsyncioProxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(asyncio, name)
+
+        def get_running_loop(self) -> Any:
+            return _Clock()
+
+    proxy = _AsyncioProxy()
+    monkeypatch.setattr(ui_backend, "asyncio", proxy)
+    monkeypatch.setattr(bridge_backend, "asyncio", proxy)
+
+    publish(tmp_path, instance_id="instance-a")
+    gets = 0
+    posts = 0
+    timeouts: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gets, posts
+        if request.method == "GET":
+            gets += 1
+            cur = state.read(tmp_path)
+            assert cur is not None
+            return httpx.Response(
+                200, json={"host": "ui", "pid": cur.pid, "instance_id": cur.instance_id}
+            )
+        posts += 1
+        # Rotate the record on the FIRST delivery so the pre-delivery rediscovery
+        # is selected, and move the controlled clock:
+        if posts == 1:
+            publish(tmp_path, instance_id="instance-b")
+            state_box["offset"] = BUDGET + 1.0 if beyond else BUDGET - 1.0
+            return httpx.Response(401, json={})
+        body = json.loads(request.content)
+        return httpx.Response(
+            200, json={"id": body["id"], "ok": True, "result": {"replaced": True}}
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def fake_async_client(**kwargs: Any) -> httpx.AsyncClient:
+        timeouts.append(kwargs.get("timeout"))
+        kwargs["transport"] = httpx.MockTransport(handler)  # type: ignore[arg-type]
+        return real_async_client(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
+    client = backend.UiHostClient(tmp_path)
+    client.timeout_for = lambda method, params: BUDGET  # type: ignore[assignment]
+
+    if beyond:
+        with pytest.raises(BridgeUnreachable):
+            await client.call("open", {"url": "https://example.test"})
+        assert (gets, posts) == (1, 1), "a spent budget forbids a second health or POST"
+        assert len(timeouts) == 2
+        return
+    assert await client.call("open", {"url": "https://example.test"}) == {"replaced": True}
+    # Remainder case: attempt1 health + POST, then attempt2 health + POST.
+    assert (gets, posts) == (2, 2), "a changed-record pre-delivery refusal redispatches exactly once"
+    assert len(timeouts) == 4, "two attempts x (health, post)"
+    assert timeouts[2] > 0 and timeouts[3] > 0
+    assert timeouts[2] < timeouts[0] and timeouts[3] < timeouts[1], (
+        "the retry is clamped to the REMAINDER, never a renewed full budget"
+    )
+
+
+@pytest.mark.asyncio
+async def test_modern_ui_delayed_timeout_after_delivery_never_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An action that may have been DELIVERED, then a record rotation, then a
+    delay past the budget: exactly ONE dispatch, no replay.
+
+    Distinct from the immediate-transport-failure test above: here the POST is
+    accepted (a 200 arrives) but the response is DELAYED past the outer budget,
+    and the record rotates before the retry branch could run. The outer
+    `asyncio.timeout` must fire first and land as `BridgeUnreachable` with the
+    transport never sending a second request — the pre-delivery retry branch is
+    reachability to only a `HostPreDeliveryFailure`, which a post-send stall can
+    never produce.
+    """
+    publish(tmp_path, instance_id="instance-a")
+    posts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "GET":
+            return httpx.Response(
+                200, json={"host": "ui", "pid": os.getpid(), "instance_id": "instance-a"}
+            )
+        posts += 1
+        # A second incarnation is advertised while our request is in flight.
+        publish(tmp_path, instance_id="instance-b")
+        await asyncio.sleep(2.0)  # outlives the tiny budget below
+        return httpx.Response(200, json={"ok": True})
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    client.timeout_for = lambda method, params: 0.1  # type: ignore[assignment]
+    with pytest.raises(BridgeUnreachable):
+        await client.call("open", {"url": "https://example.test"})
+    assert posts == 1, "a possibly-delivered action is never replayed after a record rotation"
 
 
 # --- availability and the /health acquittal, against a real listener ----------

@@ -454,3 +454,52 @@ async def test_resumed_unleased_child_can_open_again_across_the_bridge(
         assert _control(protocol_peer)["tabs"] == 1
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_serialized_extension_refusals_reach_python_recovery(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """Real TS producer -> fixture JSON HTTP -> BridgeClient -> recover mapping.
+
+    A producer exception is not serialization proof. This existing protocol
+    peer uses in-memory Chrome, not a native/installed-extension acceptance rig.
+    """
+    from local_operator.browser_bridge.backend import BridgeClient, BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+    from local_operator.browser_bridge.resources import BrowserOwnershipError, BrowserResource
+
+    resource = BrowserResource(headless_tui_env / "sessions" / "wire-sid", "wire-sid")
+    resource.initialize()
+    client = BridgeClient(headless_tui_env)
+    owner = resource.params()
+    opened = await client.call("open", {**owner, "url": "https://example.test/"})
+    assert opened["tab"].startswith("bridge:")
+    for changed, marker, copy in (
+        ({"requester": "session:attacker", "resumed_scope": True}, "foreign", "different owner"),
+        ({"owner_generation": "unknown-g", "previous_generation": "", "previous_generations": [], "resumed_scope": True}, "stale", "generation is stale"),
+    ):
+        with pytest.raises(BridgeError) as wire:
+            await client.call("owner_recover", {**owner, **changed})
+        assert wire.value.code is ErrorCode.OWNER_REFUSED
+        assert wire.value.data["refusal"] == marker
+
+        class RefusalTransport:
+            async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+                return await client.call(method, {**params, **changed})
+
+        # Only transport selection is replaced; recovery gets an actual decoded
+        # HTTP envelope from the TS producer, never a synthesized BridgeError.
+        original_client = resource.client
+        resource.client = lambda: RefusalTransport()  # type: ignore[method-assign]
+        try:
+            with pytest.raises(BrowserOwnershipError, match=copy):
+                await resource.recover()
+        finally:
+            resource.client = original_client  # type: ignore[method-assign]
+    with pytest.raises(BridgeError) as wrong_tab:
+        await client.call("open", {**owner, "tab": "bridge:999:foreign", "url": "https://example.test/"})
+    assert wrong_tab.value.data["refusal"] == "foreign"
+    assert _control(protocol_peer)["tabs"] == 1
+    await client.call("owner_finish", {**owner, "outcome": "completed"})
+    assert _control(protocol_peer)["tabs"] == 0
