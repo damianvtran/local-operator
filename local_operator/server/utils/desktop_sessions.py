@@ -4109,7 +4109,7 @@ class DesktopSessionBridge:
                             rows.append({**descriptor, "journal_seq": seq})
                     # Keep an assistant's newly known coordinate with its exact
                     # source opening user's coordinate. Plain 128-row slicing
-                    # could put A in front of a held U (or split a pair at127).
+                    # could put A in front of a held U (or split a pair at 127).
                     # Only the signature-verified rows above may gain this
                     # dependency; the helper does no scan/authority promotion.
                     for batch in transcript_index.journal_order_correction_batches(index, rows):

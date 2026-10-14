@@ -2721,6 +2721,10 @@ def journal_order_correction_batches(
     # is not the run opener, but splitting its true coordinate behind A2 at a
     # frame boundary would repeat the race. This partitions only bounded INPUT
     # descriptors by exact source proof; it never selects a last user from history.
+    # Ordering user rows ahead of the others is deliberate: the viewer orders by
+    # the stored journal_seq, not by arrival, so this only matters for the ONE
+    # event boundary a flush can fall on — and the opener is re-prepended into
+    # each later event, so a split pair is still emitted user-first there too.
     users: list[dict[str, Any]] = []
     others: list[dict[str, Any]] = []
     for row in rows:
