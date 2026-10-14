@@ -244,6 +244,24 @@ def section_order() -> tuple[str, ...]:
     return ("agent", "team", "skill")
 
 
+def paint_order(rows: Sequence[LinkRow]) -> list[LinkRow]:
+    """The rows in the order the card PAINTS them: section, then name casefold.
+
+    ONE definition shared by the painter and the panel's selection index, so the
+    highlighted row, the window and the policy-write target can never disagree
+    (D27). The service snapshot is sorted ``(kind, name)`` — agent, skill, team —
+    which is NOT paint order, so the panel must normalise on install.
+    """
+
+    by_kind: dict[str, list[LinkRow]] = {kind: [] for kind in section_order()}
+    for row in rows:
+        by_kind.setdefault(row.kind, []).append(row)
+    ordered: list[LinkRow] = []
+    for kind in section_order():
+        ordered.extend(sorted(by_kind.get(kind, []), key=lambda r: r.name.casefold()))
+    return ordered
+
+
 def _section_title(kind: str) -> str:
     """A section heading's copy from the catalogue, never a literal."""
 
@@ -283,20 +301,17 @@ def render_rows(
         return [Text(_t(_k.state_loading()), style="dim")]
 
     lines: list[Text] = []
-    by_kind: dict[str, list[LinkRow]] = {kind: [] for kind in section_order()}
-    for row in rows:
-        by_kind.setdefault(row.kind, []).append(row)
+    # Paint from the SAME ordered list the panel indexes (D27): a header per
+    # non-empty section, its rows in paint order. One grouping rule, not two.
+    ordered = paint_order(rows)
+    last_kind: str | None = None
     index = 0
-    for kind in section_order():
-        group = by_kind.get(kind, [])
-        if not group:
-            continue
-        lines.append(Text(_section_title(kind), style="bold"))
-        for row in sorted(group, key=lambda r: r.name.casefold()):
-            lines.append(
-                _render_row(row, width, selected=(selected == index), tail_style=tail_style)
-            )
-            index += 1
+    for row in ordered:
+        if row.kind != last_kind:
+            lines.append(Text(_section_title(row.kind), style="bold"))
+            last_kind = row.kind
+        lines.append(_render_row(row, width, selected=(selected == index), tail_style=tail_style))
+        index += 1
     if not lines:
         lines.append(Text(_t(_k.state_empty()), style="dim"))
     return lines

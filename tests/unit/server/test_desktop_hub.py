@@ -341,11 +341,12 @@ async def _resolved_link_id(client: Any, root: Path) -> str:
     return resolved.json()["result"]["link"]["link_id"]
 
 
-def _seed_public_link(root: Path, *, recorded_by: str = "pull") -> str:
+def _seed_public_link(root: Path, *, lineage: str = "clean", recorded_by: str = "pull") -> str:
     """A CONFIRMED public link as a real pull + capability probe leaves it.
 
     Baseline record with a source-scoped remote revision and known scope, plus
     the persisted revision-CAS attestation — the facts ``_eligibility`` reads.
+    ``lineage``/``recorded_by`` are varied to exercise the earlier gates.
     """
 
     import dataclasses
@@ -363,7 +364,7 @@ def _seed_public_link(root: Path, *, recorded_by: str = "pull") -> str:
         record,
         identity=identity,
         remote_revision='"rev-1"',
-        lineage="clean",
+        lineage=lineage,
         scope_known=True,
         local_alias="coder",
     )
@@ -427,6 +428,23 @@ async def test_desktop_patch_refuses_when_an_earlier_gate_fails_even_with_consen
 
     client, root, _hub = api
     link_id = _seed_public_link(root, recorded_by="adopt-unknown")
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert not _grant_written(root, link_id)
+
+
+async def test_desktop_patch_refuses_mixed_lineage_with_consent(api):
+    """D34: a MIXED-LINEAGE public origin refuses even with confirm_public_egress."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, lineage="mixed-lineage")
     refused = await client.patch(
         f"/v1/desktop/hub/links/{link_id}",
         json=mutation(

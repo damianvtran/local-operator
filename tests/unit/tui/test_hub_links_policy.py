@@ -28,6 +28,7 @@ HUB = "https://api.radienthq.com/v1"
 def _seed_link(
     root: Path,
     *,
+    kind: str = "agent",
     local_id: str = "a1",
     name: str = "coder",
     visibility: str = "public",
@@ -38,10 +39,22 @@ def _seed_link(
 ) -> LinkIdentity:
     """A real baseline + status row so the inventory enumerates a link."""
 
-    identity = LinkIdentity("agent", local_id, HUB, visibility, tenant, f"h-{local_id}")
-    record = prov.make_record(
-        "agent", local_id, f"h-{local_id}", tenant, {"instructions": "x"}, "pull"
-    )
+    identity = LinkIdentity(kind, local_id, HUB, visibility, tenant, f"h-{local_id}")
+    # Skill baselines carry a full SkillDocument (its fingerprint covers the whole
+    # manifest), so a skill needs a valid one-file document, not free-form text.
+    fields: dict[str, Any]
+    if kind == "skill":
+        fields = {
+            "document_version": 1,
+            "name": name,
+            "description": "d",
+            "files": [
+                {"path": "SKILL.md", "content": f"---\nname: {name}\ndescription: d\n---\nbody\n"}
+            ],
+        }
+    else:
+        fields = {"instructions": "x"}
+    record = prov.make_record(kind, local_id, f"h-{local_id}", tenant, fields, "pull")
     record = dataclasses.replace(
         record, identity=identity, remote_revision='"rev-1"', lineage="clean", local_alias=name
     )
@@ -55,7 +68,8 @@ def _seed_link(
 
     def fold(doc: dict) -> None:
         item = doc.setdefault("items", {}).setdefault(
-            f"agent:{local_id}", st.blank_item("agent", local_id, name, f"h-{local_id}", tenant)
+            f"{kind}:{local_id}",
+            st.blank_item(kind, local_id, name, f"h-{local_id}", tenant),
         )
         item.update(state="up-to-date", error_class=None, last_checked_at="2026-10-14T00:00:00Z")
         if attest_revision_cas:
@@ -530,3 +544,175 @@ async def test_zero_spacing_burst_with_punctuation_never_writes(
     values = _policy_values(tmp_path, identity.link_id)
     assert values["auto_push"] is False, "a burst must not enable auto-push"
     assert values["subscribe"] is True, "a burst must not flip subscribe"
+
+
+@pytest.mark.asyncio
+async def test_highlighted_row_is_the_write_target_for_every_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D27: the HIGHLIGHTED row is exactly the row `s`/`a` writes, every index.
+
+    The service sorts links `(kind, name)` — agent, skill, team — while the card
+    paints agent, team, skill, and `selected_row`/`_selected` indexed `_rows`.
+    Left in service order, the highlight and the policy-write target disagreed by
+    kind. Rows are now normalised to paint order once, so the reverse-styled
+    name and the write TARGET (``selected_row``, which the toggles post) are the
+    same row at every index.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # Mixed kinds with names that force a DIFFERENT order under (kind,name) vs
+    # paint order: an agent, a skill, a team, and a second agent.
+    _seed_link(tmp_path, kind="team", local_id="t1", name="crew", tenant="acme", visibility="org")
+    _seed_link(tmp_path, kind="skill", local_id="s1", name="deploy")
+    _seed_link(tmp_path, kind="agent", local_id="a1", name="coder")
+    _seed_link(tmp_path, kind="agent", local_id="a2", name="auditor")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = app._hub_links_panel()
+        expected = ["auditor", "coder", "crew", "deploy"]  # agent, agent, team, skill
+        for index in range(4):
+            panel._selected = index
+            panel._repaint()
+            await pilot.pause()
+            row = panel.selected_row
+            assert (
+                row is not None and row.name == expected[index]
+            ), f"row at index {index} is {row and row.name!r}, expected {expected[index]!r}"
+            # The painted highlight (reverse ink) must be THIS row's name — the
+            # exact row the toggle writes, since the toggles post selected_row.
+            painted = _highlighted_names(app)
+            assert (
+                row.name in painted
+            ), f"the highlighted rows {painted!r} do not include the selected {row.name!r}"
+
+
+def _highlighted_names(app: Any) -> list[str]:
+    """The names painted with the row-ink REVERSE style (the highlight).
+
+    ``render_strips`` splits a line into SEGMENTS (the boot-layout precedent);
+    the selected row's name carries ``reverse`` in its resolved style.
+    """
+
+    names: list[str] = []
+    for strip in app.screen._compositor.render_strips():
+        for segment in strip._segments:
+            if getattr(segment.style, "reverse", False) and segment.text.strip(" ·"):
+                names.append(segment.text.strip(" ·"))
+    return names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["tab", "shift+tab"])
+async def test_tab_never_strands_the_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """D29: tab/shift+tab must not move focus off the card while it is open.
+
+    Left unhandled, tab moved focus to the TranscriptView, stranding the overlay
+    OPEN but UNFOCUSED: `esc`/`q` no longer reached it and typed letters landed
+    in the composer UNDER the card. The panel now consumes them.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_link(tmp_path, visibility="org", tenant="acme")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = app._hub_links_panel()
+        await pilot.press(key)
+        await pilot.pause()
+        assert panel.is_open, "tab must not close the overlay"
+        assert panel.has_focus, "tab must not move focus off the open overlay"
+        # esc still closes it (focus was retained).
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not panel.is_open, "esc must still close the overlay after tab"
+
+
+@pytest.mark.asyncio
+async def test_non_printable_burst_key_does_not_engage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D30: a non-printable burst key that the panel does NOT bind must not engage.
+
+    `enter`/ctrl/F-keys are not panel commands, so a burst like `h`,enter,`a`
+    must not engage the panel and then let `a` write private auto-push.
+    """
+
+    from textual import events
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="org", tenant="acme", attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        # Zero-spacing burst: `h`, enter, `a` — enter is NOT a panel binding.
+        for ev in (events.Key("h", "h"), events.Key("enter", None), events.Key("a", "a")):
+            panel.on_key(ev)
+        await pilot.pause()
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["auto_push"] is False, "a non-printable burst key must not engage"
+
+
+@pytest.mark.asyncio
+async def test_card_never_overlaps_the_dock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D28: the painted card's bottom edge never reaches a docked surface.
+
+    Round-3's N3 header pull-back added a line AFTER the budget was spent, so a
+    header-adorned window could paint one row past the screen and cover the
+    composer. Swept here at the sizes the finding named.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for i in range(8):
+        _seed_link(tmp_path, local_id=f"a{i}", name=f"agent-{i}", subscribe=True)
+    for size in ((100, 24), (80, 24), (100, 30)):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app.action_hub_links()
+            await pilot.pause()
+            await pilot.pause()
+            panel = app._hub_links_panel()
+            panel._selected = 7
+            panel._repaint()
+            await pilot.pause()
+            bottom = panel.region.y + panel.region.height
+            assert bottom <= panel.screen.size.height, (size, panel.region, panel.screen.size)
+
+
+@pytest.mark.asyncio
+async def test_mid_section_window_keeps_its_section_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D35: a window opening mid-section still shows the section title."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # 8 agents then 8 skills; select the last skill so the window opens in Skills.
+    for i in range(8):
+        _seed_link(tmp_path, kind="agent", local_id=f"a{i}", name=f"agent-{i}", subscribe=True)
+    for i in range(8):
+        _seed_link(tmp_path, kind="skill", local_id=f"s{i}", name=f"skill-{i}", subscribe=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await pilot.pause()
+        app.action_hub_links()
+        await pilot.pause()
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        panel._selected = 15
+        panel._repaint()
+        await pilot.pause()
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Skills" in painted, painted
+        assert "skill-7" in painted, painted

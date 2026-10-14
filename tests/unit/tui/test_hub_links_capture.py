@@ -56,6 +56,7 @@ if "LOCAL_OPERATOR_SCRATCHPAD" not in os.environ:  # pragma: no cover - env guar
 def _seed_link(
     root: Path,
     *,
+    kind: str = "agent",
     local_id: str,
     name: str,
     visibility: str,
@@ -67,10 +68,21 @@ def _seed_link(
     attest_revision_cas: bool = False,
 ) -> LinkIdentity:
     """Write a real baseline + status row so the inventory enumerates it as a link."""
-    identity = LinkIdentity("agent", local_id, HUB, visibility, tenant, f"h-{local_id}")
-    record = prov.make_record(
-        "agent", local_id, f"h-{local_id}", tenant, {"instructions": "x"}, "pull"
-    )
+    identity = LinkIdentity(kind, local_id, HUB, visibility, tenant, f"h-{local_id}")
+    # A skill baseline carries a full SkillDocument (its fingerprint covers the
+    # manifest), so a skill row needs a valid one-file document.
+    if kind == "skill":
+        fields: dict[str, Any] = {
+            "document_version": 1,
+            "name": name,
+            "description": "d",
+            "files": [
+                {"path": "SKILL.md", "content": f"---\nname: {name}\ndescription: d\n---\nbody\n"}
+            ],
+        }
+    else:
+        fields = {"instructions": "x"}
+    record = prov.make_record(kind, local_id, f"h-{local_id}", tenant, fields, "pull")
     import dataclasses
 
     record = dataclasses.replace(
@@ -89,7 +101,7 @@ def _seed_link(
 
     def fold(doc: dict) -> None:
         item = doc.setdefault("items", {}).setdefault(
-            f"agent:{local_id}", st.blank_item("agent", local_id, name, f"h-{local_id}", tenant)
+            f"{kind}:{local_id}", st.blank_item(kind, local_id, name, f"h-{local_id}", tenant)
         )
         item.update(state=state, error_class=error, last_checked_at="2026-10-14T00:00:00Z")
         if attest_revision_cas:
@@ -181,6 +193,29 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 panel = app._hub_links_panel()
                 if panel is not None:
                     panel._selected = max(0, len(panel._rows) - 1)
+                    panel._repaint()
+                await pilot.pause()
+            elif contact_sheet == "tab-esc":
+                # D29: press tab then esc — the overlay must be closed (tab did
+                # not strand it open-but-unfocused), so this frame shows the
+                # transcript, proving the panel released focus and dismissed.
+                app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.press("tab")
+                await pilot.pause()
+                await pilot.press("escape")
+                await pilot.pause()
+            elif contact_sheet and contact_sheet.startswith("select-index:"):
+                # D27/D35: open the overlay and select an EXPLICIT index, so a
+                # frame can show the highlight on a chosen kind or a mid-section
+                # window that must still carry its section title.
+                app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
+                panel = app._hub_links_panel()
+                if panel is not None:
+                    panel._selected = int(contact_sheet.split(":", 1)[1])
                     panel._repaint()
                 await pilot.pause()
             else:
@@ -696,3 +731,153 @@ async def test_capture_round4_frames(tmp_path: Path, monkeypatch: pytest.MonkeyP
     for name in ("consent-16links-80x24", "selection-last-16links", "consent-3links-40x24"):
         svg = OUT / f"{name}.svg"
         assert svg.exists() and "<svg" in svg.read_text()[:200], name
+
+
+async def test_capture_round5_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frames round-5 design review asked for (D27/D28/D29/D32/D35).
+
+    * a mixed-kind frame with the highlight on EACH kind (agent/team/skill);
+    * consent at 100x30 (composer visible, no overlap);
+    * 16 links at 100x30 (no dock overlap);
+    * the mid-section window state carrying its section title (D35).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    mixed = [
+        dict(
+            kind="agent",
+            local_id="a1",
+            name="coder",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        ),
+        dict(
+            kind="team",
+            local_id="t1",
+            name="crew",
+            visibility="org",
+            tenant="acme",
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        ),
+        dict(
+            kind="skill",
+            local_id="s1",
+            name="deploy",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        ),
+    ]
+    # D27: the highlight on each kind (indices 0,1,2 in paint order).
+    for idx, kind in enumerate(("agent", "team", "skill")):
+        await _capture(
+            f"mixed-highlight-{kind}",
+            size=(100, 30),
+            contact_sheet=f"select-index:{idx}",
+            links=mixed,
+        )
+    # D22/D28: consent at 100x30 (composer on screen, no overlap).
+    await _capture(
+        "consent-100x30",
+        size=(100, 30),
+        contact_sheet="consent",
+        links=[{**mixed[0], "attest_revision_cas": True}],
+    )
+    # D28: 16 links at 100x30 (no dock overlap).
+    sixteen = [
+        dict(
+            local_id=f"a{i:02d}",
+            name=f"agent-{i:02d}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        for i in range(16)
+    ]
+    await _capture("many-16links-100x30", size=(100, 30), links=sixteen)
+    # D35: a mid-section window (8 agents + 8 skills, select the last skill).
+    mixed_many = [
+        dict(
+            kind="agent",
+            local_id=f"a{i}",
+            name=f"agent-{i}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        for i in range(8)
+    ] + [
+        dict(
+            kind="skill",
+            local_id=f"s{i}",
+            name=f"skill-{i}",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        for i in range(8)
+    ]
+    await _capture(
+        "mid-section-skills",
+        size=(60, 20),
+        contact_sheet="select-index:15",
+        links=mixed_many,
+    )
+
+    for name in (
+        "mixed-highlight-agent",
+        "mixed-highlight-team",
+        "mixed-highlight-skill",
+        "consent-100x30",
+        "many-16links-100x30",
+        "mid-section-skills",
+    ):
+        svg = OUT / f"{name}.svg"
+        assert svg.exists() and "<svg" in svg.read_text()[:200], name
+
+
+async def test_capture_tab_esc_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D29 frame: tab then esc leaves the overlay CLOSED (not stranded)."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+    await _capture(
+        "tab-then-esc",
+        size=(100, 30),
+        contact_sheet="tab-esc",
+        links=[
+            dict(
+                kind="agent",
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
+    svg = OUT / "tab-then-esc.svg"
+    assert svg.exists() and "<svg" in svg.read_text()[:200]

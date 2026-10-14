@@ -47,6 +47,11 @@ CONFIRM_EGRESS_KEY = "ctrl+y"
 #: produces arrives within ~200 ms of the open.
 TYPED_AHEAD_WINDOW_S = 0.2
 
+#: Tab / shift+tab are consumed by the panel (round-5 D29): they would otherwise
+#: move focus OFF the card, stranding the overlay open but unfocused so `esc`/`q`
+#: no longer reach it and typed text lands in the composer UNDER the card.
+FOCUS_ESCAPE_KEYS: frozenset[str] = frozenset({"tab", "shift+tab"})
+
 
 def _humanize_reason(reason: str) -> str:
     """Turn a service eligibility code into readable text for a human.
@@ -191,6 +196,7 @@ class HubLinksPanel(Static):
         self._loading = True
         self._refreshing = False
         self._error = ""
+        self._notice = ""
         self._engaged = False
         self._opened_at = time.monotonic()
         # A re-fetch can change the revision under an armed prompt; drop it so a
@@ -201,8 +207,18 @@ class HubLinksPanel(Static):
         self._repaint()
 
     def show_links(self, snapshot: Mapping[str, Any]) -> None:
-        """Install a finished inventory; keep the reader's place across a refresh."""
-        self._rows = core.rows_from_snapshot(snapshot)
+        """Install a finished inventory; keep the reader's place across a refresh.
+
+        D27: rows are sorted into PAINT order ONCE here (section_order, then
+        name casefold) — the SAME order ``core.render_rows`` paints. The SERVICE
+        snapshot is sorted ``(kind, name)`` (agent, skill, team), while the card
+        paints agent, team, skill; leaving ``_rows`` in service order made
+        ``_selected``, the highlight, the window and the policy-write target
+        disagree (the highlighted row was not the row `a`/`s` wrote). One order
+        for every index is the fix.
+        """
+
+        self._rows = core.paint_order(core.rows_from_snapshot(snapshot))
         self._loading = False
         self._refreshing = False
         self._error = ""
@@ -233,6 +249,7 @@ class HubLinksPanel(Static):
         self._loading = False
         self._refreshing = False
         self._offset = 0
+        self._notice = ""
         self._consent_link_id = None
         self._consent_revision = None
         self._engaged = False
@@ -275,6 +292,15 @@ class HubLinksPanel(Static):
         import time
 
         key = event.key
+        # D29: consume tab/shift+tab so focus cannot leave the card while it is
+        # open. Left unhandled they move focus to the TranscriptView, stranding
+        # the overlay open-but-unfocused: `esc`/`q` no longer reach the panel and
+        # typed letters go to the composer UNDER the card. Consuming them keeps
+        # the card the focus owner for its whole lifetime.
+        if key in FOCUS_ESCAPE_KEYS:
+            event.stop()
+            event.prevent_default()
+            return
         # A key is TYPED TEXT iff it produced a printable CHARACTER. Textual NAMES
         # non-alphanumeric printables (`space`, `comma`, `full_stop`), so `key` is
         # multi-char for exactly the characters a burst is full of — classifying on
@@ -289,8 +315,11 @@ class HubLinksPanel(Static):
                 event.stop()
                 return
             self._engaged = True  # the burst settled; this keystroke is intent
-        elif not printable:
-            # A navigation/action/control key is deliberate intent.
+        elif not printable and key in {binding[0] for binding in self.BINDINGS}:
+            # D30: engage only on a key the panel BINDS (its BINDINGS is the one
+            # source of truth). `enter`, ctrl chords and F-keys are not panel
+            # commands, so they must not count as intent — otherwise a burst like
+            # `h`,enter,`a` engages and `a` writes policy.
             self._engaged = True
         # 2. Disarm an armed consent on any key but the confirm itself.
         if self._consent_link_id is not None and key != CONFIRM_EGRESS_KEY:
@@ -446,27 +475,37 @@ class HubLinksPanel(Static):
         chrome = CHROME_ROWS + CARD_PADDING_ROWS + consent_lines + 1  # +1 hint row
         return max(1, min(MAX_BODY_ROWS, available - chrome))
 
-    def _plan_window(self, body: list[Text], budget: int) -> tuple[int, int]:
-        """The inclusive ``[lo, hi]`` range of body ENTRIES to paint.
+    def _plan_window(self, body: list[Text], budget: int) -> tuple[int, int, int | None]:
+        """The inclusive entry range ``[lo, hi]`` to paint, plus a sticky header.
 
-        Budgeted in PHYSICAL LINES, and it ALWAYS contains the selection and
-        NEVER orphans a row from its section header (round-3 N3, round-4 D21).
-        The round-3 N3 fix pulled the header back in AFTER the line budget was
-        spent, so at exactly the cap the last entry — the selection — fell off
-        the window. Here the header is reserved against the budget BEFORE the
-        selection's neighbours are admitted, so expanding and painting agree.
+        Budgeted in PHYSICAL LINES; it ALWAYS contains the selection (D21) and
+        NEVER exceeds ``budget`` (D28: round-3's N3 header pull-back added a line
+        AFTER the budget was spent, so a header-adorned window could paint one
+        row past the screen and cover the dock). The header reservation is
+        therefore applied BEFORE the final bounds, not after.
+
+        Returns ``(lo, hi, sticky)`` where ``sticky`` is the index of a section
+        HEADER to paint as the FIRST line when the window opens mid-section (D35:
+        team/skill rows used to appear with no section title). The sticky line is
+        counted against the budget, so a full budget drops the last entry rather
+        than overflow.
         """
 
         counts = [_entry_lines(entry) for entry in body]
         if not counts:
-            return (0, -1)
-        selected = self._painted_index()
-        if not (0 <= selected < len(counts)):
+            return (0, -1, None)
+        # ``_selected`` indexes LINK rows (what render_rows paints and what the
+        # write uses); ``body`` interleaves section HEADERS, so map link-index ->
+        # body-index by counting non-headers. With ``_rows`` in paint order the
+        # mapping is monotonic, so the window, the highlight and the write target
+        # are all the same index (D27).
+        selected = self._body_index_for(self._selected, body)
+        if selected is None:
             selected = 0
         lo = hi = selected
         used = counts[selected]
-        # If the selection's own header sits just above, reserve its line first
-        # so it rides in with the row (N3) and cannot crowd the selection out.
+        # Reserve the selection's OWN header first (N3), so it rides in with the
+        # row and cannot crowd the selection out of a spent budget.
         if lo > 0 and self._is_header(body[lo - 1]):
             lo -= 1
             used += counts[lo]
@@ -481,15 +520,66 @@ class HubLinksPanel(Static):
             if lo - 1 >= 0 and self._is_header(body[lo - 1]) and used + counts[lo - 1] <= budget:
                 lo -= 1
                 used += counts[lo]
-        # N3: if the entry just above the window is a header, include it too.
-        if lo > 0 and self._is_header(body[lo - 1]):
+        # N3: if the entry just above the window is a header, include it IF the
+        # budget allows (never overflow).
+        if lo > 0 and self._is_header(body[lo - 1]) and used + counts[lo - 1] <= budget:
             lo -= 1
-        return (lo, hi)
+            used += counts[lo]
+        # D35 STICKY HEADER: if the window still opens mid-section, remember the
+        # section header to paint AS the first line (it is not in the range, so
+        # the caller counts its line against the budget and drops the last entry
+        # to pay for it).
+        sticky: int | None = None
+        if lo > 0 and not self._is_header(body[lo]):
+            for i in range(lo - 1, -1, -1):
+                if self._is_header(body[i]):
+                    sticky = i
+                    break
+        # D28: pay for the sticky line INSIDE the budget by trimming a NON-SELECTED
+        # entry's tail/head, so the painted total (sticky + entries) never exceeds
+        # ``budget`` and the card cannot reach the dock. The selection is ALWAYS
+        # preserved: prefer the far tail, then the head, and only drop the sticky
+        # line if nothing else can go.
+        if sticky is not None:
+            while used + 1 > budget and (hi > selected or lo < selected):
+                if hi > selected:
+                    used -= counts[hi]
+                    hi -= 1
+                elif lo < selected:
+                    used -= counts[lo]
+                    lo += 1
+            if used + 1 > budget:
+                # Even the selection alone plus the header exceeds a tiny budget;
+                # drop the sticky line rather than overflow. A row without its
+                # section is worse than a covered dock only on a 1-row screen.
+                sticky = None
+        return (lo, hi, sticky)
 
-    def _windowed_lines(self, body: list[Text], lo: int, hi: int) -> list[Text]:
-        """The physical lines of body entries ``[lo, hi]`` inclusive."""
+    @staticmethod
+    def _body_index_for(link_index: int, body: list[Text]) -> int | None:
+        """Map a LINK index to its BODY entry index (skipping section headers)."""
+
+        seen = 0
+        for i, entry in enumerate(body):
+            if HubLinksPanel._is_header(entry):
+                continue
+            if seen == link_index:
+                return i
+            seen += 1
+        return None
+
+    def _windowed_lines(
+        self, body: list[Text], lo: int, hi: int, sticky: int | None = None
+    ) -> list[Text]:
+        """The physical lines of body entries ``[lo, hi]``, with a sticky title.
+
+        When ``sticky`` is set (D35) the section header at that index is painted
+        FIRST — the section title a mid-section window would otherwise omit.
+        """
 
         lines: list[Text] = []
+        if sticky is not None:
+            lines.append(body[sticky])
         for entry in body[lo : hi + 1]:
             lines.extend(_entry_lines_text(entry))
         return lines
@@ -499,30 +589,6 @@ class HubLinksPanel(Static):
         """Whether a body entry is a section HEADER (render_rows shows them bold)."""
 
         return str(entry.style) == "bold"
-
-    def _painted_index(self) -> int:
-        """The body row the SELECTED link paints on (headers included).
-
-        Mirrors ``core.render_rows``' own ordering — sections in
-        :func:`core.section_order`, headers only for non-empty sections, rows
-        sorted by name — so the window and the paint cannot disagree about where
-        the selection sits.
-        """
-
-        by_kind: dict[str, list[core.LinkRow]] = {}
-        for row in self._rows:
-            by_kind.setdefault(row.kind, []).append(row)
-        painted = 0
-        for kind in core.section_order():
-            group = by_kind.get(kind, [])
-            if not group:
-                continue
-            painted += 1  # the section header
-            for row in sorted(group, key=lambda r: r.name.casefold()):
-                if row is self.selected_row:
-                    return painted
-                painted += 1
-        return max(0, painted - 1)
 
     def _content_width(self) -> int:
         """The width rows are COMPOSED to: the card width less its padding.
@@ -560,11 +626,12 @@ class HubLinksPanel(Static):
                 tail_style=self._tail_style(),
             )
         # WINDOW the body around the selection, in PHYSICAL LINES and within the
-        # SCREEN-derived budget (round-2 D8, round-4 D21/D22), so an entry past
-        # the cap is reachable, the selection is ALWAYS painted, and a wrapped
-        # list never runs off the bottom edge.
-        lo, hi = self._plan_window(body, budget)
-        visible = self._windowed_lines(body, lo, hi)
+        # SCREEN-derived budget (round-2 D8, round-4 D21/D22, round-5 D28/D35), so
+        # an entry past the cap is reachable, the selection is ALWAYS painted, a
+        # mid-section window carries its section title, and the painted total
+        # never exceeds the budget (so the card cannot reach the dock).
+        lo, hi, sticky = self._plan_window(body, budget)
+        visible = self._windowed_lines(body, lo, hi, sticky)
         whole = lo == 0 and (hi == len(body) - 1)
         first_link, last_link = self._visible_link_range(body, lo, hi)
         lines = [self._title()]
@@ -649,13 +716,21 @@ class HubLinksPanel(Static):
             _t(_k.confirm_keys(confirm=_t(_k.hint_confirm()), cancel=_t(_k.hint_cancel()))),
             style=warn,
         )
-        # D26: the escape route when a terminal swallows a control chord. Kept a
-        # SEPARATE paragraph and only when it fits the width unwrapped, so it can
-        # never break the D22 height budget or wrap the keys line.
+        # D26/D32: the escape route when a terminal swallows a control chord. The
+        # copy names the CLI verb and the `<id>` placeholder with
+        # `--auto-push true --confirm-public-egress` (round-5 D32: without the id
+        # the old copy was a dead end). A real id is a 64-char sha256, so a
+        # runnable line never fits; the id is shown on its OWN line so the
+        # command is completable by hand. Kept SEPARATE paragraphs and each
+        # emitted only when it fits unwrapped, so they can never break the D22
+        # height budget or wrap the keys line.
         paras = [lead, body, keys]
         alt = _t(_k.confirm_alt())
         if cell_len(alt) <= width:
             paras.append(Text(alt, style=warn))
+            id_line = _t(_k.confirm_id(id=(row.link_id or row.local_id)))
+            if cell_len(id_line) <= width:
+                paras.append(Text(id_line, style=warn))
         # Wrap each paragraph to the content width; every produced line is a
         # real painted line, so the caller's height sum stays honest.
         out: list[Text] = []

@@ -412,3 +412,13 @@ def test_cli_refuses_when_an_earlier_gate_fails_even_with_consent(rig, capsys) -
     assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
     assert "not eligible for this origin" in capsys.readouterr().out
     assert not _grant_written(root, link_id)
+
+
+def test_cli_refuses_mixed_lineage_with_consent(rig, capsys) -> None:
+    """D34: a MIXED-LINEAGE public origin refuses even with --confirm-public-egress."""
+
+    root, _hub, _agents = rig
+    link_id = _seed_public_link(root, lineage="mixed-lineage")
+    assert _set(root, link_id, auto_push=True, confirm_public_egress=True) == 1
+    assert "not eligible for this origin" in capsys.readouterr().out
+    assert not _grant_written(root, link_id)

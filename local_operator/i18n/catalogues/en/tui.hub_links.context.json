@@ -237,11 +237,16 @@
   "tui.hub_links.confirm.alt": {
     "role": "escape route",
     "tone": "plain, precise",
-    "note": "A command-line fallback shown only when it fits unwrapped, for terminals that swallow ctrl+y. Names the CLI verb and its confirm flag; no secrets."
+    "note": "A command-line fallback shown only when it fits unwrapped, for terminals that swallow ctrl+y. Names the CLI verb, the <id> placeholder and --auto-push true --confirm-public-egress; the real id is shown on the next line so the command is completable. No secrets."
   },
   "tui.hub_links.refusal.revision_moved": {
     "role": "refusal message",
     "tone": "plain, precise",
     "note": "Shown when the armed consent's policy revision differs from the row at confirm time; the user is confirming a value they never saw, so nothing is written."
+  },
+  "tui.hub_links.confirm.id": {
+    "role": "link identifier",
+    "tone": "plain, precise",
+    "note": "The 64-char link id, shown so the escape-route command can be completed by hand; an opaque identifier, not a secret."
   }
 }

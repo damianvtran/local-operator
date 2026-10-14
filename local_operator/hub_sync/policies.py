@@ -129,8 +129,14 @@ def update_policy(
 
     ``can_enable_auto_push`` is a service attestation, not a request field. It
     must never be derived from preview pin existence or user-supplied scope.
-    Existing ON may remain paused when eligibility changes; turning it OFF or
-    changing Subscribe does not require a working hub/model connection.
+    ``ineligible_reason`` MUST be the SERVICE-computed eligibility reason read
+    from the inventory (``row["eligibility"]["reason"]``), never a caller's free
+    string: the public-consent carve-out below keys on
+    ``ineligible_reason == "unsafe-publication"``, and a caller that could name
+    its own reason could bypass an earlier gate. Treat both as typed attestations
+    from :func:`hub_sync.service._eligibility`. Existing ON may remain paused when
+    eligibility changes; turning it OFF or changing Subscribe does not require a
+    working hub/model connection.
     """
     from local_operator import settings_io
 
