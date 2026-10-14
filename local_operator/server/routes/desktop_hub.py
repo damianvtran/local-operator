@@ -67,6 +67,14 @@ class HubApply(Input):
     replace: Literal["remote", "local"] | None = None
     confirm_replace: bool = False
     dry_run: bool = False
+    #: SOURCE-RESOLUTION ARM. ``resolve_source: true`` is the explicit act that
+    #: confirms source+scope for a legacy unknown-origin link and materializes its
+    #: immutable identity + guarded baseline. It is mutually exclusive with the
+    #: merge arms above and never runs implicitly.
+    resolve_source: bool = False
+    hub_source: str | None = None
+    visibility: Literal["public", "org"] | None = None
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class HubApplyAll(Input):
@@ -197,6 +205,61 @@ async def apply(
     """Apply ONE item (click-to-update). ``dry_run`` previews without writing."""
 
     from local_operator.hub_sync import service as svc
+
+    if body.resolve_source:
+        # Mutually exclusive with the merge arms: this arm writes identity/scope
+        # metadata only and never merges content.
+        if body.prefer or body.replace or body.dry_run:
+            raise _refusal(422, "resolve_source cannot be combined with prefer/replace/dry_run")
+        if not body.hub_source or not body.visibility:
+            raise _refusal(422, "resolve_source needs hub_source and visibility")
+        if body.visibility == "org" and not body.tenant_id:
+            raise _refusal(422, "an org source resolution needs tenant_id")
+        if body.visibility == "public" and body.tenant_id:
+            raise _refusal(422, "a public source resolution must not name an organization")
+
+        def resolve_work(ctx: Any) -> dict[str, Any]:
+            from local_operator.clients.radient import configured_radient_base_url
+            from local_operator.hub_sync.identity import LinkError as _IdentityError
+            from local_operator.hub_sync.identity import approve_source
+
+            # The supplied source must match the ONE configured credential-free
+            # base -- never an arbitrary URL gaining credential egress.
+            approved = (configured_radient_base_url(ctx.config_manager),)
+            try:
+                source = approve_source(body.hub_source, approved)
+            except _IdentityError as error:
+                raise _refusal(422, str(error)) from None
+            if ctx.credential == "none":
+                raise _refusal(401, "no hub credential is configured for this destination")
+            record = svc.resolve_source(
+                ctx,
+                kind=body.kind,
+                name=body.name,
+                hub_source=source,
+                visibility=body.visibility,
+                tenant_id=body.tenant_id,
+            )
+            return {
+                "link": record.identity.to_json(),
+                "resolved": {
+                    "source": record.identity.hub_source,
+                    "visibility": record.identity.visibility,
+                    "tenant_id": record.identity.tenant_id,
+                    "baseline": record.recorded_by,
+                    "scope_known": record.scope_known,
+                },
+            }
+
+        async def resolve_mutate() -> dict[str, Any]:
+            return await _run(request, config_manager, provider_auth_store, resolve_work)
+
+        async with errors(request):
+            return reply(
+                await receipts(request).run(
+                    "hub-resolve:" + body.request_id, body.model_dump(), resolve_mutate
+                )
+            )
 
     if body.replace and not body.confirm_replace:
         raise _refusal(

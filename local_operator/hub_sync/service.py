@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import store as st
+from local_operator.hub_sync.identity import LinkIdentity
 from local_operator.hub_sync.merge import (
     FieldInput,
     MergeOptions,
@@ -245,6 +246,74 @@ def _adopt_if_equal(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
         prov.write_baseline(ctx.config_dir, record)
     except (prov.BaselineError, OSError):
         logger.debug("could not adopt baseline for %s %s", c.kind, c.local_id, exc_info=True)
+
+
+def resolve_source(
+    ctx: HubSyncContext,
+    *,
+    kind: str,
+    name: str,
+    hub_source: str,
+    visibility: str,
+    tenant_id: str | None,
+) -> prov.BaselineRecord:
+    """Confirm SOURCE+SCOPE for an unknown-origin (legacy) linked item.
+
+    The adopt paths elsewhere materialize a baseline only when the texts agree;
+    a legacy row that carries a hub id but no recorded source/scope is otherwise
+    stuck at "unknown baseline" forever. This arm is the explicit act that
+    resolves it: it names the destination source+scope, validates it against the
+    configured credential-free bases the caller already vouches for (the route
+    only supplies a registered source), and materializes the immutable identity
+    plus a guarded baseline.
+
+    Refusals are the point: a known scope that differs (Public vs another Org),
+    or a differing hub id, is refused with ``origin-conflict`` and the prior
+    bytes are left untouched -- this route can never silently relink an artifact
+    or invent a ``link_id``. The real ``link_id`` comes only from the canonical
+    identity tuple (``LinkIdentity.link_id``).
+    """
+    from local_operator.agents import hub_origin
+
+    registry = ctx.agents() if kind == "agent" else ctx.teams()
+    if kind == "agent":
+        row = registry.get_agent_by_name(name)
+        hub_id = hub_origin(row) if row is not None else None
+        local_id = str(row.id) if row is not None else None
+        fields = _local_fields_for(ctx, kind, row)
+    else:
+        row = registry.get_team_by_name(name)
+        local_id = str(row.id) if row is not None else None
+        # A team's remote id lives in its baseline record (a linked team HAS one),
+        # never on the row itself.
+        linked = (
+            prov.read_baseline(ctx.config_dir, kind, local_id) if local_id is not None else None
+        )
+        hub_id = linked.hub_id if linked is not None else None
+        fields = _local_fields_for(ctx, kind, row)
+    if row is None or hub_id is None or local_id is None:
+        raise LookupError(f"no linked {kind} named {name!r}")
+
+    identity = LinkIdentity(kind, local_id, hub_source, visibility, tenant_id, hub_id)
+    existing = prov.read_baseline(ctx.config_dir, kind, local_id)
+    if existing is not None and existing.identity is not None:
+        # One writable origin per artifact: a differing source/scope/remote id
+        # refuses here rather than relinking, and the old record is untouched.
+        existing.identity.require_same_origin(identity)
+    record = prov.make_record(kind, local_id, hub_id, tenant_id, fields, "adopt-unknown")
+    record = replace(record, identity=identity, scope_known=True, lineage="unknown")
+    prov.write_baseline(ctx.config_dir, record)
+    return record
+
+
+def _local_fields_for(ctx: HubSyncContext, kind: str, row: Any) -> Mapping[str, Any]:
+    """The LOCAL fields a baseline records, matching the check/merge field maps."""
+    if kind == "agent":
+        return {
+            "instructions": ctx.agents().get_agent_system_prompt(row.id) or "",
+            "description": str(row.description or ""),
+        }
+    return chk.team_fields_of(row)
 
 
 def check_items(

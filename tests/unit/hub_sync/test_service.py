@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -592,3 +593,54 @@ def test_team_label_and_aliases_survive_a_hub_sync_apply(env) -> None:
     assert after.description == "new d"
     assert after.label == "Release Display"
     assert after.aliases == ["rel"]
+
+
+def test_resolve_source_materializes_identity_and_preserves_scope(env) -> None:
+    """The resolve arm confirms SOURCE+SCOPE and refuses a differing known scope."""
+    ctx, hub, agents, teams, root = env
+    stamped = _pull_agent(agents, hub, root)
+    # Drop the identity so the row is a LEGACY unknown-origin link (hub id only).
+    record = prov.read_baseline(root, "agent", stamped.id)
+    prov.write_baseline(root, dataclasses.replace(record, identity=None, scope_known=True))
+
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=stamped.name,
+        hub_source="https://hub.example.com/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.identity is not None
+    assert resolved.identity.visibility == "public"
+    assert resolved.scope_known is True
+    assert (
+        prov.read_baseline(root, "agent", stamped.id).identity.link_id == resolved.identity.link_id
+    )
+
+    # A DIFFERENT known scope (org) at the same source is refused, old bytes kept.
+    before = (root / "hub" / "baselines" / f"agent-{stamped.id}.json").read_bytes()
+    with pytest.raises(Exception):
+        svc.resolve_source(
+            ctx,
+            kind="agent",
+            name=stamped.name,
+            hub_source="https://hub.example.com/v1",
+            visibility="org",
+            tenant_id="org-tab",
+        )
+    assert (root / "hub" / "baselines" / f"agent-{stamped.id}.json").read_bytes() == before
+
+
+def test_resolve_source_refuses_unlinked_item(env) -> None:
+    ctx, hub, agents, teams, root = env
+    row = agents.create_agent(_fields(name="local-only", description="d", tags=["role"]))
+    with pytest.raises(LookupError):
+        svc.resolve_source(
+            ctx,
+            kind="agent",
+            name=row.name,
+            hub_source="https://hub.example.com/v1",
+            visibility="public",
+            tenant_id=None,
+        )
