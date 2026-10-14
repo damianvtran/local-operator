@@ -71,6 +71,7 @@ from local_operator.providers.usage_cache import (
     USAGE_UNAVAILABLE_RETRY_MS,
     UsageCacheStore,
     account_backoff_ms,
+    default_cache_path,
     fingerprint_accounts,
     fingerprint_secret,
     provider_cache_key,
@@ -895,19 +896,6 @@ class ProviderController:
             ),
         )
 
-    def _read_only_usage_cache(self) -> "UsageCacheStore":
-        """The cache handle for the read-only seam, built on demand.
-
-        A caller that built the controller through the ordinary constructor has
-        a lazily-built WRITING cache; the seam must never reach it, so this
-        opens a dedicated read-only handle over the same default path instead.
-        """
-        cache = self._usage_cache
-        if cache is None:
-            cache = UsageCacheStore(read_only=True)
-            self._usage_cache = cache
-        return cache
-
     @staticmethod
     def _persisted_account_fingerprint(store: "ReadOnlyUsageMetadataStore", provider: str) -> str:
         """The fingerprint of the PERSISTED account set for ``provider``.
@@ -958,20 +946,25 @@ class ProviderController:
         """
         try:
             store = self.auth_store
-            cache = self._read_only_usage_cache()
-        except Exception:  # noqa: BLE001 — no cache/store = unavailable
+        except Exception:  # noqa: BLE001 — no store = unavailable
             return None
-        if getattr(cache, "_read_only", False):
-            if not cache._db_path.exists():
-                # An absent database is EMPTY, not unavailable: the seam must be
-                # able to say "nothing cached yet" without creating the file.
-                return []
-            if cache._connect() is None:
-                # The file exists but will not open (corrupt, locked, foreign
-                # schema). UNAVAILABLE, never empty: rendering this as ``[]``
-                # would tell the phone "no cached quota" when the truth is "the
-                # cache could not be read" — and the UI would show zero credits.
+        # NEVER trust the injected cache to be read-only: an ordinary writable
+        # UsageCacheStore handed in by an embedding host would create usage.db
+        # on first use. The seam opens its own read-only handle unconditionally.
+        try:
+            cache = UsageCacheStore(self._usage_read_only_path(), read_only=True)
+        except Exception:  # noqa: BLE001
+            return None
+        # An absent store or an unreadable one is UNAVAILABLE, not empty — the
+        # distinction the auth path used to collapse into ``[]``.
+        if getattr(store, "read_only_unavailable", lambda: False)():
+            return None
+        if not cache.read_only_available():
+            if cache._db_path.exists():
                 return None
+            # Absent database: EMPTY, not unavailable — and no file was created
+            # to discover that.
+            return []
 
         providers = (
             [self._storage_id(provider)]
@@ -980,16 +973,25 @@ class ProviderController:
         )
         out: list[UsageReport] = []
         for storage in providers:
-            try:
-                key = provider_cache_key(
-                    storage, self._persisted_account_fingerprint(store, storage)
-                )
-                loaded = cache.get(key, include_expired=True)
-            except Exception:  # noqa: BLE001 — a read failure is UNAVAILABLE
+            key = provider_cache_key(storage, self._persisted_account_fingerprint(store, storage))
+            readable, loaded = cache.read_reports_read_only(key, include_expired=True)
+            if not readable:
+                # A failed query or undecodable payload: UNAVAILABLE, never a
+                # silently-shortened list that reads as "no quota".
                 return None
-            if loaded:
-                out.extend(loaded)
+            out.extend(loaded)
         return [self._without_identity(report) for report in out]
+
+    def _usage_read_only_path(self) -> "Path":
+        """The database path the read-only seam should read.
+
+        An injected cache's own path is honoured (tests aim it at a temp file);
+        the default is the shared cache's.
+        """
+        existing = self._usage_cache
+        if isinstance(existing, UsageCacheStore):
+            return existing.db_path
+        return default_cache_path()
 
     def _persisted_providers(self, store: "ReadOnlyUsageMetadataStore") -> list[str]:
         """Storage ids with at least one persisted credential, sorted."""

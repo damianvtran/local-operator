@@ -345,16 +345,26 @@ class UsageCacheStore:
         if self._read_only:
             # Read-only open: no mkdir, no O_CREAT, no WAL PRAGMA, no schema
             # DDL, no commit, no chmod — a phone GET must not write. An absent
-            # database is an empty cache, not a file this path creates. The URI
-            # form is what makes sqlite itself refuse any write, so a future
-            # caller cannot accidentally mutate through this handle.
+            # database is an empty cache, not a file this path creates.
+            #
+            # ``immutable=1`` is load-bearing here, not merely tidy: a plain
+            # ``mode=ro`` open still creates ``-wal``/``-shm`` sidecars beside
+            # the database (measured: ``mode=ro`` added both; ``mode=ro&immutable=1``
+            # added neither and still read every row). The sidecars are writes
+            # the no-writes promise forbids, so this path opens immutable. The
+            # tradeoff it accepts: immutable assumes the file will not change,
+            # so it SKIPS an uncheckpointed WAL — a live writer's newest commits
+            # can be invisible. For best-effort display that reads as a slightly
+            # older cached value (never a wrong one), which is the right failure
+            # direction for a phone route; correctness of routing is unaffected
+            # because this seam serves no routing decision.
             if not self._db_path.exists():
                 return None
             try:
-                uri = f"file:{self._db_path}?mode=ro"
+                uri = f"file:{self._db_path}?mode=ro&immutable=1"
                 conn = sqlite3.connect(uri, timeout=5.0, uri=True)
                 # sqlite3.connect in ro mode still opens lazily; force a read
-                # so a corrupt/absent-table file fails HERE (=> empty) rather
+                # so a corrupt/foreign file fails HERE (=> unavailable) rather
                 # than at the first query.
                 conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
                 self._conn = conn
@@ -395,6 +405,67 @@ class UsageCacheStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    @property
+    def db_path(self) -> Path:
+        """The database this store opens (read by the read-only seam)."""
+        return self._db_path
+
+    # -- read-only seam reads ------------------------------------------------
+    def read_only_available(self) -> bool:
+        """True when a read-only handle opens AND the reports table exists.
+
+        The seam needs this because :meth:`get` collapses three different
+        answers into ``None`` — key absent, table absent, payload unparseable —
+        and the phone route must tell "nothing cached" (EMPTY) from "the cache
+        could not be read" (UNAVAILABLE, which must never render as zero
+        credits). A missing ``usage_reports`` table is the second case: the file
+        opens but holds no usable schema.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_reports'"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        return row is not None
+
+    def read_reports_read_only(
+        self, key: str, *, include_expired: bool = False
+    ) -> tuple[bool, list[UsageReport]]:
+        """``(readable, reports)`` for ``key`` on the read-only seam path.
+
+        Unlike :meth:`get`, a read failure is NOT folded into an empty result:
+        ``readable=False`` means the query failed or a stored payload would not
+        decode, which the seam reports as UNAVAILABLE rather than as an absence
+        of data. ``(True, [])`` is a genuinely absent key.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False, []
+        try:
+            row = conn.execute(
+                "SELECT payload, expires_at_ms FROM usage_reports WHERE key = ?", (key,)
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — table/query failure = unavailable
+            logger.debug("usage cache: read-only query failed", exc_info=True)
+            return False, []
+        if row is None:
+            return True, []
+        payload, expires_at_ms = row
+        if not include_expired and int(expires_at_ms) <= self._now_ms():
+            return True, []
+        try:
+            data = json.loads(payload)
+        except Exception:  # noqa: BLE001 — unparseable row = unavailable
+            return False, []
+        if not isinstance(data, list):
+            return False, []
+        reports = [r for r in (report_from_dict(item) for item in data) if r is not None]
+        return True, reports
 
     @staticmethod
     def _now_ms() -> int:

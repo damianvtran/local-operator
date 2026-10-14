@@ -45,6 +45,35 @@ async def test_construction_and_empty_read_create_nothing(tmp_path) -> None:
     assert _snapshot(root) == before, "a read-only route wrote to disk"
 
 
+async def test_no_wal_or_shm_sidecars_and_unchanged_mtime_inode(tmp_path) -> None:
+    """A mode=ro path must not create -wal/-shm nor touch existing files.
+
+    This is the BLOCKER: ``mode=ro`` alone still creates SQLite sidecars beside
+    the database, which is a write. The seam opens ``immutable=1`` instead. The
+    inode+mtime comparison catches an in-place rewrite the name check would miss.
+    """
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential("openai", {"access": "a", "refresh": "r", "expires": 10**15})
+    seeder.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.close()
+
+    names_before = sorted(p.name for p in tmp_path.iterdir())
+    stat_before = {p.name: (p.stat().st_ino, p.stat().st_mtime_ns) for p in tmp_path.iterdir()}
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    controller.cached_persisted_usage_reports_read_only(None)
+    controller.cached_persisted_usage_reports_read_only("openai")
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == names_before, "sidecar created"
+    for name, (ino, mtime) in stat_before.items():
+        now = (tmp_path / name).stat()
+        assert (now.st_ino, now.st_mtime_ns) == (ino, mtime), f"{name} was touched"
+
+
 async def test_read_only_open_refuses_writes(tmp_path) -> None:
     """The handle cannot mutate even if a caller reaches for it directly."""
     db = tmp_path / "usage.db"
@@ -106,30 +135,97 @@ async def test_populated_report_is_served_without_identity(tmp_path) -> None:
     ]
 
 
-async def test_corrupt_cache_is_unavailable_not_empty(tmp_path, monkeypatch) -> None:
-    """A read FAILURE is UNAVAILABLE (``None``), distinct from empty (``[]``).
+async def test_real_corrupt_auth_store_is_unavailable(tmp_path) -> None:
+    """A corrupt AUTH store is UNAVAILABLE (``None``), not empty — real file.
 
-    A phone must not render "0 credits" for a cache it could not read: spent and
-    unreadable are different claims. Empty is ``[]``; unreadable is ``None``.
+    No monkeypatch of the swallow site: the file itself is a non-database, so the
+    real read path (not a fake exception) has to draw the distinction.
     """
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    auth_db.write_bytes(b"not a database")
+    cache = UsageCacheStore(cache_db)
+    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.close()
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    assert controller.cached_persisted_usage_reports_read_only("openai") is None
+
+
+async def test_real_missing_usage_table_is_unavailable(tmp_path) -> None:
+    """A database with no ``usage_reports`` table is UNAVAILABLE, not empty."""
+
     auth_db = tmp_path / "auth.db"
     cache_db = tmp_path / "usage.db"
     seeder = AuthStore(auth_db)
     seeder.upsert_credential("openai", {"access": "a", "refresh": "r", "expires": 10**15})
     seeder.close()
-    cache_db.write_bytes(b"not a database")
+    conn = sqlite3.connect(str(cache_db))
+    conn.execute("CREATE TABLE unrelated (x)")
+    conn.commit()
+    conn.close()
+
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
-
-    def boom(*_args, **_kwargs):
-        raise sqlite3.DatabaseError("unreadable")
-
-    monkeypatch.setattr(UsageCacheStore, "get", boom)
     assert controller.cached_persisted_usage_reports_read_only("openai") is None
+
+
+async def test_real_corrupt_usage_payload_is_unavailable(tmp_path) -> None:
+    """A row whose payload will not decode is UNAVAILABLE, not empty."""
+
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    # The fingerprint the seam derives is the persisted identity ("acct"), so the
+    # seeded row must be keyed by the SAME fingerprint or the seam sees an absent
+    # key and ``[]`` is the correct answer.
+    seeder.upsert_credential(
+        "openai", {"access": "a", "refresh": "r", "expires": 10**15, "account_id": "acct"}
+    )
+    seeder.close()
+    cache = UsageCacheStore(cache_db)
+    # Corrupt the row under the key the seam ACTUALLY reads (the persisted
+    # account's fingerprint), not an unrelated key.
+    cache.set(
+        provider_cache_key("openai", fingerprint_accounts(["acct"])),
+        "openai",
+        [UsageReport(provider="openai")],
+        expires_at_ms=10**13,
+    )
+    cache.close()
+    conn = sqlite3.connect(str(cache_db))
+    assert conn.execute("SELECT count(*) FROM usage_reports").fetchone()[0] >= 1
+    conn.execute("UPDATE usage_reports SET payload = ?", ("{not json",))
+    conn.commit()
+    conn.close()
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    assert controller.cached_persisted_usage_reports_read_only("openai") is None
+
+
+async def test_absent_store_close_is_a_noop(tmp_path) -> None:
+    """Closing a read-only store with no database must not raise."""
+    store = AuthStore.open_read_only(tmp_path / "absent.db")
+    store.close()  # AttributeError before the fix
+
+
+async def test_injected_writable_cache_is_not_used(tmp_path) -> None:
+    """An injected WRITABLE cache must not be reached by the seam."""
+
+    auth_db = tmp_path / "auth.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential("openai", {"access": "a", "refresh": "r", "expires": 10**15})
+    seeder.close()
+    writable_path = tmp_path / "writable-usage.db"
+    controller = ProviderController(
+        AuthStore.open_read_only(auth_db),
+        None,
+        usage_cache=UsageCacheStore(writable_path),
+    )
+    assert controller.cached_persisted_usage_reports_read_only("openai") == []
+    assert not writable_path.exists(), "seam used the injected writable cache"
 
 
 async def test_fingerprint_ignores_env_override_keys(tmp_path, monkeypatch) -> None:
     """The persisted-account fingerprint never folds in an ambient env key."""
-    import os
 
     auth_db = tmp_path / "auth.db"
     seeder = AuthStore(auth_db)

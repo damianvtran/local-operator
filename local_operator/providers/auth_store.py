@@ -1174,23 +1174,45 @@ class AuthStore:
     def _connect_read_only(self) -> _SerializedConnection | None:
         """The metadata-only handle, or ``None`` when there is nothing to read.
 
-        ``mode=ro`` over an existing file only: no mkdir, no O_CREAT, no WAL
-        PRAGMA, no schema DDL, no commit, no chmod. sqlite refuses every write
-        through this handle, so the seam cannot mutate by accident. An absent or
-        unreadable database is an EMPTY store, not an error — the phone route
-        asks "what is cached", and "nothing yet" is a legitimate answer.
+        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
+        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
+        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
+        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
+        promise forbids. sqlite also refuses every write through this handle.
+
+        Returns ``None`` when there is nothing to read: an ABSENT database
+        (legitimately empty) or one that will not open. Callers distinguish the
+        two states by :meth:`read_only_unavailable`; returning a bare ``None``
+        here is what keeps construction from creating a file to find out.
         """
         if not self._db_path.exists():
             return None
         try:
             conn = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro", timeout=5.0, uri=True, check_same_thread=False
+                f"file:{self._db_path}?mode=ro&immutable=1",
+                timeout=5.0,
+                uri=True,
+                check_same_thread=False,
             )
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return _SerializedConnection(conn)
-        except Exception:  # noqa: BLE001 — absent/corrupt db = empty store
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
             logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
             return None
+
+    def read_only_unavailable(self) -> bool:
+        """Whether a read-only store could not be read (vs. genuinely empty).
+
+        ``False`` when there is a usable handle or the database is simply
+        absent — both mean "empty", a legitimate answer. ``True`` when the file
+        exists but will not open (corrupt, foreign, locked) — UNAVAILABLE, which
+        the seam reports as ``None`` so a UI never renders it as zero credits.
+        Only meaningful for a store built read-only; a writing store always has
+        a live handle.
+        """
+        if not self._read_only:
+            return False
+        return self._conn is None and self._db_path.exists()
 
     @property
     def db_path(self) -> Path:
@@ -1256,7 +1278,12 @@ class AuthStore:
         # its only consumer: everything else detects a closed connection the way
         # sqlite does, with ``ProgrammingError`` on use.
         self._closed = True
-        self._conn.close()
+        # A read-only store over an ABSENT database has no handle: closing it
+        # must be a safe no-op, not a ``NoneType.close`` raise. The phone route
+        # closes whatever it opened, and "there was nothing to open" is the
+        # common cold-start case.
+        if self._conn is not None:
+            self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
             self._usage_cache = None
