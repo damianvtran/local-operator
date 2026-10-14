@@ -465,6 +465,33 @@ class ReadOnlyUsageMetadataStore(Protocol):
     ) -> bool: ...  # pragma: no cover
 
 
+@dataclasses.dataclass
+class ReadOnlyUsageSnapshot:
+    """One read-only cached-usage answer, with its own freshness.
+
+    A bare list could not express the three states the phone route must tell
+    apart, so this carries them explicitly:
+
+    - ``unavailable``: the store or cache could not be read (corrupt, foreign
+      schema, no required columns). Distinct from empty; MUST NOT render as zero
+      credits.
+    - ``reports``: the cached reports for the persisted account(s), identity
+      stripped. ``[]`` with ``unavailable=False`` is a genuine "nothing cached".
+    - ``may_be_stale`` / ``cached_at``: freshness. The seam opens
+      ``immutable=1`` to guarantee it never WRITES, which means it cannot see an
+      uncheckpointed WAL — so a non-empty ``-wal`` beside the database is the
+      signal that ``reports`` may be behind, possibly still naming an account a
+      committed DELETE removed. The consumer must not present a stale inventory
+      as current; ``cached_at`` (on-disk mtime, the "as of" immutable honours)
+      lets it say how old the answer is.
+    """
+
+    reports: list[UsageReport] = dataclasses.field(default_factory=list)
+    unavailable: bool = False
+    may_be_stale: bool = False
+    cached_at: int | None = None
+
+
 class ProviderController:
     """Provider/model/credential/usage facade for interactive front ends."""
 
@@ -924,7 +951,7 @@ class ProviderController:
 
     def cached_persisted_usage_reports_read_only(
         self, provider: str | None = None
-    ) -> list[UsageReport] | None:
+    ) -> "ReadOnlyUsageSnapshot":
         """Cached usage for the CURRENT PERSISTED account, read-only.
 
         ONE method, because a two-flag variant (``read_only=``/
@@ -932,45 +959,59 @@ class ProviderController:
         silently reintroduces the env/runtime/config override leak this exists to
         avoid. Here the safe call is the only call.
 
-        ``provider=None`` returns the persisted-provider INVENTORY: the cached
-        reports of every provider that has a persisted credential. ``provider``
-        names one. Empty when there is no cache or no persisted account.
+        ``provider=None`` returns the persisted-provider INVENTORY; ``provider``
+        names one. Both return a :class:`ReadOnlyUsageSnapshot`, which carries the
+        three states a bare list could not: an UNAVAILABLE read
+        (``unavailable=True``, never rendered as zero credits), a genuine empty
+        result (``reports == []``, ``unavailable=False``), and freshness
+        (``may_be_stale``/``cached_at``).
 
-        ``None`` — distinct from ``[]`` — is the UNAVAILABLE state: the cache or
-        store could not be read (absent, locked, corrupt). It must NOT be
-        rendered as zero credits, which would tell a user their quota is spent
-        when the truth is that the phone simply cannot see it.
+        Freshness is load-bearing, not decorative: ``immutable=1`` guarantees the
+        no-write property but cannot see an uncheckpointed WAL, so a non-empty
+        ``-wal`` means the numbers may be behind — and an INVENTORY built from
+        them could name an account a committed DELETE removed. That is why a
+        possibly-stale inventory WITHHOLDS its list rather than presenting
+        deleted accounts as current; an explicit provider is returned flagged, so
+        its own (possibly old) numbers are not silently dropped.
 
-        The returned wire shape carries NO account identity: identity is stripped
-        here rather than trusted to the renderer.
+        The returned reports carry NO account identity: identity and vendor notes
+        are stripped here rather than trusted to the renderer.
         """
         try:
             store = self.auth_store
         except Exception:  # noqa: BLE001 — no store = unavailable
-            return None
+            return ReadOnlyUsageSnapshot(unavailable=True)
         # NEVER trust the injected cache to be read-only: an ordinary writable
         # UsageCacheStore handed in by an embedding host would create usage.db
         # on first use. The seam opens its own read-only handle unconditionally.
         try:
             cache = UsageCacheStore(self._usage_read_only_path(), read_only=True)
         except Exception:  # noqa: BLE001
-            return None
-        # An absent store or an unreadable one is UNAVAILABLE, not empty — the
-        # distinction the auth path used to collapse into ``[]``.
+            return ReadOnlyUsageSnapshot(unavailable=True)
+        # A store or cache that cannot be read is UNAVAILABLE, not empty — the
+        # distinction the auth path used to collapse into ``[]``. An ABSENT
+        # database is genuinely empty (and nothing was created to find out).
         if getattr(store, "read_only_unavailable", lambda: False)():
-            return None
+            return ReadOnlyUsageSnapshot(unavailable=True)
         if not cache.read_only_available():
             if cache._db_path.exists():
-                return None
-            # Absent database: EMPTY, not unavailable — and no file was created
-            # to discover that.
-            return []
+                return ReadOnlyUsageSnapshot(unavailable=True)
+            return ReadOnlyUsageSnapshot()
 
+        may_be_stale = cache.read_only_sidecar_present() or bool(
+            getattr(store, "read_only_sidecar_present", lambda: False)()
+        )
+        cached_at = cache.read_only_cached_at()
         providers = (
             [self._storage_id(provider)]
             if provider is not None
             else self._persisted_providers(store)
         )
+        if provider is None and may_be_stale:
+            # The INVENTORY is derived from possibly-deleted rows, so it must not
+            # list them as current. Withhold the list and let ``may_be_stale`` say
+            # "we cannot name the accounts right now" rather than "none exist".
+            return ReadOnlyUsageSnapshot(may_be_stale=True, cached_at=cached_at)
         out: list[UsageReport] = []
         for storage in providers:
             key = provider_cache_key(storage, self._persisted_account_fingerprint(store, storage))
@@ -978,9 +1019,13 @@ class ProviderController:
             if not readable:
                 # A failed query or undecodable payload: UNAVAILABLE, never a
                 # silently-shortened list that reads as "no quota".
-                return None
+                return ReadOnlyUsageSnapshot(unavailable=True)
             out.extend(loaded)
-        return [self._without_identity(report) for report in out]
+        return ReadOnlyUsageSnapshot(
+            reports=[self._without_identity(report) for report in out],
+            may_be_stale=may_be_stale,
+            cached_at=cached_at,
+        )
 
     def _usage_read_only_path(self) -> "Path":
         """The database path the read-only seam should read.

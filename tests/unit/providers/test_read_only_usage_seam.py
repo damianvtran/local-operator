@@ -40,8 +40,9 @@ async def test_construction_and_empty_read_create_nothing(tmp_path) -> None:
     controller = ProviderController.read_only_for_persisted_usage(
         root / "auth.db", root / "usage.db"
     )
-    assert controller.cached_persisted_usage_reports_read_only(None) == []
-    assert controller.cached_persisted_usage_reports_read_only("openai") == []
+    snap = controller.cached_persisted_usage_reports_read_only(None)
+    assert snap.reports == [] and snap.unavailable is False
+    assert controller.cached_persisted_usage_reports_read_only("openai").reports == []
     assert _snapshot(root) == before, "a read-only route wrote to disk"
 
 
@@ -125,14 +126,13 @@ async def test_populated_report_is_served_without_identity(tmp_path) -> None:
     cache.close()
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
-    reports = controller.cached_persisted_usage_reports_read_only("openai")
-    assert [r.provider for r in reports] == ["openai"]
-    assert reports[0].limits[0].amount.remaining == 10
+    snap = controller.cached_persisted_usage_reports_read_only("openai")
+    assert not snap.unavailable and [r.provider for r in snap.reports] == ["openai"]
+    assert snap.reports[0].limits[0].amount.remaining == 10
     # Identity and vendor notes never reach the phone wire.
-    assert all(r.identity is None and r.notes is None for r in reports)
-    assert [r.provider for r in controller.cached_persisted_usage_reports_read_only(None)] == [
-        "openai"
-    ]
+    assert all(r.identity is None and r.notes is None for r in snap.reports)
+    inv = controller.cached_persisted_usage_reports_read_only(None)
+    assert [r.provider for r in inv.reports] == ["openai"]
 
 
 async def test_real_corrupt_auth_store_is_unavailable(tmp_path) -> None:
@@ -148,7 +148,7 @@ async def test_real_corrupt_auth_store_is_unavailable(tmp_path) -> None:
     cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
     cache.close()
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
-    assert controller.cached_persisted_usage_reports_read_only("openai") is None
+    assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
 
 
 async def test_real_missing_usage_table_is_unavailable(tmp_path) -> None:
@@ -165,7 +165,7 @@ async def test_real_missing_usage_table_is_unavailable(tmp_path) -> None:
     conn.close()
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
-    assert controller.cached_persisted_usage_reports_read_only("openai") is None
+    assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
 
 
 async def test_real_corrupt_usage_payload_is_unavailable(tmp_path) -> None:
@@ -198,7 +198,7 @@ async def test_real_corrupt_usage_payload_is_unavailable(tmp_path) -> None:
     conn.close()
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
-    assert controller.cached_persisted_usage_reports_read_only("openai") is None
+    assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
 
 
 async def test_absent_store_close_is_a_noop(tmp_path) -> None:
@@ -220,7 +220,7 @@ async def test_injected_writable_cache_is_not_used(tmp_path) -> None:
         None,
         usage_cache=UsageCacheStore(writable_path),
     )
-    assert controller.cached_persisted_usage_reports_read_only("openai") == []
+    assert controller.cached_persisted_usage_reports_read_only("openai").reports == []
     assert not writable_path.exists(), "seam used the injected writable cache"
 
 
@@ -239,3 +239,101 @@ async def test_fingerprint_ignores_env_override_keys(tmp_path, monkeypatch) -> N
     fingerprint = ProviderController._persisted_account_fingerprint(store, "anthropic")
     expected = fingerprint_accounts(["persisted"])
     assert fingerprint == expected
+
+
+async def test_foreign_auth_schema_is_unavailable(tmp_path) -> None:
+    """A valid SQLite auth file WITHOUT the credential table is UNAVAILABLE.
+
+    ``sqlite_master`` looks fine (there is a table), so a name-only probe would
+    call this empty. The seam must fail closed instead: it is not a store it can
+    read, on BOTH the inventory and explicit-provider paths.
+    """
+    import sqlite3
+
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    conn = sqlite3.connect(str(auth_db))
+    conn.execute("CREATE TABLE unrelated (x)")
+    conn.commit()
+    conn.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.close()
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    assert controller.cached_persisted_usage_reports_read_only(None).unavailable is True
+    assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
+
+
+async def test_auth_table_missing_required_column_is_unavailable(tmp_path) -> None:
+    """A ``auth_credentials`` table missing columns the read selects is UNAVAILABLE."""
+    import sqlite3
+
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    conn = sqlite3.connect(str(auth_db))
+    conn.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT)")
+    conn.commit()
+    conn.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.close()
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
+
+
+async def test_wal_deleted_account_is_not_presented_as_current(tmp_path) -> None:
+    """A committed DELETE sitting in ``-wal`` must not be served as current.
+
+    ``immutable=1`` cannot see the WAL, so the reader still sees the removed row
+    (an ordinary connection sees count=0). The seam must flag staleness and
+    WITHHOLD the possibly-deleted inventory rather than list it as current.
+    """
+    import sqlite3
+
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential(
+        "openai", {"access": "a", "refresh": "r", "expires": 10**15, "account_id": "acct"}
+    )
+    seeder.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.close()
+
+    writer = sqlite3.connect(str(auth_db))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("DELETE FROM auth_credentials")
+    writer.commit()  # lives in -wal, uncheckpointed
+    assert (tmp_path / "auth.db-wal").stat().st_size > 0
+    assert sqlite3.connect(str(auth_db)).execute(
+        "SELECT count(*) FROM auth_credentials"
+    ).fetchone() == (0,)
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    snap = controller.cached_persisted_usage_reports_read_only(None)
+    assert snap.may_be_stale is True
+    assert snap.reports == [], "possibly-deleted account was served as current"
+    assert snap.cached_at is not None
+    # An explicit provider is returned flagged, so its own numbers are not
+    # silently dropped — but it is still marked stale.
+    explicit = controller.cached_persisted_usage_reports_read_only("openai")
+    assert explicit.may_be_stale is True
+    writer.close()
+
+
+async def test_clean_database_is_not_flagged_stale(tmp_path) -> None:
+    """No non-empty ``-wal`` means the read is current, not stale."""
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential(
+        "openai", {"access": "a", "refresh": "r", "expires": 10**15, "account_id": "acct"}
+    )
+    seeder.close()
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    snap = controller.cached_persisted_usage_reports_read_only(None)
+    assert snap.may_be_stale is False
+    assert snap.unavailable is False

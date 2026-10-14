@@ -1203,16 +1203,68 @@ class AuthStore:
     def read_only_unavailable(self) -> bool:
         """Whether a read-only store could not be read (vs. genuinely empty).
 
-        ``False`` when there is a usable handle or the database is simply
-        absent — both mean "empty", a legitimate answer. ``True`` when the file
-        exists but will not open (corrupt, foreign, locked) — UNAVAILABLE, which
-        the seam reports as ``None`` so a UI never renders it as zero credits.
-        Only meaningful for a store built read-only; a writing store always has
-        a live handle.
+        ``False`` when the database is simply absent — "empty" is a legitimate
+        answer, and the seam must be able to say it without creating the file.
+        ``True`` when the file exists but cannot yield credentials: it will not
+        open (corrupt/locked), OR it opens but lacks the tables/columns this
+        store's read path requires. The second case is a foreign or half-built
+        database — a valid SQLite file that is NOT a credential store — and
+        reporting it as empty would tell the phone "no accounts" when the truth
+        is "this is not a store I can read". Only meaningful for a read-only
+        store; a writing store always has a live, schema-applied handle.
         """
         if not self._read_only:
             return False
-        return self._conn is None and self._db_path.exists()
+        if not self._db_path.exists():
+            return False
+        if self._conn is None:
+            return True
+        return not self._has_required_schema()
+
+    def _has_required_schema(self) -> bool:
+        """Whether the required credential table AND its columns are present.
+
+        ``sqlite_master`` alone is not enough: a database can hold a
+        ``auth_credentials`` table missing ``identity_key`` (an older or foreign
+        build), which then fails at the first SELECT rather than at open. Both
+        the table and every column the read path selects are required.
+        """
+        if self._conn is None:
+            return False
+        try:
+            cols = {
+                str(row[1])
+                for row in self._conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
+            }
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        required = {
+            "id",
+            "provider",
+            "credential_type",
+            "data",
+            "disabled_cause",
+            "identity_key",
+            "created_at",
+            "updated_at",
+        }
+        return required.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a non-empty ``-wal`` sits beside the store's database.
+
+        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
+        so a committed DELETE in the WAL is invisible to it: the reader still
+        sees the removed credential row. A non-empty ``-wal`` is that exact
+        on-disk signal, which the seam surfaces as staleness so a possibly-
+        deleted account is never presented as current. A zero-length WAL holds
+        no frames and is not staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
 
     @property
     def db_path(self) -> Path:

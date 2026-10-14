@@ -413,25 +413,54 @@ class UsageCacheStore:
 
     # -- read-only seam reads ------------------------------------------------
     def read_only_available(self) -> bool:
-        """True when a read-only handle opens AND the reports table exists.
+        """True when a read-only handle opens AND the reports table has columns.
 
         The seam needs this because :meth:`get` collapses three different
         answers into ``None`` — key absent, table absent, payload unparseable —
         and the phone route must tell "nothing cached" (EMPTY) from "the cache
         could not be read" (UNAVAILABLE, which must never render as zero
-        credits). A missing ``usage_reports`` table is the second case: the file
-        opens but holds no usable schema.
+        credits). A ``usage_reports`` table missing its key columns is the second
+        case: the file opens but the SELECT would fail.
         """
         conn = self._connect()
         if conn is None:
             return False
         try:
-            row = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_reports'"
-            ).fetchone()
+            cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(usage_reports)").fetchall()
+            }
         except Exception:  # noqa: BLE001 — unreadable schema = unavailable
             return False
-        return row is not None
+        return {"key", "payload", "expires_at_ms"}.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a ``-wal``/``-shm`` sidecar with unfrozen frames exists.
+
+        The seam opens ``immutable=1`` to guarantee the no-write property, which
+        means it CANNOT see an uncheckpointed WAL. A NON-EMPTY ``-wal`` is
+        therefore the exact on-disk signal that the database it read may be
+        behind: committed inserts/updates the reader will not see, and deletes it
+        will still see. A zero-length ``-wal`` (the common idle state — measured
+        on a live writer that had checkpointed) holds no frames and is NOT
+        staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
+
+    def read_only_cached_at(self) -> int | None:
+        """Epoch ms the on-disk database was last written, or ``None``.
+
+        A freshness marker the phone can render. ``immutable`` reads the main
+        file as of its mtime, so that timestamp is the honest "as of" for the
+        payload this seam returns.
+        """
+        try:
+            return int(self._db_path.stat().st_mtime * 1000)
+        except OSError:
+            return None
 
     def read_reports_read_only(
         self, key: str, *, include_expired: bool = False
