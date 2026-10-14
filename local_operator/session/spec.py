@@ -82,7 +82,15 @@ __all__ = [
 
 
 class SessionSpecError(ValueError):
-    """Invalid input to the SDK surface — refused before anything is built."""
+    """Invalid input to the SDK surface — refused before anything is built.
+
+    Keyed spec diagnostics render English source through the existing envelope,
+    not the configured locale: callers still receive the historical single
+    string argument, with no new exception attributes. Imports stay inside
+    failing branches so valid value construction remains stdlib-only and never
+    reads configuration before SDK root isolation. Translation needs a separate
+    caller-contract migration; extraction does not authorize that behavior.
+    """
 
 
 class VolatileRootError(SessionSpecError):
@@ -324,20 +332,37 @@ class ApprovalPolicy:
     def __post_init__(self) -> None:
         if self.mode == "declared":
             if not self.tools:
+                from local_operator.i18n.keys import wire_errors_sdk_spec
+
                 raise SessionSpecError(
-                    "ApprovalPolicy.declared() must name at least one tool; use "
-                    "ApprovalPolicy.refuse() for an undeclared bound session"
+                    wire_errors_sdk_spec.approval_declared_tools_empty().envelope(locale="en")[
+                        "text"
+                    ]
                 )
         elif self.tools:
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
             raise SessionSpecError(
-                f"ApprovalPolicy.tools is only meaningful for mode 'declared', not {self.mode!r}"
+                wire_errors_sdk_spec.approval_tools_wrong_mode(mode=repr(self.mode)).envelope(
+                    locale="en"
+                )["text"]
             )
         if self.mode == "callback":
             if not callable(self.handler):
-                raise SessionSpecError("ApprovalPolicy.callback() requires a callable gate")
+                from local_operator.i18n.keys import wire_errors_sdk_spec
+
+                raise SessionSpecError(
+                    wire_errors_sdk_spec.approval_callback_gate_required().envelope(locale="en")[
+                        "text"
+                    ]
+                )
         elif self.handler is not None:
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
             raise SessionSpecError(
-                f"ApprovalPolicy.handler is only meaningful for mode 'callback', not {self.mode!r}"
+                wire_errors_sdk_spec.approval_handler_wrong_mode(mode=repr(self.mode)).envelope(
+                    locale="en"
+                )["text"]
             )
 
     @classmethod
@@ -476,25 +501,36 @@ class SessionSpec:
         if self.agent_name and self.agent_id:
             # exec refuses this pair at resolve_startup; refusing here too keeps
             # the failure before any construction, with the same wording.
-            raise SessionSpecError("agent_name and agent_id are mutually exclusive")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.agent_identity_conflict().envelope(locale="en")["text"]
+            )
         if self.resume is not None and not str(self.resume):
-            raise SessionSpecError('resume must be a session id or "@latest", not an empty string')
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.resume_empty().envelope(locale="en")["text"]
+            )
         if self.tools is not None and not isinstance(self.tools, tuple):
             # A list is the ergonomic spelling; frozen here so the spec is
             # hashable and cannot be mutated between validation and use.
             object.__setattr__(self, "tools", tuple(self.tools))
         if self.tools is not None and not self.tools:
-            raise SessionSpecError(
-                "tools must name at least one tool; leave it None to stay unrestricted"
-            )
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(wire_errors_sdk_spec.tools_empty().envelope(locale="en")["text"])
         if self.yolo and self.approvals.mode in ("refuse", "callback"):
             # yolo short-circuits the gate object on the session side, so a
             # refuse/callback gate installed here could never be consulted —
             # silently ignored is exactly the failure shape this SDK refuses to
             # have. `auto()` is the honest spelling of the same posture.
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
             raise SessionSpecError(
-                f"yolo=True makes an ApprovalPolicy.{self.approvals.mode}() gate "
-                "unreachable; use ApprovalPolicy.auto() (or drop yolo) instead"
+                wire_errors_sdk_spec.yolo_approval_unreachable(
+                    approval_mode=self.approvals.mode
+                ).envelope(locale="en")["text"]
             )
         # The output-contract fields are validated cheaply HERE (stdlib only —
         # see ``_OUTPUT_FORMATS``) and fully by ``OutputContract.__post_init__``
@@ -503,22 +539,44 @@ class SessionSpec:
         # written, before anything is constructed.
         if self.output_format is not None:
             if self.output_format not in _OUTPUT_FORMATS:
-                raise SessionSpecError("output_format must be one of " + ", ".join(_OUTPUT_FORMATS))
+                from local_operator.i18n.keys import wire_errors_sdk_spec
+
+                raise SessionSpecError(
+                    wire_errors_sdk_spec.output_format_invalid(
+                        formats=", ".join(_OUTPUT_FORMATS)
+                    ).envelope(locale="en")["text"]
+                )
         if self.output_schema is not None and self.output_format is None:
-            raise SessionSpecError("output_schema requires output_format")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.output_schema_requires_format().envelope(locale="en")["text"]
+            )
         if self.output_retries is not None and self.output_format is None:
-            raise SessionSpecError("output_retries requires output_format")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.output_retries_requires_format().envelope(locale="en")["text"]
+            )
         if self.output_retries is not None and (
             isinstance(self.output_retries, bool)
             or not isinstance(self.output_retries, int)
             or not 0 <= self.output_retries <= 5
         ):
-            raise SessionSpecError("output_retries must be between 0 and 5")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.output_retries_range().envelope(locale="en")["text"]
+            )
         if self.world_root is not None and not str(self.world_root).strip():
             # Cheap and stdlib-only, like the checks above; the CONTAINMENT
             # checks need the roots and live in ``sdk.open_session``, where
             # they run once before any construction.
-            raise SessionSpecError("world_root must be a non-empty path when set")
+            from local_operator.i18n.keys import wire_errors_sdk_spec
+
+            raise SessionSpecError(
+                wire_errors_sdk_spec.world_root_empty().envelope(locale="en")["text"]
+            )
 
     def to_namespace(self) -> argparse.Namespace:
         """The narrow session-factory namespace, field-for-field as exec builds it.
