@@ -22,6 +22,7 @@ is what pins the rows, so this file exists to prove what those rows LOOK like.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,7 @@ def _seed_link(
     auto_push: bool,
     state: str,
     error: str | None,
+    attest_revision_cas: bool = False,
 ) -> LinkIdentity:
     """Write a real baseline + status row so the inventory enumerates it as a link."""
     identity = LinkIdentity("agent", local_id, HUB, visibility, tenant, f"h-{local_id}")
@@ -90,6 +92,11 @@ def _seed_link(
             f"agent:{local_id}", st.blank_item("agent", local_id, name, f"h-{local_id}", tenant)
         )
         item.update(state=state, error_class=error, last_checked_at="2026-10-14T00:00:00Z")
+        if attest_revision_cas:
+            # A positively-attested atomic revision-CAS: the service's eligibility
+            # precondition, seeded here so the consent frame reaches the
+            # public-egress prompt rather than the named refusal.
+            doc.setdefault("server", {})["revision_cas"] = True
 
     st.StatusStore(root).mutate(fold)
     return identity
@@ -130,6 +137,16 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 await pilot.press("ctrl+b")
                 await pilot.pause()
                 await pilot.pause()
+                # Seed the OTHER two tail facts so this frame shows the footer
+                # with asks + chip + hub door TOGETHER (round-2 D9). These are the
+                # Sidebar's own totals, fed the way the app feeds them.
+                sidebar = app._session_sidebar
+                sidebar.set_asking({"a": 4})
+                sidebar.set_asks_total(4)
+                sidebar.set_subagent_total(4)
+                app.refresh_hub_total()
+                await pilot.pause()
+                await pilot.pause()
             elif contact_sheet == "command":
                 # The USER's route: type the command into the real editor and
                 # submit it, so the capture proves the registry entry dispatches.
@@ -138,6 +155,18 @@ async def _capture(name: str, *, size=(100, 30), contact_sheet: str | None = Non
                 editor.load_text("/hub")
                 await pilot.press("enter")
                 await pilot.pause()
+                await pilot.pause()
+            elif contact_sheet == "consent":
+                # The public auto-push consent state (round-2 D7): open the
+                # overlay and arm the two-step consent on the focused public
+                # link, so the frame shows the deliberate confirmation prompt.
+                app.action_hub_links()
+                await pilot.pause()
+                await pilot.pause()
+                panel = app._hub_links_panel()
+                if panel is not None:
+                    panel._selected = 0
+                    panel.action_toggle_auto_push()
                 await pilot.pause()
             else:
                 # Drive the REAL open path: the sync action the binding, the
@@ -313,10 +342,115 @@ async def test_capture_hub_links_states(tmp_path: Path, monkeypatch: pytest.Monk
         ],
     )
 
-    svgs = sorted(OUT.glob("*.svg"))
-    assert len(svgs) == 9
-    for svg in svgs:
-        assert "<svg" in svg.read_text()[:200]
+    # Assert THIS test's own frames by name (the file is shared with the
+    # round-2 remediation capture test, so a global count is order-coupled).
+    for name in (
+        "healthy-one-link",
+        "available",
+        "failure-retry",
+        "multi-public-org",
+        "long-name-min-width",
+        "empty",
+        "footer-door",
+        "overlay-windowed",
+        "command-invoked",
+    ):
+        svg = OUT / f"{name}.svg"
+        assert svg.exists() and "<svg" in svg.read_text()[:200], name
+
+
+async def test_capture_round2_remediation_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frames round-2 design review specifically asked for.
+
+    * 40x24 overlay — the width the padding bug wrapped at (D8).
+    * footer with asks + chip + hub door TOGETHER, and the control where the
+      door yields while the facts survive (D9).
+    * the restored hint row (D6) and the more-rows indicator (D11), captured in
+      the default overlay frame.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    # D8: the 40x24 frame the rows wrapped at before the padding fix.
+    await _capture(
+        "narrow-40x24",
+        size=(40, 24),
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
+    # D9 coexistence: the width where the door rides WITH both facts (content 34
+    # at screen 120 — the sidebar quantizes, so the tested size is exact).
+    await _capture(
+        "footer-all-three",
+        size=(120, 30),
+        contact_sheet="door",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
+    # D9 control: the NARROWER frame where the facts survive and the door drops.
+    await _capture(
+        "footer-door-dropped",
+        size=(116, 30),
+        contact_sheet="door",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        ],
+    )
+
+    # D7: the public auto-push consent prompt (the deliberate two-step state).
+    await _capture(
+        "consent-public",
+        contact_sheet="consent",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+                attest_revision_cas=True,
+            )
+        ],
+    )
+
+    # Assert THIS test's own round-2 frames by name (shared OUT dir).
+    for name in ("narrow-40x24", "footer-all-three", "footer-door-dropped", "consent-public"):
+        svg = OUT / f"{name}.svg"
+        assert svg.exists() and "<svg" in svg.read_text()[:200], name
 
 
 async def test_hub_panel_and_host_start_hidden() -> None:
@@ -348,5 +482,86 @@ async def test_hub_panel_and_host_start_hidden() -> None:
                 "a hidden overlay host must claim no cells",
                 host.region,
             )
+    finally:
+        shutil.rmtree(case_root, ignore_errors=True)
+
+
+async def test_hint_row_is_painted_from_the_catalogue() -> None:
+    """D6: the panel TEACHES its keys — the hint row is back, catalogue-built.
+
+    The round-2 regression dropped the key-hint row (a catalogue move left the
+    binding set with no hint), so the panel took focus and bound esc/q/r/↑↓/
+    enter/s/a with nothing teaching them. This drives the real app and asserts
+    the painted card carries the catalogue's key words.
+    """
+    import shutil
+    import tempfile
+
+    from local_operator.tui.settings import settings_reload
+
+    case_root = Path(tempfile.mkdtemp(prefix="hub-links-hint-", dir=OUT))
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(case_root)
+    try:
+        settings_reload()
+        _seed_link(
+            case_root,
+            local_id="a1",
+            name="coder",
+            visibility="public",
+            tenant=None,
+            subscribe=True,
+            auto_push=False,
+            state="up-to-date",
+            error=None,
+        )
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.action_hub_links()
+            await pilot.pause()
+            await pilot.pause()
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            # The catalogue's own words, from the real i18n runtime.
+            assert "esc close" in painted, painted
+            assert "s subscribe" in painted, painted
+            assert "a auto-push" in painted, painted
+    finally:
+        shutil.rmtree(case_root, ignore_errors=True)
+
+
+async def test_more_rows_indicator_reports_the_window() -> None:
+    """D11: a list longer than the body cap reports its range, not silence."""
+
+    import shutil
+    import tempfile
+
+    from local_operator.tui.settings import settings_reload
+
+    case_root = Path(tempfile.mkdtemp(prefix="hub-links-more-", dir=OUT))
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(case_root)
+    try:
+        settings_reload()
+        for i in range(20):
+            _seed_link(
+                case_root,
+                local_id=f"a{i}",
+                name=f"agent-{i:02d}",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.action_hub_links()
+            await pilot.pause()
+            await pilot.pause()
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            # The indicator reads `n–m/total` (the sessions-list precedent) and
+            # reports the LINKS actually shown, not a fixed `1`.
+            assert re.search(r"\d+–\d+/20", painted), painted
     finally:
         shutil.rmtree(case_root, ignore_errors=True)

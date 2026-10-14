@@ -160,11 +160,15 @@ def test_empty_inventory_says_not_linked() -> None:
 
 def test_a_very_long_name_is_fitted_to_width() -> None:
     rows = core.rows_from_snapshot(_snapshot(_link(name="x" * 200)))
-    line = core.render_rows(rows, 40)[1]
-    # The row fits its box: the name truncates with an ellipsis and the dim
-    # tail gives at narrow width rather than overflowing.
-    assert cell_len(line.plain) <= 40
-    assert "…" in line.plain
+    entry = core.render_rows(rows, 40)[1]
+    # Round-2 D8: at a width too narrow for name + scope + policy on ONE line, the
+    # policy pair WRAPS to a second indented line (the namespace context note:
+    # wrap rather than truncate). Every physical line still fits the box, and the
+    # policy words are not lost to truncation.
+    for physical in str(entry).split("\n"):
+        assert cell_len(physical) <= 40, (physical, cell_len(physical))
+    assert "…" in entry.plain
+    assert "Subscribe" in entry.plain and "Auto-push" in entry.plain
 
 
 def test_unresolved_legacy_links_are_listed_as_blocked_rows() -> None:
@@ -197,3 +201,36 @@ def test_eligibility_and_will_flags_project_into_the_row() -> None:
     )
     row = core.rows_from_snapshot(snapshot)[0]
     assert row.auto_will_apply is True and row.auto_will_push is True
+
+
+def test_rows_carry_policy_revision_and_eligibility() -> None:
+    """D7: a row carries the CAS revision and the eligibility fact/refusal reason.
+
+    The toggle needs the revision it last saw and the service-computed
+    eligibility; without them the panel could not perform the CAS write or name
+    the reason an enable is refused.
+    """
+    row = core.rows_from_snapshot(
+        _snapshot(
+            _link(
+                policy={"subscribe": True, "auto_push": False, "revision": "rev-xyz"},
+                eligibility={"can_auto_push": False, "reason": "unsafe-publication"},
+            )
+        )
+    )[0]
+    assert row.policy_revision == "rev-xyz"
+    assert row.can_auto_push is False
+    assert row.eligibility_reason == "unsafe-publication"
+
+
+def test_narrow_row_wraps_the_policy_pair_rather_than_truncating() -> None:
+    """D8: at the 40x24 content floor the policy pair moves to a second line."""
+    rows = core.rows_from_snapshot(_snapshot(_link(name="coder")))
+    entry = core.render_rows(rows, 24)[1]
+    physical = str(entry).split("\n")
+    assert len(physical) >= 2, physical
+    assert all(cell_len(line) <= 24 for line in physical), physical
+    # Both policy words AND both values survive on the wrapped detail line(s).
+    rest = "\n".join(physical[1:])
+    assert "Subscribe" in rest and "Auto-push" in rest
+    assert "On" in rest and "Off" in rest

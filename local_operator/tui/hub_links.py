@@ -40,6 +40,11 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 #: pyright on (RFC §2.4).
 _t = tr("tui.hub_links")
 
+#: The narrowest NAME a row keeps on its first line before the policy pair moves
+#: to a second indented line (round-2 D8). Below this the scope/name would be
+#: unreadable, so wrapping beats truncating — the namespace's own context note.
+MIN_NAME_CELLS = 12
+
 #: The single status/action slot: ONE cell, reserved so a poll-driven state
 #: change never reflows the row (the design's "reserve the existing slot").
 SLOT_IDLE = "·"  # a healthy link still shows a quiet mark, never nothing
@@ -90,6 +95,14 @@ class LinkRow:
     auto_will_push: bool
     state: str
     error_class: str | None
+    #: The policy revision the inventory reported, for the CAS on a toggle
+    #: (round-2 D7). ``None`` for a legacy/unresolved row, which cannot be
+    #: edited until its origin is resolved.
+    policy_revision: str | None = None
+    #: Service-computed auto-push eligibility and its named reason (D7): turning
+    #: auto-push ON is refused locally when this is False, with the reason shown.
+    can_auto_push: bool = False
+    eligibility_reason: str = ""
 
     @property
     def scope_label(self) -> str:
@@ -195,6 +208,9 @@ def rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[LinkRow]:
                 auto_will_push=bool(link.get("auto_will_push")),
                 state=str(link.get("state") or "up-to-date"),
                 error_class=pull.get("error_class"),
+                policy_revision=policy.get("revision"),
+                can_auto_push=bool((link.get("eligibility") or {}).get("can_auto_push")),
+                eligibility_reason=str((link.get("eligibility") or {}).get("reason") or ""),
             )
         )
     for row in snapshot.get("unresolved", []):
@@ -248,6 +264,13 @@ def render_rows(
 ) -> list[Text]:
     """The body: one section per kind, one reserved-slot row per link (pure).
 
+    ``width`` is the WIDGET'S CONTENT box in cells — the panel's styles.width
+    minus its padding — not the outer width. The widget computes it once
+    (:meth:`HubLinksPanel._content_width`) and passes the same number it pinned
+    ``styles.width`` to, so a row can never be composed wider than the box it is
+    painted into (the round-2 wrap bug: rows were composed at ``screen-8`` while
+    the padded content box was 4 cells narrower, so a 32-cell row wrapped).
+
     ``tail_style`` is the resolved ink for the source+policy tail. The WIDGET
     passes the theme's ``muted`` (D4); the default ``"dim"`` keeps the core
     renderable without a theme (a bare ``"muted"`` is a palette token, not a
@@ -286,9 +309,15 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
     raw API base URL (D2 / frozen §30); the full source URL is the row's
     accessible description. The slot is ALWAYS one reserved cell, so a state
     change cannot reflow the row, and neither the source/permission copy nor the
-    essential policy words may be clipped away (frozen §128) — at a narrow width
-    the NAME is what gives first, then the tail truncates with an ellipsis so the
-    scope still leads it.
+    essential policy words may be clipped away (frozen §128).
+
+    WIDTH BEHAVIOUR (round-2 D8). At a content width too narrow for
+    ``<name> — <scope> · Subscribe <s> · Auto-push <p>`` to survive with a
+    readable name, the policy moves to a SECOND indented line rather than being
+    truncated: the catalogue's own context note for this namespace says to wrap
+    explanatory copy, never truncate it, and the policy pair is the row's whole
+    point. The name keeps at least :data:`MIN_NAME_CELLS`, so the scope still
+    leads the tail and the two policy words stay legible at the 40x24 floor.
 
     Ink: the tail uses ``muted`` (6.51:1 dark / 5.18:1 light), not ``dim``
     (3.43:1 / 2.72:1) — the projects_send precedent (D4).
@@ -296,23 +325,52 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
 
     slot = _SLOT_FOR.get(row.slot_state, SLOT_IDLE)
     prefix = f"{slot} "
-    tail = (
-        f" — {row.scope_label} · "
+    scope = f" — {row.scope_label}"
+    policy = (
         f"{_t(_k.policy_subscribe_label())} {row._policy_word(row.subscribe)} · "
         f"{_t(_k.policy_auto_push_label())} {row._policy_word(row.auto_push)}"
     )
-    name_room = max(4, width - cell_len(prefix) - cell_len(tail))
-    name = truncate_cells(row.name, name_room)
-    remaining = width - cell_len(prefix) - cell_len(name)
-    if remaining <= 0:
-        tail = ""
-    elif cell_len(tail) > remaining:
-        tail = truncate_cells(tail, remaining)
-    line = Text()
-    line.append(prefix, style="dim" if not selected else "reverse")
-    line.append(name, style="reverse" if selected else "")
-    line.append(tail, style=tail_style if not selected else "reverse")
-    return line
+    tail = f"{scope} · {policy}"
+    name_room = width - cell_len(prefix) - cell_len(tail)
+    if name_room >= MIN_NAME_CELLS:
+        # Fits on one line: name (min 4 cells) then the scope+policy tail.
+        name = truncate_cells(row.name, max(4, name_room))
+        remaining = width - cell_len(prefix) - cell_len(name)
+        fitted_tail = truncate_cells(tail, remaining) if cell_len(tail) > remaining else tail
+        line = Text()
+        line.append(prefix, style="dim" if not selected else "reverse")
+        line.append(name, style="reverse" if selected else "")
+        line.append(fitted_tail, style=tail_style if not selected else "reverse")
+        return line
+    # Narrow: the policy moves to its own indented line(s) so neither policy
+    # word is lost. The first line is `<slot> <name> — <scope>`; the policy is
+    # indented under the name column, and when it does not fit ONE line each flag
+    # gets its own line — at the 40x24 content floor `Subscribe On · Auto-push
+    # Off` is 28 cells and the detail line is narrower, so a single line would
+    # clip the auto-push VALUE; splitting keeps both words and both values.
+    name = truncate_cells(row.name, max(4, width - cell_len(prefix) - cell_len(scope)))
+    head = Text()
+    head.append(prefix, style="dim" if not selected else "reverse")
+    head.append(name, style="reverse" if selected else "")
+    head.append(scope, style=tail_style if not selected else "reverse")
+    indent = " " * cell_len(prefix)
+    detail_width = max(0, width - cell_len(prefix))
+    style = tail_style if not selected else "reverse"
+    flags = [
+        f"{_t(_k.policy_subscribe_label())} {row._policy_word(row.subscribe)}",
+        f"{_t(_k.policy_auto_push_label())} {row._policy_word(row.auto_push)}",
+    ]
+    joined = " · ".join(flags)
+    if cell_len(joined) <= detail_width:
+        details = [joined]
+    else:
+        details = flags
+    out = Text.assemble(head)
+    for part in details:
+        out.append("\n")
+        out.append(indent)
+        out.append(truncate_cells(part, detail_width), style=style)
+    return out
 
 
 def aggregate_slot(rows: Sequence[LinkRow]) -> str:

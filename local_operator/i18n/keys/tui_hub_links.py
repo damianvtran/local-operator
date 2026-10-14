@@ -50,6 +50,34 @@ def detail_title() -> Msg:
     return Msg("tui.hub_links.detail.title", {})
 
 
+def hint_activate() -> Msg:
+    return Msg("tui.hub_links.hint.activate", {})
+
+
+def hint_auto_push() -> Msg:
+    return Msg("tui.hub_links.hint.auto_push", {})
+
+
+def hint_close() -> Msg:
+    return Msg("tui.hub_links.hint.close", {})
+
+
+def hint_range(*, first: str, last: str, total: str) -> Msg:
+    return Msg("tui.hub_links.hint.range", {"first": first, "last": last, "total": total})
+
+
+def hint_refresh() -> Msg:
+    return Msg("tui.hub_links.hint.refresh", {})
+
+
+def hint_scroll() -> Msg:
+    return Msg("tui.hub_links.hint.scroll", {})
+
+
+def hint_subscribe() -> Msg:
+    return Msg("tui.hub_links.hint.subscribe", {})
+
+
 def mark_available(*, item: str, source: str) -> Msg:
     return Msg("tui.hub_links.mark.available", {"item": item, "source": source})
 

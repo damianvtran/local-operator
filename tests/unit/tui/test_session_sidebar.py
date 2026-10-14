@@ -5529,3 +5529,74 @@ async def test_the_ask_mark_paints_the_derived_ink():
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
         assert sidebar._asking_mark(entry) == (ASK_MARKER, "chip-live")
+
+
+def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
+    """No sidebar binding may shadow an app-level binding (round-2 D10).
+
+    A focused-widget binding outranks the app's for the same key, so a sidebar
+    chord on a key the app already owns silently takes that key away — the exact
+    bug round 2 found: `ctrl+n` was bound here for the hub door while
+    `app.py` materialises a `Binding(action.default, ...)` for every app-scoped
+    `KEY_ACTIONS` entry, and `keymap.new_session` defaults to `ctrl+n`. The
+    earlier comment claimed `ctrl+n` was "unbound at app level (audited)"; that
+    was FALSE, and this test is the assertion the comment should have been.
+
+    The two DELIBERATE shadows are allow-listed with their reasons, so a third
+    one cannot appear unnoticed — the collision set is computed from the live
+    app bindings (including the remappable keymap defaults and the footer-led
+    keys), never a hand-maintained list.
+    """
+    from local_operator.keymap import KEY_ACTIONS
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
+    from local_operator.tui.widgets.session_sidebar import SessionSidebar
+
+    app_keys: set[str] = {str(binding.key) for binding in OperatorApp.BINDINGS}
+    # The remappable defaults are materialised as bindings, but assert them
+    # explicitly too so a refactor that stops materialising one still fails here.
+    keymap_defaults = {action.default for action in KEY_ACTIONS if action.scope == "app"}
+    assert keymap_defaults <= app_keys, keymap_defaults - app_keys
+
+    #: key -> why this chord may shadow the app binding. Each is a documented,
+    #: reviewed decision, not an accident.
+    allowed_shadows = {
+        # The sidebar owns the exit while it holds the keyboard; the app's
+        # `escape` is deliberately outranked in F9 mode (design round 1).
+        "escape": "the focused sidebar/card owns its own exit",
+        # U2/U13: the fleet door's keyboard route, taught on the footer rung and
+        # safe because the aside's `fork_aside` is declined in exactly this state
+        # (see `check_action` below, review round 2 F15).
+        "ctrl+f": "fleet door; check_action declines it while an aside is open",
+        # The overlay cards share the `/usage` convention: a focused card's own
+        # `r` refresh (the app's `r` is not a command).
+        "r": "focused overlay card refreshes itself (the /usage convention)",
+    }
+
+    def check(widget: type) -> None:
+        def _key(binding: object) -> str:
+            key = getattr(binding, "key", None)
+            return str(key) if key is not None else str(binding[0])  # type: ignore[index]
+
+        def _action(binding: object) -> str:
+            action = getattr(binding, "action", None)
+            return str(action) if action is not None else str(binding[1])  # type: ignore[index]
+
+        shadows = {
+            _key(binding): _action(binding)
+            for binding in widget.BINDINGS
+            if _key(binding) in app_keys
+        }
+        unexpected = {k: a for k, a in shadows.items() if k not in allowed_shadows}
+        assert not unexpected, (
+            f"{widget.__name__} bindings shadow app bindings without a documented "
+            f"reason: {unexpected}"
+        )
+        # A REMAPPABLE app key must never be shadowed: that is the exact D10 bug
+        # (`ctrl+n` silently took the user's new-session hotkey), so it is
+        # asserted directly rather than left to the allowlist.
+        taken = keymap_defaults & set(shadows)
+        assert not taken, f"{widget.__name__} shadows remappable keymap keys: {taken}"
+
+    check(SessionSidebar)
+    check(HubLinksPanel)

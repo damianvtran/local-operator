@@ -486,14 +486,16 @@ class SessionSidebar(Widget, can_focus=True):
         # is Textual's own fall-through — a declined binding is skipped and the
         # app's `fork_aside` runs, i.e. the behaviour the aside advertises.
         Binding("ctrl+f", "fleet_asks", show=False),
-        # `ctrl+n` — THE HUB LINKS DOOR'S KEYBOARD ROUTE (the architect's
-        # placement), the fifth chord of the same sidebar-scoped family. Safe
-        # HERE for their measured reason: in F9 mode the sidebar owns the focus
-        # chain and the composer is not in it. It pairs with the footer's hub
-        # note exactly as `ctrl+f` pairs with the ask note — one door, two
-        # gestures. `ctrl+n` is unbound at app level (audited), so it shadows
-        # nothing.
-        Binding("ctrl+n", "hub_links", show=False),
+        # NO `ctrl+n` CHORD FOR THE HUB DOOR (round-2 D10). The earlier binding
+        # claimed `ctrl+n` was "unbound at app level (audited)" — that was FALSE:
+        # `app.py` materialises a `Binding(action.default, ...)` for every
+        # app-scoped `KEY_ACTIONS` entry, and `keymap.new_session` defaults to
+        # `ctrl+n`. A focused-widget binding outranks the app's, so the chord
+        # silently shadowed the user's (remappable!) new-session hotkey. Rather
+        # than spend another key, the door keeps its two real routes — the
+        # footer note's press and `/hub` — and this widget binds no key for it.
+        # `test_sidebar_footer_bindings_do_not_shadow_app_bindings` pins the
+        # invariant that no sidebar binding shadows an app binding.
     ]
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -1814,10 +1816,12 @@ class SessionSidebar(Widget, can_focus=True):
         self.post_message(self.FleetAsksRequested())
 
     def action_hub_links(self) -> None:
-        """`ctrl+n` — open the Hub links surface (the architect's placement).
+        """Open the Hub links surface (the architect's placement).
 
-        The same destination and message as the footer hub note's press: one
-        door, two gestures, the app's `action_hub_links` behind both.
+        No KEY binds this (round-2 D10: a chord would shadow the remappable
+        new-session hotkey); the footer hub note's press and `/hub` are the two
+        real routes. Both post the SAME message, and the app's `action_hub_links`
+        is behind it — one door, two gestures.
         """
         self.post_message(self.HubLinksRequested())
 
@@ -2723,13 +2727,33 @@ class SessionSidebar(Widget, can_focus=True):
         # `truncate_cells` would crop it mid-word.
         ask_note = self._asks_note()
         hub_note = self._hub_note()
-        # The hub DOOR joins the tail as a PARTICIPANT (the ask note's rule),
-        # never an append after the fit tests. It rides every rung via `tail`,
-        # so it drops WHOLE with the tail at a narrow width rather than cropping
-        # mid-word — a control, not a fact, but it must still never be the
-        # reason a fit test is voided.
-        tail_parts = [part for part in (ask_note, hub_note, chip) if part]
-        tail = f" · {' · '.join(tail_parts)}" if tail_parts else ""
+
+        # THE HUB DOOR IS THE FIRST TAIL FACT TO DROP (round-2 D9). The door is a
+        # CONTROL whose route outlives it (the mouse and `/hub` both remain), so
+        # it must never be the reason a FACT yields: before any candidate that
+        # would drop the ask note or the chip, the ladder tries the SAME rung
+        # with the door removed. So the tail is built two ways — full, and
+        # hub-free — and every rung is expanded full-then-hub-free, in that
+        # order, before the ladder moves to a narrower rung.
+        def _tail(*parts: str) -> str:
+            kept = [part for part in parts if part]
+            return f" · {' · '.join(kept)}" if kept else ""
+
+        tail_full = _tail(ask_note, hub_note, chip)
+        tail_nohub = _tail(ask_note, chip)
+        tail_variants = [tail_full]
+        if hub_note and tail_nohub != tail_full:
+            tail_variants.append(tail_nohub)
+
+        def expand(rung_templates: list[str]) -> list[str]:
+            """Every rung, expanded full-tail then hub-free, in preference order."""
+
+            out: list[str] = []
+            for template in rung_templates:
+                for variant in tail_variants:
+                    out.append(template.format(t=variant))
+            return out
+
         # THE FOCUSED LADDER (issue #1357 slice 2a; reranked by #1944). When the
         # list holds the keyboard its footer teaches the action set the keyboard
         # now owns: `ctrl+k pin` from 30 cells of list width up — pinning was
@@ -2799,51 +2823,54 @@ class SessionSidebar(Widget, can_focus=True):
             # 100-column terminal gives this panel.
             key = " · ctrl+f asks" if ask_note else ""
             key_short = " · ctrl+f" if ask_note else ""
-            candidates: list[str] = []
+            rungs: list[str] = []
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
                 if chip:
-                    candidates.append(f"{position} · {pin}{key}{layer}{tail}")
-                candidates.append(f"{position} · {pin}{key}{tail}")
+                    rungs.append(f"{position} · {pin}{key}{layer}{{t}}")
+                rungs.append(f"{position} · {pin}{key}{{t}}")
                 if chip:
-                    candidates.append(f"{position} · {pin}{layer}{tail}")
-                candidates.append(f"{position} · {pin}{tail}")
+                    rungs.append(f"{position} · {pin}{layer}{{t}}")
+                rungs.append(f"{position} · {pin}{{t}}")
             if chip:
-                candidates.append(f"{pin}{key}{layer}{tail}")
-            candidates += [
-                f"{pin}{key}{tail}",
+                rungs.append(f"{pin}{key}{layer}{{t}}")
+            rungs += [
+                f"{pin}{key}{{t}}",
                 # The ask door's teacher outranks the pin's rung (U13): both are
                 # whole-or-nothing facts, and this one is the only teacher the
                 # chord has. Inserted BEFORE the pin-only candidate, so at a
                 # width where the pin cannot ride beside it the pin is what
                 # yields — never the note or the lead.
-                f"{lead}{key}{tail}",
-                f"{lead}{key_short}{tail}",
-                f"{pin}{tail}",
-                f"{lead}{tail}",
-                lead,
+                f"{lead}{key}{{t}}",
+                f"{lead}{key_short}{{t}}",
+                f"{pin}{{t}}",
+                f"{lead}{{t}}",
             ]
+            candidates = expand(rungs)
+            candidates.append(lead)
         else:
             if len(self.entries) > self.page_size:
                 last = min(len(self.entries), self._offset + self.page_size)
                 position = f"{self._offset + 1}–{last}/{len(self.entries)}"
-                candidates = [
-                    f"{position} · {lead} · ctrl+b hide{tail}",
-                    f"{position} · {lead}{tail}",
-                ]
+                candidates = expand(
+                    [
+                        f"{position} · {lead} · ctrl+b hide{{t}}",
+                        f"{position} · {lead}{{t}}",
+                    ]
+                )
             else:
-                candidates = [f"{base}{tail}"]
-                if tail:
-                    # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round
-                    # 2: U3). At 80x24 an unfocused sidebar has 29 content cells
-                    # and `f9 focus · ctrl+b hide · asks: 4` is 32, so the
-                    # ladder used to fall all the way to `f9 focus · ctrl+b hide`
-                    # — dropping the total, the only fleet surface on the frame,
-                    # while keeping a hint about hiding a panel. `ctrl+b hide`
-                    # is discovered by pressing ctrl+b and is also on the frame
-                    # that toggles it; the count is discovered from nowhere else.
-                    candidates.append(f"{lead}{tail}")
+                candidates = expand([f"{base}{{t}}"])
+                # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round 2:
+                # U3). At 80x24 an unfocused sidebar has 29 content cells and
+                # `f9 focus · ctrl+b hide · asks: 4` is 32, so the ladder used to
+                # fall all the way to `f9 focus · ctrl+b hide` — dropping the
+                # total, the only fleet surface on the frame, while keeping a
+                # hint about hiding a panel. `ctrl+b hide` is discovered by
+                # pressing ctrl+b and is also on the frame that toggles it; the
+                # count is discovered from nowhere else. Once the hub-free
+                # variants are spent, the lead keeps the tail it can.
+                candidates.extend(expand([f"{lead}{{t}}"]))
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(

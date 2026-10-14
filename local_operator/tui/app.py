@@ -46321,6 +46321,11 @@ class OperatorApp(App[None]):
     def on_hub_links_panel_dismissed(self, message: "HubLinksPanel.Dismissed") -> None:
         message.stop()
         self.workers.cancel_group(self, "hub-links")
+        # Round-2 D12: the door's count is refreshed on DISMISS too. Opening the
+        # panel is exactly where a link's state can change (a pull applies, a
+        # policy toggles), so the footer count the door paints would otherwise
+        # be stale until the next sidebar toggle.
+        self.refresh_hub_total()
         restore = self._hub_links_focus_restore
         self._hub_links_focus_restore = None
         if restore is not None and getattr(restore, "is_mounted", False):
@@ -46332,25 +46337,141 @@ class OperatorApp(App[None]):
         self, message: "HubLinksPanel.RefreshRequested"
     ) -> None:
         message.stop()
+        # A refresh is a state change too; the door follows it (round-2 D12).
+        self.refresh_hub_total()
         self.run_worker(
             self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
         )
 
     def on_hub_links_panel_policy_requested(self, message: "HubLinksPanel.PolicyRequested") -> None:
-        """The reserved slot's action: apply/retry/policy for a SOURCE-SCOPED link.
+        """The reserved slot's non-toggle action: apply/retry, or a named refusal.
 
-        A legacy link has no link_id and never reaches here with an action (its
-        row is blocked); the policy menu for a confirmed link is opened by the
-        app because it owns service access. Kept as a single entry point so the
-        panel never guesses a destination.
+        ``direction == "auto-push"`` is the ineligible-enable path: the service
+        reports why auto-push cannot be turned on, and this prints that NAMED
+        reason rather than writing anything. A legacy link has no link_id and is
+        refused with the resolve-first notice. Pull/push (available/failure) are
+        not wired in this slice and report an honest notice naming the direction.
         """
         message.stop()
         if message.link_id is None:
             self._system_notice("resolve this link's source before acting on it", "warning")
             return
-        # The full policy editor lands with the i18n key set; the intent and
-        # routing are wired here so the panel has one destination to call.
-        self._system_notice(f"hub link {message.link_id}: {message.direction}", "info")
+        if message.direction == "auto-push":
+            reason = self._hub_link_eligibility_reason(message.link_id)
+            self._system_notice(
+                f"auto-push is not available for this link: {reason or 'ineligible'}",
+                "warning",
+            )
+            return
+        # A direct apply/retry of one direction is not in this slice's scope; say
+        # so plainly rather than pretending. The toggle and advisory routes are
+        # the two actions this surface owns today.
+        self._system_notice(f"{message.direction} is not offered from this surface yet", "info")
+
+    def on_hub_links_panel_policy_toggle_requested(
+        self, message: "HubLinksPanel.PolicyToggleRequested"
+    ) -> None:
+        """Apply one source-scoped policy toggle through the CLI's own service path.
+
+        Round-2 D7: this is a REAL write. It calls the same ``update_policy`` the
+        CLI ``lop hub link set`` and the desktop PATCH route call, under the same
+        revision CAS, with the same service-computed auto-push eligibility and
+        the same explicit public-egress consent — so a toggle here changes the
+        CONFIG (a new policy revision) or refuses with a NAMED reason. Nothing
+        about the write is re-implemented; the panel reports intent and this owns
+        the service call.
+        """
+        message.stop()
+        if message.link_id is None:
+            self._system_notice("resolve this link's source before acting on it", "warning")
+            return
+
+        def work() -> str | None:
+            """Returns a refusal message, or ``None`` on success."""
+            from local_operator.config import ConfigManager
+            from local_operator.hub_sync import provenance as prov
+            from local_operator.hub_sync import service as svc
+            from local_operator.hub_sync.identity import LinkError
+            from local_operator.hub_sync.policies import update_policy
+            from local_operator.paths import config_dir
+
+            cm = ConfigManager(config_dir())
+            record = None
+            for candidate in prov.iter_baselines(cm.config_dir):
+                if candidate.identity is not None and candidate.identity.link_id == message.link_id:
+                    record = candidate
+                    break
+            if record is None or record.identity is None:
+                return "no link with that id is known locally"
+            ctx = svc.HubSyncContext(
+                config_dir=cm.config_dir,
+                config_manager=cm,
+                client_for_tenant=lambda _t: None,
+            )
+            row = next(
+                (
+                    link
+                    for link in svc.links_snapshot(ctx)["links"]
+                    if link["link_id"] == message.link_id
+                ),
+                None,
+            )
+            eligible = bool(row and row["eligibility"]["can_auto_push"])
+            # PUBLIC ENABLE + CONSENT: the service marks a public origin
+            # ``unsafe-publication`` precisely BECAUSE no egress grant exists yet
+            # — that grant is the thing the explicit consent CREATES. So when
+            # the caller has given consent for a public origin, eligibility is
+            # satisfied by that consent, and ``update_policy`` then binds the
+            # grant (its own public branch). Without this the consent flow could
+            # never complete. Every other ineligibility stays a refusal.
+            reason = str((row or {}).get("eligibility", {}).get("reason") or "")
+            visibility = str((row or {}).get("visibility") or "")
+            consent_completes = (
+                message.confirm_egress and visibility == "public" and reason == "unsafe-publication"
+            )
+            subscribe = message.value if message.policy == "subscribe" else None
+            auto_push = message.value if message.policy == "auto_push" else None
+            try:
+                update_policy(
+                    cm,
+                    record.identity,
+                    expected_revision=message.revision,
+                    subscribe=subscribe,
+                    auto_push=auto_push,
+                    can_enable_auto_push=eligible or consent_completes,
+                    confirm_public_egress=message.confirm_egress,
+                )
+            except LinkError as error:
+                return str(error)
+            return None
+
+        async def run() -> None:
+            refusal = await asyncio.to_thread(work)
+            panel = self._hub_links_panel()
+            if refusal is not None:
+                self._system_notice(refusal, "warning")
+            # Re-read either way: a success shows the new policy, a refusal (a
+            # CAS mismatch) shows the row that moved under the user.
+            if panel is not None and panel.is_open:
+                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                if panel.is_open:
+                    panel.show_links(snapshot)
+            self.refresh_hub_total()
+
+        self.run_worker(run(), thread=False, group="hub-links", exclusive=True)
+
+    def _hub_link_eligibility_reason(self, link_id: str) -> str:
+        """The service-computed ineligibility reason for a link, or ""."""
+
+        try:
+            snapshot = self._hub_links_snapshot_sync()
+        except Exception:  # noqa: BLE001 - a notice must not raise
+            return ""
+        row = next(
+            (link for link in snapshot.get("links", []) if link.get("link_id") == link_id),
+            None,
+        )
+        return str((row or {}).get("eligibility", {}).get("reason") or "")
 
     # -- the /btw aside ------------------------------------------------------
     #

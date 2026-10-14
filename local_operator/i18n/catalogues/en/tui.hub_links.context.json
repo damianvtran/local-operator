@@ -173,5 +173,40 @@
     "note": "Source-scoped independent policy. Subscribe controls scheduled inbound only; auto-push controls scheduled outbound only. Neither is a global ceiling. Source and item are literal display labels, never a inferred active organization. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
     "role": "help text",
     "tone": "plain, precise"
+  },
+  "tui.hub_links.hint.activate": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.close": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.range": {
+    "role": "range indicator",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.refresh": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.scroll": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.auto_push": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.hint.subscribe": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
   }
 }
