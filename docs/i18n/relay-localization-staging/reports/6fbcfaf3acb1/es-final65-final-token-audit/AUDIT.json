@@ -1,0 +1,525 @@
+{
+  "audit": "Independent final Spanish singular-token convergence audit",
+  "date": "2026-10-14",
+  "auditor": {
+    "agent": "independent Spanish task auditor",
+    "session": "6fbcfaf3acb1",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback_used": false
+  },
+  "source_revision": {
+    "base_HEAD": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+    "working_source_status": "uncommitted three count-aware EN noun source changes; exact hashes pin audited content, NOT a later committed-head claim"
+  },
+  "source_root": "source-checkout",
+  "target_root": "historical-scratch/5ad0af2dd59e/es-final65-final-token",
+  "verdict": "clean_native_with_nonblocking_documentation_followup",
+  "terminal_native_round": true,
+  "unresolved_major": 0,
+  "namespace_results": {
+    "relay.shell": {
+      "keys": 44,
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+      "target_sha256": "9e6691cdd0fab8dfbf09c314d8acd353a2d109a135d487493c652cb02a712438",
+      "native_result": "passed",
+      "rendered_result": "BLOCKED"
+    },
+    "relay.session": {
+      "keys": 17,
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "context_sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db",
+      "target_sha256": "17a2bf64b2a6f5ffeb10d7d8d54a06d76e6a3102c477681fdf59815a57b463f2",
+      "native_result": "passed",
+      "rendered_result": "BLOCKED"
+    },
+    "relay.login": {
+      "keys": 4,
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "context_sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a",
+      "target_sha256": "b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658",
+      "native_result": "passed",
+      "rendered_result": "BLOCKED"
+    }
+  },
+  "scope": {
+    "reaudited": "one singular token branch",
+    "retained_keys": 64,
+    "total_covered": 65,
+    "source_context_unchanged": true,
+    "byte_proof": "Final shell is exactly previous shell bytes with one replacement one {tóken} -> one {token}; session/login whole-file identical. Stable source/context hashes match previous independent audit. No full matrix rerun."
+  },
+  "preceding_evidence": {
+    "original_failed_final65_audit": "reports/6fbcfaf3acb1/es-final65-audit/AUDIT.json",
+    "seven_key_unified_delta_audit": "reports/6fbcfaf3acb1/es-final65-count-aware-audit/AUDIT.json",
+    "seven_key_audit_sha256": "2e41557cd633396cd79088c45a622c8530003dda965193cb1aaf4cf54455da22",
+    "retained_delta_matrix": "reports/6fbcfaf3acb1/es-final65-count-aware-audit/phone.json",
+    "matrix_summary": "80 Python and actual-phone amount combinations with composed no-family/family rows, at 0/1/2/1.5/-1/-1.5/±million, plus 1:00 and .29/.07 percent controls. Repository exact key/type/style checks and type/category/style negatives passed; 58 prior target/source/context rows proved unchanged. Retained, not rerun."
+  },
+  "resolution": {
+    "ES65-1": {
+      "severity": "MAJOR",
+      "status": "resolved_in_audited_candidate",
+      "evidence": "Count-aware unit nouns plus natural Cantidad restante caption; all seven-key delta count matrices retained by final byte proof."
+    },
+    "ES65-2": {
+      "severity": "MINOR",
+      "status": "resolved_in_audited_candidate",
+      "evidence": "Neutral date/time punctuation has no a las1:00 agreement defect; prior exact actual outputs retained."
+    },
+    "ES65-3": {
+      "severity": "MINOR",
+      "status": "deferred_nonblocking",
+      "reason": "Scoped native prose caché and adapted measurement token/tókenes rationale accepted; durable style/ledger disposition remains parent-owned. No claim that source style docs were edited."
+    },
+    "ES65-4": {
+      "severity": "MINOR",
+      "status": "resolved_in_audited_candidate",
+      "evidence": "Exact one-branch correction tóken→token; four actual phone composed outputs at +1/-1 now use token, matching FundéuRAE singular orthography."
+    }
+  },
+  "new_findings": [],
+  "preserved_million_lead": {
+    "claim": "Fully digit-written million should not include de; French authority suggested extrapolation to ES",
+    "disposition": "rejected_for_ES; parent subsequently confirmed withdrawal; lead preserved here",
+    "source": "https://www.rae.es/dpd/cardinales",
+    "section": "6",
+    "exact_quote": "Lo mismo sucede si se escriben con números: 1 000 000 de personas, 1 200 000 personas.",
+    "conclusion": "Keep current Spanish many {de créditos/de tókenes/de solicitudes}; no de duplication in actual rows. French grammar does not determine Spanish grammar."
+  },
+  "token_orthography_source": {
+    "url": "https://www.fundeu.es/recomendacion/token-alternativas-en-espanol/",
+    "quote": "Las grafías token (sin cursiva ni comillas) o toquen son adecuadas en español; sus plurales respectivos son tókenes y tóquenes."
+  },
+  "actual_final_probe": {
+    "runtime": "actual phone createMessageRuntime",
+    "model": "openai/gpt-6.1-sol",
+    "node": "v26.5.0",
+    "probes": [
+      {
+        "value": 1,
+        "unit": "token",
+        "text": "Cantidad restante: 1 token",
+        "row": "Cuota incluida · 7 días — Cantidad restante: 1 token"
+      },
+      {
+        "value": 1,
+        "unit": "token",
+        "text": "Uso: 1 token",
+        "row": "Cuota incluida · 7 días — Uso: 1 token"
+      },
+      {
+        "value": -1,
+        "unit": "token",
+        "text": "Cantidad restante: -1 token",
+        "row": "Cuota incluida · 7 días — Cantidad restante: -1 token"
+      },
+      {
+        "value": -1,
+        "unit": "token",
+        "text": "Uso: -1 token",
+        "row": "Cuota incluida · 7 días — Uso: -1 token"
+      }
+    ]
+  },
+  "all65_rows": [
+    {
+      "key": "relay.shell.list.empty",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "no hay sesiones en ejecución"
+    },
+    {
+      "key": "relay.shell.list.connecting",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "conectando…"
+    },
+    {
+      "key": "relay.shell.list.section.active",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Sesiones activas"
+    },
+    {
+      "key": "relay.shell.list.section.previous",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Sesiones anteriores"
+    },
+    {
+      "key": "relay.shell.list.theme",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "elegir tema"
+    },
+    {
+      "key": "relay.shell.session.waiting",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "esperando la vista de la sesión…"
+    },
+    {
+      "key": "relay.shell.session.connecting",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "conectando con la sesión…"
+    },
+    {
+      "key": "relay.shell.usage.title",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "uso"
+    },
+    {
+      "key": "relay.shell.usage.cached",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Uso en caché. No se solicita actualizar con el proveedor."
+    },
+    {
+      "key": "relay.shell.usage.unavailable",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Uso en caché no disponible."
+    },
+    {
+      "key": "relay.shell.usage.loading",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cargando uso en caché…"
+    },
+    {
+      "key": "relay.shell.usage.empty",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "No se informó uso en caché."
+    },
+    {
+      "key": "relay.shell.usage.last_known",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Último uso conocido; el uso actual no está disponible."
+    },
+    {
+      "key": "relay.shell.usage.continue",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cuota incluida agotada; se continuará con créditos."
+    },
+    {
+      "key": "relay.shell.usage.family_caps",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Siguen aplicando los límites por familia de modelos."
+    },
+    {
+      "key": "relay.shell.usage.paid",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cuota de pago"
+    },
+    {
+      "key": "relay.shell.usage.family",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cuota por familia de modelos"
+    },
+    {
+      "key": "relay.shell.usage.included",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cuota incluida"
+    },
+    {
+      "key": "relay.shell.usage.amount_unknown",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cantidad no informada"
+    },
+    {
+      "key": "relay.shell.usage.blocked",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Gasto no disponible"
+    },
+    {
+      "key": "relay.shell.usage.eligibility_unknown",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Elegibilidad de gasto desconocida"
+    },
+    {
+      "key": "relay.shell.usage.unlimited",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cuota de pago ilimitada"
+    },
+    {
+      "key": "relay.shell.usage.window_five",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "5 horas"
+    },
+    {
+      "key": "relay.shell.usage.window_week",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "7 días"
+    },
+    {
+      "key": "relay.shell.usage.window_month",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Mensual"
+    },
+    {
+      "key": "relay.shell.usage.window_lifetime",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Total histórico"
+    },
+    {
+      "key": "relay.shell.usage.window_unknown",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Ventana desconocida"
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cantidad restante: {value, number} {unit}"
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Uso: {value, number} {unit}"
+    },
+    {
+      "key": "relay.shell.usage.fraction",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{value, number, percent} usado"
+    },
+    {
+      "key": "relay.shell.usage.reset",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Restablecimiento: {value, date, medium}, {value, time, short}"
+    },
+    {
+      "key": "relay.shell.usage.command",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Muestra el uso en caché del proveedor"
+    },
+    {
+      "key": "relay.shell.usage.as_of",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Datos del {value, date, medium}, {value, time, short}."
+    },
+    {
+      "key": "relay.shell.usage.stale",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Puede estar desactualizado."
+    },
+    {
+      "key": "relay.shell.usage.row",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{label} · {window} — {value}"
+    },
+    {
+      "key": "relay.shell.usage.row_family",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{label} ({family}) · {window} — {value}"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{count, plural, one {crédito} many {de créditos} other {créditos}}"
+    },
+    {
+      "key": "relay.shell.usage.unit_usd",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "USD"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "native_result": "passed",
+      "basis": "singular token spelling reaudited and exercised at ±1",
+      "target": "{count, plural, one {token} many {de tókenes} other {tókenes}}"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{count, plural, one {solicitud} many {de solicitudes} other {solicitudes}}"
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Queda {value, number, percent}"
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "{value, number, percent} usado"
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Cantidad restante: {value, number}"
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Uso: {value, number}"
+    },
+    {
+      "key": "relay.session.list.search_placeholder",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Buscar conversaciones…"
+    },
+    {
+      "key": "relay.session.list.empty_hint",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "empieza una abajo o desde la TUI en tu máquina"
+    },
+    {
+      "key": "relay.session.list.no_matches",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "ninguna conversación coincide"
+    },
+    {
+      "key": "relay.session.list.start_idle",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "nueva sesión"
+    },
+    {
+      "key": "relay.session.list.start_busy",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "iniciando…"
+    },
+    {
+      "key": "relay.session.view.back",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "volver a las sesiones"
+    },
+    {
+      "key": "relay.session.view.empty_title",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "aún no hay mensajes"
+    },
+    {
+      "key": "relay.session.view.empty_hint",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "envía un mensaje abajo para empezar"
+    },
+    {
+      "key": "relay.session.past.back",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "atrás"
+    },
+    {
+      "key": "relay.session.past.heading",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "sesiones anteriores"
+    },
+    {
+      "key": "relay.session.past.search_placeholder",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "buscar nombres y conversaciones…"
+    },
+    {
+      "key": "relay.session.past.loading",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "cargando…"
+    },
+    {
+      "key": "relay.session.directory.sheet_title",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "directorio de trabajo"
+    },
+    {
+      "key": "relay.session.directory.path_placeholder",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "o escribe otra ruta…"
+    },
+    {
+      "key": "relay.session.model.sheet_title",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "modelo"
+    },
+    {
+      "key": "relay.session.model.filter_placeholder",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "filtrar modelos"
+    },
+    {
+      "key": "relay.session.model.loading",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "cargando…"
+    },
+    {
+      "key": "relay.login.page.title",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "local operator — iniciar sesión"
+    },
+    {
+      "key": "relay.login.password.label",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "contraseña"
+    },
+    {
+      "key": "relay.login.submit.label",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "iniciar sesión"
+    },
+    {
+      "key": "relay.login.error.password",
+      "native_result": "passed",
+      "basis": "retained through exact byte-replacement proof from independently audited predecessor",
+      "target": "Contraseña incorrecta."
+    }
+  ],
+  "rendered": {
+    "result": "BLOCKED",
+    "publication_approval": false,
+    "reason": "No browser/rendered fit evidence in this independent native task; retained hold, no waiver. Native passed does not authorize publication metadata.",
+    "pseudo": "applicable UI expansion/fit evidence remains BLOCKED",
+    "RTL": "Spanish LTR; native RTL mirroring not applicable; mixed-script and general RTL visual proof unclaimed"
+  },
+  "edits": "Own scratch only. No source/target/ledger/shipped edits; no installs/browser/heavy tests. Original failed and interim audits preserved."
+}

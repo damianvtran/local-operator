@@ -1,0 +1,1712 @@
+{
+  "fr": [
+    {
+      "message": "relay.login.page.title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.password.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.submit.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.error.password",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_idle",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_busy",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.back",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.empty",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.active",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.previous",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.session.waiting",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row_family",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.fraction",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_credits",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_usd",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_tokens",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_requests",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.reset",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.as_of",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    }
+  ],
+  "es": [
+    {
+      "message": "relay.login.page.title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.password.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.submit.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.error.password",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_idle",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_busy",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.back",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.empty",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.active",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.previous",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.session.waiting",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row_family",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.fraction",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_credits",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_usd",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_tokens",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_requests",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.reset",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.as_of",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    }
+  ],
+  "ru": [
+    {
+      "message": "relay.login.page.title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.password.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.submit.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.error.password",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_idle",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_busy",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.back",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.empty",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.active",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.previous",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.session.waiting",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row_family",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.fraction",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_credits",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_usd",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_tokens",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_requests",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.reset",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.as_of",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    }
+  ],
+  "vi": [
+    {
+      "message": "relay.login.page.title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.password.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.submit.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.error.password",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_idle",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_busy",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.back",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.empty",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.active",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.previous",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.session.waiting",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row_family",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.fraction",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_credits",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_usd",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_tokens",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_requests",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.reset",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.as_of",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    }
+  ],
+  "hi": [
+    {
+      "message": "relay.login.page.title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.password.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.submit.label",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.login.error.password",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_idle",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.list.start_busy",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.back",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_title",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.session.view.empty_hint",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.empty",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.active",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.list.section.previous",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.session.waiting",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.row_family",
+      "expected": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "label",
+          "simple"
+        ],
+        [
+          "family",
+          "simple"
+        ],
+        [
+          "window",
+          "simple"
+        ],
+        [
+          "value",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used",
+      "expected": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ],
+        [
+          "unit",
+          "simple"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.fraction",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_percent",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.remaining_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.used_unknown_unit",
+      "expected": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "number"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_credits",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_usd",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_tokens",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.unit_requests",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.reset",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    },
+    {
+      "message": "relay.shell.usage.as_of",
+      "expected": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "actual": [
+        [
+          "value",
+          "date"
+        ]
+      ],
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "Поиск по беседам…",
+  "relay.session.list.empty_hint": "запустите сессию ниже или в TUI на вашем компьютере",
+  "relay.session.list.no_matches": "подходящих бесед нет",
+  "relay.session.list.start_idle": "новая сессия",
+  "relay.session.list.start_busy": "запуск…",
+  "relay.session.view.back": "назад к сессиям",
+  "relay.session.view.empty_title": "сообщений пока нет",
+  "relay.session.view.empty_hint": "отправьте сообщение ниже, чтобы начать",
+  "relay.session.past.back": "назад",
+  "relay.session.past.heading": "прошлые сессии",
+  "relay.session.past.search_placeholder": "поиск по названиям и беседам…",
+  "relay.session.past.loading": "загрузка…",
+  "relay.session.directory.sheet_title": "рабочий каталог",
+  "relay.session.directory.path_placeholder": "или введите другой путь…",
+  "relay.session.model.sheet_title": "модель",
+  "relay.session.model.filter_placeholder": "фильтр моделей",
+  "relay.session.model.loading": "загрузка…"
+}

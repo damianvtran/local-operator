@@ -1,0 +1,714 @@
+{
+  "model": "openai/gpt-6.1-sol",
+  "head": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "source_state": "uncommitted working-tree delta, not contents of HEAD",
+  "namespaces": [
+    {
+      "namespace": "relay.shell",
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.shell.json",
+      "target_path": "candidates/ru/relay.shell.json",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "b96e8923fe82824db2434720f722d2cf323d5aa733d78ad1c75285391c16245b",
+      "keys": 44,
+      "changed_keys": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests"
+      ]
+    },
+    {
+      "namespace": "relay.session",
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.session.json",
+      "target_path": "candidates/ru/relay.session.json",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "1d3618c0928e956da89e70b9eaf0945c15062493a043a6e17a8364fc912efdec",
+      "keys": 17,
+      "changed_keys": []
+    },
+    {
+      "namespace": "relay.login",
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.login.json",
+      "target_path": "candidates/ru/relay.login.json",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "6235f9f3f058fe859194f37879d485199449345c1692beeda2dc767f691dfaa1",
+      "keys": 4,
+      "changed_keys": []
+    }
+  ],
+  "compatibility": [
+    {
+      "namespace": "relay.shell",
+      "retained_values": 41,
+      "session_login_raw_bytes_identical": null
+    },
+    {
+      "namespace": "relay.session",
+      "retained_values": 17,
+      "session_login_raw_bytes_identical": true
+    },
+    {
+      "namespace": "relay.login",
+      "retained_values": 4,
+      "session_login_raw_bytes_identical": true
+    }
+  ],
+  "probes": [
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "en": "{count, plural, one {credit} other {credits}}",
+      "ru": "{count, plural, one {кредит} few {кредита} many {кредитов} other {кредита}}",
+      "argument": {
+        "name": "count",
+        "type": "plural",
+        "numeric_count": "number",
+        "style": "cardinal",
+        "offset": 0
+      },
+      "categories": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ]
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "en": "{count, plural, one {token} other {tokens}}",
+      "ru": "{count, plural, one {токен} few {токена} many {токенов} other {токена}}",
+      "argument": {
+        "name": "count",
+        "type": "plural",
+        "numeric_count": "number",
+        "style": "cardinal",
+        "offset": 0
+      },
+      "categories": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ]
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "en": "{count, plural, one {request} other {requests}}",
+      "ru": "{count, plural, one {запрос} few {запроса} many {запросов} other {запроса}}",
+      "argument": {
+        "name": "count",
+        "type": "plural",
+        "numeric_count": "number",
+        "style": "cardinal",
+        "offset": 0
+      },
+      "categories": [
+        "one",
+        "few",
+        "many",
+        "other"
+      ]
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 0,
+      "category": "many",
+      "unit": "кредитов",
+      "variant": "remaining",
+      "value": "Остаток: 0 (кредитов)",
+      "row": "Включённая квота · Месяц: Остаток: 0 (кредитов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (кредитов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 0,
+      "category": "many",
+      "unit": "кредитов",
+      "variant": "used",
+      "value": "Использовано: 0 (кредитов)",
+      "row": "Включённая квота · Месяц: Использовано: 0 (кредитов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 0 (кредитов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1,
+      "category": "one",
+      "unit": "кредит",
+      "variant": "remaining",
+      "value": "Остаток: 1 (кредит)",
+      "row": "Включённая квота · Месяц: Остаток: 1 (кредит)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (кредит)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1,
+      "category": "one",
+      "unit": "кредит",
+      "variant": "used",
+      "value": "Использовано: 1 (кредит)",
+      "row": "Включённая квота · Месяц: Использовано: 1 (кредит)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 (кредит)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 2,
+      "category": "few",
+      "unit": "кредита",
+      "variant": "remaining",
+      "value": "Остаток: 2 (кредита)",
+      "row": "Включённая квота · Месяц: Остаток: 2 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 2,
+      "category": "few",
+      "unit": "кредита",
+      "variant": "used",
+      "value": "Использовано: 2 (кредита)",
+      "row": "Включённая квота · Месяц: Использовано: 2 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 2 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1.5,
+      "category": "other",
+      "unit": "кредита",
+      "variant": "remaining",
+      "value": "Остаток: 1,5 (кредита)",
+      "row": "Включённая квота · Месяц: Остаток: 1,5 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1,5 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1.5,
+      "category": "other",
+      "unit": "кредита",
+      "variant": "used",
+      "value": "Использовано: 1,5 (кредита)",
+      "row": "Включённая квота · Месяц: Использовано: 1,5 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1,5 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1,
+      "category": "one",
+      "unit": "кредит",
+      "variant": "remaining",
+      "value": "Остаток: -1 (кредит)",
+      "row": "Включённая квота · Месяц: Остаток: -1 (кредит)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1 (кредит)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1,
+      "category": "one",
+      "unit": "кредит",
+      "variant": "used",
+      "value": "Использовано: -1 (кредит)",
+      "row": "Включённая квота · Месяц: Использовано: -1 (кредит)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1 (кредит)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -2,
+      "category": "few",
+      "unit": "кредита",
+      "variant": "remaining",
+      "value": "Остаток: -2 (кредита)",
+      "row": "Включённая квота · Месяц: Остаток: -2 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -2 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -2,
+      "category": "few",
+      "unit": "кредита",
+      "variant": "used",
+      "value": "Использовано: -2 (кредита)",
+      "row": "Включённая квота · Месяц: Использовано: -2 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -2 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1.5,
+      "category": "other",
+      "unit": "кредита",
+      "variant": "remaining",
+      "value": "Остаток: -1,5 (кредита)",
+      "row": "Включённая квота · Месяц: Остаток: -1,5 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1,5 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1.5,
+      "category": "other",
+      "unit": "кредита",
+      "variant": "used",
+      "value": "Использовано: -1,5 (кредита)",
+      "row": "Включённая квота · Месяц: Использовано: -1,5 (кредита)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1,5 (кредита)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1000000,
+      "category": "many",
+      "unit": "кредитов",
+      "variant": "remaining",
+      "value": "Остаток: 1 000 000 (кредитов)",
+      "row": "Включённая квота · Месяц: Остаток: 1 000 000 (кредитов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 000 000 (кредитов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1000000,
+      "category": "many",
+      "unit": "кредитов",
+      "variant": "used",
+      "value": "Использовано: 1 000 000 (кредитов)",
+      "row": "Включённая квота · Месяц: Использовано: 1 000 000 (кредитов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 000 000 (кредитов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 0,
+      "category": "many",
+      "unit": "токенов",
+      "variant": "remaining",
+      "value": "Остаток: 0 (токенов)",
+      "row": "Включённая квота · Месяц: Остаток: 0 (токенов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (токенов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 0,
+      "category": "many",
+      "unit": "токенов",
+      "variant": "used",
+      "value": "Использовано: 0 (токенов)",
+      "row": "Включённая квота · Месяц: Использовано: 0 (токенов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 0 (токенов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1,
+      "category": "one",
+      "unit": "токен",
+      "variant": "remaining",
+      "value": "Остаток: 1 (токен)",
+      "row": "Включённая квота · Месяц: Остаток: 1 (токен)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (токен)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1,
+      "category": "one",
+      "unit": "токен",
+      "variant": "used",
+      "value": "Использовано: 1 (токен)",
+      "row": "Включённая квота · Месяц: Использовано: 1 (токен)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 (токен)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 2,
+      "category": "few",
+      "unit": "токена",
+      "variant": "remaining",
+      "value": "Остаток: 2 (токена)",
+      "row": "Включённая квота · Месяц: Остаток: 2 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 2,
+      "category": "few",
+      "unit": "токена",
+      "variant": "used",
+      "value": "Использовано: 2 (токена)",
+      "row": "Включённая квота · Месяц: Использовано: 2 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 2 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1.5,
+      "category": "other",
+      "unit": "токена",
+      "variant": "remaining",
+      "value": "Остаток: 1,5 (токена)",
+      "row": "Включённая квота · Месяц: Остаток: 1,5 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1,5 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1.5,
+      "category": "other",
+      "unit": "токена",
+      "variant": "used",
+      "value": "Использовано: 1,5 (токена)",
+      "row": "Включённая квота · Месяц: Использовано: 1,5 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1,5 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1,
+      "category": "one",
+      "unit": "токен",
+      "variant": "remaining",
+      "value": "Остаток: -1 (токен)",
+      "row": "Включённая квота · Месяц: Остаток: -1 (токен)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1 (токен)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1,
+      "category": "one",
+      "unit": "токен",
+      "variant": "used",
+      "value": "Использовано: -1 (токен)",
+      "row": "Включённая квота · Месяц: Использовано: -1 (токен)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1 (токен)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -2,
+      "category": "few",
+      "unit": "токена",
+      "variant": "remaining",
+      "value": "Остаток: -2 (токена)",
+      "row": "Включённая квота · Месяц: Остаток: -2 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -2 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -2,
+      "category": "few",
+      "unit": "токена",
+      "variant": "used",
+      "value": "Использовано: -2 (токена)",
+      "row": "Включённая квота · Месяц: Использовано: -2 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -2 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1.5,
+      "category": "other",
+      "unit": "токена",
+      "variant": "remaining",
+      "value": "Остаток: -1,5 (токена)",
+      "row": "Включённая квота · Месяц: Остаток: -1,5 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1,5 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1.5,
+      "category": "other",
+      "unit": "токена",
+      "variant": "used",
+      "value": "Использовано: -1,5 (токена)",
+      "row": "Включённая квота · Месяц: Использовано: -1,5 (токена)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1,5 (токена)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1000000,
+      "category": "many",
+      "unit": "токенов",
+      "variant": "remaining",
+      "value": "Остаток: 1 000 000 (токенов)",
+      "row": "Включённая квота · Месяц: Остаток: 1 000 000 (токенов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 000 000 (токенов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1000000,
+      "category": "many",
+      "unit": "токенов",
+      "variant": "used",
+      "value": "Использовано: 1 000 000 (токенов)",
+      "row": "Включённая квота · Месяц: Использовано: 1 000 000 (токенов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 000 000 (токенов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 0,
+      "category": "many",
+      "unit": "запросов",
+      "variant": "remaining",
+      "value": "Остаток: 0 (запросов)",
+      "row": "Включённая квота · Месяц: Остаток: 0 (запросов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (запросов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 0,
+      "category": "many",
+      "unit": "запросов",
+      "variant": "used",
+      "value": "Использовано: 0 (запросов)",
+      "row": "Включённая квота · Месяц: Использовано: 0 (запросов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 0 (запросов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1,
+      "category": "one",
+      "unit": "запрос",
+      "variant": "remaining",
+      "value": "Остаток: 1 (запрос)",
+      "row": "Включённая квота · Месяц: Остаток: 1 (запрос)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (запрос)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1,
+      "category": "one",
+      "unit": "запрос",
+      "variant": "used",
+      "value": "Использовано: 1 (запрос)",
+      "row": "Включённая квота · Месяц: Использовано: 1 (запрос)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 (запрос)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 2,
+      "category": "few",
+      "unit": "запроса",
+      "variant": "remaining",
+      "value": "Остаток: 2 (запроса)",
+      "row": "Включённая квота · Месяц: Остаток: 2 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 2,
+      "category": "few",
+      "unit": "запроса",
+      "variant": "used",
+      "value": "Использовано: 2 (запроса)",
+      "row": "Включённая квота · Месяц: Использовано: 2 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 2 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1.5,
+      "category": "other",
+      "unit": "запроса",
+      "variant": "remaining",
+      "value": "Остаток: 1,5 (запроса)",
+      "row": "Включённая квота · Месяц: Остаток: 1,5 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1,5 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1.5,
+      "category": "other",
+      "unit": "запроса",
+      "variant": "used",
+      "value": "Использовано: 1,5 (запроса)",
+      "row": "Включённая квота · Месяц: Использовано: 1,5 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1,5 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1,
+      "category": "one",
+      "unit": "запрос",
+      "variant": "remaining",
+      "value": "Остаток: -1 (запрос)",
+      "row": "Включённая квота · Месяц: Остаток: -1 (запрос)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1 (запрос)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1,
+      "category": "one",
+      "unit": "запрос",
+      "variant": "used",
+      "value": "Использовано: -1 (запрос)",
+      "row": "Включённая квота · Месяц: Использовано: -1 (запрос)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1 (запрос)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -2,
+      "category": "few",
+      "unit": "запроса",
+      "variant": "remaining",
+      "value": "Остаток: -2 (запроса)",
+      "row": "Включённая квота · Месяц: Остаток: -2 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -2 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -2,
+      "category": "few",
+      "unit": "запроса",
+      "variant": "used",
+      "value": "Использовано: -2 (запроса)",
+      "row": "Включённая квота · Месяц: Использовано: -2 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -2 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1.5,
+      "category": "other",
+      "unit": "запроса",
+      "variant": "remaining",
+      "value": "Остаток: -1,5 (запроса)",
+      "row": "Включённая квота · Месяц: Остаток: -1,5 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: -1,5 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1.5,
+      "category": "other",
+      "unit": "запроса",
+      "variant": "used",
+      "value": "Использовано: -1,5 (запроса)",
+      "row": "Включённая квота · Месяц: Использовано: -1,5 (запроса)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: -1,5 (запроса)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1000000,
+      "category": "many",
+      "unit": "запросов",
+      "variant": "remaining",
+      "value": "Остаток: 1 000 000 (запросов)",
+      "row": "Включённая квота · Месяц: Остаток: 1 000 000 (запросов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 000 000 (запросов)",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1000000,
+      "category": "many",
+      "unit": "запросов",
+      "variant": "used",
+      "value": "Использовано: 1 000 000 (запросов)",
+      "row": "Включённая квота · Месяц: Использовано: 1 000 000 (запросов)",
+      "familyRow": "Квота семейства моделей (opus) · 5 часов: Использовано: 1 000 000 (запросов)",
+      "status": "PASS"
+    }
+  ],
+  "negative_controls": [
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "mutation": "old invariant noun removes count",
+      "actual": "argument mismatch: [] != [[\"count\",6,\"cardinal\",0]]",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "mutation": "missing count at runtime",
+      "actual": "relay.shell.usage.unit_credits",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "mutation": "old invariant noun removes count",
+      "actual": "argument mismatch: [] != [[\"count\",6,\"cardinal\",0]]",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "mutation": "missing count at runtime",
+      "actual": "relay.shell.usage.unit_tokens",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "mutation": "old invariant noun removes count",
+      "actual": "argument mismatch: [] != [[\"count\",6,\"cardinal\",0]]",
+      "status": "PASS"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "mutation": "missing count at runtime",
+      "actual": "relay.shell.usage.unit_requests",
+      "status": "PASS"
+    }
+  ],
+  "source_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "context_changed_keys": [
+    "relay.shell.usage.unit_credits",
+    "relay.shell.usage.unit_tokens",
+    "relay.shell.usage.unit_requests"
+  ],
+  "caller": {
+    "path": "local_operator/mobile/web/src/components/usage-sheet.tsx",
+    "same_count_measured": true,
+    "finite_guard": true,
+    "usd_no_count": true
+  },
+  "result": "passed",
+  "findings": [],
+  "retained_prior_minor": {
+    "id": "RU-M1",
+    "severity": "MINOR",
+    "key": "relay.shell.usage.command",
+    "disposition": "deferred",
+    "reason": "Translator report.md:23 says outside approved three-noun contract; not a correctness fix. Value remains byte-identical to prior audit. Non-gating."
+  },
+  "rendered": "BLOCKED: customer resource hold",
+  "pseudo": "Prior 62 unchanged values retain text-format evidence; changed nouns formatted/composed here. No new layout evidence.",
+  "cldr": "PASS one/few/many/other: positive/negative magnitudes, fractional genitive singular, million many. RU RTL N/A: LTR.",
+  "independence": "Did not translate or edit targets; independent of translator.",
+  "native_verdict": "passed; terminal delta; no new findings, no blocker/major",
+  "typed_count_evidence": {
+    "path": "local_operator/mobile/web/src/i18n/keys.gen.ts",
+    "lines": [
+      57,
+      58,
+      59
+    ],
+    "actual": "All three changed unit keys are { \"count\": number }; observed by rg. No compiler suite run."
+  },
+  "prior_report": "reports/847d8d9b4185/ru-final65-audit.json",
+  "native_notes": "All three paradigms are idiomatic RU: one nominative singular кредит/токен/запрос; few and fractional other genitive singular кредита/токена/запроса; many genitive plural кредитов/токенов/запросов. Negative magnitudes follow same plural selection; million takes genitive plural. Parenthetical label in unchanged amount templates remains understandable as compact amount-unit presentation; no duplicate count or added preposition. Used and remaining complete rows/family rows preserve source fields and punctuation. No changes requested."
+}

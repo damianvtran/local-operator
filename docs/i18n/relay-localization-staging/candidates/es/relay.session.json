@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "Buscar conversaciones…",
+  "relay.session.list.empty_hint": "empieza una abajo o desde la TUI en tu máquina",
+  "relay.session.list.no_matches": "ninguna conversación coincide",
+  "relay.session.list.start_idle": "nueva sesión",
+  "relay.session.list.start_busy": "iniciando…",
+  "relay.session.view.back": "volver a las sesiones",
+  "relay.session.view.empty_title": "aún no hay mensajes",
+  "relay.session.view.empty_hint": "envía un mensaje abajo para empezar",
+  "relay.session.past.back": "atrás",
+  "relay.session.past.heading": "sesiones anteriores",
+  "relay.session.past.search_placeholder": "buscar nombres y conversaciones…",
+  "relay.session.past.loading": "cargando…",
+  "relay.session.directory.sheet_title": "directorio de trabajo",
+  "relay.session.directory.path_placeholder": "o escribe otra ruta…",
+  "relay.session.model.sheet_title": "modelo",
+  "relay.session.model.filter_placeholder": "filtrar modelos",
+  "relay.session.model.loading": "cargando…"
+}

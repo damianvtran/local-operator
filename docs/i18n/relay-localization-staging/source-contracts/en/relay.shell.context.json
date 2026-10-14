@@ -1,0 +1,114 @@
+{
+  "relay.shell.list.empty": {
+    "role": "empty-list placeholder",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. Rendered when the list SSE is connected and no rows exist; the sibling key carries the pre-connection state."
+  },
+  "relay.shell.list.connecting": {
+    "role": "empty-list pre-connection placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered while the list stream has not delivered a first frame; paired with relay.shell.list.empty."
+  },
+  "relay.shell.list.section.active": {
+    "role": "list section heading",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. The section order and membership come from the daemon; this is only the heading."
+  },
+  "relay.shell.list.section.previous": {
+    "role": "list section heading",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. The section order and membership come from the daemon; this is only the heading."
+  },
+  "relay.shell.list.theme": {
+    "role": "theme button accessible name",
+    "tone": "Preserve current copy and casing.",
+    "note": "Owned relay SPA shell chrome. Accessible label for the ◐ theme control; the glyph itself is not translated."
+  },
+  "relay.shell.session.waiting": {
+    "role": "session view placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is connected but has not delivered a frame yet. Projection is daemon jargon for the session's live view/state snapshot, not a graphical projection or prediction. Translate the intended meaning: waiting for the session view to arrive; the connection is already established. Keep the English source unchanged."
+  },
+  "relay.shell.session.connecting": {
+    "role": "session view pre-connection placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is not connected; paired with relay.shell.session.waiting."
+  },
+  "relay.shell.usage.title": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.cached": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.unavailable": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.loading": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.empty": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.last_known": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.continue": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.family_caps": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.paid": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.family": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.included": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.amount_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.blocked": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.eligibility_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.unlimited": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.window_five": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.window_week": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.window_month": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.window_lifetime": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.window_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.remaining": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; translators may reorder/rephrase the complete message to avoid forced gender/plural agreement with this invariant label. Never display a raw API unit token."},
+  "relay.shell.usage.used": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; rephrase/reorder the complete sentence as needed to avoid forced gender/plural agreement."},
+  "relay.shell.usage.fraction": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric FRACTION, e.g. 0.29 means 29 percent used. ICU percent owns rounding, spacing and percent sign in the actual catalogue locale. Never multiply or append a second percent sign."},
+  "relay.shell.usage.reset": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is the reset timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and the phone time zone, consistently with as_of; not an ISO machine token."},
+  "relay.shell.usage.command": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
+  "relay.shell.usage.as_of": {"role": "cache freshness disclosure", "tone": "Factual timestamp, no live-refresh promise.", "note": "{value} is the immutable cached timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and phone time zone, consistently with reset; not the browser default locale."},
+  "relay.shell.usage.stale": {"role": "cache freshness warning", "tone": "Clear and non-alarmist.", "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."},
+  "relay.shell.usage.row": {
+    "role": "complete usage allowance row without a named model family",
+    "tone": "Compact, neutral status summary.",
+    "note": "Own the entire field order and punctuation, including the separator before the value. {label} is an already localized allowance category; {window} is an already localized time-window label, including Unknown window; {value} is the already localized amount or eligibility/status text. Reorder placeholders and use locale-appropriate punctuation; do not translate their supplied contents again. Used when family_cap is false or the family identifier is unknown, so there must be no empty family parentheses. All parameters are strings; preserve their names."
+  },
+  "relay.shell.usage.row_family": {
+    "role": "complete usage allowance row with a named model family",
+    "tone": "Compact, neutral status summary.",
+    "note": "Own the entire field order and punctuation, including parentheses and the separator before the value. {label}, {window}, and {value} are already localized text as in relay.shell.usage.row. {family} is the provider's machine model-family identifier (for example opus), not prose to translate. Reorder all placeholders and use locale-appropriate punctuation. Used only when family_cap is true and the family identifier is known. All parameters are strings; preserve their names."
+  },
+  "relay.shell.usage.unit_credits": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized unit noun for API token credits. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+  },
+  "relay.shell.usage.unit_usd": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized measurement label for API token usd. Supplied to a complete amount message, which may reorder/rephrase to avoid gender or grammatical agreement with this invariant label. USD denotes US dollars, not a conversion. Never interpolate the raw API token in place of this label."
+  },
+  "relay.shell.usage.unit_tokens": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized unit noun for API token tokens. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+  },
+  "relay.shell.usage.unit_requests": {
+    "role": "measurement unit label",
+    "tone": "Neutral, compact.",
+    "note": "Localized unit noun for API token requests. {count} is the SAME actual finite numeric measurement selected by remaining ?? used, never formatted text or the used_fraction fallback. ICU cardinal plural follows the actual served catalogue locale; Python count is int|float, phone count is number. Render the NOUN ONLY: do not insert # or repeat the count, because the outer amount message formats/prints the number exactly once. Supply needed CLDR forms for zero, one, two, fractions, negative magnitudes and large exact numeric values; other is mandatory. French exact numeric million uses its many branch with a plain plural noun and NO de (OQLF numeric-versus-spelled-million guidance); do not apply the spelled-out un million de rule to the displayed digits. Spanish exact numeric million uses many with de plus the plural noun (RAE cardinales section 6); coordinate the outer message so de occurs exactly once. Russian fractional other uses the native fractional case, not the integer-many noun form. USD stays a fixed invariant label with no count parameter and is not a conversion. Never interpolate the raw API token. English 1 credit/token/request is an intentional correction of the former fixed-plural defect, not byte-identical English extraction parity."
+  },
+  "relay.shell.usage.remaining_percent": {
+    "role": "complete percent amount status",
+    "tone": "Neutral.",
+    "note": "{value} is a numeric FRACTION (0.29 is 29 percent). ICU percent formatting uses the actual catalogue locale and rounds to an integer; do not add another percent sign or scale the placeholder. API percent-unit amounts are percent points and normalized to fractions by the caller."
+  },
+  "relay.shell.usage.used_percent": {
+    "role": "complete percent amount status",
+    "tone": "Neutral.",
+    "note": "{value} is a numeric FRACTION (0.29 is 29 percent). ICU percent formatting uses the actual catalogue locale and rounds to an integer; do not add another percent sign or scale the placeholder. API percent-unit amounts are percent points and normalized to fractions by the caller."
+  },
+  "relay.shell.usage.remaining_unknown_unit": {
+    "role": "amount with unknown measurement unit",
+    "tone": "Neutral.",
+    "note": "{value} is the numeric amount. Deliberately omit unrecognized/unknown API unit tokens rather than inventing currency, translating untrusted metadata or discarding a measured value."
+  },
+  "relay.shell.usage.used_unknown_unit": {
+    "role": "amount with unknown measurement unit",
+    "tone": "Neutral.",
+    "note": "{value} is the numeric amount. Deliberately omit unrecognized/unknown API unit tokens rather than inventing currency, translating untrusted metadata or discarding a measured value."
+  }
+}

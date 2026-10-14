@@ -1,0 +1,22 @@
+{
+  "method": "Execute AST-extracted exact _render_login_html and _LOGIN_HTML from audited source with isolated catalogue/resolver/mark dependencies; production render_message formatter; not live daemon or browser proof.",
+  "results": [
+    {
+      "case": "complete RU login namespace",
+      "status": "PASS",
+      "lang": "ru",
+      "error_text": "Неверный пароль."
+    },
+    {
+      "case": "catalogue HTML escaping and single-pass placeholder substitution",
+      "status": "PASS",
+      "actual_title": "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; __PASSWORD__"
+    },
+    {
+      "case": "partial RU login catalogue forces full English page including error",
+      "status": "PASS",
+      "actual_title": "local operator — sign in",
+      "error": "Wrong password."
+    }
+  ]
+}

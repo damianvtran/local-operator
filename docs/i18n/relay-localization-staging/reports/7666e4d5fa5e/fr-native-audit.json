@@ -1,0 +1,194 @@
+{
+  "audit": "independent French native-text audit final65 PR2329",
+  "auditor": {
+    "agent": "task / session 7666e4d5fa5e",
+    "model": "openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "independent_of_translator": true,
+    "human_native_speaker_claim": false
+  },
+  "date": "2026-10-14",
+  "source_commit": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "source_checkout": "source-checkout",
+  "target_root": "historical-scratch/c4131ebe3f64/relay-final65/fr",
+  "status": "changes_requested",
+  "namespace_results": {
+    "relay.shell": {
+      "native_assessment": "changes_requested",
+      "findings": [
+        "F-FR-01"
+      ],
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "9c8b4ee29b5da192235ae6722d44e51e49e59e4d4829ebb03035e88ed88580b9",
+      "prior_sha256": "92547e717820b43b02255197a9906ce7e4ede1749dc9e804ed6a0f9d79fcc0a2",
+      "key_count": 44,
+      "retained": [
+        "relay.shell.list.empty",
+        "relay.shell.list.connecting",
+        "relay.shell.list.section.active",
+        "relay.shell.list.section.previous",
+        "relay.shell.list.theme",
+        "relay.shell.session.waiting",
+        "relay.shell.session.connecting",
+        "relay.shell.usage.title",
+        "relay.shell.usage.cached",
+        "relay.shell.usage.unavailable",
+        "relay.shell.usage.loading",
+        "relay.shell.usage.empty",
+        "relay.shell.usage.last_known",
+        "relay.shell.usage.continue",
+        "relay.shell.usage.family_caps",
+        "relay.shell.usage.paid",
+        "relay.shell.usage.family",
+        "relay.shell.usage.included",
+        "relay.shell.usage.amount_unknown",
+        "relay.shell.usage.blocked",
+        "relay.shell.usage.eligibility_unknown",
+        "relay.shell.usage.unlimited",
+        "relay.shell.usage.window_five",
+        "relay.shell.usage.window_week",
+        "relay.shell.usage.window_month",
+        "relay.shell.usage.window_lifetime",
+        "relay.shell.usage.window_unknown",
+        "relay.shell.usage.command",
+        "relay.shell.usage.stale",
+        "relay.shell.usage.row",
+        "relay.shell.usage.row_family"
+      ],
+      "modified": [
+        "relay.shell.usage.remaining",
+        "relay.shell.usage.used",
+        "relay.shell.usage.fraction",
+        "relay.shell.usage.reset",
+        "relay.shell.usage.as_of"
+      ],
+      "added": [
+        "relay.shell.usage.unit_credits",
+        "relay.shell.usage.unit_usd",
+        "relay.shell.usage.unit_tokens",
+        "relay.shell.usage.unit_requests",
+        "relay.shell.usage.remaining_percent",
+        "relay.shell.usage.used_percent",
+        "relay.shell.usage.remaining_unknown_unit",
+        "relay.shell.usage.used_unknown_unit"
+      ],
+      "retained_entry_bytes_identical": true,
+      "whole_target_bytes_identical": false,
+      "high_visibility_current_hash_sample": "PASS native text; samples actually formatted by relay runtime, server login is not mounted/rendered HTML proof"
+    },
+    "relay.session": {
+      "native_assessment": "pass",
+      "findings": [],
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "ff308557eaaac62556f20625039d9e70df97cf55f5b150580f7511c16ecd2018",
+      "prior_sha256": "ff308557eaaac62556f20625039d9e70df97cf55f5b150580f7511c16ecd2018",
+      "key_count": 17,
+      "retained": [
+        "relay.session.list.search_placeholder",
+        "relay.session.list.empty_hint",
+        "relay.session.list.no_matches",
+        "relay.session.list.start_idle",
+        "relay.session.list.start_busy",
+        "relay.session.view.back",
+        "relay.session.view.empty_title",
+        "relay.session.view.empty_hint",
+        "relay.session.past.back",
+        "relay.session.past.heading",
+        "relay.session.past.search_placeholder",
+        "relay.session.past.loading",
+        "relay.session.directory.sheet_title",
+        "relay.session.directory.path_placeholder",
+        "relay.session.model.sheet_title",
+        "relay.session.model.filter_placeholder",
+        "relay.session.model.loading"
+      ],
+      "modified": [],
+      "added": [],
+      "retained_entry_bytes_identical": true,
+      "whole_target_bytes_identical": true,
+      "high_visibility_current_hash_sample": "PASS native text; samples actually formatted by relay runtime, server login is not mounted/rendered HTML proof"
+    },
+    "relay.login": {
+      "native_assessment": "pass",
+      "findings": [],
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "5f6cc95bffee5f11984b4a083af057ba96a5e332a623c5b5c3659a9e61530d24",
+      "prior_sha256": "5f6cc95bffee5f11984b4a083af057ba96a5e332a623c5b5c3659a9e61530d24",
+      "key_count": 4,
+      "retained": [
+        "relay.login.page.title",
+        "relay.login.password.label",
+        "relay.login.submit.label",
+        "relay.login.error.password"
+      ],
+      "modified": [],
+      "added": [],
+      "retained_entry_bytes_identical": true,
+      "whole_target_bytes_identical": true,
+      "high_visibility_current_hash_sample": "PASS native text; samples actually formatted by relay runtime, server login is not mounted/rendered HTML proof"
+    }
+  },
+  "findings": [
+    {
+      "id": "F-FR-01",
+      "severity": "MAJOR",
+      "namespace": "relay.shell",
+      "location": "historical-scratch/c4131ebe3f64/relay-final65/fr/relay.shell.json:29-30; 37,39-40",
+      "keys": [
+        "relay.shell.usage.remaining",
+        "relay.shell.usage.used"
+      ],
+      "title": "Invariant plural units embedded as counted nouns break native French agreement",
+      "actual": [
+        "reste 1 crédits",
+        "utilisation de 1 requêtes",
+        "reste 1,5 jetons"
+      ],
+      "rationale": "Avoiding adjective gender with utilisation de does not fix noun-number agreement. Current Intl fr selects one for 0, 1 and 1.5; ordinary singular one case is unambiguously malformed. This is a native language defect in the directly changed high-visibility amount phrases, not structural ICU failure.",
+      "remediation": "Move invariant unit to a caption outside the counted-noun phrase, preserving value:number and unit:string; e.g. Solde ({unit}) : {value, number} / Utilisation ({unit}) : {value, number}. Or implement actual unit inflection with an explicitly agreed source contract; no wider contract change is required for the caption approach.",
+      "counterfactual_probe": "Same actual relay formatter accepts alternate scratch map with unchanged params; all 0/1/2/1.5 credits/USD/tokens/requests render correctly as captions. No submitted file edited."
+    }
+  ],
+  "verification": {
+    "key_counts": {
+      "relay.shell": 44,
+      "relay.session": 17,
+      "relay.login": 4
+    },
+    "total_keys": 65,
+    "delta": {
+      "modified": 5,
+      "added": 8,
+      "retained": 52
+    },
+    "typed_icu": "PASS exact argument-name/type parity across all 65",
+    "validator": "PASS actual check_catalogues in independent isolated fixture: zero problems",
+    "negative_control": "PASS number-to-simple alteration rejected with arguments mismatch; restored control zero problems",
+    "real_path": "PASS actual createMessageRuntime importing pinned runtime.ts and existing intl-messageformat dependency; language/number/date/row/fallback probes executed",
+    "amount_matrix": "0/1/2/1.5/1234.5 × credits/USD/tokens/requests × remaining/used, composed into actual row_family",
+    "percent_matrix": "0/0.01/0.29/1/1.5 × fraction/remaining_percent/used_percent; single U+00A0 %; integer percent output",
+    "dates": "UTC actual 2026-10-14T15:04:00Z -> 14 oct. 2026 à 15:04",
+    "cldr_actual": {
+      "0": "one",
+      "1": "one",
+      "2": "other",
+      "1.5": "one",
+      "1000000": "many"
+    },
+    "rendered_visual": {
+      "status": "BLOCKED",
+      "reason": "Customer/resource hold; no browser, screenshots, mounted UI or geometry proof attempted or claimed."
+    },
+    "rtl": "NOT_APPLICABLE French is LTR; mixed-bidi visual proof not attempted",
+    "pseudo": "NOT_RUN Width, pseudo expansion, truncation/reflow and actual responsive layout remain unproven."
+  },
+  "artifacts": {
+    "fr-native-audit.json": "reports/7666e4d5fa5e/fr-native-audit.json",
+    "fr-native-audit.md": "reports/7666e4d5fa5e/fr-native-audit.md",
+    "fr-native-provenance.json": "reports/7666e4d5fa5e/fr-native-provenance.json",
+    "fr-intl-probes.log": "historical-scratch/7666e4d5fa5e/fr-intl-probes.log",
+    "fr-validator.log": "historical-scratch/7666e4d5fa5e/fr-validator.log",
+    "audit-fr.mjs": "historical-scratch/7666e4d5fa5e/audit-fr.mjs",
+    "validate-fr-independent.py": "historical-scratch/7666e4d5fa5e/validate-fr-independent.py"
+  }
+}

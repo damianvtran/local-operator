@@ -1,0 +1,135 @@
+{
+  "date": "2026-10-14",
+  "audit_id": "VI-final65-countplural-independent-delta",
+  "pr": 2329,
+  "auditor_agent": "lopdev task — independent Vietnamese auditor",
+  "auditor_session": "be1081b9662d",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_used": false,
+  "source_commit_base": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "source_state": "working-tree delta, not committed at audit time; approval pinned to bytes below, not claimed as committed HEAD content",
+  "source_root": "source-checkout",
+  "candidate_root": "historical-scratch/590f5d5140c6/vi-final65-countplural",
+  "native_verdict": "PASS",
+  "terminal_native_round": true,
+  "findings": [],
+  "unresolved_blocker_major_count": 0,
+  "hashes": {
+    "relay.shell": {
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "target_sha256": "f475dbefccd75d713fdea93fd8c5a12b541f94d00ec00c23b00fe72e2e942319",
+      "key_count": 44
+    },
+    "relay.session": {
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "7743c7b5d018b84395478e99231714a46cd998e8c78ce465333be8df62fd517a",
+      "key_count": 17
+    },
+    "relay.login": {
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "a87e8ed3381143ee8d61dada52b0df604c72191cdde1747b9ea8fd6c46537020",
+      "key_count": 4
+    }
+  },
+  "source_shell_context_sha256": "c1eb5190cc1c0737bc53320e08a8ef28dd1ec01d8ccf9ba9d5a7b315d2c9a8a1",
+  "prior_audit": "reports/be1081b9662d/vi-native-audit/audit.json",
+  "prior_audit_sha256": "87a87bf5161a478f58af5b669c5160f7f8a499700c63c914092b07c3bd9d600e",
+  "prior_62_preserved": {
+    "relay.shell": {
+      "unchanged_count": 41,
+      "unchanged_key_values": true,
+      "unchanged_line_bytes": true,
+      "entire_namespace_byte_identical": false
+    },
+    "relay.session": {
+      "unchanged_count": 17,
+      "unchanged_key_values": true,
+      "unchanged_line_bytes": true,
+      "entire_namespace_byte_identical": true
+    },
+    "relay.login": {
+      "unchanged_count": 4,
+      "unchanged_key_values": true,
+      "unchanged_line_bytes": true,
+      "entire_namespace_byte_identical": true
+    }
+  },
+  "delta_keys": [
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "source": "{count, plural, one {credit} other {credits}}",
+      "target": "{count, plural, other {tín dụng}}",
+      "native_result": "PASS",
+      "typed_count": "plural, no skeleton",
+      "CLDR": "vi other only",
+      "rationale": "Vietnamese invariant unit noun; the surrounding amount message owns numeric value and order. No count repetition, English plural suffix or classifier needed."
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "source": "{count, plural, one {token} other {tokens}}",
+      "target": "{count, plural, other {token}}",
+      "native_result": "PASS",
+      "typed_count": "plural, no skeleton",
+      "CLDR": "vi other only",
+      "rationale": "Vietnamese invariant unit noun; the surrounding amount message owns numeric value and order. No count repetition, English plural suffix or classifier needed."
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "source": "{count, plural, one {request} other {requests}}",
+      "target": "{count, plural, other {yêu cầu}}",
+      "native_result": "PASS",
+      "typed_count": "plural, no skeleton",
+      "CLDR": "vi other only",
+      "rationale": "Vietnamese invariant unit noun; the surrounding amount message owns numeric value and order. No count repetition, English plural suffix or classifier needed."
+    }
+  ],
+  "executed_counts": [
+    0,
+    1,
+    2,
+    1.5,
+    -1,
+    -1.5,
+    1000000
+  ],
+  "executed_compositions": 42,
+  "python_JS_outputs_identical": true,
+  "negative_controls": {
+    "relay.shell.usage.unit_credits:missing_count": "message argument 'count' was not supplied (have: none)",
+    "relay.shell.usage.unit_tokens:missing_count": "message argument 'count' was not supplied (have: none)",
+    "relay.shell.usage.unit_requests:missing_count": "message argument 'count' was not supplied (have: none)",
+    "dropped_count_catalogue": [
+      "vi/relay.shell: relay.shell.usage.unit_credits: arguments () != en's (('count', 'plural'),)"
+    ],
+    "wrong_count_type": [
+      "vi/relay.shell: relay.shell.usage.unit_credits: arguments (('count', 'number'),) != en's (('count', 'plural'),)"
+    ],
+    "invalid_plural_style": "expected '{' (at offset 24 of '{count, plural, percent other {tín dụng}}')"
+  },
+  "JS_missing_count_controls": {
+    "relay.shell.usage.unit_credits": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_credits"
+    },
+    "relay.shell.usage.unit_tokens": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_tokens"
+    },
+    "relay.shell.usage.unit_requests": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_requests"
+    }
+  },
+  "caller_evidence": "Read actual usage-sheet.tsx working-tree diff: measured = remaining ?? used; finite measured passed identically to noun count and amount value. Exact runtime composition reproduced selection for both remaining/used; no mounted component/UI evidence.",
+  "rendered": "HOLD retained — customer resource hold",
+  "RTL": "NOT_APPLICABLE vi LTR; previous limitation retained",
+  "pseudo": "BLOCKED rendered fit under resource hold; not native-language certification",
+  "shipped_claim": false,
+  "repo_or_ledger_edits": false,
+  "evidence": [
+    "probe.py",
+    "probe.mjs",
+    "mechanical.json",
+    "js-mechanical.json"
+  ]
+}

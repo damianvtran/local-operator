@@ -1,0 +1,490 @@
+{
+  "audit_id": "VI-final65-independent-native",
+  "date": "2026-10-14",
+  "pr": 2329,
+  "auditor_agent": "lopdev task — independent Vietnamese final65 auditor",
+  "auditor_session": "be1081b9662d",
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_used": false,
+  "translator_agent": "relay-vi-final65-translation",
+  "translator_actual_model": "openai/gpt-6.1-sol",
+  "independence": "Different agent/session; not the translator or implementer. Same model family disclosed; this is one independent LLM native-language audit, not a human native-speaker certification.",
+  "source_commit": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "candidate_root": "historical-scratch/590f5d5140c6/vi-final65",
+  "native_verdict": "PASS",
+  "terminal_native_round": true,
+  "findings": [],
+  "unresolved_blocker_major_count": 0,
+  "namespaces": {
+    "relay.shell": {
+      "count": 44,
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "6f196e2535134079dfec349f645b27a75a132c95bbd40bd98a3f3cd68f18d22f",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {},
+      "native_result": "PASS",
+      "native_review": "44/44 meaning, concise tone, safety/cache/unknown status, allowance categories, projection distinction, numeric grammar and full row punctuation reviewed.",
+      "findings": [],
+      "keys": [
+        {
+          "key": "relay.shell.list.empty",
+          "source": "no sessions running",
+          "target": "không có phiên nào đang chạy",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.list.connecting",
+          "source": "connecting…",
+          "target": "đang kết nối…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.list.section.active",
+          "source": "Active Sessions",
+          "target": "Phiên đang hoạt động",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.list.section.previous",
+          "source": "Previous Sessions",
+          "target": "Phiên trước đó",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.list.theme",
+          "source": "choose theme",
+          "target": "chọn giao diện",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.session.waiting",
+          "source": "waiting for projection…",
+          "target": "đang chờ trạng thái hiện tại của phiên…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.session.connecting",
+          "source": "connecting to session…",
+          "target": "đang kết nối với phiên…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.title",
+          "source": "usage",
+          "target": "lượng sử dụng",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.cached",
+          "source": "Cached usage. No provider refresh is requested.",
+          "target": "Lượng sử dụng từ cache. Không yêu cầu cập nhật từ nhà cung cấp.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unavailable",
+          "source": "Cached usage unavailable.",
+          "target": "Không có dữ liệu lượng sử dụng trong cache.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.loading",
+          "source": "Loading cached usage…",
+          "target": "Đang tải lượng sử dụng từ cache…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.empty",
+          "source": "No cached usage reported.",
+          "target": "Chưa có báo cáo lượng sử dụng trong cache.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.last_known",
+          "source": "Last known usage; current usage unavailable.",
+          "target": "Lượng sử dụng ghi nhận lần cuối; chưa có dữ liệu hiện tại.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.continue",
+          "source": "Included quota used; credits will continue.",
+          "target": "Đã hết hạn mức đi kèm; sẽ tiếp tục dùng tín dụng.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.family_caps",
+          "source": "Model-family caps still apply.",
+          "target": "Giới hạn theo dòng mô hình vẫn áp dụng.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.paid",
+          "source": "Paid allowance",
+          "target": "Hạn mức trả phí",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.family",
+          "source": "Model-family allowance",
+          "target": "Hạn mức theo dòng mô hình",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.included",
+          "source": "Included allowance",
+          "target": "Hạn mức đi kèm",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.amount_unknown",
+          "source": "Amount not reported",
+          "target": "Chưa có số liệu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.blocked",
+          "source": "Spend unavailable",
+          "target": "Không thể chi tiêu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.eligibility_unknown",
+          "source": "Spend eligibility unknown",
+          "target": "Chưa rõ có được phép chi tiêu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unlimited",
+          "source": "Unlimited paid allowance",
+          "target": "Hạn mức trả phí không giới hạn",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.window_five",
+          "source": "5-hour",
+          "target": "5 giờ",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.window_week",
+          "source": "7-day",
+          "target": "7 ngày",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.window_month",
+          "source": "Monthly",
+          "target": "Hàng tháng",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.window_lifetime",
+          "source": "Lifetime",
+          "target": "Trọn đời",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.window_unknown",
+          "source": "Unknown window",
+          "target": "Chưa rõ chu kỳ",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.remaining",
+          "source": "{value, number} {unit} left",
+          "target": "Còn lại {value, number} {unit}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.used",
+          "source": "{value, number} {unit} used",
+          "target": "Đã dùng {value, number} {unit}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.fraction",
+          "source": "{value, number, percent} used",
+          "target": "Đã dùng {value, number, percent}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.reset",
+          "source": "Resets at {value, date, medium}, {value, time, short}",
+          "target": "Đặt lại vào {value, date, medium}, {value, time, short}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.command",
+          "source": "Show cached provider usage",
+          "target": "Xem lượng sử dụng của nhà cung cấp từ cache",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.as_of",
+          "source": "As of {value, date, medium}, {value, time, short}.",
+          "target": "Dữ liệu tính đến {value, date, medium}, {value, time, short}.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.stale",
+          "source": "May be out of date.",
+          "target": "Dữ liệu có thể đã cũ.",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.row",
+          "source": "{label} · {window}: {value}",
+          "target": "{label} · {window}: {value}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.row_family",
+          "source": "{label} ({family}) · {window}: {value}",
+          "target": "{label} ({family}) · {window}: {value}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unit_credits",
+          "source": "credits",
+          "target": "tín dụng",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unit_usd",
+          "source": "USD",
+          "target": "USD",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unit_tokens",
+          "source": "tokens",
+          "target": "token",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.unit_requests",
+          "source": "requests",
+          "target": "yêu cầu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.remaining_percent",
+          "source": "{value, number, percent} left",
+          "target": "Còn lại {value, number, percent}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.used_percent",
+          "source": "{value, number, percent} used",
+          "target": "Đã dùng {value, number, percent}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.remaining_unknown_unit",
+          "source": "{value, number} left",
+          "target": "Còn lại {value, number}",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.shell.usage.used_unknown_unit",
+          "source": "{value, number} used",
+          "target": "Đã dùng {value, number}",
+          "native_result": "PASS"
+        }
+      ]
+    },
+    "relay.session": {
+      "count": 17,
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "7743c7b5d018b84395478e99231714a46cd998e8c78ce465333be8df62fd517a",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {},
+      "native_result": "PASS",
+      "native_review": "17/17 action/search/history/directory/model meaning and source casing reviewed; TUI allowed; path/model identifiers not translated.",
+      "findings": [],
+      "keys": [
+        {
+          "key": "relay.session.list.search_placeholder",
+          "source": "Search conversations…",
+          "target": "Tìm cuộc trò chuyện…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.list.empty_hint",
+          "source": "start one below, or from the TUI on your machine",
+          "target": "tạo phiên bên dưới hoặc từ TUI trên máy của bạn",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.list.no_matches",
+          "source": "no matching conversations",
+          "target": "không có cuộc trò chuyện phù hợp",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.list.start_idle",
+          "source": "new session",
+          "target": "phiên mới",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.list.start_busy",
+          "source": "starting…",
+          "target": "đang khởi tạo…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.view.back",
+          "source": "back to sessions",
+          "target": "về danh sách phiên",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.view.empty_title",
+          "source": "no messages yet",
+          "target": "chưa có tin nhắn",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.view.empty_hint",
+          "source": "send a message below to get started",
+          "target": "gửi tin nhắn bên dưới để bắt đầu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.past.back",
+          "source": "back",
+          "target": "quay lại",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.past.heading",
+          "source": "past sessions",
+          "target": "phiên trước đây",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.past.search_placeholder",
+          "source": "search names and conversations…",
+          "target": "tìm tên và nội dung trò chuyện…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.past.loading",
+          "source": "loading…",
+          "target": "đang tải…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.directory.sheet_title",
+          "source": "working directory",
+          "target": "thư mục làm việc",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.directory.path_placeholder",
+          "source": "or type another path…",
+          "target": "hoặc nhập đường dẫn khác…",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.model.sheet_title",
+          "source": "model",
+          "target": "mô hình",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.model.filter_placeholder",
+          "source": "filter models",
+          "target": "lọc mô hình",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.session.model.loading",
+          "source": "loading…",
+          "target": "đang tải…",
+          "native_result": "PASS"
+        }
+      ]
+    },
+    "relay.login": {
+      "count": 4,
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "a87e8ed3381143ee8d61dada52b0df604c72191cdde1747b9ea8fd6c46537020",
+      "source_matches_checkout": true,
+      "exact_keyset": true,
+      "typed_ICU_style_order_parity": true,
+      "NFC": true,
+      "plural_selectors": {},
+      "native_result": "PASS",
+      "native_review": "4/4 brand/title, password, sign-in and refusal meaning reviewed; concise labels and unambiguous error; not independently rendered visually.",
+      "findings": [],
+      "keys": [
+        {
+          "key": "relay.login.page.title",
+          "source": "local operator — sign in",
+          "target": "local operator — đăng nhập",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.login.password.label",
+          "source": "password",
+          "target": "mật khẩu",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.login.submit.label",
+          "source": "sign in",
+          "target": "đăng nhập",
+          "native_result": "PASS"
+        },
+        {
+          "key": "relay.login.error.password",
+          "source": "Wrong password.",
+          "target": "Mật khẩu không đúng.",
+          "native_result": "PASS"
+        }
+      ]
+    }
+  },
+  "checks": {
+    "exact_keysets": "PASS 65/65",
+    "typed_ICU_styles_and_order": "PASS 65/65; independent AST comparison including styles",
+    "NFC": "PASS",
+    "CLDR": "PASS; vi only other; no candidate plural/select branches",
+    "runtime": "PASS exact relay runtime.ts 65/65 messages plus Python formatters and exact AST login renderer",
+    "rendered": "BLOCKED — customer resource hold; no browser/native app/visual frames launched",
+    "RTL": "NOT_APPLICABLE to Vietnamese LTR native meaning; no mirroring/bidi visual claim",
+    "pseudo": "BLOCKED rendered fit/pseudo long-text under customer resource hold; pseudo does not certify translation",
+    "shipped": "NOT_CLAIMED; candidate remains unapproved by overall programme gate"
+  },
+  "evidence_files": [
+    "mechanical.json",
+    "js-mechanical.json",
+    "probe.py",
+    "probe.mjs"
+  ],
+  "glossary_decisions": {
+    "credits": "tín dụng — monetary/usage credit units, not token counts; consistent with the supplied allowance context",
+    "tokens": "token — intentional vi developer borrowing allowed by vi style guide, singular invariant unit; not the raw API plural tokens",
+    "cache": "cache — explicitly permitted vi developer term in the binding style guide, in Vietnamese syntax từ cache / trong cache",
+    "USD": "ISO currency unit preserved, no conversion",
+    "requests": "yêu cầu — translated unit, no raw API requests stub",
+    "model_family": "dòng mô hình — quota family remains distinct from individual model",
+    "projection": "trạng thái hiện tại của phiên — session live state arrival, not graphical projection/prediction or reconnection"
+  },
+  "limitations": [
+    "No rendered width/truncation/accessibility/full-app flow evidence due explicit resource hold.",
+    "Python login uses exact function/template AST with synthetic locale and mark URI, not HTTP daemon startup; HTML evidence is not screenshot evidence.",
+    "Repository checker catches argument type/drop but not number skeleton change; independent typed-style AST negative control rejects number percent → number. This is an existing checker limitation, not a candidate translation defect."
+  ],
+  "provenance_inputs": {
+    "decisions.json": "117a69b9b50daaa1c678737b97c194adb948b353f9ff8f5d8b96cab21aa76ad0",
+    "validation.json": "8b9fa8032127a48dcb404e1077cfd4e9b357cc764627e64e9f6032c56a8d13f9"
+  }
+}

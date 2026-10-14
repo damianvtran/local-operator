@@ -1,0 +1,87 @@
+{
+  "relay.session.list.search_placeholder": {
+    "role": "session list search input placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. The list body's search field; the section headings themselves are relay.shell chrome."
+  },
+  "relay.session.list.empty_hint": {
+    "role": "formatted empty-list hint under the placeholder",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. Rendered under relay.shell.list.empty; the two together answer 'nothing here, and where to go'."
+  },
+  "relay.session.list.no_matches": {
+    "role": "empty-filter verdict",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. Shown when every list section is empty, i.e. a query matched nothing or every row was pinned away."
+  },
+  "relay.session.list.start_idle": {
+    "role": "start-session footer control label (idle)",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. One tap starts a session; the busy state is the sibling key below."
+  },
+  "relay.session.list.start_busy": {
+    "role": "start-session footer control label (in flight)",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. Rendered while the start request is in flight; paired with relay.session.list.start_idle."
+  },
+  "relay.session.view.back": {
+    "role": "back-to-sessions accessible name",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. The ‹ header control's accessible label in the session view (both the connecting and connected headers); the glyph itself is not translated."
+  },
+  "relay.session.view.empty_title": {
+    "role": "empty conversation headline",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. Shown for a just-started session with no messages, paired with the hint below."
+  },
+  "relay.session.view.empty_hint": {
+    "role": "empty conversation hint",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. Rendered under relay.session.view.empty_title; hidden once a turn starts streaming."
+  },
+  "relay.session.past.back": {
+    "role": "back-to-list accessible name on the history screen",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. The ‹ header control's accessible label on the past-sessions screen; the glyph itself is not translated."
+  },
+  "relay.session.past.heading": {
+    "role": "past-sessions screen heading",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. The screen's h1."
+  },
+  "relay.session.past.search_placeholder": {
+    "role": "history search input placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. Search covers both session names and conversation bodies."
+  },
+  "relay.session.past.loading": {
+    "role": "history in-flight placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. Shown while the search response has not landed; distinct from the empty verdict."
+  },
+  "relay.session.directory.sheet_title": {
+    "role": "working-directory sheet title",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. The composer's directory chip opens this sheet; the title names the surface, not a directory value."
+  },
+  "relay.session.directory.path_placeholder": {
+    "role": "free-text directory input placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. The fallback for a directory not in the quick-picks."
+  },
+  "relay.session.model.sheet_title": {
+    "role": "model sheet title",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. The sheet that lists the server's ranked models; the rows themselves carry server data, not translated copy."
+  },
+  "relay.session.model.filter_placeholder": {
+    "role": "model filter input placeholder",
+    "tone": "Preserve current copy and casing, lowercase.",
+    "note": "Owned relay SPA session copy. Filters the ranked model list by provider or model name."
+  },
+  "relay.session.model.loading": {
+    "role": "model catalogue in-flight placeholder",
+    "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
+    "note": "Owned relay SPA session copy. Shown while the catalogue response has not landed; the error and empty states are separate keys or daemon copy."
+  }
+}

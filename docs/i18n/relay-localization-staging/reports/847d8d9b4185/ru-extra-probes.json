@@ -1,0 +1,469 @@
+{
+  "agreement_samples": [
+    {
+      "value": 0,
+      "unit": "кредиты",
+      "amount": "Остаток: 0 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (кредиты)"
+    },
+    {
+      "value": 0,
+      "unit": "USD",
+      "amount": "Остаток: 0 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (USD)"
+    },
+    {
+      "value": 0,
+      "unit": "токены",
+      "amount": "Остаток: 0 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (токены)"
+    },
+    {
+      "value": 0,
+      "unit": "запросы",
+      "amount": "Остаток: 0 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (запросы)"
+    },
+    {
+      "value": 1,
+      "unit": "кредиты",
+      "amount": "Остаток: 1 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (кредиты)"
+    },
+    {
+      "value": 1,
+      "unit": "USD",
+      "amount": "Остаток: 1 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (USD)"
+    },
+    {
+      "value": 1,
+      "unit": "токены",
+      "amount": "Остаток: 1 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (токены)"
+    },
+    {
+      "value": 1,
+      "unit": "запросы",
+      "amount": "Остаток: 1 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (запросы)"
+    },
+    {
+      "value": 2,
+      "unit": "кредиты",
+      "amount": "Остаток: 2 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (кредиты)"
+    },
+    {
+      "value": 2,
+      "unit": "USD",
+      "amount": "Остаток: 2 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (USD)"
+    },
+    {
+      "value": 2,
+      "unit": "токены",
+      "amount": "Остаток: 2 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (токены)"
+    },
+    {
+      "value": 2,
+      "unit": "запросы",
+      "amount": "Остаток: 2 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (запросы)"
+    },
+    {
+      "value": 5,
+      "unit": "кредиты",
+      "amount": "Остаток: 5 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (кредиты)"
+    },
+    {
+      "value": 5,
+      "unit": "USD",
+      "amount": "Остаток: 5 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (USD)"
+    },
+    {
+      "value": 5,
+      "unit": "токены",
+      "amount": "Остаток: 5 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (токены)"
+    },
+    {
+      "value": 5,
+      "unit": "запросы",
+      "amount": "Остаток: 5 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (запросы)"
+    },
+    {
+      "value": 21,
+      "unit": "кредиты",
+      "amount": "Остаток: 21 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (кредиты)"
+    },
+    {
+      "value": 21,
+      "unit": "USD",
+      "amount": "Остаток: 21 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (USD)"
+    },
+    {
+      "value": 21,
+      "unit": "токены",
+      "amount": "Остаток: 21 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (токены)"
+    },
+    {
+      "value": 21,
+      "unit": "запросы",
+      "amount": "Остаток: 21 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (запросы)"
+    },
+    {
+      "value": 0.29,
+      "unit": "кредиты",
+      "amount": "Остаток: 0,29 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (кредиты)"
+    },
+    {
+      "value": 0.29,
+      "unit": "USD",
+      "amount": "Остаток: 0,29 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (USD)"
+    },
+    {
+      "value": 0.29,
+      "unit": "токены",
+      "amount": "Остаток: 0,29 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (токены)"
+    },
+    {
+      "value": 0.29,
+      "unit": "запросы",
+      "amount": "Остаток: 0,29 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (запросы)"
+    },
+    {
+      "value": 0.07,
+      "unit": "кредиты",
+      "amount": "Остаток: 0,07 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (кредиты)"
+    },
+    {
+      "value": 0.07,
+      "unit": "USD",
+      "amount": "Остаток: 0,07 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (USD)"
+    },
+    {
+      "value": 0.07,
+      "unit": "токены",
+      "amount": "Остаток: 0,07 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (токены)"
+    },
+    {
+      "value": 0.07,
+      "unit": "запросы",
+      "amount": "Остаток: 0,07 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (запросы)"
+    },
+    {
+      "value": 123.5,
+      "unit": "кредиты",
+      "amount": "Остаток: 123,5 (кредиты)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (кредиты)"
+    },
+    {
+      "value": 123.5,
+      "unit": "USD",
+      "amount": "Остаток: 123,5 (USD)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (USD)"
+    },
+    {
+      "value": 123.5,
+      "unit": "токены",
+      "amount": "Остаток: 123,5 (токены)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (токены)"
+    },
+    {
+      "value": 123.5,
+      "unit": "запросы",
+      "amount": "Остаток: 123,5 (запросы)",
+      "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (запросы)"
+    }
+  ],
+  "pseudo": {
+    "status": "PASS_FORMAT_ONLY",
+    "count": 65,
+    "samples": [
+      {
+        "key": "relay.shell.list.empty",
+        "actual": "⟦запущенных сессий нет — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.list.connecting",
+        "actual": "⟦подключение… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.list.section.active",
+        "actual": "⟦Активные сессии — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.list.section.previous",
+        "actual": "⟦Предыдущие сессии — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.list.theme",
+        "actual": "⟦выбрать тему — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.session.waiting",
+        "actual": "⟦ожидание данных сессии… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.session.connecting",
+        "actual": "⟦подключение к сессии… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.title",
+        "actual": "⟦использование — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.cached",
+        "actual": "⟦Данные из кэша. Обновление у провайдера не запрашивается. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unavailable",
+        "actual": "⟦Данные об использовании из кэша недоступны. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.loading",
+        "actual": "⟦Загрузка данных об использовании из кэша… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.empty",
+        "actual": "⟦Данных об использовании в кэше нет. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.last_known",
+        "actual": "⟦Последние известные данные; текущее использование недоступно. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.continue",
+        "actual": "⟦Включённая квота исчерпана; далее используются кредиты. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.family_caps",
+        "actual": "⟦Квоты семейств моделей по-прежнему действуют. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.paid",
+        "actual": "⟦Платная квота — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.family",
+        "actual": "⟦Квота семейства моделей — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.included",
+        "actual": "⟦Включённая квота — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.amount_unknown",
+        "actual": "⟦Объём не указан — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.blocked",
+        "actual": "⟦Списание кредитов недоступно — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.eligibility_unknown",
+        "actual": "⟦Доступность списания неизвестна — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unlimited",
+        "actual": "⟦Платная квота без ограничений — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.window_five",
+        "actual": "⟦5 часов — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.window_week",
+        "actual": "⟦7 дней — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.window_month",
+        "actual": "⟦Месяц — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.window_lifetime",
+        "actual": "⟦За всё время — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.window_unknown",
+        "actual": "⟦Неизвестный период — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.remaining",
+        "actual": "⟦Остаток: 0,29 (кредиты) — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.used",
+        "actual": "⟦Использовано: 0,29 (кредиты) — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.fraction",
+        "actual": "⟦использовано 29 % — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.reset",
+        "actual": "⟦Сброс: 14 окт. 2026 г., 12:34 — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.command",
+        "actual": "⟦Использование провайдера из кэша — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.as_of",
+        "actual": "⟦По состоянию на 14 окт. 2026 г., 12:34. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.stale",
+        "actual": "⟦Возможно, устарело. — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.row",
+        "actual": "⟦Квота семейства моделей · 5 часов: осталось 29 % — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.row_family",
+        "actual": "⟦Квота семейства моделей (opus) · 5 часов: осталось 29 % — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unit_credits",
+        "actual": "⟦кредиты — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unit_usd",
+        "actual": "⟦USD — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unit_tokens",
+        "actual": "⟦токены — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.unit_requests",
+        "actual": "⟦запросы — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.remaining_percent",
+        "actual": "⟦осталось 29 % — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.used_percent",
+        "actual": "⟦использовано 29 % — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.remaining_unknown_unit",
+        "actual": "⟦осталось 0,29 — расширенная строка⟧"
+      },
+      {
+        "key": "relay.shell.usage.used_unknown_unit",
+        "actual": "⟦использовано 0,29 — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.list.search_placeholder",
+        "actual": "⟦Поиск по беседам… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.list.empty_hint",
+        "actual": "⟦запустите сессию ниже или в TUI на вашем компьютере — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.list.no_matches",
+        "actual": "⟦подходящих бесед нет — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.list.start_idle",
+        "actual": "⟦новая сессия — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.list.start_busy",
+        "actual": "⟦запуск… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.view.back",
+        "actual": "⟦назад к сессиям — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.view.empty_title",
+        "actual": "⟦сообщений пока нет — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.view.empty_hint",
+        "actual": "⟦отправьте сообщение ниже, чтобы начать — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.past.back",
+        "actual": "⟦назад — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.past.heading",
+        "actual": "⟦прошлые сессии — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.past.search_placeholder",
+        "actual": "⟦поиск по названиям и беседам… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.past.loading",
+        "actual": "⟦загрузка… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.directory.sheet_title",
+        "actual": "⟦рабочий каталог — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.directory.path_placeholder",
+        "actual": "⟦или введите другой путь… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.model.sheet_title",
+        "actual": "⟦модель — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.model.filter_placeholder",
+        "actual": "⟦фильтр моделей — расширенная строка⟧"
+      },
+      {
+        "key": "relay.session.model.loading",
+        "actual": "⟦загрузка… — расширенная строка⟧"
+      },
+      {
+        "key": "relay.login.page.title",
+        "actual": "⟦local operator — вход — расширенная строка⟧"
+      },
+      {
+        "key": "relay.login.password.label",
+        "actual": "⟦пароль — расширенная строка⟧"
+      },
+      {
+        "key": "relay.login.submit.label",
+        "actual": "⟦войти — расширенная строка⟧"
+      },
+      {
+        "key": "relay.login.error.password",
+        "actual": "⟦Неверный пароль. — расширенная строка⟧"
+      }
+    ],
+    "layout": "BLOCKED: customer resource hold; no rendered frames"
+  },
+  "percent_points": {
+    "input": 123.5,
+    "fraction": 1.235,
+    "actual": "осталось 124 %",
+    "explanation": "UsageSheet line 56 divides API percent-unit amounts by 100; ICU rounds percent to integer. Direct fraction 123.5 intentionally formats 12 350 %, not 123.5 %."
+  }
+}

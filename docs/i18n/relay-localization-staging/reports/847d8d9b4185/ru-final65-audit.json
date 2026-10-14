@@ -1,0 +1,1608 @@
+{
+  "model": "openai/gpt-6.1-sol",
+  "head": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "namespaces": [
+    {
+      "namespace": "relay.shell",
+      "keys": 44,
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.shell.json",
+      "target_path": "historical-scratch/a753be6f0d01/relay-final65/ru/relay.shell.json",
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "076b295ad1f4b9a90ef02424063f716c84af3cbf85ae41f1c53ce724e1d066ff",
+      "mechanical": "PASS",
+      "native_result": "passed",
+      "native_notes": "44/44 native-text reviewed against EN and all context sidecars. Established сессия/использование/кэш/токен glossary; waiting means session data, not a projection prediction. Paid/included/family quotas remain distinct; unknown amounts, eligibility and windows are not zero. Unit labels as parenthetical independent labels avoid numeric declension at 0/1/2/5/21/fractions. Complete row retains all fields, opus unchanged, dot separator and nonempty family parentheses. Currency USD unchanged. Numeric formats and whole unknown-unit messages preserve values without inventing units. One nonblocking command-description polish finding.",
+      "findings": [
+        "RU-M1"
+      ],
+      "unresolved_blocker_major": 0
+    },
+    {
+      "namespace": "relay.session",
+      "keys": 17,
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.session.json",
+      "target_path": "historical-scratch/a753be6f0d01/relay-final65/ru/relay.session.json",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "1d3618c0928e956da89e70b9eaf0945c15062493a043a6e17a8364fc912efdec",
+      "mechanical": "PASS",
+      "native_result": "passed",
+      "native_notes": "17/17 native-text reviewed against EN/context. Formal вы realized through запустите/отправьте/введите; infinitive theme action elsewhere consistent. сессия is the technical running entity, беседа is conversation contents; names and conversation-body search retained. TUI Latin remains per glossary. Loading/starting/empty states remain distinct, grammatical feminine рабочая not introduced because каталог masculine; рабочий каталог correct. Ellipses/case retained.",
+      "findings": [],
+      "unresolved_blocker_major": 0
+    },
+    {
+      "namespace": "relay.login",
+      "keys": 4,
+      "source_path": "source-checkout/local_operator/i18n/catalogues/en/relay.login.json",
+      "target_path": "historical-scratch/a753be6f0d01/relay-final65/ru/relay.login.json",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "6235f9f3f058fe859194f37879d485199449345c1692beeda2dc767f691dfaa1",
+      "mechanical": "PASS",
+      "native_result": "passed",
+      "native_notes": "4/4 native-text reviewed against EN/context. local operator brand unchanged; вход page title / пароль label / войти action / incorrect-password refusal idiomatic, neutral; period retained. Exact production login HTML function escaping and full-page English fallback exercised with fixture dependencies, not a live server.",
+      "findings": [],
+      "unresolved_blocker_major": 0
+    }
+  ],
+  "probes": [
+    {
+      "key": "relay.shell.usage.fraction",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 29 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 29 %"
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 29 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "Остаток: 0,29 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "Использовано: 0,29 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 0,29"
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "input": {
+        "value": 0.29,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 0,29"
+    },
+    {
+      "key": "relay.shell.usage.fraction",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 7 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 7 %"
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 7 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "Остаток: 0,07 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "Использовано: 0,07 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 0,07"
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "input": {
+        "value": 0.07,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 0,07"
+    },
+    {
+      "key": "relay.shell.usage.fraction",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 12 350 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 12 350 %"
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 12 350 %"
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "Остаток: 123,5 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "Использовано: 123,5 (кредиты)"
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "осталось 123,5"
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "input": {
+        "value": 123.5,
+        "unit": "кредиты"
+      },
+      "actual": "использовано 123,5"
+    },
+    {
+      "key": "relay.shell.usage.reset",
+      "input": {
+        "value": 1791981240000
+      },
+      "actual": "Сброс: 14 окт. 2026 г., 12:34"
+    },
+    {
+      "key": "relay.shell.usage.as_of",
+      "input": {
+        "value": 1791981240000
+      },
+      "actual": "По состоянию на 14 окт. 2026 г., 12:34."
+    },
+    {
+      "case": "text angle brackets remain literal, no HTML interpretation by ICU",
+      "actual": "<script>alert(1)</script> · 5 часов: 123,5"
+    }
+  ],
+  "negative_controls": [
+    {
+      "namespace": "relay.shell",
+      "mutation": "missing key",
+      "actual": "key parity",
+      "status": "PASS"
+    },
+    {
+      "namespace": "relay.session",
+      "mutation": "missing key",
+      "actual": "key parity",
+      "status": "PASS"
+    },
+    {
+      "namespace": "relay.login",
+      "mutation": "missing key",
+      "actual": "key parity",
+      "status": "PASS"
+    },
+    {
+      "mutation": "{value}",
+      "actual": "argument type/style/encounter mismatch: relay.shell.usage.fraction",
+      "status": "PASS"
+    },
+    {
+      "mutation": "{value, number}",
+      "actual": "argument type/style/encounter mismatch: relay.shell.usage.fraction",
+      "status": "PASS"
+    },
+    {
+      "mutation": "{wrong, number, percent}",
+      "actual": "argument type/style/encounter mismatch: relay.shell.usage.fraction",
+      "status": "PASS"
+    }
+  ],
+  "fallback": [
+    {
+      "case": "missing Russian namespace set",
+      "uiLocale": "en",
+      "actual": "123.5 credits left"
+    },
+    {
+      "case": "partial Russian shell map",
+      "actual": "en"
+    },
+    {
+      "case": "forced Russian context missing key",
+      "actual": "123.5 credits left",
+      "expected": "123.5 credits left"
+    },
+    {
+      "case": "malformed params",
+      "actual": "relay.shell.usage.remaining"
+    },
+    {
+      "case": "missing required param",
+      "actual": "relay.shell.usage.remaining"
+    }
+  ],
+  "rows": [
+    {
+      "key": "relay.shell.list.empty",
+      "en": "no sessions running",
+      "ru": "запущенных сессий нет",
+      "arguments": [],
+      "sample": "запущенных сессий нет",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.list.connecting",
+      "en": "connecting…",
+      "ru": "подключение…",
+      "arguments": [],
+      "sample": "подключение…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.list.section.active",
+      "en": "Active Sessions",
+      "ru": "Активные сессии",
+      "arguments": [],
+      "sample": "Активные сессии",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.list.section.previous",
+      "en": "Previous Sessions",
+      "ru": "Предыдущие сессии",
+      "arguments": [],
+      "sample": "Предыдущие сессии",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.list.theme",
+      "en": "choose theme",
+      "ru": "выбрать тему",
+      "arguments": [],
+      "sample": "выбрать тему",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.session.waiting",
+      "en": "waiting for projection…",
+      "ru": "ожидание данных сессии…",
+      "arguments": [],
+      "sample": "ожидание данных сессии…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.session.connecting",
+      "en": "connecting to session…",
+      "ru": "подключение к сессии…",
+      "arguments": [],
+      "sample": "подключение к сессии…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.title",
+      "en": "usage",
+      "ru": "использование",
+      "arguments": [],
+      "sample": "использование",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.cached",
+      "en": "Cached usage. No provider refresh is requested.",
+      "ru": "Данные из кэша. Обновление у провайдера не запрашивается.",
+      "arguments": [],
+      "sample": "Данные из кэша. Обновление у провайдера не запрашивается.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unavailable",
+      "en": "Cached usage unavailable.",
+      "ru": "Данные об использовании из кэша недоступны.",
+      "arguments": [],
+      "sample": "Данные об использовании из кэша недоступны.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.loading",
+      "en": "Loading cached usage…",
+      "ru": "Загрузка данных об использовании из кэша…",
+      "arguments": [],
+      "sample": "Загрузка данных об использовании из кэша…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.empty",
+      "en": "No cached usage reported.",
+      "ru": "Данных об использовании в кэше нет.",
+      "arguments": [],
+      "sample": "Данных об использовании в кэше нет.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.last_known",
+      "en": "Last known usage; current usage unavailable.",
+      "ru": "Последние известные данные; текущее использование недоступно.",
+      "arguments": [],
+      "sample": "Последние известные данные; текущее использование недоступно.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.continue",
+      "en": "Included quota used; credits will continue.",
+      "ru": "Включённая квота исчерпана; далее используются кредиты.",
+      "arguments": [],
+      "sample": "Включённая квота исчерпана; далее используются кредиты.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.family_caps",
+      "en": "Model-family caps still apply.",
+      "ru": "Квоты семейств моделей по-прежнему действуют.",
+      "arguments": [],
+      "sample": "Квоты семейств моделей по-прежнему действуют.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.paid",
+      "en": "Paid allowance",
+      "ru": "Платная квота",
+      "arguments": [],
+      "sample": "Платная квота",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.family",
+      "en": "Model-family allowance",
+      "ru": "Квота семейства моделей",
+      "arguments": [],
+      "sample": "Квота семейства моделей",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.included",
+      "en": "Included allowance",
+      "ru": "Включённая квота",
+      "arguments": [],
+      "sample": "Включённая квота",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.amount_unknown",
+      "en": "Amount not reported",
+      "ru": "Объём не указан",
+      "arguments": [],
+      "sample": "Объём не указан",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.blocked",
+      "en": "Spend unavailable",
+      "ru": "Списание кредитов недоступно",
+      "arguments": [],
+      "sample": "Списание кредитов недоступно",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.eligibility_unknown",
+      "en": "Spend eligibility unknown",
+      "ru": "Доступность списания неизвестна",
+      "arguments": [],
+      "sample": "Доступность списания неизвестна",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unlimited",
+      "en": "Unlimited paid allowance",
+      "ru": "Платная квота без ограничений",
+      "arguments": [],
+      "sample": "Платная квота без ограничений",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.window_five",
+      "en": "5-hour",
+      "ru": "5 часов",
+      "arguments": [],
+      "sample": "5 часов",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.window_week",
+      "en": "7-day",
+      "ru": "7 дней",
+      "arguments": [],
+      "sample": "7 дней",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.window_month",
+      "en": "Monthly",
+      "ru": "Месяц",
+      "arguments": [],
+      "sample": "Месяц",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.window_lifetime",
+      "en": "Lifetime",
+      "ru": "За всё время",
+      "arguments": [],
+      "sample": "За всё время",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.window_unknown",
+      "en": "Unknown window",
+      "ru": "Неизвестный период",
+      "arguments": [],
+      "sample": "Неизвестный период",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "en": "{value, number} {unit} left",
+      "ru": "Остаток: {value, number} ({unit})",
+      "arguments": [
+        [
+          "value",
+          2,
+          null
+        ],
+        [
+          "unit",
+          1,
+          null
+        ]
+      ],
+      "sample": "Остаток: 123,5 (кредиты)",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "en": "{value, number} {unit} used",
+      "ru": "Использовано: {value, number} ({unit})",
+      "arguments": [
+        [
+          "value",
+          2,
+          null
+        ],
+        [
+          "unit",
+          1,
+          null
+        ]
+      ],
+      "sample": "Использовано: 123,5 (кредиты)",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.fraction",
+      "en": "{value, number, percent} used",
+      "ru": "использовано {value, number, percent}",
+      "arguments": [
+        [
+          "value",
+          2,
+          "percent"
+        ]
+      ],
+      "sample": "использовано 12 350 %",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.reset",
+      "en": "Resets at {value, date, medium}, {value, time, short}",
+      "ru": "Сброс: {value, date, medium}, {value, time, short}",
+      "arguments": [
+        [
+          "value",
+          3,
+          "medium"
+        ],
+        [
+          "value",
+          4,
+          "short"
+        ]
+      ],
+      "sample": "Сброс: 14 окт. 2026 г., 12:34",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.command",
+      "en": "Show cached provider usage",
+      "ru": "Использование провайдера из кэша",
+      "arguments": [],
+      "sample": "Использование провайдера из кэша",
+      "native_review": "reviewed",
+      "native_result": "passed_with_minor",
+      "finding_ids": [
+        "RU-M1"
+      ]
+    },
+    {
+      "key": "relay.shell.usage.as_of",
+      "en": "As of {value, date, medium}, {value, time, short}.",
+      "ru": "По состоянию на {value, date, medium}, {value, time, short}.",
+      "arguments": [
+        [
+          "value",
+          3,
+          "medium"
+        ],
+        [
+          "value",
+          4,
+          "short"
+        ]
+      ],
+      "sample": "По состоянию на 14 окт. 2026 г., 12:34.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.stale",
+      "en": "May be out of date.",
+      "ru": "Возможно, устарело.",
+      "arguments": [],
+      "sample": "Возможно, устарело.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.row",
+      "en": "{label} · {window}: {value}",
+      "ru": "{label} · {window}: {value}",
+      "arguments": [
+        [
+          "label",
+          1,
+          null
+        ],
+        [
+          "window",
+          1,
+          null
+        ],
+        [
+          "value",
+          1,
+          null
+        ]
+      ],
+      "sample": "Квота семейства моделей · 5 часов: Остаток: 123,5 (кредиты)",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.row_family",
+      "en": "{label} ({family}) · {window}: {value}",
+      "ru": "{label} ({family}) · {window}: {value}",
+      "arguments": [
+        [
+          "label",
+          1,
+          null
+        ],
+        [
+          "family",
+          1,
+          null
+        ],
+        [
+          "window",
+          1,
+          null
+        ],
+        [
+          "value",
+          1,
+          null
+        ]
+      ],
+      "sample": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (кредиты)",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "en": "credits",
+      "ru": "кредиты",
+      "arguments": [],
+      "sample": "кредиты",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unit_usd",
+      "en": "USD",
+      "ru": "USD",
+      "arguments": [],
+      "sample": "USD",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "en": "tokens",
+      "ru": "токены",
+      "arguments": [],
+      "sample": "токены",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "en": "requests",
+      "ru": "запросы",
+      "arguments": [],
+      "sample": "запросы",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "en": "{value, number, percent} left",
+      "ru": "осталось {value, number, percent}",
+      "arguments": [
+        [
+          "value",
+          2,
+          "percent"
+        ]
+      ],
+      "sample": "осталось 12 350 %",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "en": "{value, number, percent} used",
+      "ru": "использовано {value, number, percent}",
+      "arguments": [
+        [
+          "value",
+          2,
+          "percent"
+        ]
+      ],
+      "sample": "использовано 12 350 %",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "en": "{value, number} left",
+      "ru": "осталось {value, number}",
+      "arguments": [
+        [
+          "value",
+          2,
+          null
+        ]
+      ],
+      "sample": "осталось 123,5",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "en": "{value, number} used",
+      "ru": "использовано {value, number}",
+      "arguments": [
+        [
+          "value",
+          2,
+          null
+        ]
+      ],
+      "sample": "использовано 123,5",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.list.search_placeholder",
+      "en": "Search conversations…",
+      "ru": "Поиск по беседам…",
+      "arguments": [],
+      "sample": "Поиск по беседам…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.list.empty_hint",
+      "en": "start one below, or from the TUI on your machine",
+      "ru": "запустите сессию ниже или в TUI на вашем компьютере",
+      "arguments": [],
+      "sample": "запустите сессию ниже или в TUI на вашем компьютере",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.list.no_matches",
+      "en": "no matching conversations",
+      "ru": "подходящих бесед нет",
+      "arguments": [],
+      "sample": "подходящих бесед нет",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.list.start_idle",
+      "en": "new session",
+      "ru": "новая сессия",
+      "arguments": [],
+      "sample": "новая сессия",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.list.start_busy",
+      "en": "starting…",
+      "ru": "запуск…",
+      "arguments": [],
+      "sample": "запуск…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.view.back",
+      "en": "back to sessions",
+      "ru": "назад к сессиям",
+      "arguments": [],
+      "sample": "назад к сессиям",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.view.empty_title",
+      "en": "no messages yet",
+      "ru": "сообщений пока нет",
+      "arguments": [],
+      "sample": "сообщений пока нет",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.view.empty_hint",
+      "en": "send a message below to get started",
+      "ru": "отправьте сообщение ниже, чтобы начать",
+      "arguments": [],
+      "sample": "отправьте сообщение ниже, чтобы начать",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.past.back",
+      "en": "back",
+      "ru": "назад",
+      "arguments": [],
+      "sample": "назад",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.past.heading",
+      "en": "past sessions",
+      "ru": "прошлые сессии",
+      "arguments": [],
+      "sample": "прошлые сессии",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.past.search_placeholder",
+      "en": "search names and conversations…",
+      "ru": "поиск по названиям и беседам…",
+      "arguments": [],
+      "sample": "поиск по названиям и беседам…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.past.loading",
+      "en": "loading…",
+      "ru": "загрузка…",
+      "arguments": [],
+      "sample": "загрузка…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.directory.sheet_title",
+      "en": "working directory",
+      "ru": "рабочий каталог",
+      "arguments": [],
+      "sample": "рабочий каталог",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.directory.path_placeholder",
+      "en": "or type another path…",
+      "ru": "или введите другой путь…",
+      "arguments": [],
+      "sample": "или введите другой путь…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.model.sheet_title",
+      "en": "model",
+      "ru": "модель",
+      "arguments": [],
+      "sample": "модель",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.model.filter_placeholder",
+      "en": "filter models",
+      "ru": "фильтр моделей",
+      "arguments": [],
+      "sample": "фильтр моделей",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.session.model.loading",
+      "en": "loading…",
+      "ru": "загрузка…",
+      "arguments": [],
+      "sample": "загрузка…",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.login.page.title",
+      "en": "local operator — sign in",
+      "ru": "local operator — вход",
+      "arguments": [],
+      "sample": "local operator — вход",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.login.password.label",
+      "en": "password",
+      "ru": "пароль",
+      "arguments": [],
+      "sample": "пароль",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.login.submit.label",
+      "en": "sign in",
+      "ru": "войти",
+      "arguments": [],
+      "sample": "войти",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    },
+    {
+      "key": "relay.login.error.password",
+      "en": "Wrong password.",
+      "ru": "Неверный пароль.",
+      "arguments": [],
+      "sample": "Неверный пароль.",
+      "native_review": "reviewed",
+      "native_result": "passed",
+      "finding_ids": []
+    }
+  ],
+  "cldr": {
+    "locale": "ru",
+    "plural_categories": [
+      "one",
+      "few",
+      "many",
+      "other"
+    ],
+    "plural_icu_messages": 0,
+    "number_example": "123,5",
+    "percent_example": "29 %",
+    "status": "PASS for numbers/percent/datetime; plural branches not applicable to these keys"
+  },
+  "auditor": {
+    "agent": "independent task auditor 847d8d9b4185",
+    "model": "openai/gpt-6.1-sol",
+    "preferred_model_claim": false,
+    "fallback_usage": "None observed in this task; actual session model recorded, no requested/preferred model substituted."
+  },
+  "date": "2026-10-14",
+  "locale": "ru",
+  "scope": "Independent final65 catalogue audit for core PR #2329; not author/translator of these target files.",
+  "result": "passed",
+  "verdict": "clean with one nonblocking MINOR follow-up; terminal for textual native audit",
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "RU-M1",
+      "severity": "MINOR",
+      "namespace": "relay.shell",
+      "key": "relay.shell.usage.command",
+      "target_line": 33,
+      "path": "historical-scratch/a753be6f0d01/relay-final65/ru/relay.shell.json",
+      "actual": "Использование провайдера из кэша",
+      "source": "Show cached provider usage",
+      "evidence": "Used as /usage command description at components/composer.tsx:203. The Russian genitive phrase reads as using the provider from the cache, rather than showing cached provider usage data. The neighboring sheet copy correctly names данные об использовании.",
+      "suggestion": "Показать данные об использовании из кэша (or Показать данные провайдера из кэша).",
+      "gate": "Non-blocking polish; no correctness change and no additional audit round required."
+    }
+  ],
+  "login_probes": {
+    "method": "Execute AST-extracted exact _render_login_html and _LOGIN_HTML from audited source with isolated catalogue/resolver/mark dependencies; production render_message formatter; not live daemon or browser proof.",
+    "results": [
+      {
+        "case": "complete RU login namespace",
+        "status": "PASS",
+        "lang": "ru",
+        "error_text": "Неверный пароль."
+      },
+      {
+        "case": "catalogue HTML escaping and single-pass placeholder substitution",
+        "status": "PASS",
+        "actual_title": "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; __PASSWORD__"
+      },
+      {
+        "case": "partial RU login catalogue forces full English page including error",
+        "status": "PASS",
+        "actual_title": "local operator — sign in",
+        "error": "Wrong password."
+      }
+    ]
+  },
+  "supplemental_probes": {
+    "agreement_samples": [
+      {
+        "value": 0,
+        "unit": "кредиты",
+        "amount": "Остаток: 0 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (кредиты)"
+      },
+      {
+        "value": 0,
+        "unit": "USD",
+        "amount": "Остаток: 0 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (USD)"
+      },
+      {
+        "value": 0,
+        "unit": "токены",
+        "amount": "Остаток: 0 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (токены)"
+      },
+      {
+        "value": 0,
+        "unit": "запросы",
+        "amount": "Остаток: 0 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0 (запросы)"
+      },
+      {
+        "value": 1,
+        "unit": "кредиты",
+        "amount": "Остаток: 1 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (кредиты)"
+      },
+      {
+        "value": 1,
+        "unit": "USD",
+        "amount": "Остаток: 1 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (USD)"
+      },
+      {
+        "value": 1,
+        "unit": "токены",
+        "amount": "Остаток: 1 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (токены)"
+      },
+      {
+        "value": 1,
+        "unit": "запросы",
+        "amount": "Остаток: 1 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 1 (запросы)"
+      },
+      {
+        "value": 2,
+        "unit": "кредиты",
+        "amount": "Остаток: 2 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (кредиты)"
+      },
+      {
+        "value": 2,
+        "unit": "USD",
+        "amount": "Остаток: 2 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (USD)"
+      },
+      {
+        "value": 2,
+        "unit": "токены",
+        "amount": "Остаток: 2 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (токены)"
+      },
+      {
+        "value": 2,
+        "unit": "запросы",
+        "amount": "Остаток: 2 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 2 (запросы)"
+      },
+      {
+        "value": 5,
+        "unit": "кредиты",
+        "amount": "Остаток: 5 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (кредиты)"
+      },
+      {
+        "value": 5,
+        "unit": "USD",
+        "amount": "Остаток: 5 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (USD)"
+      },
+      {
+        "value": 5,
+        "unit": "токены",
+        "amount": "Остаток: 5 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (токены)"
+      },
+      {
+        "value": 5,
+        "unit": "запросы",
+        "amount": "Остаток: 5 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 5 (запросы)"
+      },
+      {
+        "value": 21,
+        "unit": "кредиты",
+        "amount": "Остаток: 21 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (кредиты)"
+      },
+      {
+        "value": 21,
+        "unit": "USD",
+        "amount": "Остаток: 21 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (USD)"
+      },
+      {
+        "value": 21,
+        "unit": "токены",
+        "amount": "Остаток: 21 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (токены)"
+      },
+      {
+        "value": 21,
+        "unit": "запросы",
+        "amount": "Остаток: 21 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 21 (запросы)"
+      },
+      {
+        "value": 0.29,
+        "unit": "кредиты",
+        "amount": "Остаток: 0,29 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (кредиты)"
+      },
+      {
+        "value": 0.29,
+        "unit": "USD",
+        "amount": "Остаток: 0,29 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (USD)"
+      },
+      {
+        "value": 0.29,
+        "unit": "токены",
+        "amount": "Остаток: 0,29 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (токены)"
+      },
+      {
+        "value": 0.29,
+        "unit": "запросы",
+        "amount": "Остаток: 0,29 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,29 (запросы)"
+      },
+      {
+        "value": 0.07,
+        "unit": "кредиты",
+        "amount": "Остаток: 0,07 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (кредиты)"
+      },
+      {
+        "value": 0.07,
+        "unit": "USD",
+        "amount": "Остаток: 0,07 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (USD)"
+      },
+      {
+        "value": 0.07,
+        "unit": "токены",
+        "amount": "Остаток: 0,07 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (токены)"
+      },
+      {
+        "value": 0.07,
+        "unit": "запросы",
+        "amount": "Остаток: 0,07 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 0,07 (запросы)"
+      },
+      {
+        "value": 123.5,
+        "unit": "кредиты",
+        "amount": "Остаток: 123,5 (кредиты)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (кредиты)"
+      },
+      {
+        "value": 123.5,
+        "unit": "USD",
+        "amount": "Остаток: 123,5 (USD)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (USD)"
+      },
+      {
+        "value": 123.5,
+        "unit": "токены",
+        "amount": "Остаток: 123,5 (токены)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (токены)"
+      },
+      {
+        "value": 123.5,
+        "unit": "запросы",
+        "amount": "Остаток: 123,5 (запросы)",
+        "full_row": "Квота семейства моделей (opus) · 5 часов: Остаток: 123,5 (запросы)"
+      }
+    ],
+    "pseudo": {
+      "status": "PASS_FORMAT_ONLY",
+      "count": 65,
+      "samples": [
+        {
+          "key": "relay.shell.list.empty",
+          "actual": "⟦запущенных сессий нет — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.list.connecting",
+          "actual": "⟦подключение… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.list.section.active",
+          "actual": "⟦Активные сессии — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.list.section.previous",
+          "actual": "⟦Предыдущие сессии — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.list.theme",
+          "actual": "⟦выбрать тему — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.session.waiting",
+          "actual": "⟦ожидание данных сессии… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.session.connecting",
+          "actual": "⟦подключение к сессии… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.title",
+          "actual": "⟦использование — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.cached",
+          "actual": "⟦Данные из кэша. Обновление у провайдера не запрашивается. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unavailable",
+          "actual": "⟦Данные об использовании из кэша недоступны. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.loading",
+          "actual": "⟦Загрузка данных об использовании из кэша… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.empty",
+          "actual": "⟦Данных об использовании в кэше нет. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.last_known",
+          "actual": "⟦Последние известные данные; текущее использование недоступно. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.continue",
+          "actual": "⟦Включённая квота исчерпана; далее используются кредиты. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.family_caps",
+          "actual": "⟦Квоты семейств моделей по-прежнему действуют. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.paid",
+          "actual": "⟦Платная квота — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.family",
+          "actual": "⟦Квота семейства моделей — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.included",
+          "actual": "⟦Включённая квота — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.amount_unknown",
+          "actual": "⟦Объём не указан — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.blocked",
+          "actual": "⟦Списание кредитов недоступно — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.eligibility_unknown",
+          "actual": "⟦Доступность списания неизвестна — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unlimited",
+          "actual": "⟦Платная квота без ограничений — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.window_five",
+          "actual": "⟦5 часов — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.window_week",
+          "actual": "⟦7 дней — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.window_month",
+          "actual": "⟦Месяц — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.window_lifetime",
+          "actual": "⟦За всё время — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.window_unknown",
+          "actual": "⟦Неизвестный период — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.remaining",
+          "actual": "⟦Остаток: 0,29 (кредиты) — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.used",
+          "actual": "⟦Использовано: 0,29 (кредиты) — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.fraction",
+          "actual": "⟦использовано 29 % — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.reset",
+          "actual": "⟦Сброс: 14 окт. 2026 г., 12:34 — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.command",
+          "actual": "⟦Использование провайдера из кэша — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.as_of",
+          "actual": "⟦По состоянию на 14 окт. 2026 г., 12:34. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.stale",
+          "actual": "⟦Возможно, устарело. — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.row",
+          "actual": "⟦Квота семейства моделей · 5 часов: осталось 29 % — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.row_family",
+          "actual": "⟦Квота семейства моделей (opus) · 5 часов: осталось 29 % — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unit_credits",
+          "actual": "⟦кредиты — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unit_usd",
+          "actual": "⟦USD — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unit_tokens",
+          "actual": "⟦токены — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.unit_requests",
+          "actual": "⟦запросы — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.remaining_percent",
+          "actual": "⟦осталось 29 % — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.used_percent",
+          "actual": "⟦использовано 29 % — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.remaining_unknown_unit",
+          "actual": "⟦осталось 0,29 — расширенная строка⟧"
+        },
+        {
+          "key": "relay.shell.usage.used_unknown_unit",
+          "actual": "⟦использовано 0,29 — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.list.search_placeholder",
+          "actual": "⟦Поиск по беседам… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.list.empty_hint",
+          "actual": "⟦запустите сессию ниже или в TUI на вашем компьютере — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.list.no_matches",
+          "actual": "⟦подходящих бесед нет — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.list.start_idle",
+          "actual": "⟦новая сессия — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.list.start_busy",
+          "actual": "⟦запуск… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.view.back",
+          "actual": "⟦назад к сессиям — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.view.empty_title",
+          "actual": "⟦сообщений пока нет — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.view.empty_hint",
+          "actual": "⟦отправьте сообщение ниже, чтобы начать — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.past.back",
+          "actual": "⟦назад — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.past.heading",
+          "actual": "⟦прошлые сессии — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.past.search_placeholder",
+          "actual": "⟦поиск по названиям и беседам… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.past.loading",
+          "actual": "⟦загрузка… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.directory.sheet_title",
+          "actual": "⟦рабочий каталог — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.directory.path_placeholder",
+          "actual": "⟦или введите другой путь… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.model.sheet_title",
+          "actual": "⟦модель — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.model.filter_placeholder",
+          "actual": "⟦фильтр моделей — расширенная строка⟧"
+        },
+        {
+          "key": "relay.session.model.loading",
+          "actual": "⟦загрузка… — расширенная строка⟧"
+        },
+        {
+          "key": "relay.login.page.title",
+          "actual": "⟦local operator — вход — расширенная строка⟧"
+        },
+        {
+          "key": "relay.login.password.label",
+          "actual": "⟦пароль — расширенная строка⟧"
+        },
+        {
+          "key": "relay.login.submit.label",
+          "actual": "⟦войти — расширенная строка⟧"
+        },
+        {
+          "key": "relay.login.error.password",
+          "actual": "⟦Неверный пароль. — расширенная строка⟧"
+        }
+      ],
+      "layout": "BLOCKED: customer resource hold; no rendered frames"
+    },
+    "percent_points": {
+      "input": 123.5,
+      "fraction": 1.235,
+      "actual": "осталось 124 %",
+      "explanation": "UsageSheet line 56 divides API percent-unit amounts by 100; ICU rounds percent to integer. Direct fraction 123.5 intentionally formats 12 350 %, not 123.5 %."
+    }
+  },
+  "limitations": {
+    "rendered": "BLOCKED — explicit customer resource hold; no browser, screenshots, narrow-width layout, font clipping, or live interaction validation. Format probes are strings, not rendered UX proof.",
+    "pseudo": "65/65 synthetic expanded-string ICU format probes pass; pseudo rendered width/layout BLOCKED under same customer resource hold.",
+    "rtl": "Not applicable to Russian catalogue: ru is LTR. Source directionFor maps only ur to RTL. No RTL layout/native Urdu claim.",
+    "cldr": "RU numeric/date/time/percent tested. No plural/select ICU branches in these 65 messages; plural branch coverage not applicable. Parenthetical unit names deliberately avoid plural agreement.",
+    "runtime": "Relay TS source transpiled with existing TypeScript dependency, executes actual createMessageRuntime and existing intl-messageformat. Login exact function AST with fixture dependency boundaries, actual Python render_message. Not a live server/browser or comprehensive code/QA/design review.",
+    "publication": "No ledger edits, shipped-eligibility assertion, PR review substitute, release or merge approval."
+  },
+  "artifacts": [
+    "audit-ru.mjs",
+    "runtime-under-audit.mjs",
+    "ru-mechanical.json",
+    "ru-mechanical-output.txt",
+    "login-probe.py",
+    "ru-login-probes.json",
+    "extra-probes.mjs",
+    "ru-extra-probes.json"
+  ]
+}

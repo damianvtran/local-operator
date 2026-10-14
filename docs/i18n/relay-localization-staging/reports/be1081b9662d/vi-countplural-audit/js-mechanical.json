@@ -1,0 +1,314 @@
+{
+  "actual_runtime": "exact relay runtime.ts / existing IntlMessageFormat; no renderer mounted",
+  "composed": [
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 0,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại 0 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 0,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng 0 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại 1 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng 1 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 2,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại 2 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 2,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng 2 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1.5,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại 1,5 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1.5,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng 1,5 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại -1 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng -1 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1.5,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại -1,5 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": -1.5,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng -1,5 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1000000,
+      "kind": "remaining",
+      "unit_actual": "tín dụng",
+      "actual": "Còn lại 1.000.000 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "count": 1000000,
+      "kind": "used",
+      "unit_actual": "tín dụng",
+      "actual": "Đã dùng 1.000.000 tín dụng"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 0,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại 0 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 0,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng 0 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại 1 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng 1 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 2,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại 2 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 2,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng 2 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1.5,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại 1,5 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1.5,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng 1,5 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại -1 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng -1 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1.5,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại -1,5 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": -1.5,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng -1,5 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1000000,
+      "kind": "remaining",
+      "unit_actual": "token",
+      "actual": "Còn lại 1.000.000 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "count": 1000000,
+      "kind": "used",
+      "unit_actual": "token",
+      "actual": "Đã dùng 1.000.000 token"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 0,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại 0 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 0,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng 0 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại 1 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng 1 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 2,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại 2 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 2,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng 2 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1.5,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại 1,5 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1.5,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng 1,5 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại -1 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng -1 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1.5,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại -1,5 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": -1.5,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng -1,5 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1000000,
+      "kind": "remaining",
+      "unit_actual": "yêu cầu",
+      "actual": "Còn lại 1.000.000 yêu cầu"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "count": 1000000,
+      "kind": "used",
+      "unit_actual": "yêu cầu",
+      "actual": "Đã dùng 1.000.000 yêu cầu"
+    }
+  ],
+  "python_JS_byte_identical": true,
+  "negative_controls": {
+    "relay.shell.usage.unit_credits": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_credits"
+    },
+    "relay.shell.usage.unit_tokens": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_tokens"
+    },
+    "relay.shell.usage.unit_requests": {
+      "missing_count_rejected": true,
+      "actual": "relay.shell.usage.unit_requests"
+    }
+  }
+}

@@ -1,0 +1,564 @@
+{
+  "passed": true,
+  "timezone": "UTC",
+  "rows": [
+    {
+      "key": "relay.shell.list.empty",
+      "output": "कोई सत्र चल नहीं रहा है"
+    },
+    {
+      "key": "relay.shell.list.connecting",
+      "output": "कनेक्ट हो रहा है…"
+    },
+    {
+      "key": "relay.shell.list.section.active",
+      "output": "सक्रिय सत्र"
+    },
+    {
+      "key": "relay.shell.list.section.previous",
+      "output": "पिछले सत्र"
+    },
+    {
+      "key": "relay.shell.list.theme",
+      "output": "थीम चुनें"
+    },
+    {
+      "key": "relay.shell.session.waiting",
+      "output": "सत्र की मौजूदा स्थिति मिलने की प्रतीक्षा है…"
+    },
+    {
+      "key": "relay.shell.session.connecting",
+      "output": "सत्र से कनेक्ट हो रहा है…"
+    },
+    {
+      "key": "relay.shell.usage.title",
+      "output": "उपयोग"
+    },
+    {
+      "key": "relay.shell.usage.cached",
+      "output": "कैश में सहेजी गई उपयोग की जानकारी। प्रदाता से नई जानकारी नहीं माँगी जा रही है।"
+    },
+    {
+      "key": "relay.shell.usage.unavailable",
+      "output": "कैश में सहेजी गई उपयोग की जानकारी उपलब्ध नहीं है।"
+    },
+    {
+      "key": "relay.shell.usage.loading",
+      "output": "कैश में सहेजी गई उपयोग की जानकारी लोड हो रही है…"
+    },
+    {
+      "key": "relay.shell.usage.empty",
+      "output": "कैश में उपयोग की कोई जानकारी नहीं मिली।"
+    },
+    {
+      "key": "relay.shell.usage.last_known",
+      "output": "उपयोग की पिछली जानकारी; मौजूदा जानकारी उपलब्ध नहीं है।"
+    },
+    {
+      "key": "relay.shell.usage.continue",
+      "output": "शामिल कोटा पूरा उपयोग हो चुका है; आगे क्रेडिट से उपयोग जारी रहेगा।"
+    },
+    {
+      "key": "relay.shell.usage.family_caps",
+      "output": "मॉडल-समूह की सीमाएँ अभी भी लागू हैं।"
+    },
+    {
+      "key": "relay.shell.usage.paid",
+      "output": "सशुल्क उपयोग सीमा"
+    },
+    {
+      "key": "relay.shell.usage.family",
+      "output": "मॉडल-समूह की उपयोग सीमा"
+    },
+    {
+      "key": "relay.shell.usage.included",
+      "output": "शामिल उपयोग सीमा"
+    },
+    {
+      "key": "relay.shell.usage.amount_unknown",
+      "output": "मात्रा की जानकारी नहीं मिली"
+    },
+    {
+      "key": "relay.shell.usage.blocked",
+      "output": "खर्च करने की सुविधा उपलब्ध नहीं है"
+    },
+    {
+      "key": "relay.shell.usage.eligibility_unknown",
+      "output": "खर्च करने की अनुमति अज्ञात है"
+    },
+    {
+      "key": "relay.shell.usage.unlimited",
+      "output": "सशुल्क उपयोग की कोई सीमा नहीं"
+    },
+    {
+      "key": "relay.shell.usage.window_five",
+      "output": "5 घंटे"
+    },
+    {
+      "key": "relay.shell.usage.window_week",
+      "output": "7 दिन"
+    },
+    {
+      "key": "relay.shell.usage.window_month",
+      "output": "मासिक"
+    },
+    {
+      "key": "relay.shell.usage.window_lifetime",
+      "output": "पूरे कार्यकाल की"
+    },
+    {
+      "key": "relay.shell.usage.window_unknown",
+      "output": "अज्ञात अवधि"
+    },
+    {
+      "key": "relay.shell.usage.remaining",
+      "output": "123.5 क्रेडिट शेष"
+    },
+    {
+      "key": "relay.shell.usage.used",
+      "output": "123.5 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "key": "relay.shell.usage.fraction",
+      "output": "12,350% का उपयोग हुआ"
+    },
+    {
+      "key": "relay.shell.usage.reset",
+      "output": "14 अक्टू॰ 2026, 1:05 pm पर रीसेट होगा"
+    },
+    {
+      "key": "relay.shell.usage.command",
+      "output": "प्रदाता के उपयोग की कैश में सहेजी गई जानकारी देखें"
+    },
+    {
+      "key": "relay.shell.usage.as_of",
+      "output": "14 अक्टू॰ 2026, 1:05 pm तक की जानकारी।"
+    },
+    {
+      "key": "relay.shell.usage.stale",
+      "output": "जानकारी पुरानी हो सकती है।"
+    },
+    {
+      "key": "relay.shell.usage.row",
+      "output": "प्रदाता · मासिक: 123.5"
+    },
+    {
+      "key": "relay.shell.usage.row_family",
+      "output": "प्रदाता (मॉडल-समूह) · मासिक: 123.5"
+    },
+    {
+      "key": "relay.shell.usage.unit_credits",
+      "output": "क्रेडिट"
+    },
+    {
+      "key": "relay.shell.usage.unit_usd",
+      "output": "USD"
+    },
+    {
+      "key": "relay.shell.usage.unit_tokens",
+      "output": "टोकन"
+    },
+    {
+      "key": "relay.shell.usage.unit_requests",
+      "output": "अनुरोध"
+    },
+    {
+      "key": "relay.shell.usage.remaining_percent",
+      "output": "12,350% शेष"
+    },
+    {
+      "key": "relay.shell.usage.used_percent",
+      "output": "12,350% का उपयोग हुआ"
+    },
+    {
+      "key": "relay.shell.usage.remaining_unknown_unit",
+      "output": "123.5 शेष"
+    },
+    {
+      "key": "relay.shell.usage.used_unknown_unit",
+      "output": "123.5 का उपयोग हुआ"
+    },
+    {
+      "key": "relay.session.list.search_placeholder",
+      "output": "बातचीत खोजें…"
+    },
+    {
+      "key": "relay.session.list.empty_hint",
+      "output": "नीचे नया सत्र शुरू करें, या अपने कंप्यूटर पर TUI से शुरू करें"
+    },
+    {
+      "key": "relay.session.list.no_matches",
+      "output": "कोई मेल खाती बातचीत नहीं मिली"
+    },
+    {
+      "key": "relay.session.list.start_idle",
+      "output": "नया सत्र"
+    },
+    {
+      "key": "relay.session.list.start_busy",
+      "output": "सत्र शुरू हो रहा है…"
+    },
+    {
+      "key": "relay.session.view.back",
+      "output": "सत्रों पर वापस जाएँ"
+    },
+    {
+      "key": "relay.session.view.empty_title",
+      "output": "अभी कोई संदेश नहीं है"
+    },
+    {
+      "key": "relay.session.view.empty_hint",
+      "output": "शुरू करने के लिए नीचे संदेश भेजें"
+    },
+    {
+      "key": "relay.session.past.back",
+      "output": "वापस जाएँ"
+    },
+    {
+      "key": "relay.session.past.heading",
+      "output": "पिछले सत्र"
+    },
+    {
+      "key": "relay.session.past.search_placeholder",
+      "output": "नाम और बातचीत खोजें…"
+    },
+    {
+      "key": "relay.session.past.loading",
+      "output": "लोड हो रहा है…"
+    },
+    {
+      "key": "relay.session.directory.sheet_title",
+      "output": "कार्यशील डायरेक्टरी"
+    },
+    {
+      "key": "relay.session.directory.path_placeholder",
+      "output": "या कोई दूसरा पाथ लिखें…"
+    },
+    {
+      "key": "relay.session.model.sheet_title",
+      "output": "मॉडल"
+    },
+    {
+      "key": "relay.session.model.filter_placeholder",
+      "output": "मॉडल फ़िल्टर करें"
+    },
+    {
+      "key": "relay.session.model.loading",
+      "output": "लोड हो रहा है…"
+    },
+    {
+      "key": "relay.login.page.title",
+      "output": "local operator — लॉग इन"
+    },
+    {
+      "key": "relay.login.password.label",
+      "output": "पासवर्ड"
+    },
+    {
+      "key": "relay.login.submit.label",
+      "output": "लॉग इन करें"
+    },
+    {
+      "key": "relay.login.error.password",
+      "output": "पासवर्ड गलत है।"
+    },
+    {
+      "value": 0,
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "0 क्रेडिट शेष"
+    },
+    {
+      "value": 0,
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "0 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "value": 0,
+      "unit": "USD",
+      "action": "remaining",
+      "output": "0 USD शेष"
+    },
+    {
+      "value": 0,
+      "unit": "USD",
+      "action": "used",
+      "output": "0 USD का उपयोग हुआ"
+    },
+    {
+      "value": 0,
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "0 टोकन शेष"
+    },
+    {
+      "value": 0,
+      "unit": "टोकन",
+      "action": "used",
+      "output": "0 टोकन का उपयोग हुआ"
+    },
+    {
+      "value": 0,
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "0 अनुरोध शेष"
+    },
+    {
+      "value": 0,
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "0 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "value": 1,
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "1 क्रेडिट शेष"
+    },
+    {
+      "value": 1,
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "1 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "value": 1,
+      "unit": "USD",
+      "action": "remaining",
+      "output": "1 USD शेष"
+    },
+    {
+      "value": 1,
+      "unit": "USD",
+      "action": "used",
+      "output": "1 USD का उपयोग हुआ"
+    },
+    {
+      "value": 1,
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "1 टोकन शेष"
+    },
+    {
+      "value": 1,
+      "unit": "टोकन",
+      "action": "used",
+      "output": "1 टोकन का उपयोग हुआ"
+    },
+    {
+      "value": 1,
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "1 अनुरोध शेष"
+    },
+    {
+      "value": 1,
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "1 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "value": 1.5,
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "1.5 क्रेडिट शेष"
+    },
+    {
+      "value": 1.5,
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "1.5 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "value": 1.5,
+      "unit": "USD",
+      "action": "remaining",
+      "output": "1.5 USD शेष"
+    },
+    {
+      "value": 1.5,
+      "unit": "USD",
+      "action": "used",
+      "output": "1.5 USD का उपयोग हुआ"
+    },
+    {
+      "value": 1.5,
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "1.5 टोकन शेष"
+    },
+    {
+      "value": 1.5,
+      "unit": "टोकन",
+      "action": "used",
+      "output": "1.5 टोकन का उपयोग हुआ"
+    },
+    {
+      "value": 1.5,
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "1.5 अनुरोध शेष"
+    },
+    {
+      "value": 1.5,
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "1.5 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "value": 2,
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "2 क्रेडिट शेष"
+    },
+    {
+      "value": 2,
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "2 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "value": 2,
+      "unit": "USD",
+      "action": "remaining",
+      "output": "2 USD शेष"
+    },
+    {
+      "value": 2,
+      "unit": "USD",
+      "action": "used",
+      "output": "2 USD का उपयोग हुआ"
+    },
+    {
+      "value": 2,
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "2 टोकन शेष"
+    },
+    {
+      "value": 2,
+      "unit": "टोकन",
+      "action": "used",
+      "output": "2 टोकन का उपयोग हुआ"
+    },
+    {
+      "value": 2,
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "2 अनुरोध शेष"
+    },
+    {
+      "value": 2,
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "2 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "value": 123.5,
+      "unit": "क्रेडिट",
+      "action": "remaining",
+      "output": "123.5 क्रेडिट शेष"
+    },
+    {
+      "value": 123.5,
+      "unit": "क्रेडिट",
+      "action": "used",
+      "output": "123.5 क्रेडिट का उपयोग हुआ"
+    },
+    {
+      "value": 123.5,
+      "unit": "USD",
+      "action": "remaining",
+      "output": "123.5 USD शेष"
+    },
+    {
+      "value": 123.5,
+      "unit": "USD",
+      "action": "used",
+      "output": "123.5 USD का उपयोग हुआ"
+    },
+    {
+      "value": 123.5,
+      "unit": "टोकन",
+      "action": "remaining",
+      "output": "123.5 टोकन शेष"
+    },
+    {
+      "value": 123.5,
+      "unit": "टोकन",
+      "action": "used",
+      "output": "123.5 टोकन का उपयोग हुआ"
+    },
+    {
+      "value": 123.5,
+      "unit": "अनुरोध",
+      "action": "remaining",
+      "output": "123.5 अनुरोध शेष"
+    },
+    {
+      "value": 123.5,
+      "unit": "अनुरोध",
+      "action": "used",
+      "output": "123.5 अनुरोध का उपयोग हुआ"
+    },
+    {
+      "value": 0.29,
+      "suffix": "fraction",
+      "output": "29% का उपयोग हुआ"
+    },
+    {
+      "value": 0.29,
+      "suffix": "remaining_percent",
+      "output": "29% शेष"
+    },
+    {
+      "value": 0.29,
+      "suffix": "used_percent",
+      "output": "29% का उपयोग हुआ"
+    },
+    {
+      "value": 0.07,
+      "suffix": "fraction",
+      "output": "7% का उपयोग हुआ"
+    },
+    {
+      "value": 0.07,
+      "suffix": "remaining_percent",
+      "output": "7% शेष"
+    },
+    {
+      "value": 0.07,
+      "suffix": "used_percent",
+      "output": "7% का उपयोग हुआ"
+    },
+    {
+      "check": "React text escaping (SSR, not rendered screenshot)",
+      "raw": "<img src=x onerror=alert(1)> & \"x\" · मासिक: 123.5 क्रेडिट शेष",
+      "html": "<span>&lt;img src=x onerror=alert(1)&gt; &amp; &quot;x&quot; · मासिक: 123.5 क्रेडिट शेष</span>"
+    },
+    {
+      "observation": "Intl accepts a nonnumeric string as NaN; not a translation defect",
+      "output": "NaN क्रेडिट शेष"
+    },
+    {
+      "negative": {
+        "value": 1
+      },
+      "output": "relay.shell.usage.remaining"
+    },
+    {
+      "negative": {
+        "value": {
+          "bad": true
+        },
+        "unit": "क्रेडिट"
+      },
+      "output": "relay.shell.usage.remaining"
+    },
+    {
+      "negative": "unclosed ICU syntax",
+      "output": "relay.shell.broken"
+    }
+  ]
+}

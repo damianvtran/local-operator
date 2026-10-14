@@ -1,0 +1,6 @@
+{
+  "relay.login.page.title": "local operator — iniciar sesión",
+  "relay.login.password.label": "contraseña",
+  "relay.login.submit.label": "iniciar sesión",
+  "relay.login.error.password": "Contraseña incorrecta."
+}

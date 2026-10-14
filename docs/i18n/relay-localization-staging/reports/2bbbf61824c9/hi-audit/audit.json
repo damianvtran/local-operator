@@ -1,0 +1,70 @@
+{
+  "audit": "Independent Hindi LLM native-language audit — relay final65",
+  "auditor": {
+    "agent": "task / Hindi independent auditor",
+    "actual_model": "openai/gpt-6.1-sol",
+    "fallback_used": false,
+    "human_native_speaker": false
+  },
+  "source_commit": "de9b9a490c839d6de2c2e41ea03ec819f66be489",
+  "scope": "All 65 supplied Hindi messages text/semantics audited (shell44/session17/login4), not a formatting-only sample. Excludes wider PR/application and catalogues outside these three namespaces. Native PASS applies only to recorded target hashes; rendered/fit and pseudo absent, ledger/distribution gates not evaluated, production activation not approved.",
+  "namespace_results": {
+    "relay.shell": {
+      "source_sha256": "8b17439e9f31f159bc60a9e2940eb2d88400dacdcda9854ae1b3c8eb0ca00586",
+      "target_sha256": "ee6c90d66c844549caa867ed81645b3cb642efad970a4537f9985b0f9b100ab0",
+      "keys": 44,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    },
+    "relay.session": {
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "target_sha256": "0fb4a5abfa0fb1ca26c2683a16a6db2f84f0f44fbf55522a7a21ec33deacb43e",
+      "keys": 17,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    },
+    "relay.login": {
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "target_sha256": "589c538128272c5cd7c54468f9e126dda52a004ee21b9eab1949590b5156c4ff",
+      "keys": 4,
+      "native_verdict": "pass",
+      "unresolved_blocker_major": 0
+    }
+  },
+  "verdict": "pass",
+  "terminal_native_round": true,
+  "findings": [],
+  "finding_ids": [],
+  "runtime": {
+    "verdict": "pass",
+    "implementation": "Pinned relay createMessageRuntime via Node native TypeScript support and installed intl-messageformat; React SSR text escaping via existing web dependencies",
+    "rendered_rows": 116,
+    "evidence": "runtime-results.json",
+    "structural_evidence": "structural-results.json",
+    "negative_controls": [
+      "Missing unit -> key fallback",
+      "Object numeric parameter -> key fallback",
+      "Unclosed ICU -> key fallback",
+      "wrong_unit -> catalogue typed-argument error"
+    ],
+    "observations": [
+      "Initial exploratory assumptions corrected: Intl nonnumeric strings render NaN, unknown named numeric style is tolerated. These are runtime semantics, not Hindi defects; no claim these negatives fail closed. Final controls use discriminating missing-param/object/syntax cases."
+    ]
+  },
+  "native_checks": {
+    "all_keys": 65,
+    "meaning_tone_Devanagari": "pass",
+    "snapshot_not_prediction": "pass",
+    "usage_quota_coherence": "pass",
+    "unit_gender_plural_case": "pass; 0/1/1.5/2 across क्रेडिट/USD/टोकन/अनुरोध; nominal शेष and का उपयोग हुआ avoid agreeing with measurement unit",
+    "ICU_types_styles": "pass; source/target argument tuple validation including number/percent/date medium/time short",
+    "punctuation_date_full_row": "pass for textual/ICU ordering; no visual-fit claim",
+    "RTL": "not applicable to Hindi LTR; directionFor(hi) verified ltr; no native Urdu claim",
+    "pseudo": "not performed; out of bounded native-language task; no pseudo/fit claim"
+  },
+  "rendered": {
+    "status": "BLOCKED",
+    "reason": "Customer resource restriction prohibits browser/heavy rendered dispatch. React SSR serialization is escaping evidence only, not rendered visual proof."
+  },
+  "restrictions": "No repo edits, installs, browser, ledger writes or shipped eligibility claim. Independent of named translator; same model family, distinct agent/session."
+}
