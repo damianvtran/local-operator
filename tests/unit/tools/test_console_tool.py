@@ -361,7 +361,13 @@ async def test_read_renders_the_text_and_the_footer_facts(
         ),
     )
     result = await _call({"method": "read", "surface": "con:1:a"})
-    assert client.calls == [("console_read", {"surface": "con:1:a", "mode": "viewport"})]
+    # `session_id` now rides every surface op: the additive lifecycle fence the
+    # host uses to refuse a different owner. It is intended on all surface ops
+    # (builtin.py attaches it whenever a surface is in the wire params), not an
+    # accident, so the expectation carries it here too.
+    assert client.calls == [
+        ("console_read", {"surface": "con:1:a", "mode": "viewport", "session_id": "s-1"})
+    ]
     assert "hello from the pty" in result.text
     assert "stdout and stderr are one pty stream" in result.text
     assert "100x30" in result.text
@@ -506,13 +512,23 @@ async def test_every_key_spelling_reaches_the_encoder_under_one_name(
         assert result.is_error is False, (spelling, result.text)
         method, params = client.calls[-1]
         assert method == "console_keys"
-        assert params == {"surface": "con:1:a", "keys": expected}, (spelling, params)
+        # `session_id` attaches to every surface op (the additive lifecycle
+        # fence), so the wire carries it beside the folded key names.
+        assert params == {"surface": "con:1:a", "keys": expected, "session_id": "s-1"}, (
+            spelling,
+            params,
+        )
 
     # A name this side does not know is NOT rewritten: the app's `unknown_key`
     # refusal carries the accepted set, so a local grammar that guessed would
     # replace the authoritative answer with a staler one.
     await _call({"method": "keys", "surface": "con:1:a", "keys": ["meta+c", "weird-key"]})
-    assert client.calls[-1][1] == {"surface": "con:1:a", "keys": ["meta+c", "weird-key"]}
+    # `session_id` rides every surface op (the additive lifecycle fence).
+    assert client.calls[-1][1] == {
+        "surface": "con:1:a",
+        "keys": ["meta+c", "weird-key"],
+        "session_id": "s-1",
+    }
 
     # A blank entry is dropped rather than sent as an empty name, and a call that
     # was nothing but blanks is refused locally rather than spending a round trip.

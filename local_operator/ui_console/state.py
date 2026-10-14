@@ -61,6 +61,11 @@ class ConsoleHostState(_host_state.UiHostState):
     console_surfaces: int = 0
     console_agent_surfaces: int = 0
     console_proto: int = 0
+    # Additive diagnostics: old apps omit them and old clients ignore them.
+    # None means unknown, never a fabricated zero-live claim.
+    console_live: int | None = None
+    console_archived: int | None = None
+    console_max_live: int | None = None
 
 
 def state_path(root: Path | None = None) -> Path:

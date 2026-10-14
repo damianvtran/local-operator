@@ -154,6 +154,11 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.ui_console.policy import (
+        DEFAULT_LIVE_LIMIT,
+        DEFAULT_OWNER_LIMIT,
+        DEFAULT_USER_RESERVED,
+    )
     from local_operator.wakes.display import DEFAULT_TIME_FORMAT
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -161,6 +166,9 @@ def _consumer_defaults() -> dict[str, object]:
     retry = RetrySettings()
     compaction = CompactionSettings()
     consumers: dict[str, object] = {
+        "console.max_live": DEFAULT_LIVE_LIMIT,
+        "console.max_owner": DEFAULT_OWNER_LIMIT,
+        "console.user_reserved": DEFAULT_USER_RESERVED,
         # The theme the TUI actually boots on. The registry restates "dark"
         # rather than importing this (that import would put `rich` on the CLI's
         # path), so THIS is what stops the two drifting — as they had: the

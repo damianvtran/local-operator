@@ -19,6 +19,11 @@ from typing import Any, Dict
 import yaml
 
 from local_operator.config_writer import config_write_lock, serialized_config_write
+from local_operator.ui_console.policy import (
+    DEFAULT_LIVE_LIMIT,
+    DEFAULT_OWNER_LIMIT,
+    DEFAULT_USER_RESERVED,
+)
 from local_operator.web_defaults import (
     DEFAULT_WEB_FETCH_CONFIG,
     DEFAULT_WEB_SEARCH_CONFIG,
@@ -473,6 +478,14 @@ DEFAULT_CONFIG = Config(
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
+            # Console slots are native runtime admission, not a count of retained
+            # histories. The desktop independently clamps hand edits and applies
+            # managed resource ceilings; lowering these never kills existing work.
+            "console": {
+                "max_live": DEFAULT_LIVE_LIMIT,
+                "max_owner": DEFAULT_OWNER_LIMIT,
+                "user_reserved": DEFAULT_USER_RESERVED,
+            },
             # The BIRTH-default reasoning effort for new conversations, alongside
             # the model pair above. ``""`` means "no opinion" — the model's own
             # documented default stands. Read at session build
