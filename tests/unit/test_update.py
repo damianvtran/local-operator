@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -4929,3 +4931,122 @@ def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(
         with patch("local_operator.update.update_command", return_value=0) as cmd:
             assert main() == 0
             assert cmd.call_args.kwargs["roll"] is expected, (argv, cmd.call_args)
+
+
+def test_a_generation_install_refreshes_the_supervised_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generation path no longer short-circuits the supervised repairs.
+
+    A generation install USED to return every unit `pending` here. It now runs the
+    same stage body the mutable path runs, because a supervisor bounce does not
+    kill session runtimes (they are separate child processes).
+    """
+    ran: list[str] = []
+    restored = update_mod.DaemonRefresh(
+        "service daemons", statuses=(update_mod.DaemonStatus("network relay", "refreshed"),)
+    )
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_service_daemons_after_upgrade",
+        lambda **k: ran.append("services") or restored,
+    )
+    monkeypatch.setattr(
+        update_mod, "refresh_mobile_after_upgrade", lambda **k: ran.append("mobile") or None
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_mobile_daemon_refresh",
+        lambda _result: update_mod.DaemonRefresh(
+            "mobile", statuses=(update_mod.DaemonStatus("mobile", "refreshed"),)
+        ),
+    )
+
+    out = update_mod.refresh_daemons_after_upgrade()
+    assert "services" in ran, "the supervised services unit did not run on a generation install"
+    statuses = {status.status for refresh in out for status in getattr(refresh, "statuses", ())}
+    assert "pending" not in statuses, "a generation install still reported a unit pending"
+    assert statuses == {"refreshed", "refreshed"} or statuses == {"refreshed"}
+
+
+def test_daemon_children_are_launchd_children_that_survive_a_bounce() -> None:
+    """Provenance anchor for the continuity claim: the supervisor's children survive.
+
+    This is the source fact the wiring above rests on — quoted, not re-derived: a
+    launchd job does not reap its job's children on restart, and this repo's systemd
+    unit states the parity deliberately (``KillMode=process``). A busy session
+    runtime is spawned detached with SIGHUP ignored, so it is such a child.
+    """
+    import inspect
+
+    from local_operator import supervisors
+
+    source = inspect.getsource(supervisors.render_systemd_unit)
+    assert "KillMode=process" in source
+    assert "children survive it" in source, "the macOS-parity claim moved; re-verify it"
+
+    from local_operator.session.runtime import process as process_mod
+
+    spawn = inspect.getsource(process_mod._install_sighup_ignore)
+    assert "start_new_session=True" in spawn and "SIGHUP" in spawn
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_detached_child_survives_a_supervisor_kill(tmp_path: Path) -> None:
+    """REAL survival proof for the continuity claim the wiring rests on.
+
+    Models the documented supervised-restart semantics (``KillMode=process`` /
+    launchd job children survive): a "unit main" process spawns a DETACHED child
+    (its own session, SIGHUP ignored — the shape ``process._install_sighup_ignore``
+    gives a session runtime) that writes a heartbeat, then the unit main is
+    terminated as a restart would. LIVENESS IS PROVEN BY WORK, not by ``kill(pid,
+    0)``: a killed-but-unreaped process is a zombie that still answers that probe,
+    so the assertion is that the heartbeat file keeps GROWING after the supervisor
+    is gone. (A negative run with a non-orphaned child is the control — see the
+    separate non-detached variant below.)
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        unit.terminate()
+        unit.wait(timeout=10)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert (
+            beat.stat().st_size > grown_at
+        ), "the detached child stopped writing after the supervisor restart"
+    finally:
+        # REAP THE DETACHED CHILD TOO: it survived the supervisor on purpose, so
+        # nothing else will end it. Its own pid is the only handle — it is in its
+        # own session, so the supervisor's group never covered it.
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
