@@ -287,3 +287,36 @@ async def test_capture_hub_links_states(tmp_path: Path, monkeypatch: pytest.Monk
     assert len(svgs) == 8
     for svg in svgs:
         assert "<svg" in svg.read_text()[:200]
+
+
+async def test_hub_panel_and_host_start_hidden() -> None:
+    """The overlay must not displace the transcript before it is ever opened.
+
+    Regression guard for a real bug: ``HubLinksPanel`` was mounted like the
+    usage card but never set ``display = False`` in ``__init__`` (``UsagePanel``
+    does). A visible 0-row host in the toast layer shifted the whole transcript
+    one cell left at boot — caught only by an unrelated slash-echo test, so this
+    pins the invariant directly: both the panel and its host start at zero size.
+    """
+    import shutil
+    import tempfile
+
+    from local_operator.tui.settings import settings_reload
+    from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
+
+    case_root = Path(tempfile.mkdtemp(prefix="hub-links-hidden-", dir=OUT))
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(case_root)
+    try:
+        settings_reload()
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(HubLinksPanel)
+            host = app.query_one("#hub-links-host")
+            assert panel.display is False, "the hub panel must start hidden"
+            assert host.region.width == 0 and host.region.height == 0, (
+                "a hidden overlay host must claim no cells",
+                host.region,
+            )
+    finally:
+        shutil.rmtree(case_root, ignore_errors=True)

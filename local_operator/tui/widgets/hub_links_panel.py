@@ -70,6 +70,11 @@ class HubLinksPanel(Static):
         self._loading = False
         self._refreshing = False
         self._error = ""
+        # Mounted once and kept (the `/usage` rule), so it must START hidden:
+        # `display` defaults True, and a visible 0-row host in the toast layer
+        # still nudged the transcript one cell left before any fetch. `close()`
+        # restores exactly this state.
+        self.display = False
 
     # -- state ---------------------------------------------------------------
 
