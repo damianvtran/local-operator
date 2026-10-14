@@ -321,12 +321,45 @@ NAMELESS_CALL_RECOVERY_PROMPT = (
     "without it if it is no longer needed."
 )
 
+#: What the loop tells the model after a turn arrived with no text and no tool
+#: calls on a clean stop. Like the nameless-call notice above it is the only
+#: record of why the conversation continues: the empty message itself is
+#: REMOVED from the wire history (an assistant turn with no content blocks is
+#: illegal on the Anthropic wire and teaches a re-ask to repeat it), so without
+#: this prompt the fact that the turn arrived empty would be invisible to the
+#: model -- and, on a resumed session, to the reader. Harness chrome -- see
+#: ``harness.rows.harness_chrome_prompts``.
+WORDLESS_STOP_RECOVERY_PROMPT = (
+    "Harness recovery notice: your last message arrived with no text and no "
+    "tool calls, so there was nothing to act on and the turn would have ended "
+    "silently. Produce your next tool call, or your final answer if the work "
+    "is done."
+)
+
 #: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
 #: reasoning model that spent its whole output budget thinking) is retried one
 #: effort rung lower before the turn ends the ordinary way. Two covers the
 #: observed failure shape (a high rung, then the rung below it also silent)
 #: without burning the user's quota on a model that cannot answer today.
 MAX_EMPTY_TRUNCATION_RETRIES = 2
+
+#: How many times ONE run will re-ask a model whose turn ended with NO text
+#: and NO tool calls on a clean ``stop`` — a WORDLESS STOP. Distinct from the
+#: empty ``length`` truncation above: that turn was cut off at the output
+#: limit and has a retreat (a lower effort rung); this turn was not cut off at
+#: any limit -- the model simply returned nothing, so no setting exists to
+#: retreat to and the re-ask carries the one fact only this layer knows: the
+#: message arrived empty. Measured 2026-10-14 on the OSWorld arm 325633a: a
+#: blank terminal message (the measured shape was a bare newline of text and
+#: no calls) ended a 163-step episode ``agent_stop``/``empty-message`` with
+#: the episode's partial work unclaimed.
+#:
+#: ONE: a second wordless stop in the same run is the model's answer, not an
+#: accident, and ends the turn the ordinary way. Run-scoped like every sibling
+#: recovery (the echo, connectivity and nameless budgets), because a fresh
+#: allowance per turn would re-buy the same diagnosis. Each re-ask is one
+#: extra model call.
+MAX_WORDLESS_STOP_RECOVERIES = 1
 
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
@@ -1529,6 +1562,11 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has re-asked after arriving with no text and no tool
+        # calls on a clean stop -- see ``MAX_WORDLESS_STOP_RECOVERIES``.
+        # Run-scoped and topped up by nothing, like the truncation budget
+        # above: a fresh allowance per turn would re-buy the same diagnosis.
+        wordless_stop_recoveries = 0
         # The output contract's budget for THIS run (== per turn: a ``--loop``
         # iteration re-enters ``_run`` fresh). Counted only on the terminal
         # seam, so every non-clean exit -- abort, stream error, continuation
@@ -2614,6 +2652,64 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                         )
+                    elif stop_reason == "stop" and not (assistant.text or "").strip():
+                        # A WORDLESS STOP: a clean ``stop`` arrived with no
+                        # text and no tool calls, and no arm above claimed it
+                        # (not a ``length`` cut-off, not the nameless-call
+                        # family's ``toolUse``). There is nothing to act on and nothing will
+                        # be said, so without this arm the turn ends here and
+                        # every surface reads a deliberate stop -- measured
+                        # 2026-10-14 on the OSWorld arm 325633a (episode
+                        # ``ep-ccea28e40a23``): one blank terminal message ended
+                        # a 163-step episode as ``agent_stop``/``empty-message``
+                        # with its partial work unclaimed. Distinct from the
+                        # 2026-10-13 wordless ``error`` end, which is the
+                        # interrupted-stream family and recovers on its own arm
+                        # above: this turn was not interrupted either.
+                        #
+                        # The re-ask is the nameless recovery's shape: the loop
+                        # states the one fact the model cannot see (its message
+                        # arrived empty) and gives it ONE bounded chance to
+                        # produce its next action or its answer. A requested
+                        # stop outranks the re-ask (the nameless rule): falling
+                        # through ends the turn as it did before this arm
+                        # existed.
+                        wordless_graceful = _graceful_cancel_requested(config)
+                        if (
+                            wordless_stop_recoveries < MAX_WORDLESS_STOP_RECOVERIES
+                            and not wordless_graceful
+                        ):
+                            wordless_stop_recoveries += 1
+                            # The empty turn must not reach the re-ask's wire
+                            # history, for the empty-truncation retry's two
+                            # reasons: an assistant message with no content
+                            # blocks is illegal on the Anthropic wire, and
+                            # replaying "I said nothing" teaches the re-ask to
+                            # say nothing.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            # Persisted for the same reason every recovery
+                            # prompt is: a resumed session must be able to see
+                            # why it was re-asked. Harness chrome -- see
+                            # ``harness.rows.harness_chrome_prompts``.
+                            recovery = Message.user(WORDLESS_STOP_RECOVERY_PROMPT)
+                            context.messages.append(recovery)
+                            new_messages.append(recovery)
+                            yield NoticeEvent(
+                                text=(
+                                    "the model's reply arrived empty (no text, no "
+                                    "tool calls) — re-asking it for its next "
+                                    "action or finish"
+                                ),
+                                kind="warning",
+                            )
+                            # No TurnEndEvent, for the nameless recovery's
+                            # reason: nothing was announced or shown for this
+                            # turn, so there is no live row to settle.
+                            has_more_tool_calls = True
+                            continue
 
                     # Asked HERE, at the boundary, precisely because the tools
                     # that just ran may have pushed a commit or opened a merge
