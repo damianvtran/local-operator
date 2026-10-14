@@ -715,7 +715,14 @@ jobs:
     # the 1440s budget at 25. 26 is the guard's own minimum,
     # ceil((1442.81 + 60)/60); the job that tripped it reported 761.59s of
     # pytest, so the ceiling still sits well above measured walls.
-    timeout-minutes: 26
+    #
+    # 26 -> 27 on 2026-10-14, for the same reason one tree later: origin/main
+    # alone already sat at 5994.758s of serial weight (1498.69s on 4 workers,
+    # 1.31s inside the 1500s budget at 26), and #2385's merge ref adds one
+    # unmeasured test file at the 30.786s fallback, taking the heaviest shard
+    # to 6001.689s -- 1500.42s, 0.42s past the budget. 27 is the guard's own
+    # minimum, ceil((1500.42 + 60)/60); measured walls are still far below it.
+    timeout-minutes: 27
     strategy:
       fail-fast: false
       matrix:
