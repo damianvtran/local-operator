@@ -29,7 +29,7 @@ import pytest
 from local_operator.buildwatch import UpdateLock
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
 from local_operator.harness.types import ImageContent
-from local_operator.harness.wake import WakeSchedule
+from local_operator.harness.wake import WakeSchedule, WakeScheduler
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime.inbox import (
@@ -840,9 +840,11 @@ async def test_the_held_re_arm_supersedes_a_live_copy_of_the_same_id(tmp_path: P
     """One row per id on disk: the held one-shot replaces the live schedule.
 
     A full-list write can carry a pre-fire copy of the same id (a caller that
-    prepared its list before the fire landed). The reservation must win, or the
-    persist would reset the owed occurrence back to the schedule that already
-    fired — the interleaving the design calls out by name.
+    prepared its list before the fire landed). Supersession is the SCHEDULER's
+    job now, through ``update`` — the full-list writer every caller ends in — so
+    that is the path this drives: the reservation must win, or the write would
+    reset the owed occurrence back to the schedule that already fired (the
+    interleaving the design calls out by name).
     """
     host = PersistHost()
     host.retire_wakes_to_inbox()
@@ -850,11 +852,12 @@ async def test_the_held_re_arm_supersedes_a_live_copy_of_the_same_id(tmp_path: P
     live = WakeSchedule(id="w1", message="check the deploy", next_due_at=9, every_ms=3_600_000)
     other = WakeSchedule(id="w2", message="hourly", next_due_at=9, every_ms=3_600_000)
 
-    await host._persist_wake_schedules([live, other])
+    await host._wake.update([live, other])
 
     written = {row["id"]: row for row in host.appended[0]}
     assert sorted(written) == ["w1", "w2"], "one row per id"
-    assert written["w1"]["every_ms"] is None, "the surviving w1 is the one-shot, not the live copy"
+    assert written["w1"]["every_ms"] is None, "the held one-shot survived the stale copy"
+    assert host._wake.pending_ids() == frozenset({"w1"}), "and stayed held"
 
 
 @pytest.mark.asyncio
