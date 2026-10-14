@@ -386,6 +386,11 @@ def read_baseline(config_dir: Path, kind: Kind, local_id: str) -> BaselineRecord
     except (BaselineError, OSError, ValueError) as exc:
         logger.warning("ignoring unreadable hub baseline for %s %s: %s", kind, local_id, exc)
         return None
+    return parse_baseline_record(raw, kind, local_id)
+
+
+def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord | None:
+    """Validate a host journal candidate before replacing the live side record."""
     if not isinstance(raw, dict) or raw.get("schema") not in (LEGACY_SCHEMA, SCHEMA):
         return None
     fields = raw.get("fields")

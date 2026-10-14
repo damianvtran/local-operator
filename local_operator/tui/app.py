@@ -51084,16 +51084,25 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import (
                 discover_skills,
                 roots_fingerprint,
             )
 
+            # The hub-owned managed root is reached through the STANDARD roots
+            # (the home-native ``~/.local-operator/skills`` IS the default
+            # profile's managed root); upstream's revert dropped the extra
+            # injection parameter from ``default_skill_roots``, so the call
+            # matches its current signature — while the owned-reader lock
+            # (``config_dir``) still guards fingerprinting and scanning of
+            # that root wherever it appears in the list.
+            active_config_dir = getattr(self._providers, "config_dir", None) or config_dir()
             roots = default_skill_roots(Path(os.getcwd()))
-            fingerprint = roots_fingerprint(roots)
+            fingerprint = roots_fingerprint(roots, config_dir=active_config_dir)
             if self._skills_by_name is None or fingerprint != self._skills_fingerprint:
-                skills, _warnings = discover_skills(roots)
+                skills, _warnings = discover_skills(roots, config_dir=active_config_dir)
                 self._skills_by_name = {skill.name: skill for skill in skills}
                 self._skills_fingerprint = fingerprint
                 # A rescan is the ONE place the vocabulary changes: push it so
@@ -51285,10 +51294,15 @@ class OperatorApp(App[None]):
         try:
             from pathlib import Path
 
+            from local_operator.paths import config_dir
             from local_operator.skills.api import default_skill_roots
             from local_operator.skills.discovery import discover_skills
 
-            skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
+            active_config_dir = getattr(self._providers, "config_dir", None) or config_dir()
+            skills, _warnings = discover_skills(
+                default_skill_roots(Path(os.getcwd())),
+                config_dir=active_config_dir,
+            )
             if not skills:
                 return None
             rows = [

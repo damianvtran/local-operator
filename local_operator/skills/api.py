@@ -241,6 +241,7 @@ def _refresh_if_changed(
     state: _RefreshState,
     *,
     boundary: Path | None = None,
+    config_dir: Path | None = None,
 ) -> None:
     """Rescan the roots into ``skills`` when the tree changed.
 
@@ -298,7 +299,11 @@ def _refresh_if_changed(
     """
     with state.lock:
         try:
-            fingerprint = roots_fingerprint(roots)
+            fingerprint = (
+                roots_fingerprint(roots)
+                if config_dir is None
+                else roots_fingerprint(roots, config_dir=config_dir)
+            )
         except OSError:
             # The fingerprint swallows OSError per-entry already; this is the
             # belt-and-braces case, and a resolver may never raise.
@@ -311,7 +316,11 @@ def _refresh_if_changed(
             # every existing caller and stub was written against (the None
             # promise is behavioural, and a reduced fake that only knows the
             # historical signature is exactly how these seams get tested).
-            if boundary is None:
+            if config_dir is not None:
+                discovered, _warnings = discover_skills(
+                    roots, boundary=boundary, config_dir=config_dir
+                )
+            elif boundary is None:
                 discovered, _warnings = discover_skills(roots)
             else:
                 discovered, _warnings = discover_skills(roots, boundary=boundary)
@@ -330,6 +339,7 @@ def make_skill_resolver(
     roots: Sequence[Path] | None = None,
     *,
     boundary: Path | None = None,
+    config_dir: Path | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``SkillResolver`` adapter for the ``read`` tool.
 
@@ -408,7 +418,9 @@ def make_skill_resolver(
                 # at any depth) is never made resolvable by rescanning, so the
                 # work is pure waste on attacker-chosen input.
                 return message
-            _refresh_if_changed(refresh_target, refresh_roots, state, boundary=world_boundary)
+            _refresh_if_changed(
+                refresh_target, refresh_roots, state, boundary=world_boundary, config_dir=config_dir
+            )
             # ALWAYS re-resolve, whatever the refresh did or did not do. The
             # only question that matters here is "is the name resolvable NOW",
             # and the mapping is shared: a concurrent reader may have populated
