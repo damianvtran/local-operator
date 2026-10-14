@@ -168,7 +168,7 @@ async def test_an_epoch_elides_the_superseded_capture_and_resume_matches(tmp_pat
     record = session._transcript.latest_entry("compaction")
     assert record is not None
     assert capture_elision_frontier(record.payload) == 1
-    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "screen", "1"),)
+    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "screen", "1", 0),)
 
     directory = session._transcript.directory
     await session.dispose()
@@ -203,7 +203,7 @@ async def test_resume_re_elides_the_recorded_capture_after_a_retro_supersede(tmp
 
     record = session._transcript.latest_entry("compaction")
     assert record is not None
-    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "a", "1"),)
+    assert capture_elision_identities(record.payload) == (("mcp:sess:cam", "a", "1", 0),)
     assert _pairs(session._context.messages) == [("a", "2"), ("b", "1")]
 
     await session.prompt("b two", images=[_stream_capture(stream="b", revision="2")])

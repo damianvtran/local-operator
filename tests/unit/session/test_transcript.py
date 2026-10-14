@@ -1075,7 +1075,7 @@ async def test_resume_reapplies_the_capture_elision_frontier(transcript):
         preserve_data={
             "capture_elisions": {
                 "applied": 1,
-                "identities": [["mcp:sess:cam", "screen", "1"]],
+                "identities": [["mcp:sess:cam", "screen", "1", 0]],
             }
         },
     )
@@ -1157,7 +1157,7 @@ async def test_resume_ignores_a_record_that_names_no_present_block(transcript):
         preserve_data={
             "capture_elisions": {
                 "applied": 1,
-                "identities": [["mcp:sess:cam", "screen", "9"]],
+                "identities": [["mcp:sess:cam", "screen", "9", 0]],
             }
         },
     )

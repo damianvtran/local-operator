@@ -316,7 +316,9 @@ class TestFormatMcpResult:
             "_meta": {"local_operator/capture": {"stream_id": "s", "revision_id": "r"}},
         }
         formatted = format_mcp_result({"content": [claimed]})
-        assert formatted.content[0].captured_frame is None
+        stamped = formatted.content[0]
+        assert isinstance(stamped, HarnessImageContent)
+        assert stamped.captured_frame is None
 
     def test_capture_producer_scope_composes_from_actual_origin_only(self) -> None:
         assert (

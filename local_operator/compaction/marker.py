@@ -75,16 +75,19 @@ def build_compaction_marker(
 
 
 #: ``preserve_data`` key for the CAPTURE-ELISION record an epoch commits:
-#: ``{"applied": <int>, "identities": [[scope, stream, revision], ...]}`` --
-#: which superseded-capture blocks the pass elided under the byte band (one
-#: entry per elided block, in elision order) plus the count for diagnostics.
-#: ADDITIVE and optional: a record without the key (every record written
-#: before this existed) replays with NO capture elisions, which is exactly
-#: the old behaviour, and a writer with nothing to record omits the key
-#: rather than spelling a zero. REPLAY USES THE IDENTITIES, never a count
-#: re-derived from the resumed segment: a later turn can retro-supersede a
-#: capture the pass protected, so the pass-time candidate order cannot be
-#: rebuilt from the resumed whole (reviewer round 1, C1).
+#: ``{"applied": <int>, "identities": [[scope, stream, revision, ordinal], ...]}``
+#: -- which superseded-capture blocks the pass elided under the byte band
+#: (one occurrence-qualified address per elided block, in elision order) plus
+#: the count for diagnostics. ADDITIVE and optional: a record without the key
+#: (every record written before this existed) replays with NO capture
+#: elisions, which is exactly the old behaviour, and a writer with nothing to
+#: record omits the key rather than spelling a zero. REPLAY USES THE
+#: ADDRESSES, never a count re-derived from the resumed segment: a later turn
+#: can retro-supersede a capture the pass protected, so the pass-time
+#: candidate order cannot be rebuilt from the resumed whole (reviewer round
+#: 1, C1), and the per-identity ORDINAL names which occurrence was elided
+#: when a producer repeated a claim and the never-empty guard skipped the
+#: first (reviewer round 1, C2).
 CAPTURE_ELISION_FRONTIER_KEY = "capture_elisions"
 
 
@@ -114,16 +117,19 @@ def capture_elision_frontier(details: Mapping[str, Any] | None) -> int | None:
 
 def capture_elision_identities(
     details: Mapping[str, Any] | None,
-) -> tuple[tuple[str, str, str], ...]:
-    """The stable addresses of the captures a marker's epoch elided.
+) -> tuple[tuple[str, str, str, int], ...]:
+    """The occurrence-qualified addresses of the captures a marker's epoch elided.
 
-    Each entry is ``(producer_scope, stream_id, revision_id)``, one per
-    elided block in elision order. ``()`` covers both "this record predates
-    the identities key" and "the value is malformed" -- replay then applies
-    NOTHING, the conservative reading: an unknown record must never elide
-    anything, and a bare count is not safely re-derivable (reviewer round 1,
-    C1). Non-string or wrongly-shaped entries are skipped individually, so
-    one bad entry cannot discard the rest of a valid record.
+    Each entry is ``(producer_scope, stream_id, revision_id, ordinal)``, one
+    per elided block in elision order; ``ordinal`` counts how many
+    same-identity blocks precede it in canonical arrival order (see the key
+    comment for why identity alone cannot name a block). ``()`` covers both
+    "this record predates the identities key" and "the value is malformed"
+    -- replay then applies NOTHING, the conservative reading: an unknown
+    record must never elide anything, and a bare count is not safely
+    re-derivable (reviewer round 1, C1/C2). Wrongly-shaped entries are
+    skipped individually, so one bad entry cannot discard the rest of a
+    valid record.
     """
     if not isinstance(details, Mapping):
         return ()
@@ -136,26 +142,38 @@ def capture_elision_identities(
     identities = record.get("identities")
     if not isinstance(identities, (list, tuple)):
         return ()
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, int]] = []
     for entry in identities:
-        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
             continue
-        scope, stream, revision = entry
-        if isinstance(scope, str) and isinstance(stream, str) and isinstance(revision, str):
-            out.append((scope, stream, revision))
+        scope, stream, revision, ordinal = entry
+        if not (
+            isinstance(scope, str)
+            and isinstance(stream, str)
+            and isinstance(revision, str)
+            and isinstance(ordinal, int)
+            and not isinstance(ordinal, bool)
+            and ordinal >= 0
+        ):
+            continue
+        out.append((scope, stream, revision, ordinal))
     return tuple(out)
 
 
 def with_capture_elision_frontier(
-    preserve_data: Mapping[str, Any] | None, identities: Sequence[tuple[str, str, str]]
+    preserve_data: Mapping[str, Any] | None, identities: Sequence[tuple[str, str, str, int]]
 ) -> dict[str, Any] | None:
     """``preserve_data`` with the capture-elision record merged in.
 
     ``identities`` are the stable harness-stamped addresses of the blocks the
-    pass ELIDED, one entry per elided block in elision order; the persisted
-    form stores them beside their count (``applied``), because replay must
-    re-elide exactly the recorded blocks rather than re-derive a candidate
-    prefix over the resumed segment (see the key comment above).
+    pass ELIDED -- ``(producer_scope, stream_id, revision_id, ordinal)``, one
+    entry per elided block in elision order, where ``ordinal`` counts how
+    many same-identity blocks preceded it (the never-empty guard can elide a
+    duplicate claim's second occurrence while leaving the first, so the
+    address needs the ordinal to name a block -- reviewer round 1, C2). The
+    persisted form stores them beside their count (``applied``), because
+    replay must re-elide exactly the recorded blocks rather than re-derive a
+    candidate prefix over the resumed segment (see the key comment above).
 
     A pass that elided nothing commits NOTHING new: the key is omitted rather
     than written as zero, so a text-only or legacy pass's marker payload

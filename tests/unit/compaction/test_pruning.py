@@ -8,6 +8,7 @@ from local_operator.compaction.pruning import (
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
     apply_capture_elisions,
+    capture_elision_entry,
     compute_suffix_tokens,
     partition_captures,
     prune_stale_frames_in_place,
@@ -805,11 +806,9 @@ def test_apply_capture_elisions_reproduces_the_byte_rung_projection():
     ]
     rung, elided = reclaim_captures_to_wire_budget(messages, budget=1)
     assert [capture.revision_id for capture in elided] == ["1", "2"]
-    identities = tuple(
-        (capture.producer_scope, capture.stream_id, capture.revision_id) for capture in elided
-    )
+    entries = tuple(capture_elision_entry(messages, capture) for capture in elided)
 
-    replayed, applied_back = apply_capture_elisions(messages, identities=identities)
+    replayed, applied_back = apply_capture_elisions(messages, identities=entries)
 
     assert replayed == rung
     assert [capture.revision_id for capture in applied_back] == ["1", "2"]
@@ -825,7 +824,7 @@ def test_apply_capture_elisions_never_empties_a_message() -> None:
     )
     messages = [only, latest]
 
-    out, elided = apply_capture_elisions(messages, identities=[("mcp:s:a", "screen", "1")])
+    out, elided = apply_capture_elisions(messages, identities=[("mcp:s:a", "screen", "1", 0)])
 
     assert elided == ()
     assert len(out[0].content) == 1
@@ -845,39 +844,69 @@ def test_apply_capture_elisions_empty_or_unmatched_and_purity() -> None:
     assert untouched[0] is messages[0]
 
     unmatched, elided_unmatched = apply_capture_elisions(
-        messages, identities=[("mcp:s:a", "screen", "99")]
+        messages, identities=[("mcp:s:a", "screen", "99", 0)]
     )
     assert elided_unmatched == ()
     assert unmatched[2] is messages[2]
 
     again, elided_again = apply_capture_elisions(
         messages,
-        identities=[("mcp:s:a", "screen", "1"), ("mcp:s:a", "screen", "2")],
+        identities=[("mcp:s:a", "screen", "1", 0), ("mcp:s:a", "screen", "2", 0)],
     )
     assert [capture.revision_id for capture in elided_again] == ["1", "2"]
     assert again[2] is messages[2]
     assert [message.model_dump() for message in messages] == before
 
 
-def test_apply_capture_elisions_bounds_duplicate_identities_by_occurrence() -> None:
-    """A repeated claim elides only as many occurrences as the record carries."""
-    messages = [
-        Message.user("a", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
-        Message.user("b", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
-        Message.user("c", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
-    ]
-    identity = ("mcp:s:a", "screen", "1")
-    block_count = lambda source: sum(  # noqa: E731 -- assertion shorthand, local to the test
-        1 for message in source for block in message.content if isinstance(block, ImageContent)
+def test_apply_capture_elisions_matches_the_recorded_occurrence_ordinal() -> None:
+    """The C2 case: the ordinal names WHICH duplicate claim was elided.
+
+    The live pass can skip a duplicate identity's first occurrence (its
+    message carries nothing else -- the never-empty guard) and elide the
+    second; a first-k replay match would target the skipped one and
+    under-elide. The record's ordinal picks the elided block exactly.
+    """
+    only = Message(role="user")
+    only.content = [_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
+    second = Message.user(
+        "two", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
     )
+    messages = [only, second]
+    identity = ("mcp:s:a", "screen", "1")
 
-    one, elided_one = apply_capture_elisions(messages, identities=[identity])
-    assert len(elided_one) == 1
-    assert block_count(one) == 2, "one duplicate occurrence must remain"
+    replayed, elided = apply_capture_elisions(messages, identities=[(*identity, 1)])
+    assert len(elided) == 1
+    assert elided[0].message_index == 1, "the SECOND occurrence is the recorded one"
+    assert replayed[0] is only, "the first occurrence stays untouched"
+    assert len(replayed[1].content) == 1  # its image left
 
-    both, elided_both = apply_capture_elisions(messages, identities=[identity, identity])
-    assert len(elided_both) == 2
-    assert block_count(both) == 1
+    untouched, elided_first = apply_capture_elisions(messages, identities=[(*identity, 0)])
+    assert elided_first == (), "ordinal 0 names the only-block occurrence: the guard skips it"
+    assert untouched[0] is only
+
+
+def test_capture_elision_entry_records_the_occurrence_the_rung_actually_elided() -> None:
+    """Live half of C2: the rung skips the only-block duplicate and elides the
+    second -- the persisted entry must name the second, so replay elides
+    exactly it rather than under-eliding against the skipped one."""
+    only = Message(role="user")
+    only.content = [_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
+    second = Message.user(
+        "two", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
+    )
+    newest = Message.user(
+        "now", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]
+    )
+    messages = [only, second, newest]
+
+    _, elided = reclaim_captures_to_wire_budget(messages, budget=1)
+    assert [capture.message_index for capture in elided] == [1]
+    entries = tuple(capture_elision_entry(messages, capture) for capture in elided)
+    assert entries == (("mcp:s:a", "screen", "1", 1),)
+
+    replayed, applied_back = apply_capture_elisions(messages, identities=entries)
+    assert [capture.message_index for capture in applied_back] == [1]
+    assert replayed[0] is only
 
 
 def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> None:
@@ -894,9 +923,7 @@ def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> 
     assert [(capture.producer_scope, capture.revision_id) for capture in elided] == [
         ("mcp:s:a", "1")
     ]
-    identities = tuple(
-        (capture.producer_scope, capture.stream_id, capture.revision_id) for capture in elided
-    )
+    entries = tuple(capture_elision_entry(at_pass, capture) for capture in elided)
 
     # A later turn supersedes B1 -- the block the pass protected.
     b2 = Message.user("b2", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:b")])
@@ -905,16 +932,15 @@ def test_apply_capture_elisions_uses_recorded_addresses_not_a_fresh_prefix() -> 
         partition_captures(resumed_segment).reclaimable[0].producer_scope == "mcp:s:b"
     ), "the fixture must make the retro-superseded block the first fresh candidate"
 
-    replayed, applied_back = apply_capture_elisions(resumed_segment, identities=identities)
+    replayed, applied_back = apply_capture_elisions(resumed_segment, identities=entries)
 
     assert [(capture.producer_scope, capture.revision_id) for capture in applied_back] == [
         ("mcp:s:a", "1")
     ]
-    kept_blocks = [
-        (block.captured_frame.producer_scope, block.captured_frame.revision_id)
-        for message in replayed
-        if isinstance(message, Message)
-        for block in message.content
-        if isinstance(block, ImageContent)
-    ]
+    kept_blocks: list[tuple[str, str]] = []
+    for message in replayed:
+        for block in message.content:
+            if isinstance(block, ImageContent) and block.captured_frame is not None:
+                frame = block.captured_frame
+                kept_blocks.append((frame.producer_scope, frame.revision_id))
     assert kept_blocks == [("mcp:s:b", "1"), ("mcp:s:a", "2"), ("mcp:s:b", "2")]

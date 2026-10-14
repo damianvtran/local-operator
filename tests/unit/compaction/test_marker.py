@@ -60,9 +60,9 @@ def test_a_context_full_marker_folds_its_summary() -> None:
 def test_capture_elision_frontier_round_trips_through_a_marker() -> None:
     """The record persists on the marker, beside any strategy payload."""
     identities = (
-        ("mcp:sess:cam", "screen", "1"),
-        ("mcp:sess:cam", "camera", "5"),
-        ("mcp:sess:cam", "screen", "2"),
+        ("mcp:sess:cam", "screen", "1", 0),
+        ("mcp:sess:cam", "camera", "5", 0),
+        ("mcp:sess:cam", "screen", "2", 1),
     )
     preserve = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, identities)
     assert preserve is not None
@@ -82,6 +82,7 @@ def test_capture_elision_frontier_is_omitted_when_unset_or_zero() -> None:
     # A zero-elision pass commits NOTHING rather than spelling a zero.
     assert with_capture_elision_frontier(None, ()) is None
     kept = with_capture_elision_frontier({"snapcompact": {"text": "x"}}, ())
+    assert kept is not None
     assert kept == {"snapcompact": {"text": "x"}}
     assert "capture_elisions" not in kept
     zero = build_compaction_marker("A SUMMARY", with_capture_elision_frontier(None, ()))
@@ -111,30 +112,31 @@ def test_capture_elision_identities_degrade_to_empty() -> None:
             "capture_elisions": {
                 "applied": 3,
                 "identities": [
-                    ["mcp:s:c", "screen", "1"],
+                    ["mcp:s:c", "screen", "1", 0],
                     ["short"],
                     [1, 2, 3],
-                    ("mcp:s:c", "screen", "2"),
+                    ["mcp:s:c", "screen", "2", -1],
+                    ("mcp:s:c", "screen", "3", 1),
                 ],
             }
         }
     }
     assert capture_elision_identities(record) == (
-        ("mcp:s:c", "screen", "1"),
-        ("mcp:s:c", "screen", "2"),
+        ("mcp:s:c", "screen", "1", 0),
+        ("mcp:s:c", "screen", "3", 1),
     )
 
 
 def test_with_capture_elision_frontier_copies_its_input() -> None:
     original = {"snapcompact": {"text": "x"}}
-    identities = (("mcp:s:c", "screen", "1"),) * 4
+    identities = (("mcp:s:c", "screen", "1", 0),) * 4
     merged = with_capture_elision_frontier(original, identities)
 
     assert merged == {
         "snapcompact": {"text": "x"},
         "capture_elisions": {
             "applied": 4,
-            "identities": [["mcp:s:c", "screen", "1"]] * 4,
+            "identities": [["mcp:s:c", "screen", "1", 0]] * 4,
         },
     }
     assert original == {"snapcompact": {"text": "x"}}

@@ -18835,11 +18835,16 @@ class Session:
         if not callable(resolve) or band is None:
             return None
         try:
-            trigger = int(resolve(plan.settings))
+            trigger = resolve(plan.settings)
         except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
             logger.debug("wire trigger resolution failed; capture elision skipped", exc_info=True)
             return None
-        if trigger <= 0:
+        # isinstance, not int(): a duck-typed resolver can hand back anything,
+        # and the narrowing guard keeps a bad ruler value a clean ``None``
+        # while giving a type checker the same certainty the runtime check
+        # gives (an int() call on an opaque value is exactly the kind of
+        # silent coercion this package avoids).
+        if not isinstance(trigger, int) or trigger <= 0:
             return None
         return int(float(band) * trigger)
 
@@ -19673,6 +19678,7 @@ class Session:
             elision_budget = self._capture_elision_budget(compaction_api, plan)
             if elision_budget is not None:
                 from local_operator.compaction.pruning import (
+                    capture_elision_entry,
                     reclaim_captures_to_wire_budget,
                 )
 
@@ -19687,14 +19693,13 @@ class Session:
                             next(projected_iter) if isinstance(message, Message) else message
                             for message in kept
                         ]
-            if elided_captures:
-                preserve_data = with_capture_elision_frontier(
-                    preserve_data,
-                    tuple(
-                        (capture.producer_scope, capture.stream_id, capture.revision_id)
-                        for capture in elided_captures
-                    ),
-                )
+                        preserve_data = with_capture_elision_frontier(
+                            preserve_data,
+                            tuple(
+                                capture_elision_entry(elision_rows, capture)
+                                for capture in elided_captures
+                            ),
+                        )
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,

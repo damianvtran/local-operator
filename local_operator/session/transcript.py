@@ -3905,11 +3905,14 @@ def replay_entries(
         if entries[i].type == ENTRY_COMPACTION:
             compaction_index = i
             break
+    # Bound on ALL paths, not inside a later gate: the replay block below
+    # re-reads the record, and a loop-bound-only binding is both a type
+    # checker complaint and a real foot-gun if the gates ever diverge.
+    compaction = entries[compaction_index] if compaction_index is not None else None
 
     start = 0
     prefix: list[AgentMessage] = []
-    if compaction_index is not None:
-        compaction = entries[compaction_index]
+    if compaction is not None:
         prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
         # re-injected VERBATIM right after the marker, so the user's own
@@ -3985,7 +3988,7 @@ def replay_entries(
         if notice is not None and isinstance(message, Message):
             _apply_prune(message, notice)
         kept.append(message)
-    if compaction_index is not None:
+    if compaction is not None:
         # Reapply the epoch's capture-elision record to the KEPT window. The
         # live pass elided superseded captures from the projection it sent
         # and recorded their stable addresses (producer scope, stream,

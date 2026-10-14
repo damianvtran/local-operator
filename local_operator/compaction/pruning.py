@@ -715,34 +715,73 @@ def _elide_capture_prefix(
     return working, tuple(elided)
 
 
+def capture_elision_entry(
+    messages: Sequence[Message], capture: CaptureElision
+) -> tuple[str, str, str, int]:
+    """The persistable address of an elided capture, with its occurrence ordinal.
+
+    Identity alone cannot name a block when a producer repeated a claim: the
+    never-empty guard can elide the SECOND occurrence while leaving the
+    first, and a first-k replay match would then hit the skipped one and
+    under-elide (reviewer round 1, C2). The ordinal -- how many
+    same-identity blocks precede this one in canonical arrival order --
+    disambiguates without any image bytes or a second registry, and both the
+    live and the replay walk count it the same way: message order, block
+    order.
+    """
+    ordinal = 0
+    for message_index, message in enumerate(messages):
+        for content_index, block in enumerate(message.content):
+            if not isinstance(block, ImageContent):
+                continue
+            frame = block.captured_frame
+            if frame is None:
+                continue
+            if (frame.producer_scope, frame.stream_id, frame.revision_id) != (
+                capture.producer_scope,
+                capture.stream_id,
+                capture.revision_id,
+            ):
+                continue
+            if message_index == capture.message_index and content_index == capture.content_index:
+                return (capture.producer_scope, capture.stream_id, capture.revision_id, ordinal)
+            ordinal += 1
+    # Unreachable for a candidate that came from the same ``messages`` (the
+    # walk above visits it); the fallback keeps the entry well-formed rather
+    # than raising inside a pass.
+    return (capture.producer_scope, capture.stream_id, capture.revision_id, ordinal)
+
+
 def apply_capture_elisions(
-    messages: Sequence[Message], *, identities: Sequence[tuple[str, str, str]]
+    messages: Sequence[Message], *, identities: Sequence[tuple[str, str, str, int]]
 ) -> tuple[list[Message], tuple[CaptureElision, ...]]:
     """Reapply a RECORDED elision set to ``messages`` (replay side).
 
     The compaction record persists WHICH captures an epoch elided -- their
     stable harness-stamped addresses ``(producer_scope, stream_id,
-    revision_id)``, one entry per elided block -- and replay elides exactly
-    those blocks. Deliberately NOT a count re-derived at replay time: a later
-    turn can retro-supersede a capture the pass protected, so the candidate
-    order over the whole segment is not the order the pass saw, and a
-    first-N walk would drop a block the live session kept and resurrect one
-    it elided (reviewer round 1, C1).
+    revision_id)`` plus each block's occurrence ordinal (see
+    :func:`capture_elision_entry`) -- and replay elides exactly those blocks.
+    Deliberately NOT a count re-derived at replay time: a later turn can
+    retro-supersede a capture the pass protected, so the candidate order
+    over the whole segment is not the order the pass saw, and a first-N walk
+    would drop a block the live session kept and resurrect one it elided
+    (reviewer round 1, C1). The ordinal disambiguates at block granularity
+    for the same reason: the never-empty guard can skip a duplicate
+    identity's first occurrence and the live pass elide the second, which a
+    first-k match would replay against the wrong block (reviewer round 1,
+    C2).
 
-    Matching is occurrence-bounded: the nth matching block in canonical
-    arrival order is elided only if the record carries at least n copies of
-    that identity, so a producer that repeated a claim cannot over-elide on
-    replay. Same never-empty skip and copy/identity semantics as the live
-    rung, through the ONE :func:`_elide_capture_prefix` core.
-
-    ``identities`` empty returns the input list untouched.
+    Same never-empty skip and copy/identity semantics as the live rung,
+    through the ONE :func:`_elide_capture_prefix` core. ``identities`` empty
+    returns the input list untouched.
     """
-    counts: dict[tuple[str, str, str], int] = {}
-    for identity in identities:
-        counts[identity] = counts.get(identity, 0) + 1
-    if not counts:
+    if not identities:
         return list(messages), ()
-    used: dict[tuple[str, str, str], int] = {}
+    recorded = {
+        (producer_scope, stream_id, revision_id, ordinal)
+        for producer_scope, stream_id, revision_id, ordinal in identities
+    }
+    ordinal_of: dict[tuple[str, str, str], int] = {}
     targets: list[CaptureElision] = []
     for message_index, message in enumerate(messages):
         for content_index, block in enumerate(message.content):
@@ -752,18 +791,18 @@ def apply_capture_elisions(
             if frame is None:
                 continue
             identity = (frame.producer_scope, frame.stream_id, frame.revision_id)
-            if used.get(identity, 0) >= counts.get(identity, 0):
-                continue
-            used[identity] = used.get(identity, 0) + 1
-            targets.append(
-                CaptureElision(
-                    message_index=message_index,
-                    content_index=content_index,
-                    stream_id=frame.stream_id,
-                    revision_id=frame.revision_id,
-                    producer_scope=frame.producer_scope,
+            ordinal = ordinal_of.get(identity, 0)
+            ordinal_of[identity] = ordinal + 1
+            if (*identity, ordinal) in recorded:
+                targets.append(
+                    CaptureElision(
+                        message_index=message_index,
+                        content_index=content_index,
+                        stream_id=frame.stream_id,
+                        revision_id=frame.revision_id,
+                        producer_scope=frame.producer_scope,
+                    )
                 )
-            )
     if not targets:
         return list(messages), ()
     return _elide_capture_prefix(messages, targets)
