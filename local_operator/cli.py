@@ -2396,9 +2396,14 @@ def credential_delete_command(args: argparse.Namespace) -> int:
 
 def config_create_command() -> int:
     """Create a new configuration file."""
+    from local_operator.config_writer import config_write_lock
+
     base_dir = config_dir()
-    config_manager = ConfigManager(base_dir)
-    config_manager._write_config(vars(config_manager.config))
+    # Read and create under the same config-root lock as settings/policy writes;
+    # a creation command must not flush a snapshot captured before their edit.
+    with config_write_lock(base_dir):
+        config_manager = ConfigManager(base_dir)
+        config_manager._write_config(vars(config_manager.config))
     # Print the path that was actually written, not a hardcoded
     # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
     # config_open_command below already reports the resolved path — naming a

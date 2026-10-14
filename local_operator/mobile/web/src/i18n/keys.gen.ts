@@ -957,6 +957,15 @@ export type MessageParams = {
   "wire.settings.web_search_timeout_seconds.label": undefined;
   "wire.settings.web_tools.description": undefined;
   "wire.settings.web_tools.title": undefined;
+  "wire.settings.hub_defaults.agents.help": undefined;
+  "wire.settings.hub_defaults.agents.label": undefined;
+  "wire.settings.hub_defaults.agents.off.description": undefined;
+  "wire.settings.hub_defaults.agents.on.description": undefined;
+  "wire.settings.hub_defaults.model_default.note": undefined;
+  "wire.settings.hub_defaults.teams.help": undefined;
+  "wire.settings.hub_defaults.teams.label": undefined;
+  "wire.settings.hub_defaults.teams.off.description": undefined;
+  "wire.settings.hub_defaults.teams.on.description": undefined;
   "wire.slash.accounts": undefined;
   "wire.slash.agent": undefined;
   "wire.slash.aida": undefined;

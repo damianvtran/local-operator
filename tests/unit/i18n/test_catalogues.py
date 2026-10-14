@@ -50,6 +50,7 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.incidents",
         "wire.notices",
         "wire.settings",
+        "wire.settings.hub_defaults",
         "wire.slash",
         "wire.aida_cadence",
     }
@@ -60,6 +61,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.errors.media") != {}
     assert catalogues.load_catalogue("en", "wire.errors.files") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
+    # Approved source namespace, not a prefix-wide wildcard. Mutation controls
+    # below still reject undeclared additions, removals and emptied namespaces.
+    assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
