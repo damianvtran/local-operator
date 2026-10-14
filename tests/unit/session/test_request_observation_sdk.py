@@ -230,11 +230,22 @@ def _spec(**overrides: Any) -> Any:
     return SessionSpec(**values)
 
 
+@pytest.fixture
+def shutdown_world(scratch: Any) -> Path:
+    """Keep this cell's discovery inside its world, not cwd's operator ancestors.
+
+    HOME alone cannot clip the skill/repo/MCP ancestor walk. The existing work
+    root is disjoint from controller config/agent state, as SessionSpec requires.
+    Other SDK scenarios deliberately retain their original unbounded spec.
+    """
+    return scratch.cwd_path
+
+
 @asynccontextmanager
-async def _opened(scratch: Any) -> AsyncIterator[Any]:
+async def _opened(scratch: Any, *, world_root: Path | None = None) -> AsyncIterator[Any]:
     from local_operator import sdk
 
-    async with sdk.open_session(_spec(), roots=scratch) as session:
+    async with sdk.open_session(_spec(world_root=world_root), roots=scratch) as session:
         yield cast(Any, session)
 
 
@@ -834,7 +845,7 @@ async def test_abort_control_leaves_child_alive_and_shutdown_joins_it(
 
 @pytest.mark.asyncio
 async def test_shutdown_joins_grandchildren_and_background_bash_jobs(
-    scratch: Any, wire: Wire, shutdown_accounting: ShutdownAccounting
+    scratch: Any, wire: Wire, shutdown_accounting: ShutdownAccounting, shutdown_world: Path
 ) -> None:
     wire.script(
         "parent",
@@ -858,7 +869,7 @@ async def test_shutdown_joins_grandchildren_and_background_bash_jobs(
     )
     wire.script("grand", text_turn("grand done"))
 
-    async with _opened(scratch) as session:
+    async with _opened(scratch, world_root=shutdown_world) as session:
         observed: list[RequestFinalObservation] = []
         session.subscribe_requests(observed.append)
         await session.prompt(f"{_PARENT_MARKER}: hold the tree")
