@@ -55,6 +55,11 @@ class MovableHandle(FakeHandle):
     def request_stop(self) -> None:
         self.stopped = True
 
+    def ready_to_resume(self) -> str:
+        # The idle-retire op carries no checkpoint request, so readiness reads
+        # empty — the frame must still carry the additive key.
+        return ""
+
 
 def _conn(kind: str = "attach") -> _ClientConn:
     return _ClientConn(writer=cast(Any, object()), kind=cast(Any, kind))
@@ -98,6 +103,9 @@ async def test_an_idle_runtime_announces_retiring_and_stops() -> None:
     announced = [f for f in sent if f.get("op") == "retiring"]
     assert [f["_recipient"] for f in announced] == ["attach"]
     assert announced[0]["reason"] == "moved"
+    # The ready-to-resume signal is additive and empty here (no checkpoint was
+    # requested): a coordinator must not read a continuation that cannot happen.
+    assert announced[0]["checkpoint_id"] == ""
 
 
 @pytest.mark.asyncio
