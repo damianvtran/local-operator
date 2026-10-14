@@ -2965,6 +2965,17 @@ class LoopConfig(BaseModel):
     #: effects (a push, an MR write) mid-flight. ``None`` leaves the behaviour
     #: exactly as it was: only the abort signal ends a turn early.
     graceful_cancel_requested: Callable[[], bool] | None = Field(default=None, exclude=True)
+    #: Whether THIS run's ending on a WORDLESS stop -- a ``stop`` whose message
+    #: carried no text and no tool calls -- is a failure the loop must recover
+    #: with one bounded re-ask (``MAX_WORDLESS_STOP_RECOVERIES``). The session
+    #: computes it from the quiet-end rule, INVERTED
+    #: (``Session._silent_end_is_a_failure``): a run whose words someone is
+    #: waiting on (a person asked or awaits, a notify wake) must not end in
+    #: silence, while every internal arrival -- peer, hub_message, job_result,
+    #: session_state, catch-up, a non-notify wake -- may end quietly, and for
+    #: those the bare stop stays its legitimate ending. Off by default: a
+    #: direct embedder keeps today's ending exactly.
+    recover_wordless_stop: bool = False
     get_aside_messages: Callable[[], Awaitable[list[Aside]]] | None = Field(
         default=None, exclude=True
     )

@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
     StreamEndEvent,
+    StreamTextDelta,
     TextContent,
 )
 from local_operator.session.attachment_hints import with_attachment_hints
@@ -80,7 +81,10 @@ def _notes(messages) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_a_pasted_image_earns_a_note_on_the_wire_and_nowhere_durable(tmp_path):
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which would persist a second
+    # user row this cell's context checks count.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream)
 
     await session.prompt("make anime of this", [ImageContent(data=PNG_B64, mime_type="image/png")])

@@ -146,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The four, and why each is persisted:
+    The five, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -156,6 +156,9 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       notice instead.
     - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
       with no name and was dropped; the live run showed a notice instead.
+    - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
+      no text and no tool calls on a clean stop; the live run showed a notice
+      instead.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -183,6 +186,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     from local_operator.harness.loop import (
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
     from local_operator.session.session import _CONTINUATION_PROMPT
@@ -192,6 +196,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
         _CONTINUATION_PROMPT,
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        WORDLESS_STOP_RECOVERY_PROMPT,
     )
 
 
@@ -205,8 +210,8 @@ def is_harness_chrome(text: str) -> bool:
     would suppress a chrome prompt that the other painted as the user's own
     words the moment a persisted prompt gained a trailing newline.
 
-    Two legs, one decision. Exact membership covers the three prompts that are
-    single fixed strings; a producer-side recogniser covers each family the
+    Two legs, one decision. Exact membership covers the prompts that are
+    single fixed strings (the five listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -707,7 +712,7 @@ def is_harness_notice_row(row: Any) -> bool:
     person who pastes a harness notice verbatim loses their display row: the text
     is hidden on every human surface. It is NOT lost anywhere else — the row is
     still in the journal, and still in the model's context; only the renderer drops
-    it, exactly as :func:`is_harness_chrome` does for the three loop/continuation
+    it, exactly as :func:`is_harness_chrome` does for the loop/continuation
     prompts, which a person can equally paste verbatim. Those two are the verified
     retention surfaces, and they are named alone because a claim about anywhere
     else would be one nobody measured. That precedent is the reason this is

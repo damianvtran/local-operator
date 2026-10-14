@@ -381,7 +381,10 @@ async def test_a_project_with_no_progress_is_stale_by_construction(tmp_path) -> 
     asks for it explicitly rather than quoting an age that does not exist."""
     store = ProjectRegistry(tmp_path / "config")
     registered(store, "brand-new")
-    stream = ScriptedStream([worked_turn(), prose("Nothing to add.")])
+    # The nudge turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which would add a fourth
+    # request the count below does not admit.
+    stream = ScriptedStream([worked_turn(), prose("Nothing to add."), prose("No progress yet.")])
     session = make_session(tmp_path, stream, store=store)
 
     await session.prompt("check")

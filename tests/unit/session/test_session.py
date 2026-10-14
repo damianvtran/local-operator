@@ -1423,7 +1423,9 @@ async def test_credential_announcement_does_not_replay_on_resume(tmp_path):
     no such env var. The honest resume advertisement is the
     ``<session-credentials>`` prompt-tail block, rebuilt from the live (empty)
     store each turn."""
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # Answers in prose: a wordless stop on a person-asked turn is re-asked
+    # once (wordless-stop recovery), and this cell counts the one request.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream)
     session.journal_credential_change("OSWORLD_OPENAI_API_KEY")
     await session.prompt("use the key I just gave you")
@@ -2966,6 +2968,11 @@ async def test_context_hint_advances_with_each_call_receipt_even_with_mid_turn_c
         events: list[StreamEvent] = []
         if more:
             events.append(StreamToolCallDelta(index=0, id="c", name="peek", argument_delta="{}"))
+        else:
+            # Answers in prose: a wordless stop on a person-asked turn is
+            # re-asked once (wordless-stop recovery), which would add a
+            # fourth request whose hint this cell does not pin.
+            events.append(StreamTextDelta(delta="done"))
         events.append(
             StreamUsageEvent(
                 usage=Usage(input_tokens=context_tokens, context_tokens=context_tokens)
@@ -5213,7 +5220,15 @@ async def test_a_delivery_turn_does_not_journal_its_row_twice(tmp_path):
     is exactly why none of them could see the real loop run; this cell drives
     the REAL pipeline and reads the transcript afterwards.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which would insert a second
+    # request before the delivery this cell indexes.
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            *[[StreamEndEvent(stop_reason="stop")] for _ in range(3)],
+        ]
+    )
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     session._is_streaming = True  # the marathon turn
@@ -5252,7 +5267,15 @@ async def test_a_dropped_delivery_turn_does_not_journal_its_row_twice(tmp_path):
     the guard: rows = 2, distinct ids = 1). The earlier cells all run the
     un-aborted path, so none covered this arm.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which this cell's count of
+    # provider calls does not admit.
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            *[[StreamEndEvent(stop_reason="stop")] for _ in range(3)],
+        ]
+    )
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     session._is_streaming = True
@@ -5285,7 +5308,15 @@ async def test_a_dropped_turn_marks_a_lost_settle_write_as_held(tmp_path, monkey
     drop itself: a not-yet-durable ``job_result`` row is marked held before it
     is written, while a row already durable keeps its delivered shape.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which this cell's count of
+    # provider calls does not admit.
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            *[[StreamEndEvent(stop_reason="stop")] for _ in range(3)],
+        ]
+    )
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     attempts = {"n": 0}
@@ -5333,7 +5364,15 @@ async def test_a_mismatched_message_batch_is_rebuilt_not_truncated(tmp_path):
     rely on ``zip``, which TRUNCATES. The guard rebuilds the rows instead, so
     every result still reaches the turn.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), and this cell waits for the
+    # delivery turn's own request.
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            *[[StreamEndEvent(stop_reason="stop")] for _ in range(3)],
+        ]
+    )
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     await session._deliver_job_results(
@@ -5646,6 +5685,28 @@ async def test_a_mixed_batch_carrying_real_intent_is_not_held(tmp_path):
 
     assert len(stream.requests) == spent_before + 1
     assert session._abort_requested is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_turn_recovers_a_wordless_stop_once(tmp_path):
+    """A person asked: a wordless stop is a LOST ANSWER, so the loop re-asks
+    ONCE -- the quiet-end rule's refusing half, wired through the turn's
+    ``LoopConfig`` (``recover_wordless_stop``). Two requests for the turn: the
+    prompt, then the re-ask. The delivery-shaped arrivals keep ONE request,
+    which the latch and wake cells pin."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="hello"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("hello")
+
+    assert len(stream.requests) == 2, "the prompt turn spends exactly one re-ask"
+    second = json.dumps(stream.requests[1].model_dump(mode="json"))
+    assert "arrived with no text" in second, "the re-ask states the missing fact"
     await session.dispose()
 
 
