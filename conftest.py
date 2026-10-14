@@ -238,7 +238,7 @@ import warnings
 
 import pytest
 
-from tests import shard_stall_watchdog
+from tests import shard_stall_watchdog, tree_identity
 
 # ---------------------------------------------------------------------------
 # Real-store guard
@@ -392,7 +392,22 @@ _install_real_store_guard()
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    _refuse_a_split_tree(config)
     shard_stall_watchdog.install(config, on_ci=_on_ci_host())
+
+
+def _refuse_a_split_tree(config: pytest.Config) -> None:
+    """Stop before collection when children would import a different tree than the tests.
+
+    Controller only: an xdist worker is started by the controller with the same
+    interpreter, so asking again per worker would cost an interpreter start each for
+    the same answer. ``tests/tree_identity.py`` carries the incident and the reasoning.
+    """
+    if hasattr(config, "workerinput"):
+        return
+    refusal = tree_identity.mismatch(pathlib.Path(str(config.rootpath)))
+    if refusal is not None:
+        raise pytest.UsageError(refusal)
 
 
 def _on_ci_host() -> bool:
