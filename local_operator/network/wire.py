@@ -556,6 +556,40 @@ class UncompressedFrame(dict[str, Any]):
     """
 
 
+class _AmbiguousJSONFrame(dict[str, Any]):
+    """Last-wins legacy values, with parse provenance for opt-in protocols only."""
+
+    duplicate_json_keys = True
+
+
+def _decode_lifecycle_json(text: str) -> Any:
+    duplicate = False
+    lifecycle_objects: list[dict[str, Any]] = []
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicate
+        result: dict[str, Any] = {}
+        lifecycle = False
+        for key, value in items:
+            if key in result:
+                duplicate = True
+            if key == "kind" and isinstance(value, str) and value.startswith("lifecycle_"):
+                lifecycle = True
+            result[key] = value
+        if lifecycle:
+            lifecycle_objects.append(result)
+        return result
+
+    frame = json.loads(text, object_pairs_hook=pairs)
+    if duplicate and isinstance(frame, dict):
+        # Do not globally tighten the legacy parser. Requests opt in here; replies
+        # opt in at checked_reply_detail, where their request protocol is known.
+        if frame.get("op") == "net_broker" and any(frame is obj for obj in lifecycle_objects):
+            raise ValueError("duplicate keys in credential lifecycle JSON")
+        return _AmbiguousJSONFrame(frame)
+    return frame
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -728,7 +762,7 @@ class LinkCrypto:
         if plaintext.startswith(COMPRESSED_MARKER):
             plaintext = self._decompress(plaintext)
         try:
-            frame = json.loads(plaintext.decode("utf-8"))
+            frame = _decode_lifecycle_json(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkCryptoError(
                 "a record decrypted to something that is not a JSON frame; the link is closed",

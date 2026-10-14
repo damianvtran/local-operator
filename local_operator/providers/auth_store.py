@@ -342,6 +342,7 @@ CREATE TABLE IF NOT EXISTS auth_credentials (
   data TEXT NOT NULL,
   disabled_cause TEXT DEFAULT NULL,
   identity_key TEXT DEFAULT NULL,
+  login_incarnation TEXT DEFAULT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -1323,7 +1324,21 @@ class AuthStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_SCHEMA)
-        conn.commit()
+        # Local metadata, never credential payload: old rows remain unknown until
+        # a real login write attests an incarnation. Refresh cannot create one.
+        # Concurrent process startup must serialize the check and ALTER, not
+        # swallow duplicate-column errors (which can conceal real corruption).
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
+            if "login_incarnation" not in columns:
+                conn.execute(
+                    "ALTER TABLE auth_credentials ADD COLUMN login_incarnation TEXT DEFAULT NULL"
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         for path in (
             self._db_path,
             self._db_path.with_suffix(self._db_path.suffix + "-wal"),
@@ -1608,6 +1623,9 @@ class AuthStore:
         # the credential the user just proved is alive.
         payload.pop(GRANT_DEAD_AT_KEY, None)
         payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+        # Unlike updated_at this is a login event, not a refresh timestamp.
+        # MCP refresh also uses upsert, so it cannot attest an incarnation yet.
+        incarnation = uuid.uuid4().hex if provider != "mcp-oauth" else None
         now = self._now_ms()
         data_json = json.dumps(payload)
 
@@ -1647,20 +1665,65 @@ class AuthStore:
                 self._conn.execute(
                     "UPDATE auth_credentials SET credential_type = ?, data = ?, "
                     "disabled_cause = NULL,"
-                    " updated_at = ? WHERE id = ?",
-                    (credential_type, data_json, now, row[0]),
+                    " updated_at = ?, login_incarnation = ? WHERE id = ?",
+                    (credential_type, data_json, now, incarnation, row[0]),
                 )
                 self._conn.commit()
                 return self._after_credential_write(provider, row[0])
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
-            "(provider, credential_type, data, identity_key, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (provider, credential_type, data_json, identity, now, now),
+            "(provider, credential_type, data, identity_key, created_at, updated_at,"
+            " login_incarnation)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (provider, credential_type, data_json, identity, now, now, incarnation),
         )
         self._conn.commit()
         return self._after_credential_write(provider, cursor.lastrowid)
+
+    @staticmethod
+    def native_lifecycle_snapshot(db_path: Path, provider: str) -> list[tuple[Any, ...]] | None:
+        """One coherent committed WAL snapshot, with NO credential material read.
+
+        Lifecycle observation must not construct a writable AuthStore (migrations),
+        nor use immutable=1 (which ignores live WAL). mode=ro may create SQLite
+        sidecars if absent, but cannot migrate or write credential/database rows.
+        Missing/legacy/unreadable is UNKNOWN, not an empty native baseline.
+        """
+        if not db_path.is_file():
+            return None
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            return conn.execute(
+                "SELECT id, updated_at, login_incarnation, disabled_cause, credential_type,"
+                " json_extract(data, '$.account_id'), json_extract(data, '$.email'),"
+                " json_extract(data, '$.org_id'), json_type(data, '$.mesh_origin')"
+                " FROM auth_credentials WHERE provider = ? ORDER BY id",
+                (provider,),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def native_login_incarnation(self, credential_id: int) -> str | None:
+        """Authoritative login identity without loading or deriving from secrets.
+
+        Read-only callers may see a pre-migration database: unknown is not an
+        invented genesis. OAuth refresh updates data/updated_at, never this column.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT login_incarnation FROM auth_credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        return str(row[0]) if row and row[0] else None
 
     def _after_credential_write(self, provider: str, credential_id: int | None) -> StoredCredential:
         """Read the row back, then run what a completed write implies.

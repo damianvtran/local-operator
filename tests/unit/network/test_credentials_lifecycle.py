@@ -184,7 +184,8 @@ def _fill_observations(lc: L.LifecycleStore, count: int, *, scope_pad: str = "")
         lc._save(doc)
 
 
-def test_distinct_scope_refs_cannot_make_the_file_unreadable(tmp_path):
+def test_distinct_scope_refs_cannot_make_the_file_unreadable(tmp_path, monkeypatch):
+    monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", L.MAX_ROWS)
     lc = L.LifecycleStore(NET, root=tmp_path)
     _fill_observations(lc, L.MAX_ROWS - 1)
     assert lc.observe(L.Observation("dev-a", KEY, "last-fit", 1, 1)).applied

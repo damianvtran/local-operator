@@ -21,7 +21,7 @@ from tests.unit.network.test_credentials_consent import rig as consent_rig
 # The consent suite's rig under the name pytest resolves (assignment, not a shadowing
 # import, so flake8 stays quiet).
 rig = consent_rig
-SCOPE = "acct-one"
+SCOPE = f"native:{P}:YWNjdC1vbmU"
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +38,13 @@ def _server(rig: Any) -> Any:
 
 def _announce(rig: Any, *, state="available", chain=1, material=1, sender="", **over: Any):
     sender = sender or rig.own.device_id
-    link = SimpleNamespace(device_id=sender, network_id=N, epoch=1)
+    link = SimpleNamespace(
+        device_id=sender,
+        network_id=N,
+        epoch=1,
+        capabilities={"credential-lifecycle-v1"},
+        local_capabilities={"credential-lifecycle-v1"},
+    )
     frame = {
         "op": "net_broker",
         "kind": "lifecycle_announce",
@@ -102,7 +108,13 @@ def test_frame_addressed_to_another_device_changes_nothing(rig):
 
 
 def test_unknown_key_changes_nothing(rig):
-    link = SimpleNamespace(device_id=rig.own.device_id, network_id=N, epoch=1)
+    link = SimpleNamespace(
+        device_id=rig.own.device_id,
+        network_id=N,
+        epoch=1,
+        capabilities={"credential-lifecycle-v1"},
+        local_capabilities={"credential-lifecycle-v1"},
+    )
     frame = {
         "kind": "lifecycle_announce",
         "owner_device": rig.own.device_id,
@@ -195,7 +207,13 @@ def _announce_frame(rig: Any, kind: str = "lifecycle_announce") -> dict[str, Any
 def test_a_device_that_owns_nothing_acks_a_lifecycle_announce(rig):
     # The recipient owns no credential, so ``broker_for_relay`` is None; the
     # announcement must still be applied (it is addressed to exactly this device).
-    link = SimpleNamespace(device_id=rig.own.device_id, network_id=N, epoch=1)
+    link = SimpleNamespace(
+        device_id=rig.own.device_id,
+        network_id=N,
+        epoch=1,
+        capabilities={"credential-lifecycle-v1"},
+        local_capabilities={"credential-lifecycle-v1"},
+    )
     detail = _no_broker_handler(rig)(link, _announce_frame(rig))
     assert detail["kind"] == "ack" and detail["entries"][0]["applied"] is True
     assert _hw(rig) == {(rig.own.device_id, P, SCOPE): (1, 1)}
@@ -205,7 +223,13 @@ def test_a_device_that_owns_nothing_acks_a_lifecycle_announce(rig):
 def test_other_kinds_on_a_device_that_owns_nothing_keep_the_refusal(rig, kind):
     from local_operator.network.types import MeshRefusal
 
-    link = SimpleNamespace(device_id=rig.own.device_id, network_id=N, epoch=1)
+    link = SimpleNamespace(
+        device_id=rig.own.device_id,
+        network_id=N,
+        epoch=1,
+        capabilities={"credential-lifecycle-v1"},
+        local_capabilities={"credential-lifecycle-v1"},
+    )
     with pytest.raises(MeshRefusal) as excinfo:
         _no_broker_handler(rig)(link, _announce_frame(rig, kind))
     assert excinfo.value.code == "not_implemented"
@@ -259,6 +283,7 @@ class _Wire:
 
     def __init__(self, caps: set[str], reply: Any = None) -> None:
         self.capabilities = frozenset(caps)
+        self.local_capabilities = frozenset({"credential-lifecycle-v1"})
         self.frames: list[dict[str, Any]] = []
         self.reply = reply
 
@@ -293,10 +318,19 @@ def _owner_server(rig: Any, wire_link: Any) -> Any:
 
 
 def _seed(rig: Any, rows: int = 1) -> None:
-    life = L.LifecycleStore(N, rig.root)
-    life.record_native(P, SCOPE, L.NativeFacts(present=True, new_login=True))
-    for index in range(rows - 1):
-        life.record_native(P, f"scope-{index}", L.NativeFacts(present=True, new_login=True))
+    rig.auth.delete_credentials_for_provider(P)
+    for identity in ["acct-one"] + [f"scope-{index}" for index in range(rows - 1)]:
+        rig.auth.upsert_credential(
+            P,
+            {
+                "type": "oauth",
+                "access": "test-access",
+                "refresh": "test-refresh",
+                "email": identity,
+                "account_id": identity,
+                "expires": 9999999999999,
+            },
+        )
 
 
 def _echo_applied(frame: dict[str, Any]) -> dict[str, Any]:
@@ -442,3 +476,184 @@ def test_new_and_old_peers_negotiate_lifecycle_without_changing_finite_grants(ri
     new_server = _owner_server(rig, new_peer)
     assert L.lifecycle_tick_step(new_server, rig.peer.device_id) == "delivered"
     assert [frame["kind"] for frame in new_peer.frames] == ["lifecycle_announce"]
+
+
+def test_native_login_refresh_logout_new_login_registered_cadence(rig):
+    """Actual native metadata writes, not hand-seeded lifecycle counters."""
+    from local_operator.network import definitions
+
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server = _owner_server(rig, peer)
+    _seed(rig)
+    L.install()
+    clock = definitions.DefinitionsSyncer(server)
+    assert clock.tick(now=1000) == [(rig.peer.device_id, "skipped:no_admin")]
+    assert len(peer.frames) == 1  # sibling ran despite definitions' own admin refusal
+    first = peer.frames[-1]["entries"][0]
+    assert (first["login_chain_revision"], first["material_generation"]) == (1, 1)
+    native = rig.auth.list_credentials(P)[0]
+    incarnation = rig.auth.native_login_incarnation(native.id)
+    # The actual refresh persistence SQL cannot change the login incarnation.
+    rig.auth._conn.execute(
+        "UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE id = ?", (native.id,)
+    )
+    rig.auth._conn.commit()
+    clock.tick(now=1061)
+    rotation = peer.frames[-1]["entries"][0]
+    assert rig.auth.native_login_incarnation(native.id) == incarnation
+    assert (rotation["login_chain_revision"], rotation["material_generation"]) == (1, 2)
+    rig.auth.delete_credentials_for_provider(P)
+    clock.tick(now=1122)
+    assert peer.frames[-1]["entries"][0]["state"] == "absent"
+    _seed(rig)
+    clock.tick(now=1183)
+    back = peer.frames[-1]["entries"][0]
+    assert (back["login_chain_revision"], back["material_generation"]) == (2, 4)
+
+
+def test_sender_denial_precedes_all_native_reads(rig, monkeypatch):
+    from local_operator.network.credentials import consent, placement
+
+    _seed(rig)
+    consent.restrict_and_revoke(
+        N, rig.own.device_id, rig.peer.device_id, {"credential_key": P}, "test-deny", rig.root
+    )
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.grant(P, rig.peer.device_id, scope="session", by=rig.own.device_id)
+    monkeypatch.setattr(L, "_native_contexts", lambda *args: pytest.fail("denied native read"))
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    assert L.lifecycle_tick_step(_owner_server(rig, peer), rig.peer.device_id) == "in_sync"
+    assert peer.frames == []
+
+
+def test_sender_rotates_retry_prefix_and_reannounces_new_link(rig):
+    _seed(rig, 11)
+
+    def selective(frame):
+        reply = _echo_applied(frame)
+        for result, item in zip(reply["detail"]["entries"], frame["entries"]):
+            if item["account_scope_ref"] in sorted(L._native_contexts(rig.root, P))[:8]:
+                result.update(applied=False, reason=L.OBSERVED_TABLE_FULL)
+        return reply
+
+    peer = _Wire({"credential-lifecycle-v1"}, selective)
+    server = _owner_server(rig, peer)
+    for _ in range(3):
+        L.lifecycle_tick_step(server, rig.peer.device_id)
+    scopes = {item["account_scope_ref"] for frame in peer.frames for item in frame["entries"]}
+    assert len(scopes) == 11
+    assert all(len(frame["entries"]) <= 8 for frame in peer.frames)
+    # A distinct link is real catch-up evidence, not a manual ledger reset.
+    replacement = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server._ensure_link = lambda device: replacement
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    assert len(replacement.frames[0]["entries"]) == 8
+
+
+@pytest.mark.parametrize("local,remote", [(False, True), (True, False), (False, False)])
+def test_receiver_requires_both_transcript_advertisements(rig, local, remote):
+    feature = {"credential-lifecycle-v1"}
+    link = SimpleNamespace(
+        device_id=rig.own.device_id,
+        network_id=N,
+        local_capabilities=feature if local else set(),
+        capabilities=feature if remote else set(),
+    )
+    result = L.member_lifecycle_announce(_server(rig), link, _announce_frame(rig))
+    assert result["code"] == "unsupported"
+    assert not _hw(rig)
+
+
+def test_capacity_blocks_new_restrictive_identity_and_reserves_other_owner(rig, monkeypatch):
+    monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", 1)
+    life = L.LifecycleStore(N, rig.root)
+    assert life.observe(L.Observation(rig.own.device_id, P, "occupied", 1, 1)).applied
+    result = _announce(rig, state="withdrawn")["entries"][0]
+    assert result == dict(
+        credential_key=P, account_scope_ref=SCOPE, applied=False, reason=L.OBSERVED_TABLE_FULL
+    )
+    assert effective.effective_access(P, root=rig.root).state == "withdrawn"
+    assert life.observe(L.Observation("other-owner", P, "free", 1, 1)).applied
+
+
+def test_unknown_native_login_baseline_is_not_seeded(rig):
+    _seed(rig)
+    rig.auth._conn.execute("UPDATE auth_credentials SET login_incarnation = NULL")
+    rig.auth._conn.commit()
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    assert L.lifecycle_tick_step(_owner_server(rig, peer), rig.peer.device_id) == "in_sync"
+    assert not L.LifecycleStore(N, rig.root).load().rows
+    assert not peer.frames
+
+
+def test_late_denial_withdraws_only_previously_disclosed_evidence(rig, monkeypatch):
+    from local_operator.network.credentials import consent, placement
+
+    _seed(rig)
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    server = _owner_server(rig, peer)
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    original = dict(peer.frames[-1]["entries"][0])
+    consent.restrict_and_revoke(
+        N, rig.own.device_id, rig.peer.device_id, {"credential_key": P}, "test-deny", rig.root
+    )
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.grant(P, rig.peer.device_id, scope="session", by=rig.own.device_id)
+    monkeypatch.setattr(L, "_native_contexts", lambda *args: pytest.fail("read after denial"))
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "delivered"
+    assert peer.frames[-1]["entries"] == [{**original, "state": "withdrawn"}]
+    assert L.lifecycle_tick_step(server, rig.peer.device_id) == "in_sync"
+
+
+def test_partial_observation_failure_returns_truthful_per_entry_results(rig, monkeypatch):
+    from local_operator.network.types import MeshRefusal
+
+    original = L.LifecycleStore.observe
+
+    def fail_second(target, obs):
+        if obs.account_scope_ref == "second":
+            raise MeshRefusal("busy", "try later")
+        return original(target, obs)
+
+    monkeypatch.setattr(L.LifecycleStore, "observe", fail_second)
+    first = _announce_frame(rig)["entries"][0]
+    reply = _announce(rig, entries=[first, {**first, "account_scope_ref": "second"}])
+    assert reply["kind"] == "ack"
+    assert reply["entries"][0]["applied"] is True
+    assert reply["entries"][1]["applied"] is False
+    assert reply["entries"][1]["reason"] == "busy"
+    assert len(_hw(rig)) == 1
+
+
+def test_account_denial_preserves_other_confirmed_native_accounts(rig):
+    from local_operator.network.credentials import consent, placement
+
+    _seed(rig, 2)
+    consent.restrict_and_revoke(
+        N,
+        rig.own.device_id,
+        rig.peer.device_id,
+        {"credential_key": P, "account_ref": "acct-one"},
+        "test-deny",
+        rig.root,
+    )
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.grant(P, rig.peer.device_id, scope="session", by=rig.own.device_id)
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    assert L.lifecycle_tick_step(_owner_server(rig, peer), rig.peer.device_id) == "delivered"
+    assert len(peer.frames[0]["entries"]) == 1
+    assert peer.frames[0]["entries"][0]["account_scope_ref"] != SCOPE
+
+
+def test_sender_preserves_verified_future_permission_without_finite_holder(rig):
+    from local_operator.network.credentials import consent, placement
+    from tests.unit.network.test_credentials_consent import request
+
+    approval, run = request(rig)
+    consent.provision_from_run(approval, run, rig.subject, rig.root)
+    with placement.mutate(N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.revoke(P, rig.peer.device_id)
+    peer = _Wire({"credential-lifecycle-v1"}, _echo_applied)
+    assert L.lifecycle_tick_step(_owner_server(rig, peer), rig.peer.device_id) == "delivered"
+    assert len(peer.frames[0]["entries"]) == 1
+    assert peer.frames[0]["entries"][0]["state"] == "available"

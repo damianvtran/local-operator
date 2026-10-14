@@ -531,3 +531,55 @@ def test_the_stores_report_carries_the_lent_rows_id_over_the_link(mesh: Any) -> 
         assert str(after[0].data.get("refresh") or "") == token0, after[0].data
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("broker_only", [False, True])
+def test_native_lifecycle_registered_cadence_uses_real_login_and_idp_refresh(mesh, broker_only):
+    """The lifecycle producer must be native writes, never test-seeded counters."""
+    import asyncio
+
+    from local_operator.network import definitions
+    from local_operator.network.credentials import lifecycle
+    from local_operator.providers.auth_store import AuthStore
+
+    definitions.stop_syncer(mesh.a)
+    definitions.stop_syncer(mesh.b)
+    _share(mesh)
+    _pull(mesh)
+    if broker_only:
+        with store.mutate(mesh.network_id, mesh.a.root) as record:
+            record.self_capabilities = ["broker_credential"]
+            store.save(record, mesh.a.root)
+    clock = definitions.DefinitionsSyncer(mesh.a)
+    auth = AuthStore(db_path=mesh.a.root / "auth.db", config_dir=mesh.a.root)
+    try:
+        native = auth.list_credentials(STUB_PROVIDER)[0]
+        incarnation = auth.native_login_incarnation(native.id)
+        clock.tick(now=1000)
+        observed = lifecycle.LifecycleStore(mesh.network_id, mesh.b.root)
+        baseline = observed.load().high_water
+        ident = next(iter(baseline))
+        assert baseline[ident] == (1, 1)
+        # The real rotating loopback IdP is exercised, not a replacement upsert
+        # mislabeled as refresh. Existing native identity and login marker persist.
+        assert asyncio.run(auth.ensure_oauth_fresh(native.id)) is not None
+        assert auth.native_login_incarnation(native.id) == incarnation
+        clock.tick(now=1061)
+        assert observed.load().high_water[ident] == (1, 2)
+        auth.delete_credentials_for_provider(STUB_PROVIDER)
+        clock.tick(now=1122)
+        assert observed.load().high_water[ident] == (1, 3)
+        auth.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "test-new-access",
+                "refresh": "test-new-refresh",
+                "expires": 9999999999999,
+                "email": "owner@example.test",
+            },
+        )
+        clock.tick(now=1183)
+        assert observed.load().high_water[ident] == (2, 4)
+    finally:
+        auth.close()

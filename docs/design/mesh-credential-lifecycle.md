@@ -349,3 +349,33 @@ Watch grant resurrection, identity/scope confusion, MCP retry storms, generation
 reset/replay, loss of sticky denies, mixed-version writers, false effective-state
 publication and storage rollback. UI consumes the core effective-state contract;
 it must not recreate a local-auth-only readiness predicate in another repository.
+
+### L1 native-event metadata exception (PR #2379 remediation)
+
+L1's no-storage-migration boundary has one explicitly authorized **additive local
+metadata** exception: nullable `auth_credentials.login_incarnation TEXT`. This is
+not the encrypted-credential migration above: no credential value is moved,
+copied, hashed, removed, or added to wire payloads. Writable AuthStore startup
+serializes the schema check/ALTER with `BEGIN IMMEDIATE`; existing rows remain
+NULL. A native provider upsert stamps a random incarnation even when the same
+identity reuses its row id/creation timestamp. OAuth refresh writes only the
+existing data/update-time fields and cannot advance this login marker.
+
+The owner observes identity, update time and incarnation in one read-only SQLite
+query (`mode=ro`, not `immutable=1`, so committed WAL changes are visible). It
+never opens a writable AuthStore merely to observe. Missing schema/file, NULL
+marker or failed reads are UNKNOWN and cannot seed an available generation.
+Lifecycle scopes reversibly encode public native account/email references; they
+are not token fingerprints. `mesh_origin` copied rows are excluded. MCP OAuth
+upsert currently serves both login and refresh, so MCP remains unknown rather
+than falsely claiming a new-login producer.
+
+**Mixed-writer limit:** an older process can upsert an existing stamped row
+without updating this new column. Its relogin is then indistinguishable from
+rotation. Complete same-identity login detection requires native writers from
+this generation; old-writer correctness is not claimed. The additive column is
+ignored by older readers/writers, so rollback does not require data removal.
+Lifecycle announcements remain gated by recipient consent/fence before native
+metadata observation, finite placement or verified future coverage, and both
+MAC-covered link feature advertisements. Receipts reconcile per connection;
+retry batches rotate independently of delivery success.
