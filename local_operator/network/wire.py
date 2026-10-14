@@ -742,6 +742,23 @@ class LinkCrypto:
             raise LinkCryptoError(
                 "a record decrypted to a JSON value that is not an object", kind="parse"
             )
+        # Lifecycle frames are metadata-only and strictly bounded, so the strict
+        # validator runs HERE, on receipt, before the frame reaches any handler. It is
+        # scoped to net_broker lifecycle kinds so no other frame's legacy-tolerant
+        # decoding changes; the import is lazy because wire.py must stay stdlib-light
+        # and must not pull the credentials package in at module import time.
+        if frame.get("op") == "net_broker" and str(frame.get("kind") or "").startswith(
+            "lifecycle_"
+        ):
+            from local_operator.network.credentials.types import validate_lifecycle_frame
+
+            try:
+                validate_lifecycle_frame(frame)
+            except ValueError as exc:
+                raise LinkCryptoError(
+                    f"a lifecycle frame failed validation: {exc}; the link is closed",
+                    kind="parse",
+                ) from exc
         return frame
 
     @staticmethod
