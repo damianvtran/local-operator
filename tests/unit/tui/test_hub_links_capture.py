@@ -95,7 +95,7 @@ def _seed_link(
     return identity
 
 
-async def _capture(name: str, *, size=(100, 30), **seed) -> tuple[Path, dict]:
+async def _capture(name: str, *, size=(100, 30), **seed) -> Path:
     """Capture one case in its OWN config root, so state cannot accumulate (D3)."""
 
     import shutil
@@ -119,6 +119,7 @@ async def _capture(name: str, *, size=(100, 30), **seed) -> tuple[Path, dict]:
                 _seed_link(case_root, **link)
             # Drive the REAL open path: the action the binding/commands call.
             await app.action_hub_links()
+            await pilot.pause()
             await pilot.pause()
             path = OUT / f"{name}.svg"
             # INSIDE the run_test block: the export composites the ACTIVE screen,
@@ -229,7 +230,10 @@ async def test_capture_hub_links_states(tmp_path: Path, monkeypatch: pytest.Monk
     # 6. empty.
     await _capture("empty", links=[])
 
+    # NOTE: the persistent SIDEBAR roster captures are added WITH the roster
+    # build (D1); the overlay frames above are what exists today.
+
     svgs = sorted(OUT.glob("*.svg"))
     assert len(svgs) == 6
     for svg in svgs:
-        assert svg.read_text().startswith("<svg") or "<svg" in svg.read_text()[:200]
+        assert "<svg" in svg.read_text()[:200]
