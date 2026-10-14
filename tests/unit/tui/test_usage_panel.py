@@ -2772,3 +2772,43 @@ def test_other_provider_notes_remain_decorative() -> None:
     assert not body.notes
     source = next(row for row in body.lines if "nonessential" in row.plain)
     assert source.style == Style(color=theme_mod.semantic_color("dim"))
+
+
+def test_paid_wallet_keeps_actual_amount_and_explicit_spend_eligibility():
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui.widgets.usage_panel import build_usage_body
+
+    plan = UsageLimit(id="plan", label="Included", shared=True, amount=UsageAmount(used_fraction=1, unit="percent"))
+    wallet = UsageLimit(id="wallet", label="Credits", paid_fallback=True, available=True,
+                        amount=UsageAmount(remaining=123.5, unit="credits"))
+    report = UsageReport(provider="openai", limits=[plan, wallet])
+    lines = build_usage_body([report], width=100, now_ms=0, header_ms=0).lines
+    rendered = "\n".join(line.plain for line in lines)
+    assert "credits will continue" in rendered
+    assert "123.5 credits left" in rendered
+    wallet.available = False
+    rendered = "\n".join(line.plain for line in build_usage_body(
+        [report], width=100, now_ms=0, header_ms=0).lines)
+    assert "Spend unavailable" in rendered
+    assert "123.5 credits left" in rendered
+    assert "credits will continue" not in rendered
+
+
+def test_paid_family_exhaustion_does_not_claim_shared_plan_exhausted():
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui.widgets.usage_panel import build_usage_body
+    shared = UsageLimit(id="plan", label="Included", shared=True,
+                        amount=UsageAmount(used_fraction=0.2, unit="percent"))
+    family = UsageLimit(id="family", label="Opus", tier="opus",
+                        amount=UsageAmount(used_fraction=1, unit="percent"))
+    wallet = UsageLimit(id="paid", label="Credits", paid_fallback=True, available=True,
+                        amount=UsageAmount(remaining=25, unit="credits"))
+    report = UsageReport(provider="anthropic", limits=[shared, family, wallet])
+    rendered = "\n".join(line.plain for line in build_usage_body([report], 100, 0, 0).lines)
+    assert "included quota used" not in rendered
+    assert "credits will continue" not in rendered
+    assert "model-family caps still apply" in rendered
+    shared.shared = False
+    shared.amount.used_fraction = 1
+    rendered = "\n".join(line.plain for line in build_usage_body([report], 100, 0, 0).lines)
+    assert "credits will continue" not in rendered

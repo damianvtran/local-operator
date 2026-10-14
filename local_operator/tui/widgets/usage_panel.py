@@ -333,6 +333,15 @@ def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
     return ""
 
 
+def _display_amount(limit):  # noqa: ANN001, ANN201
+    # A blocked paid wallet is still funded. Keep its observed remaining
+    # amount visible without altering the backend's consumed/fraction facts.
+    if getattr(limit, "paid_fallback", False) and limit.amount.remaining is not None:
+        from dataclasses import replace
+        return replace(limit.amount, used=None)
+    return limit.amount
+
+
 def usage_bar(fraction: float | None, width: int) -> str:
     """A proportion bar, or dots when the fraction is unmeasurable.
 
@@ -409,7 +418,7 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
     label_cells = [
         cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0) for limit in limits
     ]
-    numbers_cells = [cell_len(format_amount(limit.amount) or "not reported") for limit in limits]
+    numbers_cells = [cell_len(format_amount(_display_amount(limit)) or "not reported") for limit in limits]
     reset_cells = [cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits]
     # The label truncates rather than pushing the numbers off the row: it is the
     # one column whose content the user can still identify from a prefix.
@@ -469,7 +478,7 @@ def _limit_row(  # noqa: ANN001
             row.append(bar[:filled], style=tint)
             row.append(bar[filled:], style=faint)
 
-    numbers = format_amount(limit.amount) or "not reported"
+    numbers = format_amount(_display_amount(limit)) or "not reported"
     row.append("  ")
     row.append(numbers.rjust(columns.numbers), style=dim)
 
@@ -653,7 +662,16 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         # states the condition AND the remedy, so repeating a vaguer version
         # of it in the heading spends the same cells saying less.
         row.append("  ·  usage unavailable", style=dim)
-    binding = binding_limit(report)
+    payable = [limit for limit in report.limits if limit.paid_usable()]
+    if payable:
+        # Eligible credit replaces included shared quota, but only explicit
+        # provider scope can replace a model-family cap.
+        from dataclasses import replace
+        remaining_gates = [limit for limit in report.limits if not getattr(limit, "paid_fallback", False)
+                           and limit.tier and not any(p.supersedes_tiers for p in payable)]
+        binding = binding_limit(replace(report, limits=remaining_gates))
+    else:
+        binding = binding_limit(report)
     if binding is not None:
         fraction = binding.amount.fraction() or 0.0
         tint = Style(color=_status_color(binding.effective_status()))
@@ -797,6 +815,39 @@ def build_usage_body(  # noqa: ANN001
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
         account_note = _account_status_note(report, now_ms, header_ms)
+        from local_operator.i18n.keys import tui_usage
+        from local_operator.i18n.text import tr
+        paid_text = tr("tui.usage")
+        # Reuse the backend's normalized eligibility, not wallet funding alone.
+        paid = [limit for limit in report.limits if limit.paid_usable()]
+        exhausted_plan = any(
+            not getattr(limit, "paid_fallback", False) and getattr(limit, "shared", False)
+            and not limit.tier and limit.amount.fraction() is not None
+            and limit.amount.fraction() >= 1 for limit in report.limits
+        )
+        retained_tiers = any(
+            limit.tier and limit.amount.fraction() is not None
+            and limit.amount.fraction() >= 1 for limit in report.limits
+        ) and not any(limit.supersedes_tiers for limit in paid)
+        if paid and exhausted_plan:
+            lines.append(Text("  " + paid_text(tui_usage.paid_continue()), style=dim))
+            cuts.add(len(lines))
+            notes.add(len(lines) - 1)
+        if retained_tiers:
+            lines.append(Text("  " + paid_text(tui_usage.paid_family_caps()), style=dim))
+            cuts.add(len(lines))
+            notes.add(len(lines) - 1)
+        for allowance in report.limits:
+            if getattr(allowance, "paid_fallback", False):
+                qualifier = (
+                    paid_text(tui_usage.paid_blocked()) if allowance.available is False
+                    else paid_text(tui_usage.paid_eligibility_unknown()) if allowance.available is None
+                    else paid_text(tui_usage.paid_unlimited()) if allowance.unlimited else ""
+                )
+                if qualifier:
+                    lines.append(Text(f"  {allowance.label}: {qualifier}", style=dim))
+                    cuts.add(len(lines))
+                    notes.add(len(lines) - 1)
         muse_note = (
             report.notes
             if report.provider == "meta-muse"
