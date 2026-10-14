@@ -60,7 +60,19 @@ def _seed_full_store(tmp_path) -> Store:
             "INSERT INTO enrollments (owner_key, credential_id, account_id, tenant_id, "
             "endpoint_id, canonical_base_url, enrollment_generation, consent_version, "
             "consent_ref, designated_session, state) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (key, 7, "acc_1", "ten_1", "ep_1", "https://hub.example", 7, "c-v1", "c-ref", "s1", "committed"),
+            (
+                key,
+                7,
+                "acc_1",
+                "ten_1",
+                "ep_1",
+                "https://hub.example",
+                7,
+                "c-v1",
+                "c-ref",
+                "s1",
+                "committed",
+            ),
         )
         conn.execute(
             "INSERT INTO claims (owner_key, message_id, session_id, token, generation, "
@@ -78,8 +90,19 @@ def _seed_full_store(tmp_path) -> Store:
             "admission_revision, policy_epoch, creator_generation, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                key, "bmsg_1", "9f2a" * 16, "aa11" * 16, "prompt-v1", "model-a", "allow",
-                '["spam"]', "bb22" * 16, "rev-1", 3, 7, time.time(),
+                key,
+                "bmsg_1",
+                "9f2a" * 16,
+                "aa11" * 16,
+                "prompt-v1",
+                "model-a",
+                "allow",
+                '["spam"]',
+                "bb22" * 16,
+                "rev-1",
+                3,
+                7,
+                time.time(),
             ),
         )
         conn.execute(

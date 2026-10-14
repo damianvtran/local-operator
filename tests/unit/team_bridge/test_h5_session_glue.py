@@ -36,8 +36,7 @@ from local_operator.team_bridge.client import (
     BridgeSignInRequired,
     BridgeUnreachable,
 )
-from local_operator.team_bridge.store import Store
-from local_operator.team_bridge.store import OwnerReceipt
+from local_operator.team_bridge.store import OwnerReceipt, Store
 from local_operator.team_bridge.types import OwnerSnapshot
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 
@@ -78,10 +77,10 @@ def _decide_settled(tmp_path: Path, outcome: str) -> bool:
         return any(str(r.get("state")) == "sent" and r.get("receipt_json") for r in rows)
     if outcome == "transient":
         return any(
-            str(r.get("state")) == "pending" and str(r.get("error_code") or "")
-            for r in rows
+            str(r.get("state")) == "pending" and str(r.get("error_code") or "") for r in rows
         )
     return any(str(r.get("state")) == outcome for r in rows)
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -111,6 +110,7 @@ async def _session(tmp_path: Path):
 
     stream = ScriptedStream([[]])
     session = make_session(tmp_path, stream)
+
     # ``Session.ask_queue()`` is ``None`` until a front end installs the ask
     # hook (the queue is gated on it, session.py ``ask_queue``). The product's
     # raise path guards that ``None``; this fixture stands in for the attached
@@ -133,9 +133,7 @@ async def _session(tmp_path: Path):
         # (session.py ``_dispatch_bridge_decisions``); a stub without it makes
         # the record step fail contained and NOTHING ever settles. Same
         # construction as ``BridgeRuntime.key()`` with no ``owner_key`` set.
-        key=lambda: json.dumps(
-            [OWNER.canonical_base_url, OWNER.account_id, OWNER.tenant_id]
-        ),
+        key=lambda: json.dumps([OWNER.canonical_base_url, OWNER.account_id, OWNER.tenant_id]),
     )
     return session
 
@@ -195,7 +193,9 @@ async def test_duplicate_consumption_and_reconcile_never_post_twice(
     # The dispatch runs in a background task; settle on the transport ACTUALLY
     # having been entered (0 → 1 is non-trivial) before asserting counts.
     await wait_for(
-        lambda: len(posted) == 1 and not _tasks_pending(session) and _decide_settled(tmp_path, "success"),
+        lambda: len(posted) == 1
+        and not _tasks_pending(session)
+        and _decide_settled(tmp_path, "success"),
         5.0,
     )  # consumed answer + dispatch done + durable receipt
     # The SAME durable row re-appended (boot reconcile / steering batch):
@@ -230,7 +230,9 @@ async def test_a_transient_dispatch_settles_without_automatic_retries(
     except Exception:  # noqa: BLE001 — a failed dispatch is contained by design
         pass
     await wait_for(
-        lambda: len(attempts) == 1 and not _tasks_pending(session) and _decide_settled(tmp_path, "transient"),
+        lambda: len(attempts) == 1
+        and not _tasks_pending(session)
+        and _decide_settled(tmp_path, "transient"),
         5.0,
     )
     # Re-append (the durable row already exists) and reconcile: NO automatic
@@ -279,7 +281,9 @@ async def test_transport_entry_is_not_settlement(
     release.set()
     await dispatch
     await wait_for(
-        lambda: len(posted) == 1 and not _tasks_pending(session) and _decide_settled(tmp_path, "success"),
+        lambda: len(posted) == 1
+        and not _tasks_pending(session)
+        and _decide_settled(tmp_path, "success"),
         5.0,
     )
     await session.dispose()

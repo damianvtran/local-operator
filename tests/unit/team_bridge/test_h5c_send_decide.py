@@ -14,7 +14,6 @@ import pytest
 
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
-
 from tests.unit.team_bridge.test_client import FakeStore, _err, _ok
 
 pytestmark = pytest.mark.asyncio
@@ -201,7 +200,8 @@ async def test_a_decide_without_or_with_a_mismatched_receipt_never_ships() -> No
     client = _make_client(_refusal_requests(requests))
 
     with pytest.raises(ValueError):
-        await client.decide("bmsg_1", tenant_id=TENANT, decision="approved", ask_ref=None)  # type: ignore[arg-type]
+        # type: ignore[arg-type] — the point of the case: the server word
+        await client.decide("bmsg_1", tenant_id=TENANT, decision="approved", ask_ref=None)
     with pytest.raises(ValueError):
         await client.decide(
             "bmsg_1",

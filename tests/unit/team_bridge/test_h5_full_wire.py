@@ -42,7 +42,12 @@ from local_operator.harness.message_types import (
 )
 from local_operator.mobile import peer_client as peer_client_mod
 from local_operator.mobile.peer_client import send_peer_message
-from local_operator.session.runtime.inbox import SOURCE_PEER, InboxLine, append_inbox, peek_inbox
+from local_operator.session.runtime.inbox import (
+    SOURCE_PEER,
+    InboxLine,
+    append_inbox,
+    peek_inbox,
+)
 from local_operator.session.runtime.server import RuntimeServer, _ack_frame_parts
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
@@ -52,12 +57,12 @@ from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.store import Store
 from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
 from tests.unit.team_bridge.test_h5_envelope_negatives import (
+    _HINT_FIELDS,
     ADMISSION,
     DREF,
     MESSAGE_ID,
     POLICY_EPOCH,
     TEMPLATE,
-    _HINT_FIELDS,
     _meta,
     _owner,
     _runtime,
@@ -334,7 +339,13 @@ def _seed_second_envelope(session) -> dict:
         },
     )
     store.mark_delivery_phase(_owner(), DREF2, "handoff_started")
-    return _meta(message_id=MESSAGE_ID_2, delivery_ref=DREF2, body_sha256=body, display_digest=digest, **hints)
+    return _meta(
+        message_id=MESSAGE_ID_2,
+        delivery_ref=DREF2,
+        body_sha256=body,
+        display_digest=digest,
+        **hints,
+    )
 
 
 async def test_live_full_chain_ask_can_only_come_from_the_received_frame(
@@ -473,6 +484,7 @@ async def test_negative_b_altered_hints_never_ask(tmp_path, isolated_config, mon
         bridge_meta=altered,
     )
     assert str(ack)
+
     # The ack returns BEFORE the spawned wake turn writes the issuance row, so
     # the first evaluations see NO row at all: the predicate must treat that as
     # "not yet", never subscript it (a ``None[...]`` here raised out of the

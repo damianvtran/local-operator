@@ -16,7 +16,12 @@ def test_deliveries_and_refreshes_split_cleanly() -> None:
     plan = plan_feed_refs([DELIVERY, DECIDED, REVOKED, EXPIRED, STATE])
     assert plan.deliveries == ("bmsg_1",)
     assert plan.refresh is True
-    assert plan.refresh_types == ("request_decided", "request_revoked", "request_expired", "state_changed")
+    assert plan.refresh_types == (
+        "request_decided",
+        "request_revoked",
+        "request_expired",
+        "state_changed",
+    )
     assert plan.skipped == ()
 
 
@@ -29,7 +34,9 @@ def test_request_refs_never_produce_a_delivery() -> None:
 
 
 def test_malformed_refs_are_skipped_not_guessed() -> None:
-    plan = plan_feed_refs(["garbage", "message_available:kinds=bmsg_1", "message_available:message_id="])
+    plan = plan_feed_refs(
+        ["garbage", "message_available:kinds=bmsg_1", "message_available:message_id="]
+    )
     assert plan.deliveries == () and plan.refresh is False
     assert len(plan.skipped) == 3
 

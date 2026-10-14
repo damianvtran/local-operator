@@ -442,7 +442,10 @@ def test_spine_ack_binding_mismatch_arms_hold_without_delivery(tmp_path, monkeyp
     # Wrong target: a real BLOCKED intent (reject receipt) answering our read.
     _arm(
         tmp_path / "wrong_target",
-        record_kwargs={"target": "blocked", "receipt": _receipt("hello from the org", verdict="reject")},
+        record_kwargs={
+            "target": "blocked",
+            "receipt": _receipt("hello from the org", verdict="reject"),
+        },
     )
     # Wrong BODY HASH: a read intent for different screened bytes.
     _arm(tmp_path / "wrong_body", record_kwargs={"receipt": _receipt("a different body")})
@@ -528,9 +531,7 @@ def test_spine_ack_full_tuple_mismatch_arms_hold(tmp_path, monkeypatch) -> None:
         intent_id = _AckStore(config_dir).record_ack_intent(
             owner_, message_id, target, altered, "connector-test-wrong"
         )
-        _AckStore(config_dir).mark_ack_result(
-            owner_, intent_id, state="confirmed", error_code=None
-        )
+        _AckStore(config_dir).mark_ack_result(owner_, intent_id, state="confirmed", error_code=None)
         return SimpleNamespace(state="confirmed", intent_id=intent_id)
 
     monkeypatch.setattr(wake_mod, "ack_read", wrong_tuple_ack)
@@ -581,7 +582,8 @@ def test_spine_phase_persistence_refusal_holds_without_delivery(tmp_path, monkey
     """
     from types import SimpleNamespace
 
-    from local_operator.team_bridge.store import Store as _SpineStore, StoreRefused as _Refused
+    from local_operator.team_bridge.store import Store as _SpineStore
+    from local_operator.team_bridge.store import StoreRefused as _Refused
 
     store, owner = _enroll(tmp_path)
     record, body = _wire_spine(monkeypatch, tmp_path)
@@ -810,9 +812,7 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     # Make it due again; the second failure must ADVANCE the gap (bounded 2x).
     store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
     asyncio.run(
-        loop_mod.retry_due_holds(
-            owner, config_dir=tmp_path, access=_access(owner), auth_store=None
-        )
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     row_two = store.screening_hold(owner, "bmsg_f")
     assert row_two is not None
@@ -822,9 +822,7 @@ def test_repeat_failure_advances_bounded_backoff(tmp_path, monkeypatch) -> None:
     loop_mod._RETRY_ATTEMPTS["bmsg_f"] = loop_mod.RETRY_MAX_ATTEMPTS
     store.advance_hold_retry(owner, "bmsg_f", retry_at=time.time() - 1)
     asyncio.run(
-        loop_mod.retry_due_holds(
-            owner, config_dir=tmp_path, access=_access(owner), auth_store=None
-        )
+        loop_mod.retry_due_holds(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
     )
     row_three = store.screening_hold(owner, "bmsg_f")
     assert row_three is not None

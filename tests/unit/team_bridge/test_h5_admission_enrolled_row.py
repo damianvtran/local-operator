@@ -20,7 +20,9 @@ def _owner() -> SimpleNamespace:
     return SimpleNamespace(tenant_id="ten_B", endpoint_id="ep_B")
 
 
-def _row(tenant_id: str, *, eligible: bool = True, state: str = "active", endpoint: str = "ep") -> dict:
+def _row(
+    tenant_id: str, *, eligible: bool = True, state: str = "active", endpoint: str = "ep"
+) -> dict:
     return {
         "tenant_id": tenant_id,
         "eligible": eligible,

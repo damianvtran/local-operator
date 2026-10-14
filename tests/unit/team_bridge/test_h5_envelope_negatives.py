@@ -27,8 +27,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.harness.message_types import display_context_digest
+from local_operator.session.session import Session
 from local_operator.team_bridge import asks_bridge as asks_bridge_mod
 from local_operator.team_bridge import store as bridge_store
+from local_operator.team_bridge.ask_issuance import (
+    STATE_HELD,
+    STATE_RAISED,
+    STATE_UNRECOVERABLE,
+    AskIssuance,
+)
+
 # Bound at IMPORT time, before the autouse ``_no_enqueue`` fixture swaps the
 # module attribute for a recorder: the two tests that SEED the real ask log
 # must write through the real builder, and a function-local ``from ... import``
@@ -37,15 +46,7 @@ from local_operator.team_bridge import store as bridge_store
 from local_operator.team_bridge.asks_bridge import (
     enqueue_bridge_request_ask as _real_enqueue_bridge_request_ask,
 )
-from local_operator.harness.message_types import display_context_digest
-from local_operator.team_bridge.ask_issuance import (
-    STATE_HELD,
-    STATE_RAISED,
-    STATE_UNRECOVERABLE,
-    AskIssuance,
-)
 from local_operator.team_bridge.store import Store, StoreRefused
-from local_operator.session.session import Session
 
 BODY_HASH = "9f2a" * 16
 TEMPLATE = "aa11" * 16
@@ -172,7 +173,8 @@ def _seed_note_envelope(tmp_path) -> None:
             "template_sha256, prompt_version, model, verdict, categories_digest, envelope_digest, "
             "admission_revision, policy_epoch, creator_generation, claim_hash, claim_session_id, "
             "claim_generation, claim_expires_at, display_digest, fingerprint, phase, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+            ",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 DREF,
                 bridge_store._owner_key(_owner()),
@@ -433,7 +435,8 @@ def test_two_exact_asks_for_the_same_message_hold_instead_of_duplicating(
     tmp_path, _no_enqueue
 ) -> None:
     from local_operator.asks.queue import AskQueue
-    from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
+    from tests.unit.asks.test_queue import BASE
+    from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
     store = _seed_store(tmp_path)
     _stamp(store)
@@ -454,10 +457,20 @@ def test_two_exact_asks_for_the_same_message_hold_instead_of_duplicating(
     }
     queue = AskQueue(QueueFakeSession(), config_dir=tmp_path, session_id="s1", clock=lambda: BASE)
     first = _real_enqueue_bridge_request_ask(
-        queue, message_id=MESSAGE_ID, sender="dana@acme.example", summary="one", excerpt="", scope=scope
+        queue,
+        message_id=MESSAGE_ID,
+        sender="dana@acme.example",
+        summary="one",
+        excerpt="",
+        scope=scope,
     )
     second = _real_enqueue_bridge_request_ask(
-        queue, message_id=MESSAGE_ID, sender="dana@acme.example", summary="two", excerpt="", scope=scope
+        queue,
+        message_id=MESSAGE_ID,
+        sender="dana@acme.example",
+        summary="two",
+        excerpt="",
+        scope=scope,
     )
     assert first["ok"] is True and second["ok"] is True
     # TWO authoritative asks exist for the same message/scope: the tri-state
@@ -586,12 +599,11 @@ def test_unavailable_lookup_holds_instead_of_enqueueing(tmp_path, monkeypatch) -
     assert ledger.read(_owner(), MESSAGE_ID)["state"] == STATE_HELD
 
 
-def test_found_exact_ask_terminalizes_without_a_second_enqueue(
-    tmp_path, monkeypatch
-) -> None:
+def test_found_exact_ask_terminalizes_without_a_second_enqueue(tmp_path, monkeypatch) -> None:
     from local_operator.asks.queue import AskQueue
     from local_operator.team_bridge.authority import scope_from_owner
-    from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
+    from tests.unit.asks.test_queue import BASE
+    from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
     store = _seed_store(tmp_path)
     _stamp(store)

@@ -79,7 +79,9 @@ def _record(
         question_id=question_id,
         word="approve",
         generation=str(runtime.owner.enrollment_generation) if generation is None else generation,
-        scope_json=json.dumps(scope if scope is not None else fence_mod.scope_from_runtime(runtime)),
+        scope_json=json.dumps(
+            scope if scope is not None else fence_mod.scope_from_runtime(runtime)
+        ),
         consumption_row_id=asks_store.response_row_id(ask_id),
     )
 
@@ -122,9 +124,7 @@ async def test_empty_generation_is_non_authorizing_in_retry_state(tmp_path) -> N
     runtime = _runtime(tmp_path)
     intent, _ = _record(intents, runtime, generation="")
     assert (
-        intents.retry_state_for(
-            OWNER_KEY, "a-1", "bmsg_1", current_generation="7"
-        )
+        intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1", current_generation="7")
         == "owner_changed"
     )
     assert intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1") == intent.state
@@ -174,9 +174,7 @@ async def test_attempt_refuses_terminal_and_empty_generation(
         await attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
     assert exc.value.code == "not_retryable"
     assert calls == []  # settled: never re-POST
-    empty, _ = _record(
-        intents, runtime, generation="", ask_id="a-2", question_id="bmsg_2"
-    )
+    empty, _ = _record(intents, runtime, generation="", ask_id="a-2", question_id="bmsg_2")
     with pytest.raises(DecideIntentsRefused) as exc2:
         await attempt_decide_intent(runtime.client, intents, empty, runtime=runtime)
     assert exc2.value.code == "owner_changed"  # the SHARED validator refuses
@@ -233,15 +231,17 @@ async def test_recovery_without_durable_record_refuses(tmp_path, monkeypatch) ->
     intents = DecideIntents(tmp_path)
     with pytest.raises(DecideIntentsRefused) as exc:
         await recover_from_durable_answer(
-            _runtime(tmp_path).client, intents, _runtime(tmp_path), ask_id="a-1", question_id="bmsg_1"
+            _runtime(tmp_path).client,
+            intents,
+            _runtime(tmp_path),
+            ask_id="a-1",
+            question_id="bmsg_1",
         )
     assert exc.value.code == "no_durable_answer"
     assert intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1") == "none"
 
 
-async def test_recovery_generic_question_and_scope_drift_refuse(
-    tmp_path, monkeypatch
-) -> None:
+async def test_recovery_generic_question_and_scope_drift_refuse(tmp_path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     base_question = {"id": "bridge-bmsg_1", "question_id": "bmsg_1", "human_required": True}
     generic = {
@@ -271,9 +271,7 @@ async def test_recovery_generic_question_and_scope_drift_refuse(
     assert intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1") == "none"  # nothing minted
 
 
-async def test_recovery_positive_uses_original_values_and_posts_once(
-    tmp_path, monkeypatch
-) -> None:
+async def test_recovery_positive_uses_original_values_and_posts_once(tmp_path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     calls: list[object] = []
 
@@ -366,9 +364,7 @@ async def test_recovery_message_key_only_and_ambiguous_refuse(tmp_path, monkeypa
     assert intents.retry_state_for(OWNER_KEY, "a-1", "bmsg_1") == "none"
 
 
-async def test_recovery_forged_row_type_lineage_and_selector_refuse(
-    tmp_path, monkeypatch
-) -> None:
+async def test_recovery_forged_row_type_lineage_and_selector_refuse(tmp_path, monkeypatch) -> None:
     """S-7: the consumed-row verification is fail-closed on every arm.
 
     A wrong custom type, a non-human attribution, a row whose parsed id is not

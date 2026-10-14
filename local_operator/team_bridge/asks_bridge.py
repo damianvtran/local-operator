@@ -29,8 +29,8 @@ reading aid. The excerpt bound is a constraint of this store, not a wire rule.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 #: The two answer options (§10.3: "options = Approve / Deny"). Ids are stable
 #: identifiers the answer surfaces key on; labels are the §2.5 strings.
@@ -144,7 +144,9 @@ def enqueue_bridge_request_ask(
     )
     keyed = getattr(queue, "enqueue_idempotent", None)
     if issuance_key and fingerprint and callable(keyed):
-        return keyed(
+        # ``getattr`` erases the callable's type; the door is the queue's own
+        # keyed-idempotent enqueue, whose receipt is the record shape below.
+        return cast(Callable[..., dict[str, Any]], keyed)(
             issuance_key=issuance_key,
             fingerprint=fingerprint,
             questions=[question],

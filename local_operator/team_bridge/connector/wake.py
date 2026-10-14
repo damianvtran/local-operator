@@ -45,9 +45,11 @@ from local_operator.harness.message_types import (
     BRIDGE_META_MAX_BYTES,
     DISPLAY_CONTEXT_BOUNDS,
     TEAM_BRIDGE_MESSAGE_TYPE,
-    display_context_digest as canonical_display_digest,
-    validate_bridge_meta,
 )
+from local_operator.harness.message_types import (
+    display_context_digest as canonical_display_digest,
+)
+from local_operator.harness.message_types import validate_bridge_meta
 from local_operator.team_bridge.types import AckTarget
 
 logger = logging.getLogger(__name__)
@@ -73,16 +75,14 @@ def _producer_fence(store: Any, owner: Any, access: Any, settings: Any) -> str:
     the bound context is intact, else a typed code for the caller's HOLD.
     """
 
-    from local_operator.team_bridge.store import _owner_key
-
     # S-8a: the off-switch must be read from DISK at EVERY boundary, not from
     # the caller's long-lived settings object — an operator can disable the
     # feature while a screening or ACK await is in flight, and a cached True
     # would let later ACK/handoff traffic continue. This is the SAME fresh-read
     # discipline ``authority_fence`` uses; a torn read fails closed.
     from local_operator.config import read_config_values
-
     from local_operator.team_bridge.settings import TeamBridgeSettings
+    from local_operator.team_bridge.store import _owner_key
 
     # NIT-3 (PR #2378): the store names its own config directory — this read
     # and the store's own state go through the SAME path by construction.
@@ -140,6 +140,7 @@ def _display_fields(item: Mapping[str, Any]) -> dict[str, str] | None:
     if canonical_display_digest(fields) is None:
         return None
     return fields
+
 
 #: The excerpt window §11.4 pins: at least 1200 chars of the screened body
 #: reach the CoS (a shorter body is sent whole), and at most the SHARED
@@ -478,10 +479,7 @@ async def deliver_wake(
     # Cold with NO durable history: exactly the designated-CoS engagement
     # exception. The typed history predicate — never an error string — selects
     # this branch, and the errand CARRIES the message (WakeErrand never does).
-    from local_operator.session.runtime.launch import (
-        PeerMessageErrand,
-        engage_runtime,
-    )
+    from local_operator.session.runtime.launch import PeerMessageErrand, engage_runtime
 
     outcome = await engage_runtime(
         session_id,
@@ -622,7 +620,11 @@ async def handle_message_available(
             if fitted is None or display_digest is None:
                 # Canonically-unboundable display context (unknown/oversized
                 # field): the human could not be shown a tamper-evident ask.
-                return {"action": "hold", "message_id": message_id, "code": "display_context_invalid"}
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": "display_context_invalid",
+                }
             try:
                 envelope = store.write_screened_request_delivery(
                     owner,
@@ -635,17 +637,11 @@ async def handle_message_available(
                         "thread_id": str(getattr(ref, "thread_id", "") or ""),
                         "message_kind": str(getattr(ref, "message_type", "") or ""),
                         "request_state": str(getattr(ref, "request_state", "") or ""),
-                        "request_expires_at": str(
-                            getattr(ref, "request_expires_at", "") or ""
-                        ),
+                        "request_expires_at": str(getattr(ref, "request_expires_at", "") or ""),
                         "request_ref": str(getattr(ref, "request_ref", "") or ""),
                         "sender_account_id": str(getattr(ref, "sender_account_id", "") or ""),
-                        "sender_endpoint_id": str(
-                            getattr(ref, "sender_endpoint_id", "") or ""
-                        ),
-                        "recipient_account_id": str(
-                            getattr(ref, "recipient_account_id", "") or ""
-                        ),
+                        "sender_endpoint_id": str(getattr(ref, "sender_endpoint_id", "") or ""),
+                        "recipient_account_id": str(getattr(ref, "recipient_account_id", "") or ""),
                         "recipient_endpoint_id": str(
                             getattr(ref, "recipient_endpoint_id", "") or ""
                         ),
@@ -683,7 +679,9 @@ async def handle_message_available(
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
             return {"action": "hold", "message_id": message_id, "code": fence_code}
-        ack = await ack_read(owner, message_id, "read", receipt, config_dir=config_dir, access=access)
+        ack = await ack_read(
+            owner, message_id, "read", receipt, config_dir=config_dir, access=access
+        )
         from local_operator.team_bridge.pull import ACK_CONFIRMED
 
         # S-12: an ORDINARY return from ack is not a confirmed read — the
@@ -692,9 +690,8 @@ async def handle_message_available(
         # its frozen intent binding advances the handoff; anything else HOLDs
         # with the envelope parked in ``prepared`` (no fabricated ACK, no
         # delivery).
-        if (
-            str(getattr(ack, "state", "") or "") != ACK_CONFIRMED
-            or not str(getattr(ack, "intent_id", "") or "")
+        if str(getattr(ack, "state", "") or "") != ACK_CONFIRMED or not str(
+            getattr(ack, "intent_id", "") or ""
         ):
             return {
                 "action": "hold",

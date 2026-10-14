@@ -19,7 +19,11 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator.team_bridge import authority as fence_mod
-from local_operator.team_bridge.host import admission_refusal, admit_bridge_runtime, admit_soon
+from local_operator.team_bridge.host import (
+    admission_refusal,
+    admit_bridge_runtime,
+    admit_soon,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,7 +61,11 @@ def _payload(tenant_id: str = "ten_1", endpoint_id: str = "ep_1", state: str = "
     return {
         "api_version": "1",
         "tenants": [
-            {"tenant_id": tenant_id, "eligible": True, "endpoint": {"id": endpoint_id, "state": state}}
+            {
+                "tenant_id": tenant_id,
+                "eligible": True,
+                "endpoint": {"id": endpoint_id, "state": state},
+            }
         ],
     }
 
