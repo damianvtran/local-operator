@@ -3426,7 +3426,10 @@ def install_into_generation(
     # timestamp that could belong to a concurrent newer operation.
     try:
         operation = install_transaction.start_operation(
-            stable_root(), baseline=baseline, target=version, route=mode,
+            stable_root(),
+            baseline=baseline,
+            target=version,
+            route=mode,
         )
         operation.advance("preparing", candidate=str(generation))
         install_transaction.link_operation(operation, generation)
@@ -7031,14 +7034,16 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
         # local-work contract is moved by services_stage below; other units stay
         # running/pending until their own continuity contract is available.
         names = ("browser bridge", "tunnel", "wakes supervisor", "network relay", "mobile")
-        return [DaemonRefresh(
-            "supervised daemons",
-            warnings=(
-                "supervised services remain pending; no verified rolling handoff "
-                "capability (none restarted)",
-            ),
-            statuses=tuple(DaemonStatus(name, "pending") for name in names),
-        )]
+        return [
+            DaemonRefresh(
+                "supervised daemons",
+                warnings=(
+                    "supervised services remain pending; no verified rolling handoff "
+                    "capability (none restarted)",
+                ),
+                statuses=tuple(DaemonStatus(name, "pending") for name in names),
+            )
+        ]
     deadline = time.monotonic() + _STAGE_DEADLINE_S
     results: dict[str, DaemonRefresh] = {}
 
@@ -7848,7 +7853,8 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
 
             refreshes = (
                 reload_serve_daemons(rolling=True)
-                if wait_s is None else reload_serve_daemons(wait_s=wait_s, rolling=True)
+                if wait_s is None
+                else reload_serve_daemons(wait_s=wait_s, rolling=True)
             )
         else:
             refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
@@ -7937,9 +7943,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             reading = services.probe_address(record)
             healthy = state == "live" and reading.verdict == services.SERVING and not reading.detail
             matches = (
-                healthy
-                and image is not None
-                and Path(record.prefix).resolve() == image.resolve()
+                healthy and image is not None and Path(record.prefix).resolve() == image.resolve()
             )
             serving.append(
                 {
@@ -7949,37 +7953,52 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
                     "loaded_root": record.prefix if healthy else "",
                     "state": "current" if matches else "pending",
                     "reason": (
-                        ""
-                        if matches
-                        else reading.detail or "old serving build or unproved handoff"
+                        "" if matches else reading.detail or "old serving build or unproved handoff"
                     ),
                 }
             )
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
-    pending = [{"name": item.name, "state": "pending",
-                "reason": "unit presence/serving identity and rolling continuity are unproved"}
-               for item in stage.daemons if item.status == "pending"]
-    return {"contract": "rolling-no-kill-v1", "mode": "rolling-immutable",
-            "promoted": {
-                "generation": str(promoted or ""),
-                "version": generation_version(promoted),
-            },
-            "now_current": {
-                "generation": str(current or ""),
-                "version": generation_version(current),
-            },
-            "core_installed": promoted is not None and generation_version(promoted) != "",
-            # Unsupported supervisor units / old12 FIRST activation are not an
-            # empty authoritative census. Never announce overall COMPLETE.
-            "central_services_complete": False,
-            "serving_measured": serving_measured, "services": serving + pending,
-            "runtimes": {"measured": measured,
-                         **{key: value if measured else None for key, value in counts.items()}}}
+    pending = [
+        {
+            "name": item.name,
+            "state": "pending",
+            "reason": "unit presence/serving identity and rolling continuity are unproved",
+        }
+        for item in stage.daemons
+        if item.status == "pending"
+    ]
+    return {
+        "contract": "rolling-no-kill-v1",
+        "mode": "rolling-immutable",
+        "promoted": {
+            "generation": str(promoted or ""),
+            "version": generation_version(promoted),
+        },
+        "now_current": {
+            "generation": str(current or ""),
+            "version": generation_version(current),
+        },
+        "core_installed": promoted is not None and generation_version(promoted) != "",
+        # Unsupported supervisor units / old12 FIRST activation are not an
+        # empty authoritative census. Never announce overall COMPLETE.
+        "central_services_complete": False,
+        "serving_measured": serving_measured,
+        "services": serving + pending,
+        "runtimes": {
+            "measured": measured,
+            **{key: value if measured else None for key, value in counts.items()},
+        },
+    }
 
 
-def _emit_update_report(*, install_version: str, target: str, stage: StageReport | None,
-                        promoted_generation: Path | None = None) -> None:
+def _emit_update_report(
+    *,
+    install_version: str,
+    target: str,
+    stage: StageReport | None,
+    promoted_generation: Path | None = None,
+) -> None:
     """Emit the ONE machine-readable line at exit — additive to the sentences.
 
     THE LINE IS A CONTRACT (2026-09-30 design): the desktop app parses it to
@@ -8035,8 +8054,11 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
                 # Receipt persistence belongs to the promoted candidate's intent,
                 # even when newer current C now serves. Pending is recoverable,
                 # never an invented all-central complete verdict.
-                operation.advance("partial", current=rolling["now_current"]["generation"],
-                                  receipts=rolling["services"])
+                operation.advance(
+                    "partial",
+                    current=rolling["now_current"]["generation"],
+                    receipts=rolling["services"],
+                )
                 payload["update_report"]["operation_id"] = operation.identifier
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
@@ -8102,8 +8124,12 @@ def _generation_upgrade(
     # must not silently reintroduce deletion after immutable promotion succeeds.
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
-    _emit_update_report(install_version=install_version, target=target, stage=stage,
-                        promoted_generation=promoted_generation)
+    _emit_update_report(
+        install_version=install_version,
+        target=target,
+        stage=stage,
+        promoted_generation=promoted_generation,
+    )
     return total
 
 
@@ -8485,6 +8511,10 @@ def update_command(
         print(line)
     stage = _run_services_tail(services=services)
     _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
-    _emit_update_report(install_version=installed, target=result.latest, stage=stage,
-                        promoted_generation=promoted[0] if promoted else None)
+    _emit_update_report(
+        install_version=installed,
+        target=result.latest,
+        stage=stage,
+        promoted_generation=promoted[0] if promoted else None,
+    )
     return 0

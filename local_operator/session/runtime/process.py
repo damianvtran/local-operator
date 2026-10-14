@@ -4182,9 +4182,7 @@ async def _drain_inbox_into(handle: object) -> int:
     # back only what it will not deliver.
     consumed = _resume_consumed_ids(directory)
     if consumed:
-        lines = [
-            line for line in lines if (getattr(line, "message_id", "") or "") not in consumed
-        ]
+        lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]

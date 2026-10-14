@@ -47,15 +47,27 @@ def test_bad_download_hash_never_loads_controller_or_creates_environment(
 ):
     root, generation = destination
     data = b"not-a-controller"
-    monkeypatch.setattr(bootstrap, "_publication", lambda _target: (
-        "0.70.99", "local_operator-0.70.99-py3-none-any.whl",
-        "https://files.pythonhosted.org/fixture.whl", hashlib.sha256(b"different").hexdigest(),
-    ))
+    monkeypatch.setattr(
+        bootstrap,
+        "_publication",
+        lambda _target: (
+            "0.70.99",
+            "local_operator-0.70.99-py3-none-any.whl",
+            "https://files.pythonhosted.org/fixture.whl",
+            hashlib.sha256(b"different").hexdigest(),
+        ),
+    )
     monkeypatch.setattr(bootstrap, "_read_url", lambda *_args, **_kwargs: data)
     calls = []
     monkeypatch.setattr(bootstrap, "_run", lambda *_args, **_kwargs: calls.append("worker"))
-    args = argparse.Namespace(root=str(root), baseline=str(generation), target=None,
-                              caller=bootstrap.CALLER_CONTRACT, snapshot=None, no_services=False)
+    args = argparse.Namespace(
+        root=str(root),
+        baseline=str(generation),
+        target=None,
+        caller=bootstrap.CALLER_CONTRACT,
+        snapshot=None,
+        no_services=False,
+    )
     with pytest.raises(bootstrap.BootstrapError, match="hash disagrees"):
         bootstrap.bootstrap(args)
     assert not calls
@@ -63,7 +75,13 @@ def test_bad_download_hash_never_loads_controller_or_creates_environment(
 
 def test_legacy_caller_has_no_implicit_rolling_authority(destination):
     root, generation = destination
-    args = argparse.Namespace(root=str(root), baseline=str(generation), target=None,
-                              caller="old-ui", snapshot=None, no_services=False)
+    args = argparse.Namespace(
+        root=str(root),
+        baseline=str(generation),
+        target=None,
+        caller="old-ui",
+        snapshot=None,
+        no_services=False,
+    )
     with pytest.raises(bootstrap.BootstrapError, match="caller"):
         bootstrap.bootstrap(args)

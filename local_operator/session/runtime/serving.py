@@ -2271,9 +2271,7 @@ class ServingSessionHandle(SessionHandle):
         latch = getattr(self._session, "request_checkpoint", None)
         if not callable(latch):
             return False
-        if not latch(
-            turn_id=turn_id, boot_build=boot_build, target_build=pair, phase=phase
-        ):
+        if not latch(turn_id=turn_id, boot_build=boot_build, target_build=pair, phase=phase):
             return False
         # Open the admission window WITHOUT the idle gate. If the window cannot
         # open, the request we just latched must not be left half-promised.

@@ -427,7 +427,11 @@ class ReloadWatch:
                 raise ReloadRefusal(reason)
             logger.info(
                 "serve reload: pid %d is leaving %s for %s (interpreter %s, listener fd %d)",
-                os.getpid(), plan.loaded_root, plan.target_root, plan.interpreter, plan.listener_fd,
+                os.getpid(),
+                plan.loaded_root,
+                plan.target_root,
+                plan.interpreter,
+                plan.listener_fd,
             )
             _exec(plan)
         finally:

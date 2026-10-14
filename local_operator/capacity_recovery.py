@@ -89,9 +89,7 @@ def measure_capacity(
     generations = update_mod.generations_dir() if root is None else root / "generations"
     count = 0
     if generations.is_dir():
-        count = sum(
-            1 for path in generations.iterdir() if path.is_dir() and not path.is_symlink()
-        )
+        count = sum(1 for path in generations.iterdir() if path.is_dir() and not path.is_symlink())
     try:
         free = shutil.disk_usage(stable).free
     except OSError:

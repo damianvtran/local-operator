@@ -1345,7 +1345,8 @@ def reload_serve_daemons(
             # disposition is death.
             mismatch = (
                 probe_address(record, require_rolling=True).detail or None
-                if rolling and probe is _answers_as_record else probe(record)
+                if rolling and probe is _answers_as_record
+                else probe(record)
             )
             if mismatch is not None:
                 refreshes.append(

@@ -33,9 +33,7 @@ def test_pause_leaves_the_master_socket_open() -> None:
         master.bind(("127.0.0.1", 0))
         master.listen(8)
         owner = handoff.ListenerOwner(object(), servers=[], listener=master)
-        owner._bind_acceptor_factory(
-            handoff._acceptor_factory(owner.socket, asyncio.Protocol)
-        )
+        owner._bind_acceptor_factory(handoff._acceptor_factory(owner.socket, asyncio.Protocol))
         await owner.start_fenced()
         ino_before = owner.listener_ino
         owner.pause_accept()
@@ -156,14 +154,24 @@ def test_unit_inventory_classifies_every_owned_central_unit() -> None:
     """The §3 table is the inventory the wiring reads; drift is a defect."""
     names = {entry.name for entry in handoff.UNITS}
     assert names == {
-        "serve", "mobile", "relay", "browser",
-        "hub-scheduler", "wake-monitor", "tunnel", "usage",
+        "serve",
+        "mobile",
+        "relay",
+        "browser",
+        "hub-scheduler",
+        "wake-monitor",
+        "tunnel",
+        "usage",
     }
     assert {entry.name for entry in handoff.transferable_units()} == {
-        "serve", "mobile", "relay", "browser",
+        "serve",
+        "mobile",
+        "relay",
+        "browser",
     }
     assert {entry.name for entry in handoff.fenced_units()} == {
-        "hub-scheduler", "wake-monitor",
+        "hub-scheduler",
+        "wake-monitor",
     }
     # tunnel has no transferable state and MUST be reported pending, not moved.
     assert [entry.name for entry in handoff.pending_units()] == ["tunnel"]
@@ -260,8 +268,6 @@ def test_resume_plan_refuses_to_rerun_an_effect_without_a_stable_id() -> None:
 
 
 def test_resume_plan_with_no_pending_effect_replays_nothing() -> None:
-    record = handoff.checkpoint_record(
-        session_id="s", turn_id="t", committed_message_ids=["m1"]
-    )
+    record = handoff.checkpoint_record(session_id="s", turn_id="t", committed_message_ids=["m1"])
     plan = handoff.resume_plan(record)
     assert plan.deferred is False and plan.replay_effect == {}

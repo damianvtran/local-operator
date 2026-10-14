@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from local_operator import capacity_recovery, install_transaction, update as update_mod
+from local_operator import capacity_recovery, install_transaction
+from local_operator import update as update_mod
 
 DIST = update_mod.DISTRIBUTION_NAME
 
@@ -279,9 +280,7 @@ def test_the_promotion_tail_records_pressure_on_the_candidates_operation(home: P
         cr.measure_capacity = original
     operation = install_transaction.operation_for_generation(generation)
     assert operation is not None
-    entry = install_transaction.capacity_status(
-        update_mod.stable_root(), operation.identifier
-    )
+    entry = install_transaction.capacity_status(update_mod.stable_root(), operation.identifier)
     assert entry is not None and entry["state"] == "requested"
     # NOTHING WAS RECLAIMED: the generation is still there.
     assert generation.exists()
@@ -305,8 +304,7 @@ def test_the_promotion_tail_is_silent_without_pressure(home: Path) -> None:
     finally:
         cr.measure_capacity = original
     assert (
-        install_transaction.capacity_status(update_mod.stable_root(), operation.identifier)
-        is None
+        install_transaction.capacity_status(update_mod.stable_root(), operation.identifier) is None
     )
 
 

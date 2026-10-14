@@ -1,7 +1,7 @@
 """Durable update intent/recovery on owned roots, not installation/handoff proof."""
 
-from pathlib import Path
 import os
+from pathlib import Path
 
 import pytest
 

@@ -16,7 +16,6 @@ from local_operator.session.transcript import (
     Transcript,
     read_latest_custom,
 )
-
 from tests.unit.session.test_session_footprint import (
     ScriptedStream,
     _final_turn,
