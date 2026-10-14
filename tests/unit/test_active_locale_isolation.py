@@ -2,8 +2,8 @@
 
 A manually entered guard cannot prove that pytest undoes catalogue/refresher
 monkeypatches before it restores the locale. Eight items on four worksteal
-workers give each worker a producer and a later consumer; every item leaves
-French active, so the unchanged English marker-chip assertion discriminates
+workers force worker reuse; every item leaves French active, so the unchanged
+English marker-chip assertion discriminates
 without relying on the scheduler putting a particular pair together.
 """
 
@@ -19,7 +19,7 @@ def test_locale_and_refreshers_are_restored_after_monkeypatch_teardown(tmp_path:
     repo = Path(__file__).resolve().parents[2]
     suite = tmp_path / "test_worker_locale.py"
     suite.write_text(
-        '''import pytest
+        """import pytest
 from local_operator.i18n import catalogues, text
 from tests.unit.tui.test_marker_chip import (
     test_the_receipt_row_is_inked_as_chrome_not_as_the_user_s_prose as receipt,
@@ -55,7 +55,7 @@ async def test_worker_boundary(item, monkeypatch, tmp_path):
     # Teardown must restore these BEFORE calling the public locale setter.
     monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path / "missing-catalogues")
     monkeypatch.setattr(text, "_refreshers", [patched_refresher])
-''',
+""",
         encoding="utf-8",
     )
     home = tmp_path / "home"
