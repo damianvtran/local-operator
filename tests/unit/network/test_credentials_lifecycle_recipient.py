@@ -568,12 +568,18 @@ def test_capacity_blocks_new_restrictive_identity_and_reserves_other_owner(rig, 
     monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", 1)
     life = L.LifecycleStore(N, rig.root)
     assert life.observe(L.Observation(rig.own.device_id, P, "occupied", 1, 1)).applied
+    assert life.observe(L.Observation("other-owner", P, "free", 1, 1)).applied
     result = _announce(rig, state="withdrawn")["entries"][0]
     assert result == dict(
         credential_key=P, account_scope_ref=SCOPE, applied=False, reason=L.OBSERVED_TABLE_FULL
     )
     assert effective.effective_access(P, root=rig.root).state == "withdrawn"
-    assert life.observe(L.Observation("other-owner", P, "free", 1, 1)).applied
+    # Capacity reservation works before overflow; after an omitted restriction,
+    # the deliberately coarse network latch requires authoritative recovery.
+    assert (
+        life.observe(L.Observation("other-owner", P, "free", 2, 2)).reason
+        == L.NEEDS_AUTHORITATIVE_BASELINE
+    )
 
 
 def test_unknown_native_login_baseline_is_not_seeded(rig):
@@ -740,3 +746,88 @@ def test_denied_reconnect_retains_disclosure_not_delivery_ack(rig, monkeypatch):
     L._pending_entries(server, rig.peer.device_id)
     assert L._disclosure_history(server) == {}
     assert L._sent_ledger(server) == {}
+
+
+def test_capacity_restriction_is_durable_bounded_and_not_cleared_by_other_login(rig, monkeypatch):
+    monkeypatch.setattr(L, "MAX_OWNER_OBSERVATIONS", 1)
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    before = life.path.read_bytes()
+    blocked = {**_announce_frame(rig)["entries"][0], "account_scope_ref": "omitted"}
+    result = _announce(rig, entries=[blocked])["entries"][0]
+    assert result["reason"] == L.OBSERVED_TABLE_FULL and not result["applied"]
+    marker = life.path.with_name(L.LIFECYCLE_OVERFLOW_FILENAME)
+    assert marker.stat().st_mode & 0o777 == 0o600
+    marker_bytes = marker.read_bytes()
+    assert len(marker_bytes) < 128
+    assert life.path.read_bytes() == before
+    for chain, material in [(1, 1), (1, 2), (99, 99)]:
+        effective._receipts.clear()
+        reply = _announce(rig, chain=chain, material=material)["entries"][0]
+        assert not reply["applied"] and reply["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+        assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    # New scope identities are not recorded in a second overflow table.
+    for index in range(8):
+        entry = {
+            **blocked,
+            "account_scope_ref": f"untracked-{index}",
+            "state": "available",
+            "login_chain_revision": 99,
+            "material_generation": 99,
+        }
+        _announce(rig, entries=[entry])
+    assert len(L.LifecycleStore(N, rig.root).load().high_water) == 1
+    assert life.path.read_bytes() == before and marker.read_bytes() == marker_bytes
+    assert life.status() == L.NEEDS_AUTHORITATIVE_BASELINE
+    assert not L.LifecycleStore("n_222222222222222222222222", rig.root).restriction_overflowed()
+    assert not L.LifecycleStore(N, rig.root / "another-root").restriction_overflowed()
+
+
+def test_file_byte_capacity_latches_before_ephemeral_receipt(rig, monkeypatch):
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    before = life.path.read_bytes()
+    monkeypatch.setattr(L, "MAX_FILE_BYTES", len(before))
+    original = effective.note_lifecycle_observation
+
+    def checked(root, provider, state, **kwargs):
+        assert life.restriction_overflowed()  # durable marker precedes receipt/ack
+        return original(root, provider, state, **kwargs)
+
+    monkeypatch.setattr(effective, "note_lifecycle_observation", checked)
+    blocked = {**_announce_frame(rig)["entries"][0], "account_scope_ref": "file-cap"}
+    reply = _announce(rig, entries=[blocked])["entries"][0]
+    assert not reply["applied"] and reply["reason"] == L.OBSERVED_TABLE_FULL
+    assert life.path.read_bytes() == before
+    effective._receipts.clear()
+    _announce(rig)
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+
+
+@pytest.mark.parametrize("payload", ["", "not-json", '{"reason":false}'])
+def test_any_existing_capacity_marker_is_fail_closed(rig, payload):
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    marker = life.path.with_name(L.LIFECYCLE_OVERFLOW_FILENAME)
+    marker.write_text(payload)
+    marker.chmod(0o000)
+    try:
+        effective._receipts.clear()
+        assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+        assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"
+    finally:
+        marker.chmod(0o600)
+    assert marker.read_text() == payload  # malformed is restrictive, not auto-repaired
+
+
+def test_capacity_marker_symlink_is_never_overwritten(rig, tmp_path):
+    _announce(rig)
+    life = L.LifecycleStore(N, rig.root)
+    target = tmp_path / "unrelated-marker-target"
+    target.write_text("untouched")
+    marker = life.path.with_name(L.LIFECYCLE_OVERFLOW_FILENAME)
+    marker.symlink_to(target)
+    effective._receipts.clear()
+    assert _announce(rig)["entries"][0]["reason"] == L.NEEDS_AUTHORITATIVE_BASELINE
+    assert marker.is_symlink() and target.read_text() == "untouched"
+    assert effective._receipts[(effective._root(rig.root), P)].state == "withdrawn"

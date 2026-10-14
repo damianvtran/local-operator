@@ -546,8 +546,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "entry a session directory holds",
     ),
     "local_operator/network/credentials/lifecycle.py": (
-        2,
-        "``lifecycle.json`` and ``.lifecycle.lock`` under ``network/credentials/<network_id>/``: "
+        3,
+        "``lifecycle.json``, ``.lifecycle.lock`` and ``.lifecycle-restriction-overflow.json`` "
+        "under ``network/credentials/<network_id>/``: the overflow marker is a device-local "
+        "recovery-required restriction that must never travel with a session; "
         "the owner's per-network record of the material generation / login-chain revision "
         "each recipient was told about, and its flock file — per-device owner/recipient "
         "state that must never be copied to another device, a store file beside "
