@@ -54,9 +54,9 @@ export type MessageParams = {
   "relay.shell.usage.stale": undefined;
   "relay.shell.usage.title": undefined;
   "relay.shell.usage.unavailable": undefined;
-  "relay.shell.usage.unit_credits": undefined;
-  "relay.shell.usage.unit_requests": undefined;
-  "relay.shell.usage.unit_tokens": undefined;
+  "relay.shell.usage.unit_credits": { "count": number };
+  "relay.shell.usage.unit_requests": { "count": number };
+  "relay.shell.usage.unit_tokens": { "count": number };
   "relay.shell.usage.unit_usd": undefined;
   "relay.shell.usage.unlimited": undefined;
   "relay.shell.usage.used": { "value": number; "unit": string };

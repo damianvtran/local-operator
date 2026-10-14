@@ -121,10 +121,14 @@ def test_exact_wire_namespace_contract_rejects_mutations(
 
 
 def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
-    # Pin only the original ten Hindi groups. Analytics/desktop backfill is
-    # explicitly unfinished; mechanical parity is not full-surface coverage.
+    # Pin carried bytes, not publication eligibility: the original ten groups
+    # now coexist with three native-audited relay candidates held for rendering.
+    # Mechanical parity does not make those translated ledger rows passed.
     locale = "hi"
     namespaces = (
+        "relay.login",
+        "relay.session",
+        "relay.shell",
         "tui.status",
         "tui.transcript",
         "tui.welcome",

@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "Tìm cuộc trò chuyện…",
+  "relay.session.list.empty_hint": "tạo phiên bên dưới hoặc từ TUI trên máy của bạn",
+  "relay.session.list.no_matches": "không có cuộc trò chuyện phù hợp",
+  "relay.session.list.start_idle": "phiên mới",
+  "relay.session.list.start_busy": "đang khởi tạo…",
+  "relay.session.view.back": "về danh sách phiên",
+  "relay.session.view.empty_title": "chưa có tin nhắn",
+  "relay.session.view.empty_hint": "gửi tin nhắn bên dưới để bắt đầu",
+  "relay.session.past.back": "quay lại",
+  "relay.session.past.heading": "phiên trước đây",
+  "relay.session.past.search_placeholder": "tìm tên và nội dung trò chuyện…",
+  "relay.session.past.loading": "đang tải…",
+  "relay.session.directory.sheet_title": "thư mục làm việc",
+  "relay.session.directory.path_placeholder": "hoặc nhập đường dẫn khác…",
+  "relay.session.model.sheet_title": "mô hình",
+  "relay.session.model.filter_placeholder": "lọc mô hình",
+  "relay.session.model.loading": "đang tải…"
+}

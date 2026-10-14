@@ -45,11 +45,15 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 								// catalogue's, not the browser's or an unrendered backend preference.
 								// Only the provider vocabulary is mapped; future/unknown units retain
 								// the bare measured amount without inventing currency or leaking tokens.
-								const unit = amount.unit === "credits" ? messageRuntime.t("relay.shell.usage.unit_credits")
-									: amount.unit === "usd" ? messageRuntime.t("relay.shell.usage.unit_usd")
-										: amount.unit === "tokens" ? messageRuntime.t("relay.shell.usage.unit_tokens")
-											: amount.unit === "requests" ? messageRuntime.t("relay.shell.usage.unit_requests") : null;
 								const measured = amount.remaining ?? amount.used;
+								// Unit agreement follows the actual numeric measurement and the
+								// selected catalogue's CLDR rules, never a preformatted count.
+								const unit = measured !== null && Number.isFinite(measured)
+									? amount.unit === "credits" ? messageRuntime.t("relay.shell.usage.unit_credits", { count: measured })
+										: amount.unit === "usd" ? messageRuntime.t("relay.shell.usage.unit_usd")
+											: amount.unit === "tokens" ? messageRuntime.t("relay.shell.usage.unit_tokens", { count: measured })
+												: amount.unit === "requests" ? messageRuntime.t("relay.shell.usage.unit_requests", { count: measured }) : null
+									: null;
 								const remaining = amount.remaining !== null;
 								const value = measured !== null && Number.isFinite(measured)
 									? amount.unit === "percent"
