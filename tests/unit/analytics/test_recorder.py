@@ -18,6 +18,7 @@ store RETURNED as dropped, which is how the shipped store loses one).
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing as mp
 import sqlite3
 import threading
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.analytics import recorder as recorder_module
 from local_operator.analytics import store as store_module
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.recorder import AnalyticsRecorder, reset_recorder_for_test
@@ -398,6 +400,92 @@ def test_flush_for_test_reports_a_batch_the_real_store_dropped(tmp_path, monkeyp
         if holder is not None:
             holder.rollback()
             holder.close()
+        rec.close()
+
+
+def test_flush_for_test_outwaits_a_write_lock_held_past_five_seconds(tmp_path):
+    """A healthy-but-slow write must not be reported as a failure.
+
+    Why this exists: an independent probe held the SQLite write lock
+    elsewhere and watched the writer blocked INSIDE ``_flush`` on the store
+    write — the queue was already drained (``qsize == 0``) while
+    ``unfinished_tasks`` stayed frozen at 1 — and the write completed the
+    moment the lock released. The old 5 s barrier budget sits INSIDE the
+    store's own permitted busy wait (5 s per attempt, retried), so it
+    raised ``TimeoutError`` on a write that was never lost, only not yet
+    settled: the intermittent CI failure this pins.
+
+    The lock here is a real second connection's ``BEGIN IMMEDIATE``, held
+    for 6 s — past the old budget, far under the store's real settle
+    ceiling — and released by a timer while the barrier waits. After the
+    fix the barrier must ride out the lock and the row must be readable;
+    on the old budget it raises at 5 s with the row still in flight.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    holder: sqlite3.Connection | None = None
+    releaser: threading.Timer | None = None
+    try:
+        # Warm the writer's connection first, so the lock below is taken
+        # against the INSERT rather than the schema-creation path.
+        rec.record(_snap(session_id="before"))
+        rec.flush_for_test()
+        assert store.aggregate().calls == 1
+
+        holder = sqlite3.connect(str(tmp_path / "a.db"), check_same_thread=False)
+        holder.execute("BEGIN IMMEDIATE")  # hold the write lock
+
+        rec.record(_snap(session_id="slow"))
+        releaser = threading.Timer(6.0, holder.rollback)
+        releaser.start()
+        rec.flush_for_test()
+        releaser.cancel()
+        assert store.aggregate().calls == 2
+    finally:
+        if releaser is not None:
+            releaser.cancel()
+        if holder is not None:
+            holder.rollback()
+            holder.close()
+        rec.close()
+
+
+def test_flush_default_budget_is_derived_from_the_store_settle_ceiling():
+    """The default barrier budget must never name its own number again.
+
+    Pinning the DERIVATION rather than a value: if the store's busy
+    timeout or retry count changes, this budget moves with it, and a
+    future edit that hard-codes a shorter default fails here instead of
+    re-creating the held-lock flake in CI. The ceiling itself must also
+    exceed one write phase's busy waits alone, because the open retries
+    in front of a write are part of what the barrier waits on.
+    """
+    default = inspect.signature(AnalyticsRecorder.flush_for_test).parameters["timeout"].default
+    assert default == (
+        store_module.WRITE_SETTLE_CEILING_S + recorder_module._FLUSH_FOR_TEST_MARGIN_S
+    )
+    one_write_phase_s = store_module._WRITE_RETRIES * (store_module._BUSY_TIMEOUT_MS / 1000.0)
+    assert store_module.WRITE_SETTLE_CEILING_S > one_write_phase_s
+
+
+def test_flush_with_a_short_explicit_timeout_still_raises_promptly(tmp_path):
+    """A genuinely non-settling writer is still reported, promptly.
+
+    The widened default must not weaken the barrier into patience without
+    limit: a caller that passes a short timeout gets its ``TimeoutError``
+    at that deadline, not at the derived ceiling.
+    """
+    store = _BlockedBatchStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.record(_snap())
+        assert store.entered.wait(5.0), "the writer never reached the batch write"
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="1 unsettled item"):
+            rec.flush_for_test(timeout=0.2)
+        assert time.monotonic() - started < 5.0
+    finally:
+        store.release.set()
         rec.close()
 
 

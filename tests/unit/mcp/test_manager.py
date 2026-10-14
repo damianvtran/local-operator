@@ -640,9 +640,13 @@ class TestToolCallHygieneAndRetry:
 
         calls: list[tuple[Any, ...]] = []
 
-        async def capture_to_thread(function: Any, *args: Any) -> ToolResult:
+        async def capture_to_thread(function: Any, *args: Any, **kwargs: Any) -> ToolResult:
+            # Capture provenance rides as a KEYWORD (the manager composes it
+            # from the actual call), so the spy must forward **kwargs or it
+            # crashes on the new call shape instead of exercising the path;
+            # positionals stay recorded for the context-tail assertion below.
             calls.append((function, *args))
-            return function(*args)
+            return function(*args, **kwargs)
 
         monkeypatch.setattr(manager, "_connect_server", fake_connect)
         monkeypatch.setattr(asyncio, "to_thread", capture_to_thread)

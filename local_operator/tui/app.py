@@ -16998,9 +16998,18 @@ class OperatorApp(App[None]):
             self.call_from_thread(self._finish_update)
             return
         if result.latest is None:
-            self.call_from_thread(
-                self._system_notice, "could not reach PyPI to learn the latest version", "warning"
+            # Two different facts hide behind a None latest (UX round 1, M1):
+            # PyPI unreachable, or PyPI answered and a release is still
+            # publishing. The sentence must not send a reader on a healthy
+            # network to debug their connection — coherent with the desktop
+            # app's wording for the same state.
+            notice = (
+                f"PyPI has named {result.pending_version} but its files are still "
+                "publishing, so there is no update to install yet — try again in a few minutes"
+                if result.pending_version is not None
+                else "could not reach PyPI to learn the latest version"
             )
+            self.call_from_thread(self._system_notice, notice, "warning")
             self.call_from_thread(self._finish_update)
             return
         if not result.behind:
@@ -37564,16 +37573,90 @@ class OperatorApp(App[None]):
         if not ends_empty_state:
             self._sync_boot_layout()
 
+    def _replace_block(self, old: Any, block: Any) -> bool:
+        """Swap a seat for its successor at the same position (ReplayTarget).
+
+        The provenance-upgrade counterpart of :meth:`_append_block`: a
+        same-ID row whose replay learned richer facts is corrected IN PLACE,
+        never appended beside the stale one. Source coordinates carry over
+        from the seat, so a receipt that replaced a human row keeps that row's
+        id/part for every later same-ID replay to find again. The collected
+        page and the mounted view take the same shape.
+        """
+        if old.navigation_anchor_id and not block.navigation_anchor_id:
+            block.navigation_anchor_id = old.navigation_anchor_id
+            block.navigation_anchor_part = old.navigation_anchor_part
+        if self._block_sink is not None:
+            try:
+                index = self._block_sink.index(old)
+            except ValueError:
+                return False
+            self._block_sink[index] = block
+            return True
+        transcript = self._transcript_view()
+        for candidate in transcript.blocks():
+            if candidate is old:
+                return transcript.replace_block(old, block)
+        return False
+
     def _append_image_blocks(
         self,
         images: list[ImageContent],
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]:
         from local_operator.tui.session_presentation import append_image_blocks
 
-        return append_image_blocks(self, images, marker_text=marker_text, fold_width=fold_width)
+        return append_image_blocks(
+            self,
+            images,
+            marker_text=marker_text,
+            fold_width=fold_width,
+            source_id=source_id,
+            source_indices=source_indices,
+            source_total=source_total,
+            after=after,
+        )
+
+    def _insert_after(self, anchor: Any, block: Any) -> None:
+        """Mount ``block`` immediately after ``anchor`` (ReplayTarget).
+
+        An ADOPTED source-owned part belongs at its original source seat: a
+        late same-ID picture appended at the physical tail lands past a
+        reader-facing boundary its source never crossed (review round 5, R3-3
+        placement; QA Q-R6-2). Source order is the view's own block order, so
+        the seat is the anchor's index plus one.
+
+        The bounded-resume collection (``_block_sink``) is a page BUILD with
+        no laid-out view to index into; there the collection order is the
+        mount order and the part keeps the plain append behaviour.
+        """
+        if self._projection_message_id:
+            if not block.navigation_anchor_id:
+                block.navigation_anchor_id = self._projection_message_id
+                block.navigation_anchor_part = self._projection_part
+            self._projection_part += 1
+        block.ends_empty_state = True
+        if self._block_sink is not None:
+            self._block_sink.append(block)
+            return
+        transcript = self._transcript_view()
+        blocks = transcript.blocks()
+        if anchor not in blocks:
+            transcript.append_block(block)
+            return
+        transcript.insert_blocks(blocks.index(anchor) + 1, [block])
+        # The fold must learn about the row as a SOURCE-PART change at its own
+        # seat, not as a tail append: `insert_blocks` alone left a seated
+        # picture outside its owner bar's membership, so a collapsed bar hid
+        # the receipt while its picture stayed on screen (review round 6,
+        # R6-1 / QA Q-R7-1).
+        transcript.note_quiet_source_part(block)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:

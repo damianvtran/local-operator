@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import tempfile
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime
 from importlib.metadata import version
@@ -17,6 +18,7 @@ from typing import Any, Dict
 
 import yaml
 
+from local_operator.config_writer import config_write_lock, serialized_config_write
 from local_operator.web_defaults import (
     DEFAULT_WEB_FETCH_CONFIG,
     DEFAULT_WEB_SEARCH_CONFIG,
@@ -907,6 +909,7 @@ class ConfigManager:
     # run from ONE explicit startup seam (``cli.main``); a library caller
     # constructing this class cannot trigger them.
 
+    @serialized_config_write
     def _write_config(self, config: Dict[str, Any]) -> None:
         """Write configuration to YAML file.
 
@@ -1070,27 +1073,30 @@ class ConfigManager:
             settings_io.ConfigUnreadableError: ``write=True`` and ``config.yml``
                 cannot be parsed, so no write may be based on it.
         """
-        # Every key, before any mutation: a raise must not leave the caller
-        # holding a half-applied update.
-        for key in updates:
-            refusal = _dotted_write_refusal(key)
-            if refusal is not None:
-                raise ValueError(refusal)
+        # Memory-only CLI overrides remain read-only; disk mutations serialize
+        # fresh-read/compare/write, including the intentional empty flush.
+        with config_write_lock(self.config_dir) if write else nullcontext():
+            # Every key, before any mutation: a raise must not leave the caller
+            # holding a half-applied update.
+            for key in updates:
+                refusal = _dotted_write_refusal(key)
+                if refusal is not None:
+                    raise ValueError(refusal)
 
-        if write and updates:
-            # Function-local for the import-cycle reason `_dotted_write_refusal`
-            # documents, and imported rather than re-derived so that "never base
-            # a write on defaults" has exactly one implementation.
-            from local_operator import settings_io
+            if write and updates:
+                # Function-local for the import-cycle reason `_dotted_write_refusal`
+                # documents, and imported rather than re-derived so that "never base
+                # a write on defaults" has exactly one implementation.
+                from local_operator import settings_io
 
-            settings_io._reload_before_write(self)
+                settings_io._reload_before_write(self)
 
-        # Update each field individually to work with Config class
-        for key, value in updates.items():
-            self.config.set_value(key, value)
+            # Update each field individually to work with Config class
+            for key, value in updates.items():
+                self.config.set_value(key, value)
 
-        if write:
-            self._write_config(vars(self.config))
+            if write:
+                self._write_config(vars(self.config))
 
     def update_config_from_args(self, args: argparse.Namespace) -> None:
         """Update configuration with values from command line arguments.
@@ -1108,6 +1114,7 @@ class ConfigManager:
 
         self.update_config(updates, write=False)
 
+    @serialized_config_write
     def reset_to_defaults(self) -> None:
         """Reset configuration to default values."""
         # A COPY, for the reason `_fresh_default_config` exists: adopting the
@@ -1154,6 +1161,7 @@ class ConfigManager:
             current = current[part]
         return current
 
+    @serialized_config_write
     def set_config_value(self, key: str, value: Any) -> None:
         """Set a specific configuration variable.
 

@@ -12854,6 +12854,27 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
     return f"next at {due}{every}{fired}"
 
 
+def _pending_wake_ids(scheduler: WakeSchedulerProtocol) -> frozenset[str]:
+    """The handles the scheduler is holding for a successor, or the empty set.
+
+    A probed OPTIONAL capability (``WakeSchedulerProtocol`` documents it): a host
+    without a live reservation concept simply cannot answer, and "no pending" is
+    the honest reading of that — never a fabricated phase. Failure is swallowed
+    the same way: an unreadable phase must not cost the model its listing.
+    """
+    probe = getattr(scheduler, "pending_ids", None)
+    if not callable(probe):
+        return frozenset()
+    # ``getattr`` erases the capability's type; the ``cast`` names what the probe
+    # returns so ``frozenset(...)`` type-checks. Runtime behaviour is unchanged.
+    probe = cast("Callable[[], Iterable[str]]", probe)
+    try:
+        return frozenset(probe())
+    except Exception:  # noqa: BLE001 — a listing must survive a broken phase probe
+        logger.debug("wake pending_ids probe failed; listing rows as ordinary", exc_info=True)
+        return frozenset()
+
+
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
     # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
     # 5): one shared filter with the panel and the CLI
@@ -12870,7 +12891,19 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
             useless=True,
             details={"useless": True},
         )
-    lines = [f'- {s.id}: "{s.message}" {_wake_due_label(s)}' for s in schedules]
+    # Pending handles render EXPLICITLY, not as an imminent fire. A held row is a
+    # schedule this runtime still owns for a successor to run (a departing fire
+    # reserved its occurrence); the timer here will NOT fire it, so "next at
+    # <soon>" would promise a delivery that is not coming from this list. The
+    # capability is probed, not required: a scheduler that cannot report a live
+    # reservation (a snapshot facade, a reduced host) yields the empty set and
+    # every row reads as ordinary.
+    pending = _pending_wake_ids(scheduler)
+    lines = [
+        f'- {s.id}: "{s.message}" '
+        + ("awaiting runtime handover" if s.id in pending else _wake_due_label(s))
+        for s in schedules
+    ]
     return _text(tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines))
 
 
@@ -13690,6 +13723,10 @@ class SendParams(BaseModel):
         default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
     )
+    repeat: bool = Field(
+        default=False,
+        description=("Repeat a confirmed same-turn send only on explicit user request."),
+    )
     model: str | None = Field(
         default=None,
         description=(
@@ -14117,6 +14154,12 @@ async def _execute_send_peer(
     return _text(tool_call_id, "send", text, details=details)
 
 
+# A pathological attention turn must not retain every unique payload forever.
+# Capacity/size overflow falls back to actual sends, never a delivery refusal.
+_CONFIRMED_SEND_CACHE_MAX_ENTRIES = 64
+_CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES = 16 * 1024
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -14325,9 +14368,51 @@ async def execute_send(
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
+    target_sid = record.session_id if record is not None else cold_session_id
+    receipt_key = None
+    if (
+        context is not None
+        and context.send_turn_id
+        and context.session_id.strip()
+        and target_sid.strip()
+        and not params.repeat
+    ):
+        # Resolve WHO before lookup: raw names/pids can refer to different
+        # sessions. Exact body and effective mode are intent, not fuzzy matches.
+        # Patience is also an act; changing it must not silently reuse an old wait.
+        receipt_key = (
+            context.send_turn_id,
+            context.session_id or "",
+            target_sid,
+            message,
+            mode,
+            bool(params.wake) if not params.now else False,
+            patience_ms,
+        )
+        previous = context.confirmed_send_receipts.get(receipt_key)
+        if previous is not None:
+            return _text(
+                tool_call_id,
+                "send",
+                "duplicate suppressed — no new delivery, wake or patience wait. "
+                f"Original confirmed receipt: {previous.text}",
+                details={
+                    # Historical proof is not this call's delivery/wake outcome.
+                    # Current-result consumers must never promote it to a new act.
+                    "original_receipt": {
+                        "text": previous.text,
+                        "details": previous.model_copy(deep=True).details or {},
+                    },
+                    "duplicate_suppressed": True,
+                    "original_tool_call_id": previous.tool_call_id,
+                },
+            )
     sender = await _send_sender_identity(context)
 
-    from local_operator.mobile.peer_send import deliver_peer_message_outcome
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        deliver_peer_message_outcome,
+    )
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
@@ -14428,7 +14513,29 @@ async def execute_send(
         clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
-    return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    result = _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    # Only the confirmed state is reusable. Partial/uncertain receipts and
+    # refusals must allow a real retry; model switches and mesh calls bypass
+    # this local boundary entirely. Send is exclusive in the tool executor.
+    if (
+        receipt_key is not None
+        and context is not None
+        and outcome.state == DELIVERY_DELIVERED
+        and len(context.confirmed_send_receipts) < _CONFIRMED_SEND_CACHE_MAX_ENTRIES
+        and len(message) + len(result.text) <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES
+    ):
+        try:
+            entry_bytes = len(message.encode("utf-8")) + len(
+                result.model_dump_json().encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            # Receipt reuse is optional; serialization must never turn an
+            # already confirmed delivery into a reported failure.
+            pass
+        else:
+            if entry_bytes <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES:
+                context.confirmed_send_receipts[receipt_key] = result.model_copy(deep=True)
+    return result
 
 
 async def _arm_send_patience(
@@ -17102,10 +17209,22 @@ def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[
             ("--name", params.name),
             ("--team", params.team),
             ("--profile", params.profile),
-            ("--model", params.model),
         ):
             if value and value.strip():
                 argv += [flag, value.strip()]
+        model = (params.model or "").strip()
+        if model:
+            # The CLI takes hosting separately. Leaving a qualified selector in
+            # --model pairs it with the configured provider; split only once so
+            # aggregator model IDs keep their own vendor/model slash. Bare IDs
+            # intentionally retain the configured hosting, unlike remote spawns.
+            from local_operator.providers.failover import parse_selector
+
+            provider, model_id = parse_selector(model)
+            if "/" in model:
+                argv += ["--hosting", provider.strip(), "--model", model_id.strip()]
+            else:
+                argv += ["--model", model]
     argv.append("--")
     argv.append(params.prompt or "")
     return argv
@@ -28164,7 +28283,35 @@ async def _execute_hub_parent(
         if deliveries
         else f"{params.op}: nothing to do"
     )
-    lines = [header, *_hub_receipt_lines(deliveries), *(f"- {error}" for error in errors)]
+    receipt_lines = _hub_receipt_lines(deliveries)
+    delivery_states = []
+    if params.op == "send" and callable(getattr(comms, "roster_pass", None)):
+        # Queue acceptance is not execution: a settled child can retain its
+        # aside queue. Read the existing lifecycle/alias authority once rather
+        # than inventing liveness from a receipt or starting a new actor.
+        snapshot = comms.roster_pass()
+        for index, delivery in enumerate(deliveries):
+            node = snapshot.node_for(delivery.job_id)
+            if node is not None and node.status in {
+                "completed",
+                "paused",
+                "failed",
+                "cancelled",
+                "gone",
+                "interrupted",
+            }:
+                accepted = (
+                    "queued for next resume" if delivery.outcome != "failed" else "delivery refused"
+                )
+                receipt_lines[index] = (
+                    f"- {delivery.label} ({node.job_id}): child is {node.status}; {accepted}; "
+                    "not running — no work started. Resume existing history explicitly with "
+                    f"hub op='resume' to='{node.job_id}' and the work message."
+                )
+                delivery_states.append(
+                    {"job_id": node.job_id, "status": node.status, "resume_required": True}
+                )
+    lines = [header, *receipt_lines, *(f"- {error}" for error in errors)]
     return _text(
         tool_call_id,
         "hub",
@@ -28173,6 +28320,7 @@ async def _execute_hub_parent(
             "op": params.op,
             "job_ids": ids,
             "acted": len(acted),
+            **({"delivery_states": delivery_states} if delivery_states else {}),
             # Mirrored into details as well as the flag: every other useless
             # site in this module carries the key, and compaction's pruning
             # pass reads it from there.

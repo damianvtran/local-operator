@@ -84,6 +84,7 @@ from local_operator.providers.registry import (
 )
 
 if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
+    from local_operator.providers.usage import QuotaHealth
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -1085,6 +1086,11 @@ class AuthStore:
         HTTP clients stay per-process.
     """
 
+    #: The WRITABLE handle, definitely typed. A read-only store never assigns it
+    #: (its handle lives in :attr:`_ro_conn`); the annotation keeps the type
+    #: non-Optional for every unguarded ``self._conn.x`` on the writable path.
+    _conn: _SerializedConnection
+
     def __init__(
         self,
         db_path: str | Path | None = None,
@@ -1092,8 +1098,14 @@ class AuthStore:
         config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
+        read_only: bool = False,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
+        #: Metadata-only mode for the paired-phone usage seam. Every open is
+        #: ``mode=ro`` over an existing file and constructor performs NO disk
+        #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
+        #: (:meth:`list_credentials`) work; write paths must not be reached.
+        self._read_only = read_only
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1140,7 +1152,133 @@ class AuthStore:
         #: Set by :meth:`close`. Read by :func:`shared_auth_store` to decide
         #: whether the process-level store it is holding is still usable.
         self._closed = False
-        self._conn = self._connect()
+        if read_only:
+            # Construction must WRITE NOTHING: an absent database is simply an
+            # empty store, so the read-only handle is allowed to be ``None``
+            # instead of raising out of the constructor (the mode=ro open cannot
+            # be created, only opened). It lives in its OWN Optional attribute,
+            # and the WRITABLE ``self._conn`` is left UNASSIGNED here, so pyright
+            # keeps ``self._conn``'s declared type definite -- assigning a
+            # possibly-``None`` to it widened the attribute to Optional and made
+            # every unguarded ``store._conn.x`` across the tree a pyright error.
+            # Read paths branch on ``self._read_only`` and never touch
+            # ``self._conn`` on such a store.
+            self._ro_conn = self._connect_read_only()
+        else:
+            self._ro_conn = None
+            self._conn = self._connect()
+
+    @classmethod
+    def open_read_only(cls, db_path: str | Path | None = None) -> "AuthStore":
+        """A metadata-only store that writes nothing on construction or read.
+
+        The paired-phone seam must be able to read persisted credential
+        METADATA (which providers/rows exist) without the default store's
+        constructor side effects: ``mkdir`` of the config root, ``O_CREAT`` of
+        auth.db, the WAL PRAGMA, the schema ``executescript`` and three
+        ``chmod`` calls. Building a default store and merely refraining from
+        writing would still have performed all of those, so the read-only open
+        is a distinct constructor rather than a flag a caller could forget.
+        An absent database reads as an empty store.
+        """
+        store = cls(db_path, read_only=True)
+        return store
+
+    def _connect_read_only(self) -> _SerializedConnection | None:
+        """The metadata-only handle, or ``None`` when there is nothing to read.
+
+        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
+        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
+        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
+        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
+        promise forbids. sqlite also refuses every write through this handle.
+
+        Returns ``None`` when there is nothing to read: an ABSENT database
+        (legitimately empty) or one that will not open. Callers distinguish the
+        two states by :meth:`read_only_unavailable`; returning a bare ``None``
+        here is what keeps construction from creating a file to find out.
+        """
+        if not self._db_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro&immutable=1",
+                timeout=5.0,
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return _SerializedConnection(conn)
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+
+    def read_only_unavailable(self) -> bool:
+        """Whether a read-only store could not be read (vs. genuinely empty).
+
+        ``False`` when the database is simply absent — "empty" is a legitimate
+        answer, and the seam must be able to say it without creating the file.
+        ``True`` when the file exists but cannot yield credentials: it will not
+        open (corrupt/locked), OR it opens but lacks the tables/columns this
+        store's read path requires. The second case is a foreign or half-built
+        database — a valid SQLite file that is NOT a credential store — and
+        reporting it as empty would tell the phone "no accounts" when the truth
+        is "this is not a store I can read". Only meaningful for a read-only
+        store; a writing store always has a live, schema-applied handle.
+        """
+        if not self._read_only:
+            return False
+        if not self._db_path.exists():
+            return False
+        if self._ro_conn is None:
+            return True
+        return not self._has_required_schema()
+
+    def _has_required_schema(self) -> bool:
+        """Whether the required credential table AND its columns are present.
+
+        ``sqlite_master`` alone is not enough: a database can hold a
+        ``auth_credentials`` table missing ``identity_key`` (an older or foreign
+        build), which then fails at the first SELECT rather than at open. Both
+        the table and every column the read path selects are required.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return False
+        try:
+            cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
+            }
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        required = {
+            "id",
+            "provider",
+            "credential_type",
+            "data",
+            "disabled_cause",
+            "identity_key",
+            "created_at",
+            "updated_at",
+        }
+        return required.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a non-empty ``-wal`` sits beside the store's database.
+
+        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
+        so a committed DELETE in the WAL is invisible to it: the reader still
+        sees the removed credential row. A non-empty ``-wal`` is that exact
+        on-disk signal, which the seam surfaces as staleness so a possibly-
+        deleted account is never presented as current. A zero-length WAL holds
+        no frames and is not staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
 
     @property
     def db_path(self) -> Path:
@@ -1206,7 +1344,15 @@ class AuthStore:
         # its only consumer: everything else detects a closed connection the way
         # sqlite does, with ``ProgrammingError`` on use.
         self._closed = True
-        self._conn.close()
+        # A read-only store over an ABSENT database has no handle: closing it
+        # must be a safe no-op, not a ``NoneType.close`` raise. The phone route
+        # closes whatever it opened, and "there was nothing to open" is the
+        # common cold-start case.
+        if self._read_only:
+            if self._ro_conn is not None:
+                self._ro_conn.close()
+        else:
+            self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
             self._usage_cache = None
@@ -1356,15 +1502,18 @@ class AuthStore:
         ``provider`` is resolved through :meth:`_storage_id`, so asking for a
         login flavour returns the rows its login actually wrote.
         """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return []
         if provider is not None:
             provider = self._storage_id(provider)
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
                 (provider,),
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials ORDER BY id"
             ).fetchall()
@@ -1650,7 +1799,10 @@ class AuthStore:
         return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
-        row = self._conn.execute(
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        row = conn.execute(
             "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
             " created_at, updated_at FROM auth_credentials WHERE id = ?",
             (credential_id,),
@@ -3061,12 +3213,20 @@ class AuthStore:
     def _cached_remaining_fraction(
         self, row: StoredCredential, provider: str, model_id: str, now_ms: int
     ) -> float | None:
-        """Remaining shared quota (0..1) for ``row`` from the cache, or ``None``.
+        """Numeric view retained for callers; paid balances have no fraction."""
+        health = self._cached_quota_health(row, provider, model_id, now_ms)
+        return health.remaining_fraction if health is not None else None
+
+    def _cached_quota_health(
+        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
+    ) -> "QuotaHealth | None":
+        """Cached quota verdict, preserving definite usability without a fraction.
 
         ``None`` is UNKNOWN, not zero: no report, an unparseable one, one
         older than :data:`USAGE_PICK_MAX_REPORT_AGE_MS`, or a report whose
-        windows carry no measurable fraction. The caller treats unknown as
-        neutral so a cold cache cannot demote an account.
+        windows carry neither a measurable fraction nor definite payable
+        capacity. The caller keeps unknown neutral without treating a healthy
+        absolute wallet as unknown or fabricating its remaining percentage.
 
         TWO sources feed this, and the newer report wins. The per-account
         preflight row is keyed exactly as the message-boundary preflight
@@ -3122,7 +3282,9 @@ class AuthStore:
         # recency contest below would mask a slightly older real preflight
         # report and rank a 95%-used account as neutral (review round 2, F7).
         candidates = [
-            r for r in candidates if any(limit.amount.fraction() is not None for limit in r.limits)
+            r
+            for r in candidates
+            if any(limit.amount.fraction() is not None or limit.paid_usable() for limit in r.limits)
         ]
         if not candidates:
             return None
@@ -3136,15 +3298,17 @@ class AuthStore:
             # carries a ``resets_at_ms`` in the past, so "every reset is still
             # ahead" is exactly that test. A window with no reset timestamp
             # cannot be vouched for, so it makes the whole report unknown.
+            # A paid wallet can change independently of a future plan reset.
+            # Never vouch for stale credits with the included window's horizon.
+            if any(limit.paid_usable() for limit in report.limits):
+                return None
             measured = [limit for limit in report.limits if limit.amount.fraction() is not None]
             if not measured or any(
                 limit.resets_at_ms is None or limit.resets_at_ms <= now_ms for limit in measured
             ):
                 return None
         health = usage_health(report, model_id, now_ms=now_ms)
-        if health.state == "unknown" or health.remaining_fraction is None:
-            return None
-        return health.remaining_fraction
+        return health if health.state != "unknown" else None
 
     def _usage_ranked_order(
         self,
@@ -3168,7 +3332,7 @@ class AuthStore:
         to an account, and steers that binding toward headroom.
 
         HOW. Every row's remaining shared fraction is read from the cache
-        (:meth:`_cached_remaining_fraction`, no network). The rows within
+        (:meth:`_cached_quota_health`, no network). The rows within
         ``tolerance`` of the best-known remaining fraction form a bucket of
         "equally good" accounts; unknown rows join the bucket as neutral
         members, since no evidence is not evidence against. The bucket is
@@ -3200,13 +3364,17 @@ class AuthStore:
             return fallback
         try:
             now_ms = self._now_ms()
+            health = {r.id: self._cached_quota_health(r, provider, model_id, now_ms) for r in rows}
             remaining = {
-                r.id: self._cached_remaining_fraction(r, provider, model_id, now_ms) for r in rows
+                cid: h.remaining_fraction if h is not None else None for cid, h in health.items()
             }
+            usable = any(
+                h is not None and h.state in ("healthy", "reserve") for h in health.values()
+            )
             known = [v for v in remaining.values() if v is not None]
-            if not known:
+            if not known and not usable:
                 return fallback
-            best = max(known)
+            best = max(known, default=0.0)
             floor = best - self._usage_pick_tolerance
             bucket: list[StoredCredential] = []
             rest: list[StoredCredential] = []
@@ -3218,7 +3386,16 @@ class AuthStore:
                 # missing report is most often a cold cache or a window that
                 # just reset -- and penalising an account for the absence of
                 # data is how a fresh login gets starved by its own silence.
-                (bucket if value is None or value >= floor else rest).append(r)
+                # Absolute paid headroom is definite usability, not a synthetic
+                # fraction. Keep unknown neutral, but a known spent row cannot
+                # tie with a definitely usable wallet even if all fractions=0.
+                verdict = health[r.id]
+                depleted = verdict is not None and verdict.state == "depleted"
+                (
+                    bucket
+                    if (not (usable and depleted) and (value is None or value >= floor))
+                    else rest
+                ).append(r)
             # Stable sort: rows with equal remaining keep the store's row
             # order, which is the order the hash fallback also assumes.
             rest.sort(key=lambda r: -(remaining[r.id] or 0.0))

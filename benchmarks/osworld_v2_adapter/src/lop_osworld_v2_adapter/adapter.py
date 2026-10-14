@@ -149,8 +149,9 @@ class InputsMismatch(RuntimeError):
 
 
 # The name the runner uses for the judge key in ``ResetStartParams.secrets``.
+# The simulator twin needs no constant here: the install filter derives every
+# env-channel name from ``vendor_bridge.SECRET_ENV_NAMES``.
 _JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
-_USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
 _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
 
 # Judge provider names the vendored evaluator client does not know, mapped to
@@ -328,6 +329,7 @@ class OSWorldV2Adapter:
                 paste_text=actions.ACTION_SURFACE.paste_text,
                 type_text_mode=actions.ACTION_SURFACE.type_text_mode,
                 max_type_chars=actions.ACTION_SURFACE.max_type_chars,
+                drag=actions.ACTION_SURFACE.drag,
             ),
         )
         # Per-episode state. None until the corresponding method runs.
@@ -580,9 +582,10 @@ class OSWorldV2Adapter:
         # OTHER requirement the task's own fields introduce, which until now had
         # no check at all -- OSWORLD_USER_SIM_API_KEY and WEBSITE_HOST_SUFFIX
         # (declared by 40 of the release's 108 tasks, each of which allocated a
-        # guest and then died in vendor code), plus GITLAB_PRIVATE_TOKEN, which
-        # this build cannot deliver to its controller and so refuses outright
-        # rather than asking for a value that would change nothing. It cannot
+        # guest and then died in vendor code), plus GITLAB_PRIVATE_TOKEN,
+        # which this build now DELIVERS through the env channel
+        # (``vendor_bridge.SECRET_ENV_NAMES``) and therefore only refuses when
+        # genuinely unsupplied. It cannot
         # live in the runner: ``inspect_requirements`` runs before the task is
         # named, so the runner's gate sees only the always-on baseline. See
         # ``requirements.require_supplied`` for the full argument, including
@@ -608,7 +611,7 @@ class OSWorldV2Adapter:
             infra_values=self._infra_values,
         )
         self._secrets = {secret.name: secret.value for secret in params.secrets}
-        self._install_judge_environment()
+        self._install_secret_environment()
 
         provider = self._build_provider()
         # The cache root exists BEFORE allocate so a provider that downloads
@@ -684,13 +687,18 @@ class OSWorldV2Adapter:
     def _task_path(self, task_id: str) -> str:
         return str(self._workspace_root / "tasks" / f"{task_id}.py")
 
-    def _install_judge_environment(self) -> None:
+    def _install_secret_environment(self) -> None:
         # The documented exception to "secrets never touch os.environ": see
-        # vendor_bridge. Only the two names OSWorld reads from the env, only
-        # inside the worker, scrubbed on close.
+        # vendor_bridge. Every name on the env-delivery allowlist that the
+        # episode actually delivered is written -- derived from the channel
+        # itself, so a name that gains a channel (the GitLab fixture token,
+        # R-2.026) is installed here without a second list to keep in sync.
+        # Unknown names still cannot pass (``install_secret_environment``
+        # refuses them), only the worker process sees the values, and close
+        # scrubs them.
         present = {
             name: self._secrets[name]
-            for name in (_JUDGE_KEY, _USER_SIM_KEY)
+            for name in vendor_bridge.SECRET_ENV_NAMES
             if name in self._secrets
         }
         if present:

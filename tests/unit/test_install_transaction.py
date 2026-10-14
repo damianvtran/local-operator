@@ -12,10 +12,12 @@ import os
 import subprocess
 import sys
 import threading
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
+from packaging.requirements import Requirement
 
 from local_operator import install_transaction as tx
 from local_operator import update
@@ -228,6 +230,19 @@ def publication_document(target: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+def test_publication_wheel_selection_has_declared_runtime_dependency() -> None:
+    """A dev-tool transitive must not hide a broken bare PyPI updater install."""
+    project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    dependencies = tomllib.loads(project.read_text())["project"]["dependencies"]
+    requirements = [Requirement(dependency) for dependency in dependencies]
+    # Wheel parsing and host tag selection run before promotion on every OS.
+    # Extras or platform markers would still leave some default installs broken.
+    assert any(
+        requirement.name == "packaging" and requirement.marker is None and not requirement.extras
+        for requirement in requirements
+    ), "_fresh_publication imports packaging; declare it for every default install"
 
 
 def test_exact_publication_does_not_silently_become_latest(

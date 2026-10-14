@@ -268,6 +268,30 @@ def test_spawn_argv_passes_workstream_by_default() -> None:
     assert argv[-1] == "say hello"
 
 
+@pytest.mark.parametrize(
+    ("selector", "provider", "model_id"),
+    [
+        ("openrouter/openai/gpt-6.1-sol", "openrouter", "openai/gpt-6.1-sol"),
+        ("anthropic/claude-sonnet-5-5", "anthropic", "claude-sonnet-5-5"),
+    ],
+)
+def test_spawn_argv_partitions_qualified_model_once(selector, provider, model_id) -> None:
+    from local_operator.cli import build_cli_parser
+
+    argv = _sessions_open_argv(_spawn_params(model=selector))
+    assert "--hosting" in argv
+    assert argv[argv.index("--hosting") + 1] == provider
+    assert argv[argv.index("--model") + 1] == model_id
+    parsed = build_cli_parser().parse_args(argv)
+    assert parsed.hosting == provider and parsed.model == model_id
+
+
+def test_spawn_argv_bare_model_preserves_configured_hosting() -> None:
+    argv = _sessions_open_argv(_spawn_params(model="gpt-6.1-sol"))
+    assert "--hosting" not in argv
+    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
+
+
 def test_spawn_argv_ephemeral_is_the_explicit_opt_out() -> None:
     argv = _sessions_open_argv(_spawn_params(visibility="ephemeral"))
     assert "--workstream" not in argv
@@ -286,7 +310,8 @@ def test_spawn_argv_maps_the_optional_fields_and_shields_a_dash_prompt() -> None
     assert "--name" in argv and argv[argv.index("--name") + 1] == "audit"
     assert argv[argv.index("--team") + 1] == "release"
     assert argv[argv.index("--profile") + 1] == "reviewer"
-    assert argv[argv.index("--model") + 1] == "anthropic/claude-sonnet-5"
+    assert argv[argv.index("--hosting") + 1] == "anthropic"
+    assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
     # The separator is what keeps a leading-dash prompt a prompt (argparse would
     # otherwise read it as the next option); checked against the real parser.
     assert argv[-2:] == ["--", "-- verify everything"]
@@ -367,7 +392,8 @@ def test_the_allowance_is_three_armed(root: Path, monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_spawn_default_opens_a_listed_workstream(root: Path) -> None:
+@pytest.mark.parametrize("model", [None, "mock", "test/mock"])
+async def test_spawn_default_opens_a_listed_workstream(root: Path, model: str | None) -> None:
     """The incident fix, end to end: default spawn is listed with its opener.
 
     Real CLI, real store, test hosting. The receipt's job id and session id
@@ -381,7 +407,11 @@ async def test_spawn_default_opens_a_listed_workstream(root: Path) -> None:
     ctx = _context(root)
 
     result = await execute_sessions(
-        "t", {"op": "spawn", "prompt": "say hello", "name": "visible-by-default"}, None, None, ctx
+        "t",
+        {"op": "spawn", "prompt": "say hello", "name": "visible-by-default", "model": model},
+        None,
+        None,
+        ctx,
     )
     try:
         assert not result.is_error, result.text

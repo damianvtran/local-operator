@@ -15,6 +15,7 @@ from local_operator.evaluation.protocol import (
     ActionBatch,
     AskUserAction,
     ComputerAction,
+    DragAction,
     PasteTextAction,
     TypeAction,
 )
@@ -43,6 +44,12 @@ class ActionSurface:
     #: own deadline and per-character cost, so it computes this and negotiates
     #: it, exactly as it negotiates ``type_text_mode``.
     max_type_chars: int | None = None
+    #: Whether the backend carries the atomic drag translator (the guest helper
+    #: in ``computer_input`` plus the adapter's compile branch). Defaults to
+    #: False so a worker predating the capability — or any adapter that does not
+    #: implement the helper — never acquires the action merely because the core
+    #: union grew; only the backend that actually executes drags advertises it.
+    drag: bool = False
 
     @property
     def models(self) -> tuple[Any, ...]:
@@ -51,6 +58,7 @@ class ActionSurface:
             for model in get_args(get_args(ComputerAction)[0])
             if (model is not PasteTextAction or self.paste_text)
             and (model is not AskUserAction or self.ask_user)
+            and (model is not DragAction or self.drag)
         )
 
     @property
@@ -64,6 +72,7 @@ class ActionSurface:
             "actions": [model.model_json_schema() for model in self.models],
             "type_text_mode": self.type_text_mode,
             "max_type_chars": self.max_type_chars,
+            "drag": self.drag,
             "named_keys": list(self.named_keys),
         }
 

@@ -60,8 +60,10 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
+from local_operator.config_writer import config_write_lock, serialized_config_write
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
+from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
@@ -101,8 +103,17 @@ except Exception:  # pragma: no cover - a wheel without the catalogue is broken
     _WIRE_SETTINGS_SOURCES = {}
 
 
+# A small English-only addition must not invalidate already-audited settings
+# translations. Keep the established import-time rendering path, with its own
+# namespace so carried locales retain their existing source hashes/eligibility.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+
 def _t(message: _Msg) -> str:
-    """The resolved string for a generated `wire.settings` message."""
+    """The resolved string for a generated settings message."""
     source = _WIRE_SETTINGS_SOURCES.get(message.code)
     if source is None:
         return message.code
@@ -4789,6 +4800,17 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.aida_cadence_at_help()),
     ),
     Setting(
+        key="aida.cadence.interval_hours",
+        path=("aida", "cadence", "interval_hours"),
+        section="aida",
+        label=_t(_ac.interval_hours_label()),
+        kind=Kind.INT,
+        default=0,
+        minimum=0,
+        maximum=168,
+        help=_t(_ac.interval_hours_help()),
+    ),
+    Setting(
         key="aida.cadence.paused",
         path=("aida", "cadence", "paused"),
         section="aida",
@@ -5587,13 +5609,18 @@ def write_setting(
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of
     # which has a UI that could warn.
-    problem = validate(setting, value, manager.get_config().values)
-    if problem is not None:
-        raise ValueError(problem)
-    if value is None and setting.default is None:
-        reset_setting(manager, setting, notify=notify)
-        return
-    _store(manager, setting.path, value)
+    # Group validation depends on sibling values, so it belongs inside the
+    # same transaction as the nested update. Effects below stay OUTSIDE the
+    # lock: a watcher may itself write a setting from another thread.
+    with config_write_lock(manager.config_dir):
+        _reload_before_write(manager)
+        problem = validate(setting, value, manager.get_config().values)
+        if problem is not None:
+            raise ValueError(problem)
+        if value is None and setting.default is None:
+            _delete(manager, setting.path)
+        else:
+            _store(manager, setting.path, value)
     _invalidate_caches()
     if notify:
         _notify_watcher(manager)
@@ -5730,6 +5757,7 @@ def _require_readable_config(manager: "ConfigManager") -> None:
         )
 
 
+@serialized_config_write
 def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
     _reload_before_write(manager)
     top = path[0]
@@ -5751,6 +5779,7 @@ def _store(manager: "ConfigManager", path: Sequence[str], value: Any) -> None:
     manager.set_config_value(top, root)
 
 
+@serialized_config_write
 def _delete(manager: "ConfigManager", path: Sequence[str]) -> None:
     # Same staleness trap as `_store` — a delete also dumps the whole snapshot.
     _reload_before_write(manager)
@@ -6012,9 +6041,10 @@ def write_chains(
     than from the caller's stale copy, so a concurrent add survives and a
     concurrent effort edit is left alone. A chain the caller did change is
     written as the caller has it, because that is the edit they just made.
-    Concurrent edits to THE SAME chain still resolve last-writer-wins, which is
-    the one window that cannot be closed without a lock the config format has
-    no room for.
+    Concurrent edits to THE SAME chain intentionally remain last-writer-wins;
+    the shared config-root lock now serializes each fresh-read/merge/write so
+    different chain/setting edits cannot erase one another. Only link policy
+    mutations add an expected revision, rather than changing this editor's API.
 
     ``chains`` holds DISPLAY LABELS (what :func:`read_chains` returned, with
     the user's edit applied to at most one of them). A hop whose label still
@@ -6040,44 +6070,45 @@ def write_chains(
     page shows and the failover layer does not have, which is the config and
     the behaviour disagreeing again.
     """
-    # Before the originals are read, not after: `_store` reloads, and a lookup
-    # built from a stale snapshot would restore entries the file no longer has.
-    # This also raises if config.yml has become unreadable, so a cascade write
-    # aborts rather than dumping defaults over it (round 2, B3).
-    _reload_before_write(manager)
-    originals = _originals_by_label(manager)
-    on_disk = read_chains(manager)
+    with config_write_lock(manager.config_dir):
+        # Before the originals are read, not after: `_store` reloads, and a lookup
+        # built from a stale snapshot would restore entries the file no longer has.
+        # This also raises if config.yml has become unreadable, so a cascade write
+        # aborts rather than dumping defaults over it (round 2, B3).
+        _reload_before_write(manager)
+        originals = _originals_by_label(manager)
+        on_disk = read_chains(manager)
 
-    if base is None:
-        # No snapshot: the caller means "the cascade is exactly this".
-        merged: dict[str, list[str]] = {key: list(hops) for key, hops in chains.items()}
-    else:
-        # Only the caller's OWN edits are applied over what is on disk now.
-        # Compared by value rather than tracked by a "which chain changed"
-        # flag, so the merge stays correct for a caller that edited several
-        # chains, and so no caller can forget to declare its edit.
-        touched = {
-            key
-            for key in set(base) | set(chains)
-            for before, after in [(list(base.get(key, [])), list(chains.get(key, [])))]
-            if before != after
+        if base is None:
+            # No snapshot: the caller means "the cascade is exactly this".
+            merged: dict[str, list[str]] = {key: list(hops) for key, hops in chains.items()}
+        else:
+            # Only the caller's OWN edits are applied over what is on disk now.
+            # Compared by value rather than tracked by a "which chain changed"
+            # flag, so the merge stays correct for a caller that edited several
+            # chains, and so no caller can forget to declare its edit.
+            touched = {
+                key
+                for key in set(base) | set(chains)
+                for before, after in [(list(base.get(key, [])), list(chains.get(key, [])))]
+                if before != after
+            }
+            merged = {key: list(hops) for key, hops in on_disk.items()}
+            for key in touched:
+                edited = list(chains.get(key, []))
+                if edited:
+                    merged[key] = edited
+                else:
+                    # The caller deleted it. Honour that even though it is still on
+                    # disk, or a delete would be silently undone by the merge.
+                    merged.pop(key, None)
+
+        stored = {
+            key: [originals.get(key, {}).get(hop, hop.split(" (")[0]) for hop in hops]
+            for key, hops in merged.items()
+            if key.strip() and hops
         }
-        merged = {key: list(hops) for key, hops in on_disk.items()}
-        for key in touched:
-            edited = list(chains.get(key, []))
-            if edited:
-                merged[key] = edited
-            else:
-                # The caller deleted it. Honour that even though it is still on
-                # disk, or a delete would be silently undone by the merge.
-                merged.pop(key, None)
-
-    stored = {
-        key: [originals.get(key, {}).get(hop, hop.split(" (")[0]) for hop in hops]
-        for key, hops in merged.items()
-        if key.strip() and hops
-    }
-    _store(manager, ("retry", "fallbackChains"), stored)
+        _store(manager, ("retry", "fallbackChains"), stored)
     _invalidate_caches()
     _notify_watcher(manager)
 

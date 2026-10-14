@@ -69,6 +69,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from local_operator.config_writer import serialized_config_path_write
+
 logger = logging.getLogger(__name__)
 
 #: Left behind by the one release candidate that stamped (PR #645 round 5,
@@ -101,6 +103,41 @@ _REAP_UNUSED_FLAT = "session.reap_unused"
 
 
 def migrate_session_cleanup(config_dir: Path) -> list[str]:
+    """Read-only eligibility first; serialize only a migration that can write.
+
+    Startup reaches this even for refused/read-only commands. Creating a lock
+    directory/file before discovering there is no config was itself a mutation.
+    The locked helper re-reads the actual file before applying any changes, so
+    this cheap preflight does not become a stale whole-config write base.
+    """
+    from local_operator.config import DEFAULT_CONFIG, read_config_values
+
+    if not (config_dir / "config.yml").is_file():
+        return []
+    raw_values = read_config_values(config_dir)
+    if raw_values is None:
+        return []
+    # Match the existing loader's TOP-LEVEL backfill without constructing it
+    # (construction can move malformed config). Existing nested mappings are
+    # not backfilled, exactly as _load_config already specifies.
+    values = {**DEFAULT_CONFIG.values, **raw_values}
+    session = values.get("session")
+    cleanup = session.get("cleanup") if isinstance(session, dict) else None
+    needs_write = (
+        values.get(_REAP_UNUSED_FLAT) is not False
+        or not isinstance(session, dict)
+        or session.get("reap_unused") is not False
+        or not isinstance(cleanup, dict)
+        or "enabled" not in cleanup
+        or any(key in values for key in _RETIRED_CEILINGS)
+    )
+    if not needs_write:
+        return []
+    return _migrate_session_cleanup_locked(config_dir)
+
+
+@serialized_config_path_write
+def _migrate_session_cleanup_locked(config_dir: Path) -> list[str]:
     """Pin the old reapers OFF and opt the user out of the new cleanup policy.
 
     Returns the list of changes made (empty when the config already had the

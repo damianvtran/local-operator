@@ -236,3 +236,24 @@ def test_bound_screen_frame_refuses_bytes_that_are_not_an_image() -> None:
 
     with pytest.raises(ValueError):
         bound_screen_frame(b"not an image at all")
+
+
+def test_capability_drag_is_omitted_while_false_and_rides_when_true() -> None:
+    """The negotiated drag flag on the wire, in both directions.
+
+    A worker without the drag translator keeps its exact old hello bytes: the
+    false is omitted, so an old parent's ``extra="forbid"`` handshake never
+    sees the field. Only a true rides the wire, and an old parent refuses that
+    at hello -- fail-closed before prepare/reset allocate, the same documented
+    direction as ``max_type_chars`` rather than a downgrade-compatibility
+    claim.
+    """
+
+    off = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True)
+    on = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True, drag=True)
+    assert "drag" not in json.loads(off.to_canonical_json())
+    assert json.loads(on.to_canonical_json())["drag"] is True
+    round_trip = AdapterCapabilities.model_validate(json.loads(off.to_canonical_json()))
+    assert round_trip.drag is False
+    assert off.action_surface().drag is False
+    assert on.action_surface().drag is True

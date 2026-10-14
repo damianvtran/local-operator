@@ -355,6 +355,18 @@ def feature_flags() -> dict[str, Any]:
         "entry_ts": 1,
         # Viewer opt-in: journal-index ordinals/domain, not publication seq.
         "journal_order": 1,
+        # THE COMPLETE PEER-SOURCE CONTRACT, and a NEW key rather than a bump of
+        # `journal_order` for the rule this whole map is written to: a renderer
+        # that only knows the LOCAL journal-order negotiation must keep working
+        # against a backend whose PEER stored reads still answer today's
+        # unsupported shape, and a renderer that sends the new
+        # `peer_journal_source` query/read purposes must be able to tell whether
+        # this backend can honour them at all before it relies on per-response
+        # acknowledgment. Remote activation requires this feature AND the new
+        # query AND new-viewer support AND the authenticated owner's per-response
+        # ACK; any one missing keeps the legacy path. Nothing user-visible changes
+        # on an old renderer, which sends no new query and sees today's bytes.
+        "peer_journal_source": 1,
         # THE OPEN FRAME. `open_frame=1` on `GET .../{id}` (the snapshot),
         # `GET .../{id}/history` and `GET .../{id}/events` asks for the page in
         # the unit a surface PAINTS: `limit` counts paintable rows, the cut

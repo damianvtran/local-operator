@@ -30,7 +30,9 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -39,6 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from local_operator import agent_shell, sdk
@@ -72,7 +75,10 @@ from local_operator.evaluation.session_arm import (
     ObservationRenderer,
     SessionArmError,
     _agent_stop_terminal_reason,
+    _ask_delivery_sentence,
+    _bounded_close,
     _failure_terminal_reason,
+    _split_ask_delivery,
     assert_declaration_resolved,
     declare_action_server,
     open_episode_session,
@@ -102,6 +108,7 @@ from local_operator.incidents import (
 from local_operator.mcp.manager import McpManager
 from local_operator.session.session import Session
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from local_operator.session.tool_readiness import ToolReadiness
 from local_operator.session.transcript import Transcript
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
@@ -143,6 +150,25 @@ def short_scratch() -> Iterator[Path]:
     """
 
     path = Path(tempfile.mkdtemp(prefix="lo-arm-t-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def real_arm_scratch() -> Iterator[Path]:
+    """A short root the REAL session's world-root gate accepts.
+
+    Deliberately NOT ``short_scratch``: that fixture stages under the
+    platform TMPDIR (``/private/var/folders`` on macOS), and a real
+    ``sdk.open_session`` refuses a controller store under a kernel-exposed
+    tree (``SessionSpecError``, measured). ``/tmp`` is short enough for the
+    bridge's ``sun_path`` socket and is not the refused tree; the name stays
+    session-unique so parallel lanes cannot clobber each other.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix="lo-arm-t-", dir="/tmp"))
     try:
         yield path
     finally:
@@ -206,6 +232,7 @@ def _bridge(
     observation: Observation | None = None,
     execute: Any = None,
     recover: Any = None,
+    ask: Any = None,
     max_steps: int = 8,
     record: Any = None,
     instruction: str = "the task as stated",
@@ -226,6 +253,7 @@ def _bridge(
         render=lambda observation: [TextContent(text=f"seen {observation.sequence}")],
         execute=execute or default_execute,
         recover=recover,
+        ask=ask,
         max_steps=max_steps,
         record=record,
         instruction=instruction,
@@ -450,7 +478,10 @@ class TestBridgeDiscipline:
 
         after = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert after["is_error"] is True
-        assert bridge.steps == 0
+        # Each admitted output form -- the challenged claim and the accepted
+        # finish -- consumed ONE epoch apiece (blueprint §3); the refused
+        # post-terminal call consumed none.
+        assert bridge.steps == 2
 
     @pytest.mark.asyncio
     async def test_the_step_budget_ends_the_episode_without_executing(self, tmp_path: Path) -> None:
@@ -486,6 +517,158 @@ class TestBridgeDiscipline:
         )
         reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert reply["is_error"] is True
+
+
+class TestAttemptedOutputClock:
+    """The dual-clock slice (audit §45-49): completed root output groups.
+
+    ``steps`` keeps its admitted/bound-world meaning; the ATTEMPTED clock
+    beside it counts every COMPLETED root output group -- world batches,
+    refused frame/schema attempts, local-tool-only turns, ask/finish,
+    terminal prose -- ONCE per generated assistant message, and it is what
+    the horizon is enforced on: the Nth group is reserved before validation,
+    its legal results pair, and group N+1 is refused before any of its work
+    happens. A turn whose typed signal says the stream faulted is not a
+    completed output group and never charges.
+    """
+
+    def _recorder(self) -> tuple[list[tuple[str, Any]], Any]:
+        rows: list[tuple[str, Any]] = []
+
+        def record(kind: str, payload: Any) -> None:
+            rows.append((kind, dict(payload)))
+
+        return rows, record
+
+    def _turn(self, bridge: ActionBridge, call_id: str) -> None:
+        """One completed root turn whose message id carries ``call_id``-named
+        tool calls (the canonical group identity the reserve reads)."""
+
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id=call_id, name="apply_actions", arguments={})],
+                )
+            )
+        )
+
+    def _group_kinds(self, rows: list[tuple[str, Any]]) -> list[str]:
+        return [payload["group_kind"] for kind, payload in rows if kind == "attempted_group"]
+
+    @pytest.mark.asyncio
+    async def test_a_multi_call_group_charges_once(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+        first = await bridge.call(wait)
+        assert first["is_error"] is False
+        second = await bridge.call(wait)
+        assert second["details"]["rejection_class"] == "second-batch"
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 1
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["batch"]
+        assert all(
+            payload["message_id"].startswith("message:")
+            for kind, payload in rows
+            if kind == "attempted_group"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_group_consumes_the_attempt_not_the_epoch(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        self._turn(bridge, "c1")
+        reply = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert reply["is_error"] is True
+        assert "rejection_class" in reply["details"]
+        assert bridge.attempted_groups == 1  # the attempt is spent...
+        assert bridge.steps == 0  # ...the admitted epoch is not
+        bridge.fold(TurnEndEvent())
+        kinds = self._group_kinds(rows)
+        assert len(kinds) == 1 and kinds[0].startswith("refused:")
+
+    @pytest.mark.asyncio
+    async def test_the_nth_invalid_group_still_ends_the_episode(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path, max_steps=1)
+        self._turn(bridge, "c1")
+        refused = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
+        assert refused["is_error"] is True  # its paired error result first...
+        assert bridge.attempted_groups == 1
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["is_error"] is False
+        assert blocked["details"]["terminal"] == "max-steps"
+        assert bridge.end_requested == "max-steps"
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_local_tool_only_group_charges_at_turn_end(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, max_steps=1, record=record)
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="b1", name="bash", arguments={})],
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())  # no bridge call: the turn boundary charges it
+        assert bridge.attempted_groups == 1
+        assert bridge.steps == 0
+        assert self._group_kinds(rows) == ["local-tool"]
+        # N+1 is refused before any of its work happens.
+        self._turn(bridge, "c2")
+        blocked = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert blocked["details"]["terminal"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_a_faulted_turn_is_not_an_output_group(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        # The typed fault signal this bridge layer sees: the partial assistant
+        # message carries stop_reason "error" (the wire-level interruption
+        # marker lives upstream of the bridge).
+        bridge.fold(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    content=[TextContent(text="partial")],
+                    stop_reason="error",
+                )
+            )
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 0
+        assert self._group_kinds(rows) == []
+        # The next COMPLETED group charges normally -- terminal prose here.
+        bridge.fold(
+            MessageEndEvent(message=Message(role="assistant", content=[TextContent(text="done")]))
+        )
+        bridge.fold(TurnEndEvent())
+        assert bridge.attempted_groups == 1
+        assert self._group_kinds(rows) == ["prose-terminal"]
+
+    @pytest.mark.asyncio
+    async def test_challenged_and_accepted_finish_charge_once_each(self, tmp_path: Path) -> None:
+        rows, record = self._recorder()
+        bridge = _bridge(tmp_path, record=record)
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "complete"}]}
+        self._turn(bridge, "c1")
+        first = await bridge.call(claim)
+        assert first["details"]["terminal"] == "completion-challenged"
+        bridge.fold(TurnEndEvent())
+        self._turn(bridge, "c2")
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        bridge.fold(TurnEndEvent())
+        assert self._group_kinds(rows) == ["finish-challenged", "finish"]
+        assert bridge.attempted_groups == 2
+        assert bridge.steps == 2
 
 
 class TestSplitPromptContent:
@@ -559,10 +742,13 @@ class TestCompletionGate:
         assert "the task as stated" in text
         assert bridge.terminal is False
         assert bridge.end_requested is None
-        assert bridge.steps == 0
-        assert [kind for kind, _ in events] == ["completion_challenged"]
-        assert events[0][1]["reason"] == "filled the form"
-        assert events[0][1]["observation_id"] == obs.observation_id
+        # The challenged proposal is an admitted output decision: ONE epoch
+        # (blueprint §3), recorded before the challenge row.
+        assert bridge.steps == 1
+        assert [kind for kind, _ in events] == ["output_epoch", "completion_challenged"]
+        assert events[0][1] == {"epoch_kind": "finish-challenged", "steps": 1}
+        assert events[1][1]["reason"] == "filled the form"
+        assert events[1][1]["observation_id"] == obs.observation_id
 
     @pytest.mark.asyncio
     async def test_the_second_done_claim_ends_the_episode(self, tmp_path: Path) -> None:
@@ -591,7 +777,8 @@ class TestCompletionGate:
         await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "early"}]})
         executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert executed["is_error"] is False
-        assert bridge.steps == 1
+        # The challenged propose took epoch 1; the executed batch took 2.
+        assert bridge.steps == 2
         # The executed batch consumed the turn's token; the turn boundary is
         # what re-arms it (`fold`), exactly as the live loop delivers it.
         bridge.fold(TurnEndEvent())
@@ -612,7 +799,9 @@ class TestCompletionGate:
             {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot finish"}]}
         )
         assert reply["details"]["terminal"] == "finish"
-        assert [kind for kind, _ in events] == ["finish"]
+        # The failed claim is still a valid finish PROPOSAL: one admitted
+        # epoch, then the finish row.
+        assert [kind for kind, _ in events] == ["output_epoch", "finish"]
 
     @pytest.mark.asyncio
     async def test_the_gate_can_be_disabled_for_a_control_arm(self, tmp_path: Path) -> None:
@@ -1007,6 +1196,22 @@ def _confinement_fake_opener(installed: list[Any]) -> Any:
             del sink
             return lambda: None
 
+        def subscribe_requests(self, handler: Any) -> Any:
+            del handler
+            return lambda: None
+
+        async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+            del timeout_s
+            return SimpleNamespace(
+                complete=True,
+                reason=reason,
+                elapsed_ms=0.0,
+                pending_job_ids=(),
+                errors=(),
+                observer_callback_errors=0,
+                descendant_requests_in_flight=False,
+            )
+
     class _FakeContext:
         async def __aenter__(self) -> Any:
             return _FakeSession()
@@ -1240,12 +1445,33 @@ class TestActionToolGate:
             EpisodeSession,
             _await_action_tool,
         )
+        from local_operator.session.tool_readiness import ToolReadiness
 
         class _Session:
             def __init__(self) -> None:
                 self._tools: list[Any] = [SimpleNamespace(name="bash")]
                 self.mcp_startup = None
                 self.mcp_manager = None
+                self.readiness_calls = 0
+
+            async def wait_for_tools(
+                self, required: Any, *, timeout_s: float = 30.0
+            ) -> ToolReadiness:
+                # Faithful mirror of the canonical contract for this double:
+                # no manager, so already-present names read ready and the rest
+                # read missing.
+                self.readiness_calls += 1
+                names = {tool.name for tool in self._tools}
+                required_names = tuple(required)
+                present = tuple(n for n in required_names if n in names)
+                missing = tuple(n for n in required_names if n not in names)
+                return ToolReadiness(
+                    status="ready" if not missing else "missing",
+                    required=required_names,
+                    present=present,
+                    missing=missing,
+                    discovery_settled=None,
+                )
 
         class _Declaration:
             tool_name = "mcp__episode_actions_apply_actions"
@@ -1255,11 +1481,50 @@ class TestActionToolGate:
         record = cast(Any, SimpleNamespace(write=lambda *a, **k: None))
         declaration = cast(Any, _Declaration())
         assert await _await_action_tool(handle, declaration, record) is False
+        # The arm routes through the typed readiness call, not a private
+        # manager/inventory composition of its own.
+        assert session.readiness_calls == 1
 
         # The tool arriving in the LIVE inventory -- the same list the first
         # request publishes from -- flips the gate without a reopen.
         session._tools.append(SimpleNamespace(name=_Declaration.tool_name))
         assert await _await_action_tool(handle, declaration, record) is True
+        assert session.readiness_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_the_gate_refuses_while_discovery_is_pending(self) -> None:
+        """A manager still connecting reads pending, and pending is a refusal.
+
+        The typed status makes the distinction observable; the arm must not
+        prompt into a session whose action tool may never arrive.
+        """
+        from local_operator.evaluation.session_arm import (
+            EpisodeSession,
+            _await_action_tool,
+        )
+        from local_operator.session.tool_readiness import ToolReadiness
+
+        class _Session:
+            def __init__(self) -> None:
+                self.mcp_startup = None
+
+            async def wait_for_tools(
+                self, required: Any, *, timeout_s: float = 30.0
+            ) -> ToolReadiness:
+                return ToolReadiness(
+                    status="pending",
+                    required=tuple(required),
+                    present=(),
+                    missing=tuple(required),
+                    discovery_settled=False,
+                )
+
+        class _Declaration:
+            tool_name = "mcp__episode_actions_apply_actions"
+
+        handle = EpisodeSession(session=_Session(), roots=_roots_free(), _context=_AsyncContext())
+        record = cast(Any, SimpleNamespace(write=lambda *a, **k: None))
+        assert await _await_action_tool(handle, cast(Any, _Declaration()), record) is False
 
     @pytest.mark.asyncio
     async def test_tool_names_are_live_not_frozen(self) -> None:
@@ -1405,7 +1670,10 @@ class TestFailedExecuteRecovery:
         assert first["content"][0].text == RECOVERY_AFTER_READBACK_LOSS
         assert len(executed) == 1 and len(re_reads) == 1
         assert bridge.end_requested is None
-        assert bridge.steps == 0  # the failed batch never ran as a step
+        # The failed batch still consumed its epoch at admission (declared
+        # attempted-output convention): the loss is the read-back, not the
+        # decision, so the official clock charges it once.
+        assert bridge.steps == 1
 
         # Held in flight, exactly like a batch result: the same turn cannot
         # bind a second batch, and the turn boundary arms the recovered screen.
@@ -1415,7 +1683,8 @@ class TestFailedExecuteRecovery:
 
         after = await bridge.call(wait)
         assert after["is_error"] is False
-        assert bridge.steps == 1
+        # Epoch 1 was the failed batch (attempted), epoch 2 this executed one.
+        assert bridge.steps == 2
         assert len(executed) == 2
         assert len(re_reads) == 1  # one re-bind per failed batch, not a loop
 
@@ -1545,12 +1814,15 @@ class TestFailedExecuteRecovery:
         assert finish["is_error"] is True
         assert finish["details"]["rejection_class"] == "second-batch"
         assert len(executed) == 1
-        assert bridge.steps == 0
+        # The failed execute's epoch was consumed at ADMISSION and stays
+        # counted (declared attempted-output convention); the refused finish
+        # consumed none.
+        assert bridge.steps == 1
 
         # Both endings are journalled, so a bundle can tell a degraded
         # environment from a clean run.
-        assert [kind for kind, _ in recorded] == ["bridge_wedged"]
-        payload = recorded[0][1]
+        assert [kind for kind, _ in recorded] == ["output_epoch", "bridge_wedged"]
+        payload = recorded[1][1]
         assert payload["recovery_attempted"] is True
         assert payload["transport_error"].startswith("RpcRemoteError")
         assert payload["recover_error"].startswith("RpcRemoteError")
@@ -1575,9 +1847,9 @@ class TestFailedExecuteRecovery:
             record=lambda kind, payload: recorded.append((kind, payload)),
         )
         await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
-        assert [kind for kind, _ in recorded] == ["recovered"]
-        assert recorded[0][1]["observation_id"] == obs0.observation_id
-        assert recorded[0][1]["transport_error"].startswith("RpcRemoteError")
+        assert [kind for kind, _ in recorded] == ["output_epoch", "recovered"]
+        assert recorded[1][1]["observation_id"] == obs0.observation_id
+        assert recorded[1][1]["transport_error"].startswith("RpcRemoteError")
 
 
 # ---------------------------------------------------------------------------
@@ -1639,8 +1911,49 @@ class _ScriptedSession:
         self._sinks.append(sink)
         return lambda: None
 
+    def subscribe_requests(self, handler: Any) -> Any:
+        # The owning contract's observer surface; the scripted session makes
+        # no provider requests, so the registration is inert and its
+        # unsubscribe a no-op (the real episode composes it for accounting).
+        del handler
+        return lambda: None
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        # The owning contract's explicit join: scripted runs own no child work,
+        # so the receipt is honestly COMPLETE (the arm's score gate requires
+        # it; an incomplete receipt would refuse scoring by design).
+        del timeout_s
+        return SimpleNamespace(
+            complete=True,
+            reason=reason,
+            elapsed_ms=0.0,
+            pending_job_ids=(),
+            errors=(),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
+
     def set_tool_confinement(self, root: Any) -> None:
         del root
+
+    async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
+        # The arm's first-request gate now calls the typed owning API
+        # (``Session.wait_for_tools``). This double drives no discovery
+        # manager, so it spells the same no-manager semantics: names already
+        # in the live inventory read ready; anything else reads missing.
+        # Nothing here waits, so the bound is unused.
+        del timeout_s
+        names = {tool.name for tool in self._tools}
+        required_names = tuple(required)
+        present = tuple(n for n in required_names if n in names)
+        missing = tuple(n for n in required_names if n not in names)
+        return ToolReadiness(
+            status="ready" if not missing else "missing",
+            required=required_names,
+            present=present,
+            missing=missing,
+            discovery_settled=None,
+        )
 
     def request_graceful_cancel(self, reason: str = "cancelled") -> None:
         self.cancels.append(reason)
@@ -1870,7 +2183,9 @@ class TestBridgeWedgeOutcome:
         # batches and not a lost episode.
         assert adapter.executes == 5  # 4 failing + the next wait batch
         assert adapter.observes == 2  # reset's read + the recovery's
-        assert outcome.steps == 1
+        # Epochs: the recovered first batch (attempted), the executed wait, the
+        # challenged finish and the accepted finish -- one apiece at admission.
+        assert outcome.steps == 4
         # The record carries the recovery ("the environment degraded and the
         # harness bridged it"), not a suspiciously clean run.
         events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
@@ -2296,3 +2611,850 @@ class TestAgentStopOutcome:
         # The abort went through the session's normal stop path; nothing ran.
         assert session.aborts == ["episode wall budget"]
         assert adapter.calls.count("execute") == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: the bounded close-out, the release gate, ask delivery
+# ---------------------------------------------------------------------------
+
+
+class _UnverifiedSession(_ScriptedSession):
+    """A session whose owned-work join cannot be verified (the R2 gate case)."""
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        del timeout_s
+        return SimpleNamespace(
+            complete=False,
+            reason=reason,
+            elapsed_ms=1.0,
+            pending_job_ids=("job-synthetic",),
+            errors=("synthetic cleanup still running (unverified)",),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
+
+
+class TestBoundedCloseOut:
+    """The context exit is bounded; the canonical cleanup outlives its waiter."""
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_context_exit_is_cancelled_at_the_bound(self) -> None:
+        from local_operator.evaluation.session_arm import EpisodeSession
+
+        released = asyncio.Event()
+
+        class _HangingHandle:
+            async def aclose(self) -> None:
+                await released.wait()
+
+        started = time.monotonic()
+        joined = await _bounded_close(cast(EpisodeSession, _HangingHandle()), 0.05)
+        elapsed = time.monotonic() - started
+        assert joined is False
+        # The bound, not the held cleanup's lifetime: the exit was cancelled
+        # and abandoned; nothing here waits for ``released``.
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_a_completed_context_exit_returns_true(self) -> None:
+        from local_operator.evaluation.session_arm import EpisodeSession
+
+        class _FastHandle:
+            async def aclose(self) -> None:
+                return None
+
+        assert await _bounded_close(cast(EpisodeSession, _FastHandle()), 5.0) is True
+
+
+class TestReleaseRetention:
+    """R2: an unverified owned join releases NOTHING and says so."""
+
+    def _fixture(
+        self,
+        *,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        scratch_root: Path,
+        session: Any = None,
+        owner_status: Any = None,
+    ) -> tuple[Any, _UnverifiedSession, _WedgeAdapter, list[Any]]:
+        home = scratch_root / "home"
+        config_dir = home / ".local-operator"
+        agent_home = home / "local-operator-home"
+        work = home / "work"
+        for path in (config_dir, agent_home, work):
+            path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(agent_home))
+        roots = SessionRoots(
+            config_dir=config_dir, agent_home=agent_home, cwd=work, allow_volatile=True
+        )
+        spec = build_spec("ep-retain")
+        config = build_config(tmp_path, observation_retry_delay=0.0)
+        adapter = _WedgeAdapter(
+            tmp_path,
+            spec.episode_id,
+            fail_executes=0,
+            recoverable=True,
+            score=ScoreArtifact(status="scored", binary=1),
+        )
+        session = session or _UnverifiedSession(
+            scratch_root, [[{"kind": "wait", "duration_ms": 50}]]
+        )
+        session_spec = SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-retain",
+        )
+        rescued: list[Any] = []
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            rescued.append(descriptor)
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        def opener(selected: Any, *, roots: Any, mode: Any = None) -> Any:
+            del selected, roots, mode
+            return _OpenContext(session)
+
+        async def run() -> Any:
+            return await run_session_episode(
+                spec=spec,
+                config=config,
+                selector=selector(tmp_path),
+                roots=roots,
+                scratch_root=scratch_root,
+                session_spec=session_spec,
+                secrets=(),
+                launch=launch,
+                rescue=rescue,
+                session_opener=opener,
+                owner_status=owner_status,
+            )
+
+        return run, session, adapter, rescued
+
+    @pytest.mark.asyncio
+    async def test_an_incomplete_join_never_releases_the_worker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        release = asyncio.Event()
+        session = _ReleasableSession(
+            short_scratch, [[{"kind": "wait", "duration_ms": 10}]], release=release
+        )
+        run, _session, adapter, rescued = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            session=session,
+        )
+        task = asyncio.create_task(run())
+        while not session.join_calls:
+            await asyncio.sleep(0.01)
+        assert not task.done()
+        assert "cleanup" not in adapter.calls
+        assert "close" not in adapter.calls
+        assert adapter.terminated is False
+        assert rescued == []
+        release.set()
+        outcome = await asyncio.wait_for(task, timeout=15)
+        assert outcome.score is not None
+
+
+class TestAskDeliveryReceipt:
+    """R4: the canonical exchange receipt rides the tool result CONTENT."""
+
+    def test_a_canonical_receipt_is_rendered_into_the_sentence(self) -> None:
+        from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+        receipt = AskUserExchangeResult(
+            ask_id="ask-synthetic",
+            request_digest="a" * 64,
+            accepted=True,
+            answer="synthetic user answer",
+        )
+        rendered_receipt, answer = _split_ask_delivery(receipt)
+        assert answer == "synthetic user answer"
+        assert rendered_receipt is not None
+        sentence = _ask_delivery_sentence(answer, rendered_receipt)
+        assert "The simulated user answered: synthetic user answer" in sentence
+        assert "ask_user exchange receipt" in sentence
+        assert '"ask_id": "ask-synthetic"' in sentence
+        assert f'"request_digest": "{"a" * 64}"' in sentence
+
+    def test_a_declined_receipt_is_rendered_with_the_declined_sentence(self) -> None:
+        from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+        receipt = AskUserExchangeResult(
+            ask_id="ask-synthetic",
+            request_digest="b" * 64,
+            accepted=False,
+            answer=None,
+        )
+        rendered_receipt, answer = _split_ask_delivery(receipt)
+        assert answer is None and rendered_receipt is not None
+        sentence = _ask_delivery_sentence(answer, rendered_receipt)
+        assert "did not provide an answer" in sentence
+        assert '"accepted": false' in sentence
+
+    def test_a_bare_scripted_answer_renders_without_an_invented_receipt(self) -> None:
+        rendered_receipt, answer = _split_ask_delivery("scripted answer only")
+        assert rendered_receipt is None and answer == "scripted answer only"
+        sentence = _ask_delivery_sentence(answer, rendered_receipt)
+        assert sentence == "The simulated user answered: scripted answer only"
+
+    @pytest.mark.asyncio
+    async def test_the_bridge_stages_the_receipt_on_the_content(self, tmp_path: Path) -> None:
+        from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+        obs = _observation()
+        executed: list[Any] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            return _result(input_observation=obs, output_observation=obs)
+
+        async def ask(batch: Any) -> Any:
+            del batch
+            return AskUserExchangeResult(
+                ask_id="ask-bridge",
+                request_digest="c" * 64,
+                accepted=True,
+                answer="bridge answer",
+            )
+
+        bridge = _bridge(tmp_path, observation=obs, execute=execute, ask=ask)
+        reply = await bridge.call(
+            {"actions": [{"kind": "ask_user", "request_id": "ask-bridge", "question": "q"}]}
+        )
+        texts = [c.text for c in reply["content"] if isinstance(c, TextContent)]
+        assert any("bridge answer" in t for t in texts), texts
+        assert any("ask_user exchange receipt" in t for t in texts), texts
+        assert reply["details"]["ask"]["receipt"]["ask_id"] == "ask-bridge"
+        # One epoch for the exchange, and the refresh still ran exactly once
+        # (no second charge).
+        assert bridge.steps == 1 and len(executed) == 1
+
+
+class _ExplodingSession(_UnverifiedSession):
+    """The EXCEPTION path's gate case: the turn raises before any batch runs."""
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del text, images, harness_injected
+        raise SessionArmError("synthetic mid-turn failure")
+
+
+#: The asyncio.run lifetime probe, run as a REAL subprocess main().
+#:
+#: R2's lifetime honesty, stated as an executable negative: the caller returns
+#: from ``asyncio.run`` with the canonical cleanup still running, and the loop
+#: teardown CANCELS it. A future change that "retains" the cleanup must make
+#: this probe FAIL (the hook completing would prove retention); today it must
+#: show the cancellation, and the caller must never claim otherwise.
+_LIFETIME_PROBE = '''
+"""Does a returned-but-unjoined close survive asyncio.run teardown? NO."""
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.environ["PROBE_TREE"])
+
+from local_operator.evaluation.session_arm import _bounded_close, open_episode_session
+from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+from local_operator.providers.clients import MockClient
+from local_operator.sdk import SessionRoots
+from local_operator.session.spec import ApprovalPolicy, SessionSpec
+from local_operator.skills import api as skills_api
+
+skills_api.default_skill_roots = lambda cwd=None, **kwargs: []
+
+
+async def plain_wire(self, request, api_key, oauth_access=None):
+    yield StreamTextDelta(delta="lifetime-probe")
+    yield StreamEndEvent(stop_reason="stop")
+
+
+MockClient.stream = plain_wire
+
+
+async def main():
+    root = Path(os.environ["PROBE_HOME"])
+    roots = SessionRoots(
+        config_dir=root / "config",
+        agent_home=root / "agent-home",
+        cwd=root / "work",
+        allow_volatile=True,
+    )
+    roots.cwd.mkdir(parents=True, exist_ok=True)
+    handle = await open_episode_session(
+        spec=SessionSpec(hosting="test", model="mock", approvals=ApprovalPolicy.auto()),
+        roots=roots,
+    )
+    markers = root / "markers"
+    markers.mkdir(exist_ok=True)
+    release = asyncio.Event()
+
+    async def held_cleanup():
+        (markers / "started").write_text("1")
+        try:
+            await release.wait()
+            (markers / "completed").write_text("1")
+        except asyncio.CancelledError:
+            (markers / "cancelled").write_text("1")
+            raise
+
+    handle.session.add_dispose_hook(held_cleanup, last=True)
+    receipt = await handle.session.shutdown_owned_work("lifetime-probe", timeout_s=0.01)
+    canonical = handle.session._disposal_task
+    close_joined = await _bounded_close(handle, 0.05)
+    print(
+        json.dumps(
+            {
+                "receipt_complete": receipt.complete,
+                "close_joined": close_joined,
+                "canonical_alive_before_return": (
+                    canonical is not None and not canonical.done()
+                ),
+                "subscriber_attached_before_return": (
+                    handle._request_unsubscribe is not None
+                ),
+            }
+        ),
+        flush=True,
+    )
+    return
+
+
+asyncio.run(main())
+markers = Path(os.environ["PROBE_HOME"]) / "markers"
+print(
+    json.dumps(
+        {
+            "started": (markers / "started").exists(),
+            "hook_outcome": (
+                "completed"
+                if (markers / "completed").exists()
+                else ("cancelled" if (markers / "cancelled").exists() else "neither")
+            ),
+        }
+    ),
+    flush=True,
+)
+'''
+
+
+class TestAsyncioRunLifetime:
+    """R2's lifetime honesty: a bare asyncio.run return does NOT retain."""
+
+    def test_returning_to_asyncio_run_cancels_the_unjoined_cleanup(
+        self, tmp_path: Path, short_scratch: Path
+    ) -> None:
+        probe_tree = Path(__file__).resolve().parents[3]
+        script = short_scratch / "lifetime_probe.py"
+        script.write_text(_LIFETIME_PROBE)
+        probe_home = short_scratch / "probe-home"
+        probe_home.mkdir(parents=True, exist_ok=True)
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PROBE_TREE": str(probe_tree),
+            "PROBE_HOME": str(probe_home),
+            "HOME": str(probe_home),
+            "LOCAL_OPERATOR_CONFIG_DIR": str(probe_home / "config"),
+            "TERM": "xterm-256color",
+        }
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(probe_tree),
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        lines = [
+            json.loads(line)
+            for line in completed.stdout.splitlines()
+            if line.strip().startswith("{")
+        ]
+        assert len(lines) == 2, completed.stdout + completed.stderr
+        before_return, after_teardown = lines
+        # Within the LIVE process the canonical work and the subscription are
+        # actually alive at the moment the caller returns...
+        assert before_return["receipt_complete"] is False
+        assert before_return["close_joined"] is False
+        assert before_return["canonical_alive_before_return"] is True
+        assert before_return["subscriber_attached_before_return"] is True
+        # ...but the asyncio.run teardown cancels it: mere references are NOT
+        # retention, and this disposition must never claim they are.
+        assert after_teardown["started"] is True
+        assert after_teardown["hook_outcome"] == "cancelled"
+
+
+class TestReleaseRetentionExceptionPath:
+    """R2: the exception path obeys the same release gate as the normal one."""
+
+    @pytest.mark.asyncio
+    async def test_the_exception_path_never_releases_either(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        scratch = short_scratch / "explode"
+        scratch.mkdir(parents=True, exist_ok=True)
+        session = _ExplodingSession(scratch, [])
+        joins: list[int] = []
+        release = asyncio.Event()
+        original_join = session.shutdown_owned_work
+
+        async def counting_join(reason: str, *, timeout_s: float = 30.0) -> Any:
+            joins.append(1)
+            if release.is_set():
+                return await _ScriptedSession.shutdown_owned_work(
+                    session, reason, timeout_s=timeout_s
+                )
+            return await original_join(reason, timeout_s=timeout_s)
+
+        monkeypatch.setattr(session, "shutdown_owned_work", counting_join)
+        run, _session, adapter, rescued = TestReleaseRetention()._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=scratch,
+            session=session,
+        )
+        task = asyncio.create_task(run())
+        # RETAIN FIRST (R3-A1): the exception is recorded and the host then
+        # HOLDS -- it does not exit in front of owned work it has not verified.
+        for _ in range(300):
+            if joins:
+                break
+            await asyncio.sleep(0.01)
+        assert joins, "the failure path must reach the retained join"
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the failure path must not exit while unverified"
+        # Same gate as the normal path: nothing destructive ran, and no
+        # outcome was sealed over the unverified work.
+        assert "cleanup" not in adapter.calls
+        assert "close" not in adapter.calls
+        assert adapter.terminated is False
+        assert rescued == []
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "cancellation is not proof of disposal"
+        release.set()
+        await asyncio.wait_for(task, timeout=15)
+
+
+class _ReleasableSession(_ScriptedSession):
+    """A LIVE canonical join: unverified until the fixture releases it.
+
+    It mimics the contract that makes the retained-join loop safe: a pending
+    canonical makes the bounded join WAIT, and the receipt REPORTS a
+    full-bound wait via ``elapsed_ms`` -- so both settled-detection signals
+    agree this is a live join rather than a settled one. (The wall sleep is
+    shortened for test speed; the RECORD is what the loop reads.)
+    """
+
+    def __init__(self, *args: Any, release: asyncio.Event, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.release = release
+        self.join_calls = 0
+
+    async def shutdown_owned_work(self, reason: str, *, timeout_s: float = 30.0) -> Any:
+        self.join_calls += 1
+        if self.release.is_set():
+            return SimpleNamespace(
+                complete=True,
+                reason=reason,
+                elapsed_ms=0.5,
+                pending_job_ids=(),
+                errors=(),
+                observer_callback_errors=0,
+                descendant_requests_in_flight=False,
+            )
+        await asyncio.sleep(min(timeout_s, 0.02))
+        return SimpleNamespace(
+            complete=False,
+            reason=reason,
+            elapsed_ms=timeout_s * 1000.0,
+            pending_job_ids=("job-synthetic",),
+            errors=("synthetic cleanup still running (unverified)",),
+            observer_callback_errors=0,
+            descendant_requests_in_flight=False,
+        )
+
+
+class TestRetainedJoin:
+    """R2 round 3: an incomplete join HOLDS the host until it completes."""
+
+    @pytest.mark.asyncio
+    async def test_a_live_join_is_held_until_complete_and_released_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        from local_operator import owned_process
+        from local_operator.evaluation import session_arm as session_arm_mod
+
+        stops: list[int] = []
+
+        async def recording_stop(self: Any) -> None:
+            stops.append(1)
+
+        monkeypatch.setattr(session_arm_mod.ActionBridge, "stop", recording_stop)
+
+        release = asyncio.Event()
+        session = _ReleasableSession(
+            short_scratch, [[{"kind": "wait", "duration_ms": 10}]], release=release
+        )
+        channel = owned_process.OwnerStatusChannel(
+            tmp_path / "owner-status.json",
+            owner_id="ep-retained-join",
+            backend="detached",
+            job_label=None,
+        )
+        run, _session_out, adapter, rescued = TestReleaseRetention()._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            session=session,
+            owner_status=channel,
+        )
+
+        task = asyncio.create_task(run())
+        provisional = None
+        for _ in range(400):
+            try:
+                provisional = json.loads((tmp_path / "owner-status.json").read_text())
+            except (OSError, ValueError):
+                provisional = None
+            if provisional is not None and provisional["phase"] == "provisional":
+                break
+            await asyncio.sleep(0.01)
+        # HELD: the host is in the join, nothing destructive has run, and the
+        # task is still alive -- the point of the whole capability.
+        assert provisional is not None and provisional["phase"] == "provisional"
+        assert provisional["receipt"]["pending_job_ids"] == ["job-synthetic"]
+        assert session.join_calls >= 1
+        assert not task.done()
+        assert "cleanup" not in adapter.calls
+        assert "close" not in adapter.calls
+        assert adapter.terminated is False
+        assert stops == []
+
+        release.set()
+        outcome = await asyncio.wait_for(task, timeout=15)
+        # The join COMPLETED: the normal close-out ran -- score taken, worker
+        # released, bridge stopped exactly once.
+        assert outcome.status != "failed"
+        assert outcome.score is not None
+        assert "cleanup" in adapter.calls
+        assert adapter.terminated is True
+        assert rescued == []
+        assert stops == [1]
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert '"kind": "provisional"' in events
+        assert '"kind": "cleanup_retained"' not in events
+        assert '"kind": "shutdown"' in events and '"complete": true' in events
+        closing = json.loads((tmp_path / "owner-status.json").read_text())
+        assert closing["phase"] == "closing"
+        assert session.join_calls >= 2
+
+    @pytest.mark.asyncio
+    async def test_a_settled_canonical_keeps_the_host_retained(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """R3-A1 (rewritten in round 4): a settled canonical does NOT end the host.
+
+        It used to leave the loop and return a retained-FAILURE outcome, which
+        the caller then sealed while its own ``asyncio.run`` cancelled the
+        cleanup -- so the descriptor was the entire story of a live process
+        (measured in the managed host). Round 4 keeps the physically reasonable
+        reading: no retry can change a settled canonical, so the loop does not
+        spin, but the host STAYS -- every scope it holds stays alive and no
+        seal, terminal status or release happens. External authorized teardown
+        is a separate disposition, never an inference from elapsed time.
+        """
+        from local_operator.evaluation import session_arm as session_arm_mod
+
+        stops: list[int] = []
+
+        async def recording_stop(self: Any) -> None:
+            stops.append(1)
+
+        monkeypatch.setattr(session_arm_mod.ActionBridge, "stop", recording_stop)
+        release = asyncio.Event()
+        run, session, adapter, rescued = TestReleaseRetention()._fixture(
+            tmp_path=tmp_path, monkeypatch=monkeypatch, scratch_root=short_scratch
+        )
+        original_join = session.shutdown_owned_work
+
+        async def controlled_join(reason: str, *, timeout_s: float = 30.0) -> Any:
+            if release.is_set():
+                return await _ScriptedSession.shutdown_owned_work(
+                    session, reason, timeout_s=timeout_s
+                )
+            return await original_join(reason, timeout_s=timeout_s)
+
+        monkeypatch.setattr(session, "shutdown_owned_work", controlled_join)
+        task = asyncio.create_task(run())
+        # Hold past at least two paced attempts (the settle pace is 5 s), so
+        # "still held" is not merely "the first attempt has not returned".
+        await asyncio.sleep(6.5)
+        assert not task.done(), "a settled canonical must not end the host"
+        assert "cleanup" not in adapter.calls
+        assert "close" not in adapter.calls
+        assert adapter.terminated is False
+        assert stops == []
+        assert rescued == []
+        # Only a fresh PUBLIC complete receipt permits the fixture to leave.
+        # Actual permanently settled SDK failures are tested in kill-bounded
+        # managed processes; they must never be "fixed" by recreating cleanup.
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        await asyncio.wait_for(task, timeout=15)
+
+
+def _sse_response(events: list[dict[str, Any]]) -> httpx.Response:
+    """One scripted SSE body, the shape ``OpenAICompatClient`` parses."""
+
+    wire = "".join("data: " + json.dumps(e) + "\n\n" for e in events) + "data: [DONE]\n\n"
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=wire.encode())
+
+
+def _tool_delta(model: str, calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """A tool-call delta chunk for every call, ids stable per index."""
+
+    tcs = [
+        {
+            "index": i,
+            "id": f"call_{i}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+        for i, (name, args) in enumerate(calls)
+    ]
+    return {
+        "id": "r",
+        "model": model,
+        "choices": [{"index": 0, "delta": {"tool_calls": tcs}, "finish_reason": None}],
+    }
+
+
+class TestTheStreamCompletedStopBoundary:
+    """R1 C1: a stream-completed Nth group must stop the NEXT ROOT REQUEST.
+
+    The unit-level clock tests cannot see this boundary: the loop asks its
+    graceful question BEFORE it yields ``TurnEndEvent`` (``loop.py``), so a
+    stop requested when the sink sees that event is first read one boundary
+    late. Only the REAL loop shows whether the stop is read in time -- the
+    round-1 measurement on this stack: a local-tool-only Nth group let a
+    second root request go out and its tool execute (``wire_calls=2``).
+
+    This class drives the real stack through ``run_session_episode`` -- real
+    ``sdk.open_session``, real ``AgentLoop``, the arm's own native MCP action
+    tool -- with only the MODEL TRANSPORT scripted (zero spend: no network,
+    no VM, no paid model). The wire counter is the discriminator.
+    """
+
+    @staticmethod
+    def _wire(
+        script: list[list[tuple[str, dict[str, Any]]]],
+    ) -> tuple[list[dict[str, Any]], httpx.MockTransport]:
+        calls: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            calls.append({"model": body.get("model"), "messages": len(body.get("messages", []))})
+            idx = min(len(calls) - 1, len(script) - 1)
+            model = body.get("model") or "mock"
+            return _sse_response(
+                [
+                    _tool_delta(model, script[idx]),
+                    {
+                        "id": "r",
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                    },
+                ]
+            )
+
+        return calls, httpx.MockTransport(handler)
+
+    async def _run(
+        self,
+        short_scratch: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        script: list[list[tuple[str, dict[str, Any]]]],
+        max_steps: int,
+    ) -> tuple[list[dict[str, Any]], Any, str]:
+        """One real episode; returns (wire calls, outcome, record text)."""
+
+        import local_operator.providers.clients as clients_mod
+
+        home = short_scratch / "home"
+        for d in (home / ".local-operator", home / "home", home / "work"):
+            d.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(home / "home"))
+        monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+        # The documented nested-session escape: this test opens a real
+        # session in-process, which the agent-shell guard refuses without it
+        # (the same hook the zero-spend QA rigs run under).
+        monkeypatch.setenv("LOCAL_OPERATOR_ALLOW_NESTED_SESSION", "1")
+        world = short_scratch / "world"
+        (world / "work").mkdir(parents=True)
+        (world / "note.txt").write_text("synthetic world note", encoding="utf-8")
+
+        calls, transport = self._wire(script)
+        original = clients_mod.client_for_spec
+
+        def patched(spec: Any, **kwargs: Any) -> Any:
+            if getattr(spec, "provider", None) == "test":
+                return clients_mod.OpenAICompatClient(
+                    "https://synthetic.invalid/v1",
+                    http_client=httpx.AsyncClient(transport=transport),
+                    openai_api="chat_completions",
+                )
+            return original(spec, **kwargs)
+
+        monkeypatch.setattr(clients_mod, "client_for_spec", patched)
+
+        class _AskOwnerAdapter(FakeAdapter):
+            """FakeAdapter + the session arm's required ask-owner capability."""
+
+            async def handshake(self, *, timeout: float = 10.0) -> Any:
+                base = await super().handshake(timeout=timeout)
+                capabilities = base.metadata.capabilities.model_copy(
+                    update={"ask_user_answer_owner": "adapter"}
+                )
+                return base.model_copy(
+                    update={
+                        "metadata": base.metadata.model_copy(update={"capabilities": capabilities})
+                    }
+                )
+
+        roots = SessionRoots(
+            config_dir=home / ".local-operator",
+            agent_home=home / "home",
+            cwd=world / "work",
+            allow_volatile=True,
+        )
+        spec = build_spec("ep-stop-boundary")
+        config = build_config(short_scratch, observation_retry_delay=0.0, max_steps=max_steps)
+        adapter = _AskOwnerAdapter(short_scratch, spec.episode_id)
+        session_spec = SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=world,
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-stop-boundary",
+        )
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            del descriptor, kwargs
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        outcome = await run_session_episode(
+            spec=spec,
+            config=config,
+            selector=selector(short_scratch),
+            roots=roots,
+            scratch_root=short_scratch,
+            session_spec=session_spec,
+            secrets=(),
+            launch=launch,
+            rescue=rescue,
+        )
+        record = outcome.record_root / "events.jsonl" if outcome.record_root else None
+        text = ""
+        if record is not None and record.exists():
+            text = record.read_text(encoding="utf-8")
+        return calls, outcome, text
+
+    @pytest.mark.asyncio
+    async def test_a_local_only_nth_group_spends_no_second_request(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The measured R1 class: max_steps=1, turn 1 = a local ``read``.
+
+        Pre-fix the wire served a second request and the extra turn's tool
+        ran (round-1 logs: wire 2, duplicate ``read``); post-fix the request
+        is never spent.
+        """
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[("read", {"path": str(real_arm_scratch / "world" / "note.txt")})]],
+            max_steps=1,
+        )
+        assert len(calls) == 1  # the N+1 root request is never spent
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        assert '"budget_stop"' in text
+        assert text.count("tool_execution_end") == 1  # the extra turn's tool never ran
+
+    @pytest.mark.asyncio
+    async def test_a_local_nth_group_never_lets_an_action_turn_start(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Turn 1 local, turn 2 (if it were ever requested) an action call.
+
+        Pre-fix the second request was served and the action call was only
+        refused at the bridge; post-fix the request never goes out, so no
+        action-tool execution row exists at all.
+        """
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[
+                [("read", {"path": str(real_arm_scratch / "world" / "note.txt")})],
+                [("apply_actions", {"actions": [{"kind": "wait", "duration_ms": 50}]})],
+            ],
+            max_steps=1,
+        )
+        assert len(calls) == 1
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        action_rows = [
+            line
+            for line in text.splitlines()
+            if "tool_execution_end" in line and "apply_actions" in line
+        ]
+        assert action_rows == []
+
+    @pytest.mark.asyncio
+    async def test_a_multi_call_nth_group_pairs_every_result(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Nth group's OWN calls still all execute and pair: the stop is
+        honoured only after the batch completes, never mid-batch."""
+
+        path = str(real_arm_scratch / "world" / "note.txt")
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[("read", {"path": path}), ("read", {"path": path})]],
+            max_steps=1,
+        )
+        assert len(calls) == 1
+        assert outcome.attempted_groups == 1
+        assert outcome.steps == 0
+        assert text.count("tool_execution_end") == 2  # both paired

@@ -4368,6 +4368,28 @@ def test_a_reset_flag_without_the_notice_line_names_the_state() -> None:
     assert "result: 2" in "\n".join(lines)
 
 
+def test_reused_send_row_cannot_claim_a_fresh_wake() -> None:
+    card = ToolCard("cached", "send", {"target": "release-owner", "message": "same note"})
+    details = {
+        "duplicate_suppressed": True,
+        "original_receipt": {
+            "details": {"wake": True, "delivery": {"state": "delivered", "wake": "acked"}}
+        },
+    }
+    card.mark_done("duplicate suppressed — no new delivery, wake or patience wait", details)
+    row = card._build_row(100).plain
+    assert "receipt reused · no new wake · release-owner" in row
+    assert "send wake · " not in row
+    card.toggle_expanded()
+    assert "no new delivery, wake or patience wait" in card._build_content(100).plain
+    # A later fresh/force outcome must reset reuse instead of keeping stale ink.
+    card.mark_done(
+        "fresh receipt", {"wake": True, "delivery": {"state": "delivered", "wake": "acked"}}
+    )
+    assert "receipt reused" not in card._build_row(100).plain
+    assert "wake · release-owner" in card._build_row(100).plain
+
+
 def test_settled_send_rows_lead_with_their_delivery_state() -> None:
     """The amber states get a word in the marker slot, and delivered does not.
 

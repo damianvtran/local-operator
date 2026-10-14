@@ -13,6 +13,7 @@ from local_operator.evaluation.adapters.api import AdapterCapabilities, AdapterS
 from local_operator.evaluation.evidence.models import canonical_bytes, canonical_digest
 from local_operator.evaluation.protocol import (
     ActionBatch,
+    DragAction,
     KeyAction,
     PasteTextAction,
     TypeAction,
@@ -131,4 +132,29 @@ def test_old_rpc_refused_before_allocation() -> None:
 def test_ascii_native_controls_are_not_reinterpreted_as_paste() -> None:
     ActionSurface(type_text_mode="ascii").validate_batch(
         batch(TypeAction(observation_id="obs", text="x\t\n\r"))
+    )
+
+
+def test_drag_is_offered_only_when_the_backend_negotiates_it() -> None:
+    drag = DragAction(
+        observation_id="obs",
+        frame_id="screen",
+        start_x=1,
+        start_y=2,
+        end_x=3,
+        end_y=4,
+    )
+    legacy = ActionSurface()
+    enabled = ActionSurface(drag=True)
+    assert not any(model is DragAction for model in legacy.models)
+    assert any(model is DragAction for model in enabled.models)
+    assert '"drag"' not in build_system_prompt(legacy)
+    assert '"drag"' in build_system_prompt(enabled)
+    with pytest.raises(ActionAdmissionError, match="not supported"):
+        legacy.validate_batch(batch(drag))
+    enabled.validate_batch(batch(drag))
+    assert legacy.schema()["drag"] is False
+    assert enabled.schema()["drag"] is True
+    assert canonical_digest("runner-tool-schema-v1", enabled.schema()) != canonical_digest(
+        "runner-tool-schema-v1", legacy.schema()
     )

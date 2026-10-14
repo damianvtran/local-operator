@@ -381,6 +381,7 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.enabled"] = DEFAULT_ENABLED
     consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
+    consumers["aida.cadence.interval_hours"] = aida_proactive.DEFAULT_INTERVAL_HOURS
     consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
@@ -1687,7 +1688,9 @@ def test_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:
     own small confusion."""
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 3)
-    assert [path.name for path in tmp_path.iterdir()] == ["config.yml"]
+    # The persistent writer sidecar is deliberate, not an abandoned atomic
+    # replacement temporary. Removing it after release would split lock domains.
+    assert {path.name for path in tmp_path.iterdir()} == {"config.yml", ".config-write.lock"}
 
 
 def test_write_fsyncs_the_parent_directory_after_the_rename(

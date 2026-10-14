@@ -1966,6 +1966,39 @@ harness now honours the rule at the emit site as well: a row the shared
 cannot paint chrome it was never sent. An owner on an older build still sends
 these rows, which is why the marker (and the recogniser) remain the contract.
 
+### Hub deliveries on user-role rows: `provider_payload.hub_receipt`
+
+A comms delivery to a running child (a steer, a note, a question) is persisted
+as a `Message(role="user")` whose text is the model-facing `<parent-message>`
+envelope, because that is what the model must read. The envelope is NOT a
+display body: a surface that re-parses it is guessing provenance from text, and
+a surface that does not recognise it paints the XML as the user's own words.
+
+The producer therefore stamps the typed facts a `hub_message` custom carries
+onto the persisted row, under the same namespaced key both wires already
+carry:
+
+* `message_start.message.provider_payload.hub_receipt` — the live event's copy.
+* the durable row's `payload.provider_payload.hub_receipt` — the same key on the
+  journal entry a `snapshot`/`/history` page serves.
+
+Shape: `{direction: "to_child" | "to_parent", expects_reply: bool, steer: bool,
+body: str}` plus advisory `label`/`job_id` when the producer had them. `body`
+is the edited bytes the reader must see; the row's own `text` remains the
+envelope and is what providers receive — role, content, identity and
+scheduling are unchanged by the marker, and unrelated `provider_payload`
+bookkeeping on the row is merged around, never replaced.
+
+The consumer rule is POSITIVE PROVENANCE, read BEFORE any human-row
+classification: a valid marker means the row is the same hub receipt the
+`hub_message` custom path paints (never a user bubble, never the envelope); a
+malformed or body-less marker is not a receipt and the row keeps its ordinary
+user handling; a row without the marker is untouched, so transcripts written
+before the marker existed keep their legacy treatment. `hub_receipt_marker` in
+`local_operator/harness/hub_receipts.py` is the one definition all surfaces
+read (mobile projection, TUI main and child views; the desktop reducer mirrors
+it byte-for-byte).
+
 ### The `notification` frame
 
 Emitted **if and only if** the bridge observes a newly published, unseen
@@ -2845,3 +2878,127 @@ cycles). Tools/supplements retain their owning message/call and their own entry
 ordinal separately; row identity owns attachments, sender and payload. Metadata
 updates must change order even when payload bytes did not change, and omitted
 metadata on a live update cannot clear a known coordinate.
+
+
+## Complete peer-source contract (advertised; no consumer until the UI slice)
+
+`peer-journal-source-v1` IS advertised by this build — on every relay link
+(`network/wire.py`), on the runtime record (`session/runtime/serving.py` +
+`runtime/server.py`) and as the `peer_journal_source` feature key
+(`server/features.py`). ADVERTISING IS NOT ACTIVATION: every read still passes
+the four-part gate — owner advertisement, viewer declaration, authenticated
+session source, per-response acknowledgment — and absent any half the answer
+stays the legacy bytes. A remote `journal_order` alone remains
+byte-compatible unsupported, and local ordering and local mobile partial
+negotiation are unchanged. The recovery envelope's source facts are
+receiver-side implemented and inert until a UI slice consumes them. Every new
+field is omitted for legacy viewers on live and replay paths.
+
+The authority bootstrap uses the existing session GET but applies only source
+metadata via `applyJournalOrderMetadata`: install the equality-only order domain
+under session/view/read witnesses, never incidentally adopt page bodies, causal
+call owners, tail/cursor coverage or frontend state. Explicit verified page/body
+acceptance is a DIFFERENT typed path. Lookup coordinates do not reattest a loaded
+old body or release a provisional/local user. Fresh body plus coordinates must
+be admitted atomically; stale-domain loaded bodies remain payload-owed.
+`JournalOrderRead` remains `{revision, demand}`; generation is separate. A raced
+same-domain wake keeps its new reference-identity debt without blanket rejection
+of still-valid old facts. Per-ID body-owed revisions fence body acceptance.
+
+Proposed purposes on the existing view-authorized stored-history RPC:
+
+| Purpose | Authority and bounds |
+| --- | --- |
+| page | Verified bounded page; explicit page acceptance only |
+| metadata | Requested raw-ID facts only; no body/cursor/frontend effects |
+| payload | Expected accepted generation REQUIRED; fresh projected bodies and same-read coordinates together |
+| availability | One bounded deferred index refresh/join signal (4 s owner wait, inside the read-sized hop); no rows or generation authority. A build past the bound emits ONE explicit reconcile correction; further declared typed/page reads of that failed wave report `unavailable`, not a dead `building`. Explicit retry before readiness remains unavailable; an actual current-owner `ready` read clears the latch. No retry-per-render or longer wait is implied. Owner/attach-client changes invalidate the old wave; closed bridges, stale completions and refused grants cannot establish its failure on a new source. ACK, bodies, cursors and previously proven facts are preserved, and undeclared legacy responses are unchanged |
+
+Requested IDs plus explicit dependency IDs are bounded at 512. Missing means
+proven absent, unavailable means present but unsafe/unprojectable, remaining
+means budget-deferred; these are not interchangeable. Exact encoded response
+limits include every metadata map. Raw-ID lookup demand unions canonical,
+quarantined and loaded-body-owed IDs BEFORE the no-debt/no-generation guard.
+No alias, clock, wire sequence or receiver disk supplies source authority.
+
+Proof prerequisites the advertisement was gated on (held before this slice shipped):
+
+* Extend the SAME index with validated raw-ID byte ranges, retaining no bodies;
+  FD-before/after, path identity and index source must agree for bounded reads.
+* Prove actual settled projection equivalence including prune/injection/media
+  dependencies. If closure cannot be bounded, report unavailable, not missing;
+  a raw row converter is not a universal settled replay projector.
+* Availability must defer at the dispatcher, not return None from an inline
+  handler (which yields an empty ACK), and must not occupy the shared four slow
+  workers or stall reader/prompt/live traffic. Recheck link/grant/session before
+  one final answer. Cancellation cleanup must state actual protocol bounds.
+
+The index witness inherits the existing inode/size/mtime assumption, not
+cryptographic detection of externally preserved-stat rewrites. No new cache,
+service, domain, payload queue, runtime lease, permission or view-grant expansion
+is authorized. Complete-core review/QA precedes separate UI adoption. The UI
+continuity amendment must separate metadata facts from rank/body/causal-owner
+admission and retain later source demand while admitting valid earlier facts.
+
+
+### Recovery-delta source facts (receiver side, unpublished)
+
+A facade retains, per attachment, the last owner-attested ``{raw id:
+journal_seq}`` observed on its own order wakes for one generation: merged within
+a generation, atomically replaced on rotation, invalidated by ``reconcile``,
+bounded at 4096 (overflow invalidates rather than growing a partial map), and
+disposed on every rebind, go-cold and dispose. A recovery ``history_delta`` may
+carry ``journal_generation``, ``journal_ordinals`` and the owner-stamped
+``entry_times`` subset ONLY when the attachment declared the complete contract
+and EVERY delta row was attested in the retained domain — all-or-nothing,
+because a partial map under a packet-level claim would over-release rows the
+owner never attested. Omission is the designed common case (rows committed
+while disconnected were never observed on this attachment) and settles through
+the fresh authority read and the payload-by-ID fallback, never through a wrong
+display. The family is per-subscriber: a non-declaring subscriber's
+``history_delta`` frame is byte-identical to the pre-contract event on the live
+and replay paths alike. Retention is passive — it rewrites no event and
+publishes no frame.
+
+
+### Bounded structural source-body subset (unpublished implementation)
+
+The same transcript-index cache schema now proposes version 7: raw ranges and
+body-free structural facts share the existing full/suffix scanner. Facts are
+extracted from already parsed JSON before hidden-row and assistant-call
+classification loses identity. Inverse prune/call/compaction/duplicate views are
+built once with the resident index or cache load, not by a payload request.
+No notices, arguments, preserved text or message bodies enter the new table.
+Suffix facts follow the existing window-row cut; last-ID ranges alone never
+certify duplicate identities. The reader's segment row count is not a whole
+journal count after incremental re-derivation.
+
+The separate internal source-body getter discovers a complete ordinary
+non-ask call unit and its last effective prune through the captured cut, reads
+only those ranges on one source-coherent FD, and reuses the actual per-row
+replay operation. It does not build an incomplete selected Transcript or infer
+context/preserve graphs. Preserved candidates, ambiguous/ask/divert/hidden or
+cross-cut units, opaque causal scope, unknown global scope, supplements and
+unbounded legacy media expansion are terminal unavailable. Inline media and
+artifact references retain their real typed body. A wholly historical ordinary
+unit may have an audit-equivalent body; units crossing the governing cut cannot
+be partially certified. A raw prune is named as a dependency, never leaked as
+an unsolicited conversation row.
+
+Each original raw ID has exactly one of present/missing/unavailable/remaining.
+Missing requires proven source absence; unproven identity scope is envelope
+unavailable. Intrinsic units over 512 unique IDs, 512 KiB raw bytes or an empty
+encoded frame are unavailable. Aggregate budgets defer complete units as
+remaining, with a smaller requested-ID retry batch that leaves room for explicit
+dependencies. Huge units must not starve later small units. Encoded metadata is
+never silently trimmed, and expanded media is never dropped to manufacture fit.
+All body reads inherit the existing inode/size/mtime limitation, including
+stat-preserving external rewrites. Publication still requires current view,
+client, expected-domain and body-owed revision fences after awaits.
+
+This implements no public DTO, complete capability, availability lane or UI
+fallback/admission policy. Initial unprovable tails must decline optimization
+before new-domain adoption. Later unavailable units retain known/provisional
+records and require explicit source-unconfirmed reconcile; unavailable is not
+missing, reset, or a reason to poll an old peer. Metadata bootstrap remains
+lookup facts/domain only, never rank/causal-owner admission on an old body.

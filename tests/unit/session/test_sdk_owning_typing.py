@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # pyright-only: mode-precise SDK typing, asserted statically
         ViewerSessionProtocol,
     )
     from local_operator.session.spec import SessionRoots, SessionSpec
+    from local_operator.session.tool_readiness import ToolReadiness
 
     async def _static_owning_surface(spec: SessionSpec, roots: SessionRoots) -> None:
         """The three typed views the overloads promise, checked statically."""
@@ -40,6 +41,9 @@ if TYPE_CHECKING:  # pyright-only: mode-precise SDK typing, asserted statically
             unsubscribe()
             receipt = await session.shutdown_owned_work("static", timeout_s=1.0)
             static_typing.assert_type(receipt.complete, bool)
+            readiness = await session.wait_for_tools(["bash"], timeout_s=1.0)
+            static_typing.assert_type(readiness, ToolReadiness)
+            static_typing.assert_type(readiness.missing, tuple[str, ...])
 
         async with sdk.open_session(spec, roots=roots, mode="own") as session:
             static_typing.assert_type(session, OwningSessionProtocol)
@@ -100,9 +104,10 @@ def test_protocol_split_is_where_the_owning_surface_lives() -> None:
     from local_operator.session.session import Session
 
     assert SessionProtocol in getattr(OwningSessionProtocol, "__mro__")
-    owning = {"subscribe_requests", "shutdown_owned_work"}
+    owning = {"subscribe_requests", "shutdown_owned_work", "wait_for_tools"}
     assert owning <= set(_get_protocol_attrs(OwningSessionProtocol))
     assert not owning & set(_get_protocol_attrs(SessionProtocol))
     assert not owning & set(_get_protocol_attrs(ViewerSessionProtocol))
     assert callable(Session.subscribe_requests)
     assert callable(Session.shutdown_owned_work)
+    assert callable(Session.wait_for_tools)

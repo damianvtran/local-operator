@@ -9,6 +9,11 @@ Read this when allocating engineering work, planning costly evidence, or closing
 review rounds. `AGENTS.md` remains the repository authority for isolation,
 commands, security, merge and release gates. This policy changes allocation and
 scope, not the depth of validation or the operator's approval requirements.
+For this repository's public release copy, follow
+`.github/RELEASE_NOTES_TEMPLATE.md` and the release steps in `AGENTS.md`.
+The claim/bump PR's public-notes section and publication file follow that same
+contract; internal gate evidence remains in separate PR comments, never in
+user-facing release notes.
 
 ## Allocate once, inspect narrowly
 

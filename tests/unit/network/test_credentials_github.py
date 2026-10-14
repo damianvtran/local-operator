@@ -950,8 +950,24 @@ def test_window_end_revokes_on_the_broker_loop(
     assert rows and rows[-1]["detail"]["cause"] == "grant_expired", rows
 
 
-def test_a_failed_revoke_is_retried_and_recorded(owner: Any, github_api: _FakeGithub) -> None:
+def test_a_failed_revoke_is_retried_and_recorded(
+    owner: Any, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A failed DELETE is a recorded failure, then a success — never a silent no-op."""
+    audited = threading.Event()
+    audit_sink = owner.broker._github_audit_sink
+
+    def record(cause: str, key: str, holder: str, revoked: int, deferred: int) -> None:
+        audit_sink(cause, key, holder, revoked, deferred)
+        if key == github_mod.GITHUB_KEY and holder == BORROWER_DEVICE and revoked == 1:
+            audited.set()
+
+    # As in the window-end cell above, subscribe BEFORE the lender captures
+    # its sink. The backend's DELETE is visible before the worker returns and
+    # persists its outcome, so deletion alone cannot prove the retry was audited.
+    # Signal only AFTER the successful audit write; the final [0, 1] assertion
+    # still requires both the original failed attempt and completed retry.
+    monkeypatch.setattr(owner.broker, "_github_audit_sink", record)
     token = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
     github_api.fail_next_revokes = 1
     # The retry delay is a production constant (60 s); shortened here so the
@@ -962,6 +978,7 @@ def test_a_failed_revoke_is_retried_and_recorded(owner: Any, github_api: _FakeGi
     assert _wait_for(
         lambda: github_api.revoke_requests == [token] and not github_api.live(token), timeout=10.0
     ), "the retry never landed"
+    assert audited.wait(timeout=10.0), "the successful retry's revoke audit never completed"
     rows = _audit_rows(owner, "credential.revoke")
     assert [row["detail"]["revoked"] for row in rows] == [0, 1], rows
 
