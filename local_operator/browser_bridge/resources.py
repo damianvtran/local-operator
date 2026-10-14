@@ -251,9 +251,16 @@ class BrowserResource:
         # the daemon reports a different (version, proto), so a user who updates
         # the extension mid-session gets ownership back without restarting.
         self.ownership: bool | None = None
-        # The peer identity `self.ownership` was learned against. See
-        # `_peer_identity` for why the pair, not just the version.
+        # The peer identity `self.ownership` was learned against, AND the lane
+        # it was learned on. See `_peer_identity` for why the pair, not just the
+        # version. The lane name is part of the cache key: two hosts publish
+        # DIFFERENT identity shapes (the extension an extension version, the app
+        # an app version), so comparing a UI identity to a peer learned on the
+        # bridge lane is a category error that reads as an incarnation change and
+        # forces a spurious reconcile. `refresh_identity` re-scopes both on a
+        # lane move without treating it as a peer change.
         self._ownership_peer: tuple[str, int] | tuple[str, int, str] | None = None
+        self._ownership_peer_lane: str = ""
         self._lease_at_creation = self._lease_generation()
         # Whether the execution lease DEFINES this owner's identity. Only then
         # is a lease change a resume that must fence us; an owner whose identity
@@ -311,6 +318,7 @@ class BrowserResource:
         if host and host != self.host:
             self.ownership = None
             self._ownership_peer = None
+            self._ownership_peer_lane = ""
             self.host = host
 
     def _lane(self) -> OwnershipHost:
@@ -660,7 +668,24 @@ class BrowserResource:
         A -> None -> A would otherwise invalidate twice and force a needless
         re-recovery each time. Reset only when a RESOLVED peer differs from the
         learned one; a transient ``None`` leaves the learned verdict intact.
+
+        The cache is LANE-SCOPED. ``_peer_identity`` reads the CURRENT lane's
+        discovery while ``_ownership_peer`` may have been learned on the other
+        lane (a `bridge` peer versus a `ui` peer are different shapes entirely),
+        and `_retarget_lane` can move the lane without clearing the learned flag.
+        Comparing across lanes would misread a lane move as an incarnation change
+        and issue a spurious ``owner_recover`` before an ordinary finish. So when
+        the resolved lane differs from the one the cache was learned on, the
+        verdict is dropped and the peer is RE-SCOPED to the new lane WITHOUT
+        being treated as a change (no recover is owed; re-learn lazily). Only a
+        change WITHIN the same lane resets ``recovered``.
         """
+        lane = self._lane().name
+        if lane != self._ownership_peer_lane:
+            self._ownership_peer_lane = lane
+            self._ownership_peer = self._peer_identity()
+            self.ownership = None
+            return
         peer = self._peer_identity()
         if peer is not None and peer != self._ownership_peer:
             self._ownership_peer = peer
