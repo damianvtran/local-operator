@@ -8,21 +8,23 @@ enrolled row as ``owner_changed`` or lost the bound read-only posture.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from local_operator.team_bridge.host import _admission_from_payload
+from local_operator.team_bridge.store import OwnerSnapshot
 
 pytestmark = pytest.mark.asyncio
 
 
-def _owner() -> SimpleNamespace:
-    return SimpleNamespace(tenant_id="ten_B", endpoint_id="ep_B")
+def _owner() -> OwnerSnapshot:
+    return cast(OwnerSnapshot, SimpleNamespace(tenant_id="ten_B", endpoint_id="ep_B"))
 
 
 def _row(
     tenant_id: str, *, eligible: bool = True, state: str = "active", endpoint: str = "ep"
-) -> dict:
+) -> dict[str, Any]:
     return {
         "tenant_id": tenant_id,
         "eligible": eligible,
@@ -30,7 +32,7 @@ def _row(
     }
 
 
-def _payload(*rows: dict, api_version: object = "1") -> dict:
+def _payload(*rows: dict[str, Any], api_version: object = "1") -> dict[str, Any]:
     return {"api_version": api_version, "tenants": list(rows)}
 
 

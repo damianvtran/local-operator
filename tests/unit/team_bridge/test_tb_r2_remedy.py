@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -140,7 +141,7 @@ def test_a_held_outcome_leaves_a_durable_retry_row(tmp_path, monkeypatch) -> Non
 # ------------------------------------------------------------------ TB-03 ---
 
 
-def _request_item(text: str) -> dict:
+def _request_item(text: str) -> dict[str, Any]:
     return {
         "message": {
             "type": "request",

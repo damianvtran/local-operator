@@ -24,6 +24,7 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -47,7 +48,7 @@ def _tasks_pending(session) -> bool:
     return bool(getattr(session, "_background_tasks", None))
 
 
-def _decide_rows(tmp_path: Path) -> list[dict]:
+def _decide_rows(tmp_path: Path) -> list[dict[str, Any]]:
     """Durable decide-ledger rows, read through the store's own connection.
 
     The settle predicate needs the LEDGER's own state (receipt/error/typed

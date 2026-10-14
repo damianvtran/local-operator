@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -48,7 +49,9 @@ from local_operator.team_bridge.connector.wake import (
     EXCERPT_MAX_CHARS,
     build_bridge_meta,
 )
+from local_operator.team_bridge.store import OwnerSnapshot
 from local_operator.team_bridge.store import Store as _RealStore
+from local_operator.team_bridge.tool import BridgeRuntime
 from tests.unit.asks.test_queue import BASE
 from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
@@ -71,27 +74,33 @@ DISPLAY_DIGEST = display_context_digest(_HINT_FIELDS)
 assert DISPLAY_DIGEST is not None
 
 
-def _owner() -> SimpleNamespace:
-    return SimpleNamespace(
-        canonical_base_url="https://hub.example",
-        account_id="acc_1",
-        tenant_id="ten_1",
-        endpoint_id="ep_1",
-        credential_id=7,
-        enrollment_generation=7,
+def _owner() -> OwnerSnapshot:
+    return cast(
+        OwnerSnapshot,
+        SimpleNamespace(
+            canonical_base_url="https://hub.example",
+            account_id="acc_1",
+            tenant_id="ten_1",
+            endpoint_id="ep_1",
+            credential_id=7,
+            enrollment_generation=7,
+        ),
     )
 
 
-def _runtime(tmp_path) -> SimpleNamespace:
-    return SimpleNamespace(
-        owner=_owner(),
-        config_dir=tmp_path,
-        tenant_id="ten_1",
-        session_id="s1",
+def _runtime(tmp_path) -> BridgeRuntime:
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=_owner(),
+            config_dir=tmp_path,
+            tenant_id="ten_1",
+            session_id="s1",
+        ),
     )
 
 
-def _meta(**overrides) -> dict:
+def _meta(**overrides) -> dict[str, Any]:
     meta = {
         "v": "1",
         "delivery_ref": "dref_test",
@@ -176,7 +185,7 @@ def _boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bridge_store, "Store", _FakeStore)
 
 
-def _recorder(monkeypatch: pytest.MonkeyPatch, calls: list) -> None:
+def _recorder(monkeypatch: pytest.MonkeyPatch, calls: list[Any]) -> None:
     def _fake_enqueue(queue, **kwargs):
         calls.append(kwargs)
         return {"ok": True, "details": {"ask_id": "a-9"}}
@@ -204,7 +213,7 @@ def test_the_locator_validator_normalizes_and_stays_closed() -> None:
 
 
 def test_build_bridge_meta_fits_the_carriage_for_any_body_size() -> None:
-    def _item(text: str) -> dict:
+    def _item(text: str) -> dict[str, Any]:
         return {
             "message": {
                 "type": "request",
@@ -372,7 +381,7 @@ def test_the_receipt_trust_matrix(tmp_path, monkeypatch) -> None:
 def test_the_hook_raises_once_and_is_terminal_for_a_repeat(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
@@ -388,7 +397,7 @@ def test_the_hook_raises_once_and_is_terminal_for_a_repeat(
 
 
 def test_the_hook_refuses_without_a_trusted_arm(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
@@ -416,7 +425,7 @@ def test_the_hook_refuses_without_a_trusted_arm(tmp_path, monkeypatch: pytest.Mo
 def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
 
     def _refusing(queue, **kwargs):
         seen.append(kwargs)
@@ -432,7 +441,7 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
     assert ledger.read(_owner(), "bmsg_1")["state"] == "pending"
     assert "cap" in ledger.read(_owner(), "bmsg_1")["reason"]
     # The trusted local boundary retries it as an ASK only.
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
     _recorder(monkeypatch, calls)
     # S-8b: the retry is GRANT-SCOPED — an absent/empty grant map drives
     # NOTHING (a held row whose standing read did not succeed must never be
@@ -455,7 +464,7 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
 
 
 def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict] = []
+    calls: list[dict[str, Any]] = []
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, None, config_dir=tmp_path)

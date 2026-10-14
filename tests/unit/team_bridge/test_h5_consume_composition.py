@@ -25,6 +25,7 @@ Asserts pinned here (per the Root composition mandate):
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -40,7 +41,8 @@ from local_operator.team_bridge.decide_intents import (
     DecideIntentsRefused,
     recover_from_durable_answer,
 )
-from local_operator.team_bridge.store import _owner_key
+from local_operator.team_bridge.store import OwnerSnapshot, _owner_key
+from local_operator.team_bridge.tool import BridgeRuntime
 from tests.unit.asks.test_queue import BASE
 from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
@@ -50,24 +52,30 @@ MESSAGE_ID = "bmsg_abc"
 QUESTION_UID = f"bridge-{MESSAGE_ID}"
 
 
-def _owner() -> SimpleNamespace:
-    return SimpleNamespace(
-        canonical_base_url="https://hub.example",
-        account_id="acc_1",
-        tenant_id="ten_1",
-        endpoint_id="ep_1",
-        credential_id=7,
-        enrollment_generation=7,
+def _owner() -> OwnerSnapshot:
+    return cast(
+        OwnerSnapshot,
+        SimpleNamespace(
+            canonical_base_url="https://hub.example",
+            account_id="acc_1",
+            tenant_id="ten_1",
+            endpoint_id="ep_1",
+            credential_id=7,
+            enrollment_generation=7,
+        ),
     )
 
 
-def _runtime(tmp_path) -> SimpleNamespace:
-    return SimpleNamespace(
-        owner=_owner(),
-        config_dir=tmp_path,
-        tenant_id="ten_1",
-        session_id="s1",
-        client=object(),
+def _runtime(tmp_path) -> BridgeRuntime:
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=_owner(),
+            config_dir=tmp_path,
+            tenant_id="ten_1",
+            session_id="s1",
+            client=object(),
+        ),
     )
 
 

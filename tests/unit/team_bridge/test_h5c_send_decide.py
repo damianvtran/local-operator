@@ -8,6 +8,7 @@ produce ZERO requests — the whole point of validating before dispatch.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -245,7 +246,7 @@ async def test_a_batch_decide_is_bounded_and_refused_whole_pre_flight() -> None:
     requests: list[httpx.Request] = []
     client = _make_client(_capture(requests, result={"results": []}))
 
-    def item(index: int) -> dict:
+    def item(index: int) -> dict[str, Any]:
         message_id = f"bmsg_{index}"
         return {
             "message_id": message_id,

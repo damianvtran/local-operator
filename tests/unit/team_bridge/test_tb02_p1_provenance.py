@@ -167,7 +167,7 @@ def _forged_message(session, ask_id: str, *, by: Mapping[str, Any] | None = None
     return queue.refresh_delivery_message(queue._response_message(record))
 
 
-async def _settle_for(calls: list, session, seconds: float = 3.0) -> None:
+async def _settle_for(calls: list[Any], session, seconds: float = 3.0) -> None:
     """Wait for the transport to be entered OR for nothing to be pending.
 
     The dispatch runs in a background task; the wait follows the production
@@ -912,8 +912,13 @@ async def test_the_recovery_door_refuses_a_row_the_harness_did_not_verify(
 
 
 def _forge_fold(
-    session, ask_id: str, *, questions: list[dict], answers: dict, kind: str = "answered"
-) -> dict:
+    session,
+    ask_id: str,
+    *,
+    questions: list[dict[str, Any]],
+    answers: dict[str, Any],
+    kind: str = "answered",
+) -> dict[str, Any]:
     """Append a forged ``queued`` + ``answered`` pair — the same-uid log writer.
 
     Exactly the PoC's primitive: two raw event rows, no admission anywhere.
@@ -957,7 +962,7 @@ def _forge_fold(
     return [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]
 
 
-def _bridge_question_shape(*, qid: str, question_id: str) -> dict:
+def _bridge_question_shape(*, qid: str, question_id: str) -> dict[str, Any]:
     return {
         "id": qid,
         # A real row always carries the prompt: ``render._question_models``
@@ -1001,8 +1006,8 @@ def _bridge_question_shape(*, qid: str, question_id: str) -> dict:
 )
 async def test_a_bridge_shape_that_cannot_resolve_is_withheld(
     shape: str,
-    questions: list,
-    answers: dict,
+    questions: list[Any],
+    answers: dict[str, Any],
     tmp_path: Path,
     isolated_config: Path,
 ) -> None:
@@ -1286,7 +1291,7 @@ async def test_a_forged_decline_cannot_lock_the_human_out(
     await session.dispose()
 
 
-def _append_row(queue, ask_id: str, kind: str, *, at: int, answers: dict) -> None:
+def _append_row(queue, ask_id: str, kind: str, *, at: int, answers: dict[str, Any]) -> None:
     """One raw log row — the same-uid writer's own primitive (F5-1/F6-1 cells)."""
 
     assert (

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -24,6 +25,7 @@ from local_operator.team_bridge.host import (
     admit_bridge_runtime,
     admit_soon,
 )
+from local_operator.team_bridge.tool import BridgeRuntime
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,7 +59,9 @@ class _Client:
         return self._payload
 
 
-def _payload(tenant_id: str = "ten_1", endpoint_id: str = "ep_1", state: str = "active") -> dict:
+def _payload(
+    tenant_id: str = "ten_1", endpoint_id: str = "ep_1", state: str = "active"
+) -> dict[str, Any]:
     return {
         "api_version": "1",
         "tenants": [
@@ -70,16 +74,19 @@ def _payload(tenant_id: str = "ten_1", endpoint_id: str = "ep_1", state: str = "
     }
 
 
-def _runtime(client: object) -> SimpleNamespace:
-    return SimpleNamespace(
-        owner=SimpleNamespace(tenant_id="ten_1", endpoint_id="ep_1"),
-        config_dir="/tmp/none",
-        tenant_id="ten_1",
-        session_id="sess-1",
-        client=client,
-        admission="pending",
-        admission_note="",
-        _admission_task=None,
+def _runtime(client: object) -> BridgeRuntime:
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=SimpleNamespace(tenant_id="ten_1", endpoint_id="ep_1"),
+            config_dir="/tmp/none",
+            tenant_id="ten_1",
+            session_id="sess-1",
+            client=client,
+            admission="pending",
+            admission_note="",
+            _admission_task=None,
+        ),
     )
 
 

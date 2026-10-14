@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -29,6 +30,7 @@ from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.store import OwnerReceipt, Store
+from local_operator.team_bridge.tool import BridgeRuntime
 from local_operator.team_bridge.types import OwnerSnapshot
 
 pytestmark = pytest.mark.asyncio
@@ -78,7 +80,7 @@ PEER_ID_NEWER = "peer-" + "cd" * 16
 _ACCESS_CALLS: list[int] = []
 
 #: The last drive's granted context map (one entry only on a real grant).
-_LAST_GRANTS: dict = {}
+_LAST_GRANTS: dict[str, Any] = {}
 
 
 def _seed_bridge_row(
@@ -86,7 +88,7 @@ def _seed_bridge_row(
     *,
     row_id: str = PEER_ID,
     message_id: str = MESSAGE_ID,
-    fields: dict | None = None,
+    fields: dict[str, Any] | None = None,
     delivery_ref: str = "dref_standing",
     body_sha256: str = "aa11" * 16,
 ) -> None:
@@ -148,16 +150,19 @@ class _Stub(Session):
 ACCESS = SimpleNamespace(credential_id=7)
 
 
-def _runtime(tmp_path: Path) -> SimpleNamespace:
+def _runtime(tmp_path: Path) -> BridgeRuntime:
     async def _current_access():
         _ACCESS_CALLS.append(1)
         return ACCESS
 
-    return SimpleNamespace(
-        owner=OWNER,
-        config_dir=tmp_path,
-        session_id="s1",
-        client=SimpleNamespace(current_access=_current_access),
+    return cast(
+        BridgeRuntime,
+        SimpleNamespace(
+            owner=OWNER,
+            config_dir=tmp_path,
+            session_id="s1",
+            client=SimpleNamespace(current_access=_current_access),
+        ),
     )
 
 
@@ -190,11 +195,11 @@ async def _drive(
     ref=None,
     raises: Exception | None = None,
     seed: bool = True,
-    seed_fields: dict | None = None,
+    seed_fields: dict[str, Any] | None = None,
     newer_on_top: bool = False,
-    envelope: dict | None = None,
+    envelope: dict[str, Any] | None = None,
     map_local: bool = True,
-) -> tuple[list[int], dict]:
+) -> tuple[list[int], dict[str, Any]]:
     _ACCESS_CALLS.clear()
     store = Store(tmp_path)
     if store.active_owner() is None:
@@ -218,7 +223,7 @@ async def _drive(
                 fields={**DISPLAY_FIELDS, "excerpt": "later message"},
             )
     reads: list[int] = []
-    seen: list[dict] = []
+    seen: list[dict[str, Any]] = []
     results = iter(fence_results)
 
     def fence(runtime):
@@ -332,7 +337,7 @@ async def test_offline_transport_holds_without_ask(
     ],
 )
 async def test_mismatched_standing_fields_hold_without_ask(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: dict, expected_reason: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any], expected_reason: str
 ) -> None:
     reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", ""], ref=_ref(**overrides))
     assert reads == [1]
