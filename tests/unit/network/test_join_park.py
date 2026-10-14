@@ -34,6 +34,7 @@ import os
 import threading
 import time
 from argparse import Namespace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -391,3 +392,65 @@ def test_the_tool_parks_and_the_person_runs_phase_two(
 
 def _digest(result: Any) -> str:
     return "\n".join(part.text for part in result.content)
+
+
+def _pending_result_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.PendingJoin:
+    """A real stored record, without starting a pairing process or spending an invite."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    pending = types.PendingJoin(
+        invite_id="synthetic-result-race",
+        network_id="synthetic-network",
+        network_name="result-race",
+        inviter_device_id="synthetic-inviter",
+        inviter_name="inviter",
+        sas="123456",
+        fingerprint="synthetic-fingerprint",
+        pid=424242,
+        expires_at=time.time() + 30,
+    )
+    store.save_pending_join(pending)
+    return pending
+
+
+@pytest.mark.parametrize("status", ["joined", "refused"])
+def test_a_pairing_outcome_published_between_read_and_exit_probe_is_preserved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+
+    def finished_between_read_and_probe(pid: int) -> bool:
+        assert pid == pending.pid
+        # The real parker publishes its outcome, then exits. Force that exact
+        # interleaving after the reader took its awaiting-confirmation snapshot;
+        # disk serialization makes this a distinct row, not a mutated test double.
+        net_cli._parked_outcome(
+            pending,
+            status=status,
+            store=store,
+            result={"ok": status == "joined"},
+            error_code="declined" if status == "refused" else "",
+        )
+        return False
+
+    monkeypatch.setattr(net_cli, "_process_alive", finished_between_read_and_probe)
+    outcome = net_cli._await_join_result(pending, store)
+    assert outcome is not None, "a published outcome was mistaken for an abandoned ceremony"
+    assert outcome.status == status
+    assert outcome.pid == 0
+    assert outcome.result == {"ok": status == "joined"}
+    assert outcome.error_code == ("declined" if status == "refused" else "")
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_a_dead_pairing_without_a_published_outcome_is_still_abandoned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, removed: bool
+) -> None:
+    pending = _pending_result_fixture(monkeypatch, tmp_path)
+
+    def dead_without_outcome(_pid: int) -> bool:
+        if removed:
+            store.clear_pending_join(pending.invite_id)
+        return False
+
+    monkeypatch.setattr(net_cli, "_process_alive", dead_without_outcome)
+    assert net_cli._await_join_result(pending, store) is None

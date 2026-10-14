@@ -4767,6 +4767,14 @@ def _await_join_result(pending: Any, store: Any) -> Any:
         if row.status != "awaiting_confirmation":
             return row
         if not _process_alive(row.pid):
+            # The parker publishes its outcome BEFORE exiting. It can finish
+            # between our awaiting-confirmation read and this liveness probe,
+            # so death alone cannot distinguish abandonment from a completed
+            # ceremony. Re-read once after observing death; an absent or still
+            # awaiting row remains abandoned, never an invented success.
+            final = store.pending_join(pending.invite_id)
+            if final is not None and final.status != "awaiting_confirmation":
+                return final
             return None
         time.sleep(0.2)
     return None
