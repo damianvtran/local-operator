@@ -5545,6 +5545,20 @@ class RuntimeServer:
         )
         signature = self._operator_signature_verdict(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
+        if admitted and frame.get("op") == "bridge_decide":
+            # TB-02 P1: the one-shot ask-bound grant the decision needs is
+            # minted HERE, on the admission this seam just granted (capability
+            # proof or a verified operator/device signature). The dispatcher
+            # consumes it at the point of effect; without it there is no POST.
+            # Memory-only; see approval.py's grant table.
+            from local_operator.harness.approval import mint_bridge_decide_grant
+
+            mint_bridge_decide_grant(
+                session_id=str(self._record.session_id),
+                ask_id=str(frame.get("ask_id") or ""),
+                question_id=str(frame.get("question_id") or ""),
+                word=str(frame.get("word") or ""),
+            )
         if not admitted:
             # Logged because the two refusals have different causes and only
             # one of them is an attack: a capability miss is a follower or a
@@ -6279,8 +6293,8 @@ class RuntimeServer:
                 # loosening is whatever the client chose. All four are baked into
                 # the signed message, so a challenge cannot be moved between them.
                 action = str(frame.get("action") or "")
-                if action not in ("loosen", "approve"):
-                    raise ValueError("action must be 'loosen' or 'approve'")
+                if action not in ("loosen", "approve", "decide"):
+                    raise ValueError("action must be 'loosen', 'approve' or 'decide'")
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
@@ -7453,6 +7467,24 @@ class RuntimeServer:
             # ``adopt_aside`` arm below uses.
             if not inspect.isawaitable(outcome):
                 raise ValueError(f"owner {op} operation must be awaitable")
+            return cast("str", await outcome)
+        if op == "bridge_decide":
+            # TB-02 P1: the VERIFIED door for a bridge decision. The authority
+            # seam above has already admitted this frame (capability proof or a
+            # verified operator/device signature for action ``decide`` over the
+            # composite ask#question#word target) and minted the one-shot grant
+            # the dispatcher consumes; a raw ``ask_respond`` on a bridge ask is
+            # refused at the session, so this is the only way one is decided.
+            method = getattr(h, "bridge_decide", None)
+            if not callable(method):
+                raise ValueError("this session's runtime predates verified bridge decisions")
+            outcome = method(
+                str(frame.get("ask_id", "")),
+                str(frame.get("question_id", "")),
+                str(frame.get("word", "")),
+            )
+            if not inspect.isawaitable(outcome):
+                raise ValueError("owner bridge_decide operation must be awaitable")
             return cast("str", await outcome)
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when

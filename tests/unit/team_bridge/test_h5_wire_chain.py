@@ -35,6 +35,7 @@ from tests.unit.team_bridge.test_h5_envelope_negatives import (
     BODY_HASH,
     DISPLAY_DIGEST,
     DREF,
+    LOCAL_ROW_ID,
     MESSAGE_ID,
     _HINT_FIELDS,
     _meta,
@@ -50,11 +51,22 @@ from tests.unit.team_bridge.test_h5_session_glue import _session
 
 @pytest.fixture
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Home, config and cwd out of the way of the developer's real ones."""
+    """Home, config and cwd out of the way of the developer's real ones.
+
+    The feature is ENABLED for this file's config reads (the established
+    ``_enabled`` pattern in ``test_h5_remediation_fence.py``): every case here
+    exercises the doors BEHIND the fence, and a default-off config would make
+    the hook return before those doors — the store/enrollment reads stay real,
+    so a seed that stops satisfying the fence still fails loudly.
+    """
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "local_operator.config.read_config_values",
+        lambda config_dir: {"team_bridge": {"enabled": True}},
+    )
     return tmp_path
 
 
@@ -93,6 +105,10 @@ def test_live_chain_meta_survives_the_real_spool_and_raises_the_ask(
         {"account_id": "acc_sender"},
         custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         bridge_meta=drained,
+        # The harness's own accepted row id: the durable issuance maps
+        # THIS message id to the ask (S-6/S-7), and the ledger refuses a NEW
+        # issuance row without it (TB-02/round-3 claim contract).
+        entry_id=LOCAL_ROW_ID,
     )
     details = getattr(message, "details", {}) or {}
     assert str((details.get("bridge") or {}).get("delivery_ref") or "") == DREF
@@ -126,6 +142,10 @@ def test_cold_chain_errand_carries_the_same_meta_to_the_same_hook(
         errand.sender,
         custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         bridge_meta=drained,
+        # The harness's own accepted row id: the durable issuance maps
+        # THIS message id to the ask (S-6/S-7), and the ledger refuses a NEW
+        # issuance row without it (TB-02/round-3 claim contract).
+        entry_id=LOCAL_ROW_ID,
     )
     Session._maybe_raise_bridge_ask(stub, message)
     assert len(_no_enqueue) == 1
@@ -159,6 +179,10 @@ def test_legacy_omit_keeps_the_old_byte_shape_and_never_mints(tmp_path, _no_enqu
         {"account_id": "acc_sender"},
         custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         bridge_meta=drained,
+        # The harness's own accepted row id: the durable issuance maps
+        # THIS message id to the ask (S-6/S-7), and the ledger refuses a NEW
+        # issuance row without it (TB-02/round-3 claim contract).
+        entry_id=LOCAL_ROW_ID,
     )
     Session._maybe_raise_bridge_ask(stub, message)
     assert _no_enqueue == []
@@ -182,6 +206,10 @@ def test_copied_digest_with_changed_hints_never_raises_over_the_wire(
         {"account_id": "acc_sender"},
         custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         bridge_meta=drained,
+        # The harness's own accepted row id: the durable issuance maps
+        # THIS message id to the ask (S-6/S-7), and the ledger refuses a NEW
+        # issuance row without it (TB-02/round-3 claim contract).
+        entry_id=LOCAL_ROW_ID,
     )
     Session._maybe_raise_bridge_ask(stub, message)
     assert _no_enqueue == []
@@ -264,6 +292,10 @@ def test_a_stale_scope_over_the_wire_never_raises(tmp_path, _no_enqueue) -> None
         {"account_id": "acc_sender"},
         custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
         bridge_meta=drained,
+        # The harness's own accepted row id: the durable issuance maps
+        # THIS message id to the ask (S-6/S-7), and the ledger refuses a NEW
+        # issuance row without it (TB-02/round-3 claim contract).
+        entry_id=LOCAL_ROW_ID,
     )
     Session._maybe_raise_bridge_ask(stub, message)
     assert _no_enqueue == []

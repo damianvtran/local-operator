@@ -5588,6 +5588,22 @@ class ServingSessionHandle(SessionHandle):
         return "answered"
 
     @_on_session_loop
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
+        """TB-02 P1: the VERIFIED door a bridge request is decided through.
+
+        Reached only from the runtime's ``bridge_decide`` op — which the
+        authority seam admitted (spawn capability or a verified operator/device
+        signature over the composite ask#question#word target) and which minted
+        the one-shot grant the dispatcher consumes at the point of effect. A
+        plain ``ask_respond`` on a bridge ask is refused by the session.
+        """
+        outcome = self._session.bridge_decide(ask_id, question_id, word)
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the decision was refused"))
+        await self._session.reconcile_asks()
+        return "decided"
+
+    @_on_session_loop
     async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
         """REVISE a queued ask's recorded answer before it is delivered (design §10).
 

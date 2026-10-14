@@ -167,6 +167,14 @@ def response_text(
             else ASK_UNANSWERED_TEXT
         )
     else:
+        # TB-05 (PR #2378): a bridge request's report must not frame the
+        # sender's words as the human's — the flag is derived from the RAW
+        # record carriage (a non-empty question_id), the same predicate the
+        # queue's doors use.
+        bridge_request = any(
+            isinstance(question, Mapping) and str(question.get("question_id") or "")
+            for question in questions
+        )
         # ``image_counts``/``images_missing`` are passed through only when the
         # answer carried pictures; for every text-only ask the call is the one it
         # always was, so the text the model reads is unchanged.
@@ -175,6 +183,7 @@ def response_text(
             answers,
             image_counts=image_counts,
             images_missing=images_missing,
+            bridge_request=bridge_request,
         )
     if secret_lost:
         # The key name is not repeated here and the QUESTION TEXT is not quoted:

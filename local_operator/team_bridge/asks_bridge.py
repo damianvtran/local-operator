@@ -30,7 +30,7 @@ reading aid. The excerpt bound is a constraint of this store, not a wire rule.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Mapping
+from typing import Any
 
 #: The two answer options (§10.3: "options = Approve / Deny"). Ids are stable
 #: identifiers the answer surfaces key on; labels are the §2.5 strings.
@@ -73,7 +73,21 @@ def bridge_request_question(
     bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     text = f"{sender} · {summary}".strip(" ·")
     if bounded:
-        text = f"{text}\n{bounded}" if text else bounded
+        # TB-05 (PR #2378): the sender's words are DATA at every hop. The
+        # §11.1 clause rides INSIDE the question text, ahead of the excerpt,
+        # so no surface or model can read the sender's words as the human's —
+        # and tag lookalikes are neutralised exactly like the wake wrap's.
+        from local_operator.harness.message_types import (
+            BRIDGE_UNTRUSTED_CLAUSE,
+            neutralize_bridge_tag,
+        )
+
+        bounded = neutralize_bridge_tag(bounded)
+        text = (
+            f"{text}\n{BRIDGE_UNTRUSTED_CLAUSE}\n{bounded}"
+            if text
+            else f"{BRIDGE_UNTRUSTED_CLAUSE}\n{bounded}"
+        )
     question = {
         "id": f"bridge-{message_id}",
         "question": text,

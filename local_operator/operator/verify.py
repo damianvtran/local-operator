@@ -68,7 +68,7 @@ MAX_CERT_BYTES = 4096
 #: Which authority-increasing actions a signature may name. The runtime derives
 #: this from the frame it is deciding (never from a field the caller chose), so
 #: a signature minted for one action cannot be presented as the other.
-ACTIONS = ("loosen", "approve")
+ACTIONS = ("loosen", "approve", "decide")
 
 
 def _lp(value: str) -> bytes:

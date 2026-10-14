@@ -79,7 +79,10 @@ def test_default_stamp_is_the_peer_kind_and_override_stamps_bridge() -> None:
     # The dedicated wrap: the peer wrap's from_pid/conversation would be
     # misleading for an org member with no local pid.
     assert "<team-bridge-message" in bridge.details["text"]
-    assert "from_account='acc_org'" in bridge.details["text"]
+    # TB-11 (PR #2378): with no live runtime binding there is no LOCAL record
+    # to source the identity from, so the account is OMITTED — the
+    # message-supplied dict is never trusted for display.
+    assert "from_account=''" in bridge.details["text"]
     assert bridge.details["body"] == "org hi"
 
 
