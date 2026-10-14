@@ -1849,6 +1849,11 @@ async def test_a_lane_that_never_acknowledges_cannot_grow_the_chain_unbounded(
     directory.mkdir(parents=True)
     _hosts(monkeypatch, ui=True, bridge=True)
     ui_client.recover_state = "closed"
+    # Bound before the loop so the closing assertion reads a value on EVERY path:
+    # a loop that never ran leaves it empty and fails the assertion, rather than
+    # raising UnboundLocalError (and rather than leaving the name unbound for the
+    # type checker, which cannot prove the loop body executed).
+    final_chain: list[str] = []
     for _ in range(MAX_REPLAY_GENERATIONS + 8):
         lease = acquire_session_lease(directory)
         context, resource = _context(directory)
@@ -1856,8 +1861,9 @@ async def test_a_lane_that_never_acknowledges_cannot_grow_the_chain_unbounded(
         assert not worked.is_error, worked.text
         assert len(resource.record["bridge_generations"]) <= MAX_REPLAY_GENERATIONS
         assert len(resource.lane_generations("bridge")) <= MAX_REPLAY_GENERATIONS
+        final_chain = list(resource.record["bridge_generations"])
         lease.release()
-    assert len(resource.record["bridge_generations"]) == MAX_REPLAY_GENERATIONS
+    assert len(final_chain) == MAX_REPLAY_GENERATIONS
 
 
 def test_a_record_without_lane_chains_behaves_as_the_shared_chain(tmp_path: Path) -> None:
