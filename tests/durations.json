@@ -338,6 +338,7 @@
   "tests/unit/secrets/test_compatibility.py": 1.0,
   "tests/unit/secrets/test_concurrency.py": 2.592,
   "tests/unit/secrets/test_credential_shapes.py": 191.951,
+  "tests/unit/secrets/test_decoded_known_json.py": 1.006,
   "tests/unit/secrets/test_guard_area_exemption.py": 2.319,
   "tests/unit/secrets/test_hardening.py": 3.169,
   "tests/unit/secrets/test_identity.py": 1.0,
