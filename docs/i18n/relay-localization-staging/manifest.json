@@ -728,6 +728,28 @@
       "archive_sha256": "a8c4cb9caf8a5f4e5959c675145c9c521032768e669ecbf900cb2d09f1781802",
       "original_report_raw_sha256": "a8c4cb9caf8a5f4e5959c675145c9c521032768e669ecbf900cb2d09f1781802",
       "path_references_sanitized": true
+    },
+    {
+      "path": "reports/279e3a78b923/pr2329-pernamespace-eligibility-note.md",
+      "archive_sha256": "c3982019f96d5af2af0acb878da3d3a1affd7da3d56cc1ab63dff6a94f12ae05",
+      "bytes": 11231,
+      "original_raw_sha256": "c3982019f96d5af2af0acb878da3d3a1affd7da3d56cc1ab63dff6a94f12ae05"
+    },
+    {
+      "path": "notes/eligibility-qualification.md",
+      "archive_sha256": "0002423f152b0d473ddd5f08bb4deee25cf064dc345eeebdf2568c88415ef7aa",
+      "bytes": 4689,
+      "original_raw_sha256": "0002423f152b0d473ddd5f08bb4deee25cf064dc345eeebdf2568c88415ef7aa"
     }
-  ]
+  ],
+  "architect_note": {
+    "session": "279e3a78b923",
+    "actual_model": "anthropic/claude-sonnet-5-5",
+    "fallback_used": false,
+    "path": "reports/279e3a78b923/pr2329-pernamespace-eligibility-note.md",
+    "original_raw_sha256": "c3982019f96d5af2af0acb878da3d3a1affd7da3d56cc1ab63dff6a94f12ae05",
+    "qualification": "notes/eligibility-qualification.md",
+    "HTTP": "source reads only; not executed",
+    "publication": "NO approval or eligibility mechanism change"
+  }
 }

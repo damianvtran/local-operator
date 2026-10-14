@@ -34,3 +34,12 @@ exact pins and truthful complete rows. Do not filter pending rows or weaken guar
 
 The active PR head and working checkout remain unchanged by archival. No PR,
 merge, tag, release or runtime promotion is authorized by this archive.
+
+## Architectural investigation
+
+The independent architect note (actual anthropic/claude-sonnet-5-5, session
+279e3a78b923) is retained under reports/279e3a78b923. It distinguishes the current
+locale-wide fail-closed contract from collateral fallback limitations. Read
+notes/eligibility-qualification.md alongside it: generated drift checks prove
+reproducibility, not publication approval, and no HTTP execution is claimed.
+No proposed general per-namespace mechanism is implemented by this archive.
