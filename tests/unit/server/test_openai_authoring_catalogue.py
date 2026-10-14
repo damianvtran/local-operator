@@ -153,9 +153,7 @@ def test_api_and_oauth_inventory_never_share_a_cache(native_catalogue):
     assert state.requests[-1].url.path == "/v1/models"
     assert "ChatGPT-Account-ID" not in state.requests[-1].headers
     # Returning to the first account uses its own document, not the API rows.
-    state.store.get_oauth_access.return_value = OAuthAccess(
-        "fixture", 1, account_id="account-one"
-    )
+    state.store.get_oauth_access.return_value = OAuthAccess("fixture", 1, account_id="account-one")
     assert [row["id"] for row in listed(state)] == ["gpt-6.1-sol"]
     assert len(state.requests) == 2
 
@@ -163,9 +161,7 @@ def test_api_and_oauth_inventory_never_share_a_cache(native_catalogue):
 def test_oauth_account_scope_never_reuses_another_account(native_catalogue):
     state = native_catalogue
     listed(state)
-    state.store.get_oauth_access.return_value = OAuthAccess(
-        "fixture", 3, account_id="account-two"
-    )
+    state.store.get_oauth_access.return_value = OAuthAccess("fixture", 3, account_id="account-two")
     state.body = {"models": [{"slug": "synthetic-other-account"}]}
     assert [row["id"] for row in listed(state)] == ["synthetic-other-account"]
     assert state.requests[-1].headers["ChatGPT-Account-ID"] == "account-two"
@@ -187,7 +183,9 @@ def test_refresh_uses_picker_cadence_and_keeps_stale_rows_on_error(native_catalo
     assert len(state.requests) == 3
 
 
-@pytest.mark.parametrize("body,status", [({"models": []}, 200), ({"unexpected": []}, 200), ({}, 503)])
+@pytest.mark.parametrize(
+    "body,status", [({"models": []}, 200), ({"unexpected": []}, 200), ({}, 503)]
+)
 def test_empty_invalid_or_failed_native_listing_preserves_existing_fallback(
     native_catalogue, body, status
 ):
@@ -250,7 +248,9 @@ async def test_api_key_fallback_stays_read_only(native_catalogue):
     state = native_catalogue
     state.store.get_oauth_access.return_value = None
     state.store.get_api_key.return_value = "fixture"
-    assert await ProviderController(state.store).listing_credential(
-        "openai", read_only=True
-    ) == ("fixture", False, None)
+    assert await ProviderController(state.store).listing_credential("openai", read_only=True) == (
+        "fixture",
+        False,
+        None,
+    )
     state.store.get_api_key.assert_awaited_once_with("openai", read_only=True)
