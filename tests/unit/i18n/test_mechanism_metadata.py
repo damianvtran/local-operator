@@ -87,8 +87,10 @@ async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) 
 
     monkeypatch.setattr(capabilities, "resolve_language", changing_language)
     response = await capabilities.capabilities()
-    assert response.result["language"] == "ur"
-    assert response.result["language_direction"] == "rtl"
+    result = response.result
+    assert result is not None
+    assert result["language"] == "ur"
+    assert result["language_direction"] == "rtl"
     assert len(calls) == 1
 
 
