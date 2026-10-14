@@ -117,13 +117,6 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "credential-broker-v1",
     "compute-pool-v1",
     "peer-readiness-v1",
-    # THE CREDENTIAL-LIFECYCLE HALF OF THE BROKER STORY. Advertised now, before
-    # the machinery that consumes it ships, because a capability must be on the
-    # wire one release ahead of the sender that gates on it: an old peer sends
-    # nothing and simply never sees the new op, while a new sender checks the
-    # negotiated set BEFORE its first lifecycle request — asking an old peer
-    # would only make it compose a refusal it did not ask to make.
-    "credential-lifecycle-v1",
     "mcp-defs-v1",
     "pair-offer-v1",
     "mesh-update-v1",
@@ -150,11 +143,13 @@ PEER_JOURNAL_SOURCE_V1 = "peer-journal-source-v1"
 #: had to compose. Named here so the tuple above, the slice's ask condition
 #: and the tests read ONE spelling of the string.
 PEER_READINESS_V1 = "peer-readiness-v1"
-#: The credential-lifecycle capability. Advertised by every build that carries
-#: the negotiated set, one release before the sender that gates on it: a
-#: lifecycle sender reads it off the handshake and sends nothing an old peer
-#: would have to answer with a not-implemented refusal. Named here so the tuple
-#: above, the sender's ask condition and the tests read ONE spelling.
+#: The credential-lifecycle capability, named here so the LATER transport slice
+#: (the receiver that serves lifecycle frames) advertises it. It is deliberately
+#: NOT in ``LINK_CAPABILITIES`` yet: a capability must be advertised together
+#: with the receiver that serves it, because an advertisement without a handler
+#: is a promise the peer can make a request against and get a refusal for
+#: (reviewer finding on #2379). Kept as a constant so the receiver slice lands by
+#: adding one tuple entry against this one spelling.
 CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
 #: The MCP server-definition sync's capability (``mcpdefs.py``). Advertised by
 #: every build that ships ``net_mcp_defs``; a sender checks it BEFORE its first

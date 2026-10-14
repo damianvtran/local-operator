@@ -162,17 +162,17 @@ def test_both_ends_serve_the_readiness_op(request: pytest.FixtureRequest) -> Non
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES
 
 
-def test_credential_lifecycle_is_advertised_once_in_the_negotiated_set() -> None:
-    """The capability must ride the link a release before its sender gates on it.
+def test_credential_lifecycle_is_not_advertised_before_its_receiver_ships() -> None:
+    """The capability must stay off the wire until the receiver that serves it ships.
 
-    A sender reads the negotiated set and only then sends a lifecycle request, so
-    an old peer — which advertises nothing — is never asked to compose a refusal
-    it did not ask to make. The tuple is the one spelling the handshake, the ask
-    condition and this test read; a duplicate would be a second advertised
-    feature under one name.
+    An advertisement without a handler is a promise a peer can make a request
+    against and get a not-implemented refusal for — the unsafe false promise the
+    reviewer blocked on #2379, against the repo precedent that every capability
+    ships together with its receiver. The constant is kept so the transport slice
+    lands by adding one tuple entry; the pin here is what keeps it unadvertised.
     """
     assert wire.CREDENTIAL_LIFECYCLE_V1 == "credential-lifecycle-v1"
-    assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 1
+    assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 0
 
 
 def test_an_advertised_lifecycle_frame_is_answered_by_name(tmp_path: Path) -> None:
