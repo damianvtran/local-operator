@@ -3974,7 +3974,7 @@ def replay_entries(
         start = context_cut_index(entries)
 
     prunes = collect_prunes(entries)
-    out: list[AgentMessage] = list(prefix)
+    kept: list[AgentMessage] = []
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
             continue
@@ -3984,8 +3984,32 @@ def replay_entries(
         notice = prunes.get(entry.id)
         if notice is not None and isinstance(message, Message):
             _apply_prune(message, notice)
-        out.append(message)
-    return out
+        kept.append(message)
+    if compaction_index is not None:
+        # Reapply the epoch's capture-elision frontier to the KEPT window.
+        # The live pass elided superseded captures from the projection it
+        # sent and recorded the count on the compaction payload; source rows
+        # and attachment blobs stayed untouched, so replay re-derives the
+        # same partition from the same messages and consumes the same prefix
+        # -- resumed and live contexts match byte for byte. A record without
+        # a frontier (every pre-elision record) changes nothing here, and a
+        # malformed one degrades to no elision rather than a guess.
+        from local_operator.compaction.marker import capture_elision_frontier
+
+        frontier = capture_elision_frontier(compaction.payload)
+        if frontier:
+            from local_operator.compaction.pruning import apply_capture_elisions
+
+            projected, _applied = apply_capture_elisions(
+                [message for message in kept if isinstance(message, Message)],
+                limit=frontier,
+            )
+            projected_iter = iter(projected)
+            kept = [
+                next(projected_iter) if isinstance(message, Message) else message
+                for message in kept
+            ]
+    return list(prefix) + kept
 
 
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:
