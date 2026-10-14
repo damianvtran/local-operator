@@ -210,6 +210,9 @@ def test_long_scope_refs_cannot_exceed_the_file_bound(tmp_path, monkeypatch):
     pad = "x" * 240
     refused = None
     accepted = 0
+    # Bound up front: the loop always runs, but pyright cannot prove the refusing
+    # iteration assigned it before the post-loop byte-identity assertion reads it.
+    before: bytes | None = None
     for i in range(L.MAX_ROWS):
         before = lc.path.read_bytes() if lc.path.exists() else None
         res = lc.observe(L.Observation("dev-a", KEY, f"{pad}{i:05d}", 1, 1))
