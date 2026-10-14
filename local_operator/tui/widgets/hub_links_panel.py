@@ -155,7 +155,11 @@ class HubLinksPanel(Static):
             body: list[Text] = [Text(self._error, style="dim")]
         else:
             body = core.render_rows(
-                self._rows, width, selected=self._selected, loading=self._loading
+                self._rows,
+                width,
+                selected=self._selected,
+                loading=self._loading,
+                tail_style=self._tail_style(),
             )
         lines = [self._title()]
         lines.append(Text("─" * min(width, 60), style="dim"))
@@ -175,6 +179,20 @@ class HubLinksPanel(Static):
     def _title(self) -> Text:
         mark = " (refreshing…)" if self._refreshing else ""
         return Text(f"Hub links{mark}", style="bold")
+
+    def _tail_style(self) -> Any:
+        """The resolved ink for the source+policy tail: theme ``muted`` (D4).
+
+        Falls back to ``dim`` if the theme is unavailable, so a stripped harness
+        still renders rather than raising ``MissingStyle``.
+        """
+
+        from local_operator.tui import theme as theme_mod
+
+        try:
+            return theme_mod.semantic_color("muted")
+        except Exception:  # noqa: BLE001 - a card must not fail to paint
+            return "dim"
 
     def on_mount(self) -> None:
         if self.display:

@@ -92,19 +92,55 @@ def test_the_slot_reflects_aggregate_priority() -> None:
 
 def test_policy_text_names_scope_and_both_policies() -> None:
     public = core.rows_from_snapshot(_snapshot(_link(visibility="public")))[0]
-    assert public.policy_text() == "Public; Subscribe on; Auto-push off"
+    public_desc = public.policy_text()
+    assert public_desc.startswith("Public;")
+    assert "Subscribe on" in public_desc and "Auto-push off" in public_desc
+    # The accessible description carries the FULL origin URL the compact row omits.
+    assert "source https://hub.test/v1" in public_desc
     org = core.rows_from_snapshot(
-        _snapshot(_link(visibility="org", policy={"subscribe": False, "auto_push": True}))
+        _snapshot(
+            _link(
+                visibility="org",
+                tenant_name="Acme",
+                policy={"subscribe": False, "auto_push": True},
+            )
+        )
     )[0]
-    assert org.policy_text() == "Private; Subscribe off; Auto-push on"
+    assert org.policy_text().startswith("Acme · Private;")
+    assert "Subscribe off" in org.policy_text() and "Auto-push on" in org.policy_text()
+
+
+def test_the_compact_scope_label_is_public_or_org_name_private() -> None:
+    """Frozen §30: the visible scope is `Public` or `<org> · Private`, NOT the URL."""
+    public = core.rows_from_snapshot(_snapshot(_link(visibility="public")))[0]
+    assert public.scope_label == "Public"
+    org = core.rows_from_snapshot(_snapshot(_link(visibility="org", tenant_name="Acme")))[0]
+    assert org.scope_label == "Acme · Private"
+    # An org link with no resolved name still shows Private, never the URL.
+    unnamed = core.rows_from_snapshot(_snapshot(_link(visibility="org")))[0]
+    assert unnamed.scope_label == "Private"
+
+
+def test_the_rendered_row_does_not_paint_the_raw_api_url() -> None:
+    rows = core.rows_from_snapshot(_snapshot(_link(visibility="public")))
+    line = core.render_rows(rows, 100)[1]
+    assert "https://" not in line.plain
+    assert "Public" in line.plain
 
 
 def test_collapsed_name_carries_no_policy_text() -> None:
     rows = core.rows_from_snapshot(_snapshot(_link(name="coder")))
     line = core.render_rows(rows, 80)[1]
-    # The policy text is a dim TAIL, not part of the name span.
-    names = [span for span in line.spans if span.style != "dim" and span.style != "reverse"]
+    # The policy text is a muted TAIL, not part of the name span.
+    names = [span for span in line.spans if span.style not in ("dim", "muted", "reverse")]
     assert all("Subscribe" not in line.plain[span.start : span.end] for span in names)
+
+
+def test_the_tail_ink_is_the_supplied_muted_style_not_dim() -> None:
+    """D4: the widget supplies the theme's `muted`; the core paints it, not `dim`."""
+    rows = core.rows_from_snapshot(_snapshot(_link()))
+    line = core.render_rows(rows, 80, tail_style="blue")[1]
+    assert any(span.style == "blue" for span in line.spans)
 
 
 def test_the_reserved_slot_keeps_row_height_stable_across_states() -> None:

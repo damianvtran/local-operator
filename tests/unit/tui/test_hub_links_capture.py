@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -74,10 +75,15 @@ def _seed_link(
         record, identity=identity, remote_revision='"rev-1"', lineage="clean", local_alias=name
     )
     prov.write_baseline(root, record)
-    ConfigManager(root).set_config_value(
-        "hub",
-        {"links": {identity.link_id: {"subscribe": subscribe, "auto_push": auto_push}}},
-    )
+    hub: dict[str, Any] = {
+        "links": {identity.link_id: {"subscribe": subscribe, "auto_push": auto_push}}
+    }
+    if tenant:
+        # The verified persisted display name; the frozen row shows `<org> ·
+        # Private` from it, so the rig seeds it rather than leaving the bare
+        # `Private` fallback (D2).
+        hub["tenant_names"] = {tenant: tenant.title()}
+    ConfigManager(root).set_config_value("hub", hub)
 
     def fold(doc: dict) -> None:
         item = doc.setdefault("items", {}).setdefault(
@@ -90,20 +96,38 @@ def _seed_link(
 
 
 async def _capture(name: str, *, size=(100, 30), **seed) -> tuple[Path, dict]:
+    """Capture one case in its OWN config root, so state cannot accumulate (D3)."""
+
+    import shutil
+    import tempfile
+
     from local_operator.tui.settings import settings_reload
 
-    settings_reload()
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=size) as pilot:
-        await pilot.pause()
-        root = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
-        for link in seed.get("links", []):
-            _seed_link(root, **link)
-        # Drive the REAL open path: the action the binding/commands call.
-        await app.action_hub_links()
-        await pilot.pause()
-        path = OUT / f"{name}.svg"
-        save_capture(app, path)
+    # Each case gets a fresh config root under the scratchpad. The FIRST version
+    # reused one env root across all six cases, so links seeded for the healthy
+    # frame were still present in the "empty" frame — the §98 empty state had no
+    # valid proof at all. Isolating the root per case is what makes each frame
+    # describe exactly its own state.
+    case_root = Path(tempfile.mkdtemp(prefix=f"hub-links-{name}-", dir=OUT))
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(case_root)
+    try:
+        settings_reload()
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            for link in seed.get("links", []):
+                _seed_link(case_root, **link)
+            # Drive the REAL open path: the action the binding/commands call.
+            await app.action_hub_links()
+            await pilot.pause()
+            path = OUT / f"{name}.svg"
+            # INSIDE the run_test block: the export composites the ACTIVE screen,
+            # and after the context exits there is no screen on the stack.
+            save_capture(app, path)
+    finally:
+        # The seed root is inert once the SVG is written; reclaim it so the
+        # scratchpad does not accumulate one config tree per case.
+        shutil.rmtree(case_root, ignore_errors=True)
     return path
 
 

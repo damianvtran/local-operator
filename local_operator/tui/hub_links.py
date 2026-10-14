@@ -70,6 +70,7 @@ class LinkRow:
     link_id: str | None
     source: str | None
     visibility: str | None
+    tenant_name: str | None
     subscribe: bool | None
     auto_push: bool | None
     pull_state: str
@@ -83,10 +84,21 @@ class LinkRow:
 
     @property
     def scope_label(self) -> str:
+        """The frozen visible scope: ``Public`` or ``<org> · Private`` (§30).
+
+        Compact and DELIBERATELY not the API base URL: a link's origin is a
+        credential-free URL, and the frozen contract requires the row to show
+        the SCOPE (public, or the organization's NAME and Private) rather than
+        the raw origin. The full source URL stays in the accessible description
+        (:meth:`policy_text`), which is the technical detail a screen reader and
+        the policy menu read; only the collapsed row is compact.
+        """
+
         if self.visibility == "public":
             return "Public"
         if self.visibility == "org":
-            return "Private"
+            org = (self.tenant_name or "").strip()
+            return f"{org} · Private" if org else "Private"
         return "Unknown source"
 
     @property
@@ -111,7 +123,12 @@ class LinkRow:
         return "healthy"
 
     def policy_text(self) -> str:
-        """``Public; Subscribe on; Auto-push off`` — the accessible description."""
+        """``Public; Subscribe on; Auto-push off`` — the accessible description.
+
+        Carries the FULL source URL, which the compact row omits (D2): the
+        description is where the technical origin lives, while the visible row
+        shows the scope label.
+        """
 
         sub = "on" if self.subscribe else "off"
         push = "on" if self.auto_push else "off"
@@ -121,7 +138,8 @@ class LinkRow:
             "origin-conflict",
         ):
             suffix = f", paused: {self.error_class}"
-        return f"{self.scope_label}; Subscribe {sub}; Auto-push {push}{suffix}"
+        origin = f"source {self.source}; " if self.source else ""
+        return f"{self.scope_label}; {origin}Subscribe {sub}; Auto-push {push}{suffix}"
 
 
 def rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[LinkRow]:
@@ -146,6 +164,7 @@ def rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[LinkRow]:
                 link_id=link.get("link_id"),
                 source=link.get("hub_source"),
                 visibility=link.get("visibility"),
+                tenant_name=link.get("tenant_name"),
                 subscribe=policy.get("subscribe"),
                 auto_push=policy.get("auto_push"),
                 pull_state=str(pull.get("state") or "idle"),
@@ -167,6 +186,7 @@ def rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[LinkRow]:
                 link_id=None,
                 source=None,
                 visibility=None,
+                tenant_name=None,
                 subscribe=None,
                 auto_push=None,
                 pull_state="idle",
@@ -197,11 +217,16 @@ def render_rows(
     *,
     selected: int | None = None,
     loading: bool = False,
+    tail_style: Any = "dim",
 ) -> list[Text]:
     """The body: one section per kind, one reserved-slot row per link (pure).
 
-    ``loading`` shows the reserved-card text; the caller keeps last-known rows
-    across a refresh, so a poll never replaces the body with a skeleton.
+    ``tail_style`` is the resolved ink for the source+policy tail. The WIDGET
+    passes the theme's ``muted`` (D4); the default ``"dim"`` keeps the core
+    renderable without a theme (a bare ``"muted"`` is a palette token, not a
+    Rich style, and would raise ``MissingStyle``). ``loading`` shows the
+    reserved-card text; the caller keeps last-known rows across a refresh, so a
+    poll never replaces the body with a skeleton.
     """
 
     if loading and not rows:
@@ -218,41 +243,56 @@ def render_rows(
             continue
         lines.append(Text(_SECTION_TITLES.get(kind, kind.title()), style="bold"))
         for row in sorted(group, key=lambda r: r.name.casefold()):
-            lines.append(_render_row(row, width, selected=(selected == index)))
+            lines.append(
+                _render_row(row, width, selected=(selected == index), tail_style=tail_style)
+            )
             index += 1
     if not lines:
         lines.append(Text("Not linked to the hub.", style="dim"))
     return lines
 
 
-def _render_row(row: LinkRow, width: int, *, selected: bool) -> Text:
-    """``<slot> <name> — <source> · <policy>`` fitted to ``width`` cells.
+def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "dim") -> Text:
+    """``<slot> <name> — <scope> · <policy>`` fitted to ``width`` cells.
 
-    The slot is ALWAYS one reserved cell, so a state change cannot reflow the
-    row (the name carries no policy badges). At narrow widths the dim tail is
-    what gives: the full source+policy is the row's accessible description
-    (:meth:`LinkRow.policy_text`) and its tooltip, not a promise the collapsed
-    row paints every word — a row that overflowed its box would be the louder
-    defect.
+    The tail shows the compact SCOPE (``Public`` / ``Acme · Private``), never the
+    raw API base URL (D2 / frozen §30); the full source URL is the row's
+    accessible description. The slot is ALWAYS one reserved cell, so a state
+    change cannot reflow the row, and neither the source/permission copy nor the
+    essential policy words may be clipped away (frozen §128) — at a narrow width
+    the NAME is what gives first, then the tail truncates with an ellipsis so the
+    scope still leads it.
+
+    Ink: the tail uses ``muted`` (6.51:1 dark / 5.18:1 light), not ``dim``
+    (3.43:1 / 2.72:1) — the projects_send precedent (D4).
     """
 
     slot = _SLOT_FOR.get(row.slot_state, SLOT_IDLE)
-    source = row.source or "(unresolved origin)"
     prefix = f"{slot} "
-    tail = f" — {source} · {row.policy_text()}"
+    tail = (
+        f" — {row.scope_label} · Subscribe {_on_off(row.subscribe)}"
+        f" · Auto-push {_on_off(row.auto_push)}"
+    )
     name_room = max(4, width - cell_len(prefix) - cell_len(tail))
     name = truncate_cells(row.name, name_room)
     remaining = width - cell_len(prefix) - cell_len(name)
     if remaining <= 0:
         tail = ""
     elif cell_len(tail) > remaining:
-        # Keep the scope word visible at least: truncate from the tail's END.
         tail = truncate_cells(tail, remaining)
     line = Text()
     line.append(prefix, style="dim" if not selected else "reverse")
     line.append(name, style="reverse" if selected else "")
-    line.append(tail, style="dim")
+    line.append(tail, style=tail_style if not selected else "reverse")
     return line
+
+
+def _on_off(value: bool | None) -> str:
+    """``on``/``off``; an unknown policy reads as ``?`` rather than a false claim."""
+
+    if value is None:
+        return "?"
+    return "on" if value else "off"
 
 
 def aggregate_slot(rows: Sequence[LinkRow]) -> str:
