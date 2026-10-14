@@ -44,7 +44,11 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.analytics.model import CallSnapshot
-from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
+from local_operator.analytics.store import (
+    SESSION_NAME_RANK_TITLE,
+    WRITE_SETTLE_CEILING_S,
+    AnalyticsStore,
+)
 from local_operator.paths import config_dir
 
 logger = logging.getLogger("local_operator.analytics.recorder")
@@ -147,6 +151,16 @@ _QUEUE_MAXSIZE = 4096
 #: enough that a report opened right after a turn sees it; long enough that a
 #: tool loop's rapid calls coalesce into one transaction.
 _FLUSH_INTERVAL_S = 0.5
+
+#: Slack added to the store's settle ceiling for the default
+#: ``flush_for_test`` budget. The ceiling in ``store`` deliberately covers
+#: only the lock-wait arithmetic; this covers what it excludes — statement
+#: execution, thread scheduling, and a fresh database's first open
+#: (measured 0.9-1.3 s with zero contention). It is a margin ON a derived
+#: budget, not a budget of its own: the old flat 5 s default sat inside one
+#: attempt's busy wait and reported healthy-but-slow writes as failures
+#: (see ``store.WRITE_SETTLE_CEILING_S`` for the probe behind that).
+_FLUSH_FOR_TEST_MARGIN_S = 5.0
 
 #: Prune the retention window at most this often (seconds). Pruning is a DELETE
 #: over an indexed column — cheap — but there is no reason to run it on every
@@ -880,7 +894,9 @@ class AnalyticsRecorder:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: channel-record enqueue failed", exc_info=True)
 
-    def flush_for_test(self, timeout: float = 5.0) -> None:
+    def flush_for_test(
+        self, timeout: float = WRITE_SETTLE_CEILING_S + _FLUSH_FOR_TEST_MARGIN_S
+    ) -> None:
         """Block until every queued item has been through the write path. TEST ONLY.
 
         Never called on a session: real sessions do not wait for the writer.
@@ -921,6 +937,15 @@ class AnalyticsRecorder:
         naming what went wrong. The write-loss report names only the failures
         since the previous report, so its counts are new losses rather than a
         running total.
+
+        The DEFAULT ``timeout`` is the store's own settle ceiling plus a
+        small margin (``store.WRITE_SETTLE_CEILING_S`` +
+        ``_FLUSH_FOR_TEST_MARGIN_S``), never a number named here: a budget
+        shorter than the wait the store is permitted to spend on the very
+        write being awaited cannot distinguish "lost" from "not yet", and
+        the flat 5 s this used to default to did exactly that under a held
+        write lock. Callers may still pass a shorter ``timeout`` to assert
+        that a wedged writer is reported promptly — expiry still raises.
         """
         self._ensure_thread()
         deadline = time.monotonic() + timeout
