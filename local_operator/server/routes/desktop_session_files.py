@@ -19,7 +19,8 @@ for pull requests - and this module copies that route's stance:
   door's own rule (``DesktopSessions.files_target``): the same 404 for an unknown id, the same
   409 for a silent peer; a registered DRAFT answers an empty ``ready`` page (like ``find`` and
   ``history``, not a 404) and a PEER's conversation answers ``state: "unsupported"`` with no
-  rows, because its journal is not on this disk - the renderer falls back to its own scan.
+  rows, because its journal is not on this disk. A capable backend remains authoritative;
+  the renderer must not splice client-scan rows into an unsupported or partial answer.
 * **GET never blocks past a budget.** A cold scan of a 300 MB journal runs in a worker thread;
   the request waits ~1.5 s, then answers ``state: "building"`` with the rows found so far
   while a single-flight background task finishes the scan (resumable across restarts - the
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -52,7 +54,7 @@ from local_operator.server.models.desktop_session_files import (
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, host, reply
 from local_operator.server.utils.desktop_sessions import contained_descendants
-from local_operator.session_files import service
+from local_operator.session_files import ledger, service
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +84,35 @@ def _bad_filter(field: str, value: str) -> HTTPException:
     )
 
 
-async def _family(config_dir: Path, session_id: str, directory: Path) -> service.Family:
-    children, skipped = await asyncio.to_thread(contained_descendants, config_dir, session_id)
+async def _family(
+    config_dir: Path,
+    session_id: str,
+    directory: Path,
+    *,
+    scope: str = "family",
+    budget_s: float | None = None,
+) -> service.Family:
+    if scope == "self":
+        return service.Family(session_id, directory)
+    # Roster absence is indexed during the SAME resumable pass as files. A sidecar still
+    # wins; the indexed fallback cannot reparse a huge no-roster journal before the budget.
+    snapshot = await asyncio.to_thread(
+        ledger.refresh,
+        config_dir,
+        session_id,
+        directory,
+        cwd=service.session_cwd(config_dir, session_id, directory),
+        home=str(Path.home()),
+        deny=service.make_deny(config_dir),
+        budget_s=budget_s,
+    )
+    children, skipped = await asyncio.to_thread(
+        contained_descendants,
+        config_dir,
+        session_id,
+        indexed_roster=snapshot.scan.roster if snapshot else None,
+        indexed=True,
+    )
     return service.Family(
         session_id=session_id,
         session_dir=directory,
@@ -179,10 +208,21 @@ async def list_session_files(
     if directory is None:
         return reply(service.empty_listing(query))
 
-    family = await _family(config_dir, session_id, directory)
+    deadline = time.monotonic() + service.DEFAULT_BUDGET_S
+    family = await _family(
+        config_dir,
+        session_id,
+        directory,
+        scope=query.scope,
+        budget_s=max(0.0, deadline - time.monotonic()),
+    )
     try:
         answer = await asyncio.to_thread(
-            service.list_files, config_dir, family, query, budget_s=service.DEFAULT_BUDGET_S
+            service.list_files,
+            config_dir,
+            family,
+            query,
+            budget_s=max(0.0, deadline - time.monotonic()),
         )
     except service.InvalidCursor:
         raise HTTPException(
@@ -206,6 +246,8 @@ async def materialise_session_file(session_id: SessionID, file_id: FileID, reque
     row that already has a filesystem path answers 409 ``session_files_not_an_artifact``; an
     id that is not in this conversation's family answers 404 ``session_files_file_not_found``;
     a store entry that was pruned answers 410 ``session_files_artifact_missing``.
+    A hostile/moved destination or unavailable no-follow directory operations answers
+    409 ``session_files_unsafe_destination`` (never a pathname-based fallback).
     Idempotent: an identical existing copy is reused (``created: false``).
     """
     config_dir = _config_dir(request)
@@ -234,4 +276,5 @@ _MATERIALISE_REFUSALS = {
     "file_not_found": (404, _wd.session_files_file_not_found()),
     "not_an_artifact": (409, _wd.session_files_not_an_artifact()),
     "artifact_missing": (410, _wd.session_files_artifact_missing()),
+    "unsafe_destination": (409, _wd.session_files_materialise_failed(reason="unsafe destination")),
 }

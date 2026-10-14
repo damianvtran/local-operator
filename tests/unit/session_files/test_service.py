@@ -623,7 +623,7 @@ def test_materialise_refuses_a_symlinked_generated_dir(world: World) -> None:
     (scratch / "generated").symlink_to(victim)
     with pytest.raises(service.MaterialiseError) as refusal:
         service.materialise(world.config, world.family(), file_id, home=str(world.tmp))
-    assert refusal.value.code == "materialise_failed" and list(victim.iterdir()) == []
+    assert refusal.value.code == "unsafe_destination" and list(victim.iterdir()) == []
 
 
 def test_materialise_does_not_follow_a_planted_link_at_the_target_name(world: World) -> None:

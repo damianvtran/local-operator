@@ -66,7 +66,7 @@ from local_operator.supplements.contract import (
 #: tool, a changed rule): a cache written under another version is discarded and rebuilt, so a
 #: rule change is never half-applied to an old session. Also covers the denylist's verdicts,
 #: which are baked into the stored records.
-SCAN_SCHEMA: Final = 1
+SCAN_SCHEMA: Final = 2
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
@@ -288,6 +288,9 @@ class FileScan:
         self.records: dict[str, FileRecord] = {}
         self.pending: dict[str, PendingCall] = {}
         self.anchors: dict[str, Anchor] = {}
+        # Legacy roster rows share this bounded/resumable journal pass. Persisting absence
+        # avoids a whole-journal backward fallback on every warm Files request.
+        self.roster: dict[str, Any] | None = None
         self.truncated = False
         self.dropped = 0
         self._denied: set[str] = set()
@@ -315,6 +318,16 @@ class FileScan:
                     self._on_result_row(seq, line, name)
             return
         if b'"custom_type"' in line:
+            if b"subagent_roster" in line:
+                row = _row(line)
+                payload = row.get("payload") if row else None
+                if (
+                    row is not None
+                    and isinstance(payload, dict)
+                    and payload.get("custom_type") == "subagent_roster"
+                ):
+                    self.roster = {"ts": row.get("ts", 0), "details": payload.get("details", {})}
+                return
             match = _CUSTOM_PROBE.search(line)
             if match is None:
                 return
@@ -717,6 +730,7 @@ class FileScan:
             for key, rec in self.records.items()
         }
         other.pending = dict(self.pending)
+        other.roster = self.roster
         other.anchors = {
             key: Anchor(a.version, a.ts, a.seq, list(a.files), list(a.more))
             for key, a in self.anchors.items()
@@ -728,6 +742,7 @@ class FileScan:
     def to_payload(self) -> dict[str, Any]:
         return {
             "rows": self.rows,
+            "roster": self.roster,
             "truncated": self.truncated,
             "dropped": self.dropped,
             "records": [
@@ -756,6 +771,7 @@ class FileScan:
         scan = cls(cwd=cwd, home=home, deny=deny)
         try:
             scan.rows = int(payload["rows"])
+            scan.roster = payload.get("roster") if isinstance(payload.get("roster"), dict) else None
             scan.truncated = bool(payload.get("truncated"))
             scan.dropped = int(payload.get("dropped") or 0)
             for values in payload["records"]:

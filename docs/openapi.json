@@ -10244,7 +10244,7 @@
           "Desktop session files"
         ],
         "summary": "Materialise Session File",
-        "description": "Copy one digest-only artifact to ``<session scratchpad>/generated/<name>``.\n\nPOST only and session-confined: the destination is built server-side from the URL\nsession's own scratchpad and a sanitised name; the client names a ROW, never a path. A\nrow that already has a filesystem path answers 409 ``session_files_not_an_artifact``; an\nid that is not in this conversation's family answers 404 ``session_files_file_not_found``;\na store entry that was pruned answers 410 ``session_files_artifact_missing``.\nIdempotent: an identical existing copy is reused (``created: false``).",
+        "description": "Copy one digest-only artifact to ``<session scratchpad>/generated/<name>``.\n\nPOST only and session-confined: the destination is built server-side from the URL\nsession's own scratchpad and a sanitised name; the client names a ROW, never a path. A\nrow that already has a filesystem path answers 409 ``session_files_not_an_artifact``; an\nid that is not in this conversation's family answers 404 ``session_files_file_not_found``;\na store entry that was pruned answers 410 ``session_files_artifact_missing``.\nA hostile/moved destination or unavailable no-follow directory operations answers\n409 ``session_files_unsafe_destination`` (never a pathname-based fallback).\nIdempotent: an identical existing copy is reused (``created: false``).",
         "operationId": "materialise_session_file_v1_desktop_sessions__session_id__files__file_id__materialise_post",
         "parameters": [
           {

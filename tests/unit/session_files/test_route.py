@@ -463,3 +463,258 @@ async def test_materialise_of_a_pruned_store_entry_is_410_over_http(api) -> None
         and gone.json()["detail"]["code"] == "session_files_artifact_missing"
     )
     assert not (root / "sessions" / SESSION / "scratchpad" / "generated").exists()
+
+
+async def test_sensitive_scratchpad_symlink_target_is_not_listed(api) -> None:
+    client, _, root = api
+    directory = _session(root)
+    scratch = directory / "scratchpad"
+    scratch.mkdir()
+    target = root / "master.key"
+    target.write_text("synthetic fixture, not a secret")
+    report = scratch / "report.txt"
+    report.symlink_to(target)
+    harmless = scratch / "notes.txt"
+    harmless.write_text("public fixture")
+    write_journal(
+        directory,
+        [
+            tool("bad", 1, "cb", "write", "ok", {"path": str(report)}),
+            tool("good", 2, "cg", "write", "ok", {"path": str(harmless)}),
+        ],
+    )
+    answer = (await client.get(URL)).json()["result"]
+    assert [row["name"] for row in answer["rows"]] == ["notes.txt"]
+
+
+@pytest.mark.parametrize("swapped_component", ["generated", "scratchpad"])
+async def test_parent_swap_at_exclusive_create_never_writes_outside(
+    api, monkeypatch, swapped_component
+) -> None:
+    client, _, root = api
+    _seed_images(root, 1)
+    row_id = (await client.get(URL)).json()["result"]["rows"][0]["id"]
+    generated = root / "sessions" / SESSION / "scratchpad" / "generated"
+    outside = root.parent / "outside"
+    outside.mkdir()
+    victim_parent = generated if swapped_component == "generated" else generated.parent
+    parked = victim_parent.with_name("parked")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if flags & os.O_CREAT and not swapped:
+            swapped = True
+            victim_parent.rename(parked)
+            victim_parent.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    # The wrappers still implement the same platform operation; retain capability detection.
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {swap_before_open})
+    monkeypatch.setattr(os, "open", swap_before_open)
+    response = await client.post(f"{URL}/{row_id}/materialise")
+    assert swapped and response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "session_files_unsafe_destination"
+    assert list(outside.iterdir()) == []
+    parked_generated = parked if swapped_component == "generated" else parked / "generated"
+    assert list(parked_generated.iterdir()) == []
+
+
+async def test_symlinked_scratchpad_refusal_is_409_not_500(api) -> None:
+    client, _, root = api
+    _seed_images(root, 1)
+    row_id = (await client.get(URL)).json()["result"]["rows"][0]["id"]
+    outside = root.parent / "outside"
+    outside.mkdir()
+    (root / "sessions" / SESSION / "scratchpad").symlink_to(outside)
+    response = await client.post(f"{URL}/{row_id}/materialise")
+    assert (
+        response.status_code == 409
+        and response.json()["detail"]["code"] == "session_files_unsafe_destination"
+    )
+    assert list(outside.iterdir()) == []
+
+
+async def test_roster_membership_add_remove_invalidates_cursor(api) -> None:
+    client, _, root = api
+    parent = _session(root)
+    child = _session(root, CHILD, origin="subagent")
+    digest = _artifact(8)
+    write_journal(child, generate_image_rows(1, 1, digest, name="a.png", with_artifacts=True))
+    # Warm child FIRST: adding/removing it cannot be detected by max(parent, child) clock.
+    from local_operator.session_files import ledger
+
+    ledger.refresh(root, CHILD, child, cwd=str(root.parent), home=str(root.parent))
+    write_journal(
+        parent, generate_image_rows(2, 2, _artifact(9), name="b.png", with_artifacts=True)
+    )
+    sidecar = parent / "subagent-roster.v1.json"
+
+    def roster(on):
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "generation": 1,
+                    "jobs": [],
+                    "records": (
+                        [{"job_id": "j", "session_dir": str(child), "depth": 1}] if on else []
+                    ),
+                }
+            )
+        )
+
+    roster(True)
+    page = (await client.get(URL + "?sort=name&limit=1")).json()["result"]
+    assert page["rows"][0]["name"] == "a.png"
+    roster(False)
+    removed = (await client.get(URL + "?sort=name&limit=1&cursor=" + page["next_cursor"])).json()[
+        "result"
+    ]
+    assert removed["cursor_reset"] and removed["rows"][0]["name"] == "b.png"
+    assert removed["revision"] > page["revision"]
+    # A previously-issued cursor remains invalid when the old cached member returns.
+    roster(True)
+    added = (await client.get(URL + "?sort=name&limit=1&cursor=" + page["next_cursor"])).json()[
+        "result"
+    ]
+    assert added["cursor_reset"] and added["revision"] > removed["revision"]
+
+
+async def test_warm_no_roster_route_does_not_parse_journal_and_self_skips_discovery(
+    api, monkeypatch
+) -> None:
+    client, _, root = api
+    directory = _session(root)
+    rows = [assistant(f"prose-{n}", float(n), []) for n in range(15_000)]
+    write_journal(directory, rows)
+    await client.get(URL)  # complete the authoritative pass, including roster absence
+    from local_operator.session_files import scan
+
+    parses = []
+    real = scan._row
+    monkeypatch.setattr(scan, "_row", lambda raw: parses.append(1) or real(raw))
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.read_latest_custom_entry",
+        lambda *a, **kw: pytest.fail("unbounded journal fallback"),
+    )
+    for _ in range(3):
+        response = await client.get(URL)
+        assert response.status_code == 200 and response.json()["result"]["total"] == 0
+    assert parses == [], "warm no-roster requests do no journal JSON parsing"
+    monkeypatch.setattr(
+        desktop_session_files,
+        "contained_descendants",
+        lambda *a, **kw: pytest.fail("scope=self discovered family"),
+    )
+    assert (await client.get(URL + "?scope=self")).status_code == 200
+
+
+async def test_concurrent_cold_route_returns_building_without_waiting_for_scanner(
+    api, monkeypatch
+) -> None:
+    import asyncio
+
+    from local_operator.session_files import ledger
+
+    client, _, root = api
+    _seed_images(root, 1)
+    entered, release = threading.Event(), threading.Event()
+    real = ledger._read_into
+
+    def held(*args):
+        entered.set()
+        assert release.wait(10), "test did not release the scanner"
+        return real(*args)
+
+    monkeypatch.setattr(ledger, "_read_into", held)
+    monkeypatch.setattr(desktop_session_files, "_kick", lambda *a: None)
+    owner = asyncio.create_task(client.get(URL))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        # Deterministic ordering, not a latency SLA: every loser MUST finish while the owner
+        # is still gated. The old blocking lock deadlocks until this negative-control timeout.
+        burst = await asyncio.wait_for(asyncio.gather(*[client.get(URL) for _ in range(8)]), 3)
+        assert not owner.done()
+        assert all(
+            r.status_code == 200 and r.json()["result"]["state"] == "building" for r in burst
+        )
+    finally:
+        release.set()
+        await owner
+
+
+async def test_legacy_roster_is_indexed_once_and_refreshes_on_append(api, monkeypatch) -> None:
+    client, _, root = api
+    parent = _session(root)
+    child = _session(root, CHILD, origin="subagent")
+    write_journal(child, generate_image_rows(1, 1, _artifact(5), name="child.png"))
+    write_journal(parent, [assistant("first", 1, [])])
+    assert (await client.get(URL)).json()["result"]["total"] == 0
+    from ._fixtures import append_journal
+
+    append_journal(
+        parent,
+        [
+            {
+                "id": "legacy",
+                "ts": 2,
+                "type": "custom",
+                "payload": {
+                    "custom_type": "subagent_roster",
+                    "details": {
+                        "records": [{"session_dir": str(child), "job_id": "legacy-job", "depth": 1}]
+                    },
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.read_latest_custom_entry",
+        lambda *a, **kw: pytest.fail("unbounded roster fallback"),
+    )
+    for _ in range(2):
+        answer = (await client.get(URL)).json()["result"]
+        assert [r["name"] for r in answer["rows"]] == ["child.png"]
+    # A new process reloads the bounded scan's roster, rather than losing legacy children.
+    from local_operator.session_files import ledger
+
+    ledger.forget_resident()
+    answer = (await client.get(URL)).json()["result"]
+    assert answer["scan"]["children"] == 1
+
+
+async def test_contended_refresh_serves_published_rows_as_building(api, monkeypatch) -> None:
+    import asyncio
+
+    from local_operator.session_files import ledger
+
+    from ._fixtures import append_journal
+
+    client, _, root = api
+    _seed_images(root, 1)
+    first = (await client.get(URL)).json()["result"]
+    directory = root / "sessions" / SESSION
+    append_journal(directory, generate_image_rows(2, 50, _artifact(2), name="new.png"))
+    entered, release = threading.Event(), threading.Event()
+    real = ledger._read_into
+
+    def held(*args):
+        entered.set()
+        assert release.wait(10)
+        return real(*args)
+
+    monkeypatch.setattr(ledger, "_read_into", held)
+    monkeypatch.setattr(desktop_session_files, "_kick", lambda *a: None)
+    owner = asyncio.create_task(client.get(URL))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        loser = (await asyncio.wait_for(client.get(URL), 3)).json()["result"]
+        assert loser["state"] == "building" and loser["total"] == first["total"]
+        assert loser["rows"][0]["id"] == first["rows"][0]["id"]
+    finally:
+        release.set()
+        await owner
+    final = (await client.get(URL)).json()["result"]
+    assert final["state"] == "ready" and final["total"] == 2

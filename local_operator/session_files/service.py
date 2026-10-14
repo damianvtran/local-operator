@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import json
 import logging
@@ -55,6 +56,7 @@ import re
 import stat as stat_module
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Sequence
@@ -237,14 +239,18 @@ def make_deny(config_dir: str | Path) -> Callable[[str], bool]:
         return None
 
     def deny(path: str) -> bool:
-        rule = denylist.is_sensitive(path)
-        if not rule:
-            return False
-        if rule in (denylist.RULE_CONFIG_DIR, denylist.RULE_SCRATCHPAD):
-            relative = _scratch_relative(path) or _scratch_relative(os.path.realpath(path))
-            if relative is not None:
-                return bool(denylist.is_sensitive(relative))
-        return True
+        # Exempt the scratchpad independently in BOTH spellings. Exempting only the
+        # written name would launder a harmless report.txt link to config/master.key.
+        for spelling in (path, os.path.realpath(path)):
+            rule = denylist.is_sensitive(spelling)
+            if not rule:
+                continue
+            relative = _scratch_relative(spelling)
+            if rule in (denylist.RULE_CONFIG_DIR, denylist.RULE_SCRATCHPAD) and relative:
+                if not denylist.is_sensitive(relative):
+                    continue
+            return True
+        return False
 
     return deny
 
@@ -406,9 +412,17 @@ def complete_in_background(
     so a foreground GET never queues behind a 300 MB scan.
     """
     for _ in range(100_000):
+        started = time.monotonic()
         states = advance(config_dir, family, scope, budget_s=slice_s, home=home, deny=deny)
         if all(snapshot is None or snapshot.complete for *_, snapshot in states):
             return
+        if time.monotonic() - started < 0.01:
+            # A foreground slice owns the nonblocking ledger lock; don't busy-spin.
+            time.sleep(0.01)
+
+
+_FAMILY_REVISION_LOCK = threading.Lock()
+_FAMILY_REVISIONS: OrderedDict[Any, Any] = OrderedDict()
 
 
 def merge(
@@ -416,6 +430,7 @@ def merge(
     *,
     home: str,
     deny: Callable[[str], bool] | None = None,
+    revision_scope: str = "family",
 ) -> Merged:
     """Fold the members' scans into ONE entry per file, overlay Highlights, report progress."""
     entries: dict[str, Entry] = {}
@@ -463,6 +478,22 @@ def merge(
                 held.record, held.session_id, held.child, held.cwd = record, session_id, child, cwd
                 held.first_ts, held.first_seq = record.first_ts, record.first_seq
     _overlay_highlights(entries, snapshots, states, home, deny)
+    # A family generation includes every member, not just the maximum publication time.
+    # The process-local clock is monotone for membership removal as well as append. Restart
+    # or bounded-cache eviction can conservatively reset cursors, never reuse a stale offset.
+    identity = tuple(sorted((sid, snap.revision if snap else 0) for sid, _, _, snap in states))
+    key = (revision_scope, tuple((sid, cwd) for sid, _, cwd, _ in states[:1]))
+    with _FAMILY_REVISION_LOCK:
+        old_identity, old_revision = _FAMILY_REVISIONS.get(key, ((), 0))
+        revision = (
+            old_revision
+            if identity == old_identity
+            else max(int(time.time() * 1000), old_revision + 1)
+        )
+        _FAMILY_REVISIONS[key] = (identity, revision)
+        _FAMILY_REVISIONS.move_to_end(key)
+        while len(_FAMILY_REVISIONS) > 256:
+            _FAMILY_REVISIONS.popitem(last=False)
     return Merged(
         entries=list(entries.values()),
         revision=revision,
@@ -743,7 +774,7 @@ def list_files(
     home = home if home is not None else str(Path.home())
     deny = make_deny(config_dir)
     states = advance(config_dir, family, query.scope, budget_s=budget_s, home=home, deny=deny)
-    merged = merge(states, home=home, deny=deny)
+    merged = merge(states, home=home, deny=deny, revision_scope=query.scope)
     store_root = Path(config_dir) / "attachments"
 
     cursor_reset = False
@@ -876,14 +907,10 @@ def materialise(
     references the digest. WHY LAZY: the dedup the store exists for is not given up for files
     nobody opens.
 
-    CONFINEMENT, in order (each clause is a traversal negative control in the tests): the id
-    must match ``^[a-f0-9]{16}$`` and resolve to an ARTIFACT row of this family (a client names
-    a row, never a path); the destination is built from the URL session's own scratchpad
-    (``scratchpad_root`` refuses a directory that is not under ``sessions/``), the
-    ``generated`` directory may not be a symlink, the file name is :func:`sanitise_name`'s
-    single component, and the final resolved parent must equal the resolved ``generated``
-    directory. Bytes come from ``AttachmentStore.get_bytes`` (which re-verifies the digest), so
-    a bit-rotted store entry is refused rather than copied.
+    CONFINEMENT: row ids are session-scoped, names are sanitized, and destination directory
+    components are pinned with no-follow handles (see ``_copy_artifact``). Creation, reuse and
+    cleanup are fd-relative: a concurrent parent-symlink swap cannot redirect a write/read.
+    The attachment store re-verifies bytes before copying. Unsupported platforms fail closed.
 
     IDEMPOTENT: an existing file with identical bytes is reused (``created: false``); a
     different file at the name (the user's) is never overwritten - the copy lands at
@@ -916,52 +943,116 @@ def materialise(
     if scratch is None:
         raise MaterialiseError("materialise_failed", "session has no scratchpad")
     name = sanitise_name(record.name, record.digest, record.content_type or stored_mime)
-    try:
-        session_real = family.session_dir.resolve()
-        generated = scratch / "generated"
-        if scratch.is_symlink() or generated.is_symlink():
-            raise MaterialiseError("materialise_failed", "scratchpad path is a link")
-        generated.mkdir(parents=True, exist_ok=True)
-        generated_real = generated.resolve()
-        if not generated_real.is_relative_to(session_real):
-            raise MaterialiseError("materialise_failed", "destination escapes the session")
-        stem, ext = os.path.splitext(name)
-        candidates = [name, f"{stem}-{record.digest[:8]}{ext}"] + [
-            f"{stem}-{record.digest[:8]}-{n}{ext}" for n in range(2, 6)
-        ]
-        want = hashlib.sha256(data).digest()
-        for candidate in candidates:
-            target = generated_real / candidate
-            if target.parent != generated_real:  # defence in depth; sanitise_name makes it moot
-                raise MaterialiseError("materialise_failed", "destination escapes the folder")
-            try:
-                handle = target.open("xb")
-            except FileExistsError:
+    return _copy_artifact(family.session_dir, name, record.digest, data)
+
+
+_COPY_LOCK = threading.Lock()
+
+
+def _copy_artifact(session_dir: Path, name: str, digest: str, data: bytes) -> dict[str, Any]:
+    """Pin every destination ancestor; all leaf operations use the pinned directory fd.
+
+    ``resolve``/``open('xb')`` is not confinement: a renamed parent can become a link between
+    checking and creating. Open each component with O_DIRECTORY|O_NOFOLLOW, then create,
+    inspect existing files, and clean partial copies with dir_fd operations. Unsupported
+    platforms fail closed rather than silently falling back to the vulnerable path.
+    The small copy lock also prevents another POST mistaking our in-progress copy for a clash.
+    """
+    if not all(fn in os.supports_dir_fd for fn in (os.open, os.mkdir, os.unlink, os.stat)) or not (
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+    ):
+        raise MaterialiseError("unsafe_destination", "safe directory operations unavailable")
+    fds: list[int] = []
+    created_name: str | None = None
+    with _COPY_LOCK:
+        try:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            fds.append(os.open(os.sep, flags))
+            # Resolve system aliases such as macOS /var once, then pin EACH component of
+            # that absolute spelling. The scratchpad/generated names are never resolved.
+            session_real = session_dir.resolve()
+            for part in session_real.parts[1:]:
+                fds.append(os.open(part, flags, dir_fd=fds[-1]))
+            for part in ("scratchpad", "generated"):
                 try:
-                    if (
-                        not target.is_symlink()
-                        and hashlib.sha256(target.read_bytes()).digest() == want
-                    ):
-                        return _receipt(target, name=candidate, size=len(data), created=False)
+                    os.mkdir(part, mode=0o700, dir_fd=fds[-1])
+                except FileExistsError:
+                    pass
+                fds.append(os.open(part, flags, dir_fd=fds[-1]))
+            directory = session_real / "scratchpad" / "generated"
+            dirfd = fds[-1]
+
+            def still_named() -> bool:
+                # A pinned directory can be renamed safely (no external write), but returning
+                # its former pathname as "saved" would lie. Refuse if any pinned name moved.
+                paths = (session_real, session_real / "scratchpad", directory)
+                for path, fd in zip(paths, fds[-3:]):
+                    actual, pinned = os.stat(path, follow_symlinks=False), os.fstat(fd)
+                    if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                        return False
+                return True
+
+            stem, ext = os.path.splitext(name)
+            candidates = [name, f"{stem}-{digest[:8]}{ext}"] + [
+                f"{stem}-{digest[:8]}-{n}{ext}" for n in range(2, 6)
+            ]
+            want = hashlib.sha256(data).digest()
+            for candidate in candidates:
+                if not still_named():
+                    raise MaterialiseError("unsafe_destination", "destination directory moved")
+                try:
+                    fd = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=dirfd,
+                    )
+                except FileExistsError:
+                    try:
+                        existing = os.open(
+                            candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd
+                        )
+                        with os.fdopen(existing, "rb") as handle:
+                            if not stat_module.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                                continue
+                            if hashlib.sha256(handle.read()).digest() != want:
+                                continue
+                        if not still_named():
+                            raise MaterialiseError(
+                                "unsafe_destination", "destination directory moved"
+                            )
+                        return _receipt(
+                            directory / candidate, name=candidate, size=len(data), created=False
+                        )
+                    except OSError:
+                        continue
+                else:
+                    created_name = candidate
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(data)
+                    if not still_named():
+                        raise MaterialiseError("unsafe_destination", "destination directory moved")
+                    created_name = None
+                    return _receipt(
+                        directory / candidate, name=candidate, size=len(data), created=True
+                    )
+            raise MaterialiseError("materialise_failed", "no free file name")
+        except OSError as error:
+            # ELOOP/ENOTDIR are expected refusals of a hostile symlink, not server faults.
+            code = (
+                "unsafe_destination"
+                if error.errno in (errno.ELOOP, errno.ENOTDIR)
+                else "materialise_failed"
+            )
+            raise MaterialiseError(code, str(error)) from error
+        finally:
+            if created_name is not None:
+                try:
+                    os.unlink(created_name, dir_fd=fds[-1])
                 except OSError:
                     pass
-                continue
-            try:
-                with handle:
-                    handle.write(data)
-            except OSError:
-                # Do not leave a half-written copy for the next call to mistake for a clash.
-                try:
-                    target.unlink()
-                except OSError:
-                    pass
-                raise
-            return _receipt(target, name=candidate, size=len(data), created=True)
-    except MaterialiseError:
-        raise
-    except OSError as error:
-        raise MaterialiseError("materialise_failed", str(error)) from error
-    raise MaterialiseError("materialise_failed", "no free file name")
+            for fd in reversed(fds):
+                os.close(fd)
 
 
 def _receipt(target: Path, *, name: str, size: int, created: bool) -> dict[str, Any]:
