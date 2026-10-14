@@ -1274,9 +1274,9 @@ def deletion_covered(result: "MergeResult") -> bool:
         return False
     removed = 0
     for region in result.regions:
-        if region.prov == "unresolved":
+        if region.provenance == "unresolved":
             return False
-        if region.prov == "removal-honored":
+        if region.provenance == "removal-honored":
             removed += 1
             continue
         # A region that DROPPED text must name the deterministic removal that

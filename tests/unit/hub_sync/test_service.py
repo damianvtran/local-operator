@@ -644,3 +644,35 @@ def test_resolve_source_refuses_unlinked_item(env) -> None:
             visibility="public",
             tenant_id=None,
         )
+
+
+def _sections(n: int) -> str:
+    return "".join(f"## S{i}\nrule {i} text\n\n" for i in range(1, n + 1))
+
+
+def _section_slice(start: int, end: int) -> str:
+    return "".join(f"## S{i}\nrule {i} text\n\n" for i in range(start, end + 1))
+
+
+def test_complementary_removal_large_shrink_applies_when_fully_covered(env) -> None:
+    """E1 regression: each side removes a DIFFERENT block, leaving a short overlap.
+
+    Local keeps sections 1-5, remote keeps 4-8, so the merged overlap (4-5) is
+    shorter than BOTH sides -- a genuine LargeShrink. Every dropped span is a
+    deterministic one-sided ancestry removal, so the survivor proof allows the
+    apply through the REAL auto-apply path instead of a ratio-only refusal.
+    Before the fix, ``deletion_covered`` read a non-existent ``region.prov`` and
+    raised AttributeError here (fail-closed, feature non-functional).
+    """
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root, text=_sections(8))
+    agents.set_agent_system_prompt(row.id, _sections(5))  # local removed 6-8
+    hub.agents["h1"] = (_section_slice(4, 8), "d")  # remote removed 1-3
+
+    report = svc.apply_items(ctx, kind="agent", auto=True, allow_llm=False)
+
+    assert report.reports[0].applied, report.reports[0]
+    assert report.reports[0].outcome == "merged"
+    merged = _text(agents, row.id)
+    assert "## S4" in merged and "## S5" in merged
+    assert "## S1" not in merged and "## S8" not in merged
