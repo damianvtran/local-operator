@@ -284,6 +284,11 @@ def test_every_admitted_action_kind_is_offered_and_no_other() -> None:
         (" ", False),
         ("\t\n", False),
         ("\u00a0", False),
+        ("\r\n", False),
+        ("a\n", True),
+        ("\na", True),
+        ("\na\n", True),
+        ("\U0001f600", True),
         ("s", True),
         ("screen", True),
         ("0", True),
@@ -323,7 +328,7 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
                 continue
             expected = dict(field)
             if field.get("pattern") == r"\S":
-                expected["pattern"] = r"[\s\S]*\S[\s\S]*"
+                expected["pattern"] = r"^[\s\S]*\S[\s\S]*$"
                 rewritten.add((kind, name))
             assert fields[(kind, name)] == expected
         assert model.model_json_schema() == protocol_schema
@@ -340,6 +345,12 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
     frame = fields[("click", "frame_id")]
     assert Draft202012Validator(frame).is_valid("x" * 256)
     assert not Draft202012Validator(frame).is_valid("x" * 257)
+    # A search without the anchors retries a greedy prefix at every position:
+    # a valid-length whitespace-only type payload would become quadratic work.
+    text = fields[("type", "text")]
+    assert text["pattern"].startswith("^") and text["pattern"].endswith("$")
+    assert not Draft202012Validator(text).is_valid(" " * text["maxLength"])
+    assert Draft202012Validator(text).is_valid("\n" + "x" * (text["maxLength"] - 2) + "\n")
 
 
 @pytest.mark.asyncio
