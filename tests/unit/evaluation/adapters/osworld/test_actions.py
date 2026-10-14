@@ -14,8 +14,10 @@ from lop_osworld_v2_adapter import actions
 from lop_osworld_v2_adapter.actions import CompilationError
 
 from local_operator.evaluation.protocol import (
+    ActionBatch,
     ClickAction,
     DoubleClickAction,
+    DragAction,
     FrameGeometry,
     FrameSize,
     KeyAction,
@@ -145,3 +147,79 @@ def test_coordinate_corners_round_trip() -> None:
         compiled = actions.compile_action(action, geo)
         assert compiled is not None
         assert f"x={x}" in compiled and f"y={y}" in compiled
+
+
+def _decoded_guest(statement: str) -> str:
+    import ast
+
+    return ast.literal_eval(statement[len("exec(") : -1])
+
+
+def test_drag_compiles_both_endpoints_through_one_geometry() -> None:
+    identity = DragAction(
+        observation_id="o",
+        frame_id="screen",
+        start_x=10,
+        start_y=20,
+        end_x=110,
+        end_y=220,
+    )
+    compiled = actions.compile_action(identity, _geo())
+    assert compiled is not None
+    assert "_drag_x11(10, 20, 110, 220, 'left', 500)" in _decoded_guest(compiled)
+    # Deterministic byte-for-byte: identical action + geometry produce the
+    # same source, with no random easing or duration.
+    assert compiled == actions.compile_action(identity, _geo())
+    # A 2x downscale maps BOTH endpoints exactly like every other pointer
+    # action: 50,25 -> 100,50 and 100,75 -> 200,150, through the geometry's
+    # own floor-and-clamp policy.
+    scaled = DragAction(
+        observation_id="o",
+        frame_id="screen",
+        start_x=50,
+        start_y=25,
+        end_x=100,
+        end_y=75,
+        duration_ms=1200,
+    )
+    scaled_source = actions.compile_action(scaled, _geo(native=(1920, 1080), visible=(960, 540)))
+    assert scaled_source is not None
+    assert "_drag_x11(100, 50, 200, 150, 'left', 1200)" in _decoded_guest(scaled_source)
+
+
+def test_drag_admission_is_gated_by_the_surface_capability() -> None:
+    from local_operator.evaluation.action_surface import (
+        ActionAdmissionError,
+        ActionSurface,
+    )
+
+    batch = ActionBatch.model_validate(
+        {
+            "protocol_version": "1.0",
+            "task_id": "task",
+            "episode_id": "episode",
+            "observation_id": "obs",
+            "actions": [
+                {
+                    "kind": "drag",
+                    "observation_id": "obs",
+                    "frame_id": "screen",
+                    "start_x": 1,
+                    "start_y": 2,
+                    "end_x": 3,
+                    "end_y": 4,
+                }
+            ],
+        }
+    )
+    # A backend that does not declare the translator refuses the batch before
+    # producing any statement: no guest call can happen for an unsupported
+    # kind.
+    with pytest.raises(ActionAdmissionError, match="not supported"):
+        ActionSurface().validate_batch(batch)
+    # This adapter declares it, so the same batch compiles to one statement
+    # (one observation, existing ordered-batch semantics).
+    assert actions.ACTION_SURFACE.drag is True
+    statements = actions.compile_batch(batch, _geo())
+    assert len(statements) == 1
+    assert "_drag_x11" in _decoded_guest(statements[0])
