@@ -346,7 +346,14 @@ class UpdateOperation:
             raise InstallTransactionError(
                 "update operation phase has no verified completion contract"
             )
-        if set(observations) - {"candidate", "current", "receipts", "continuations", "failure"}:
+        if set(observations) - {
+            "candidate",
+            "current",
+            "receipts",
+            "continuations",
+            "failure",
+            "handoff",
+        }:
             raise InstallTransactionError("update operation observation is unsupported")
         with transaction(self.root, operation=f"update operation {phase}") as held:
             held.validate(self.root)
@@ -410,6 +417,69 @@ def link_operation(operation: UpdateOperation, generation: Path) -> None:
             generation / ".update-operation.json",
             {"operation_id": operation.identifier},
         )
+
+
+def handoff_status(root: Path, identifier: str) -> dict[str, Any] | None:
+    """Read the transfer record; a read never advances or repairs it."""
+    row = operation_status(root, identifier)
+    if row is None:
+        return None
+    handoff = row.get("handoff")
+    return handoff if isinstance(handoff, dict) else None
+
+
+def advance_handoff(
+    root: Path,
+    identifier: str,
+    state: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Move the transfer record one state under the EXISTING root transaction.
+
+    The legacy ordering is enforced, not just documented: ``commit`` requires a
+    prior ``ready`` from the successor, and ``ack`` requires ``commit``. A state
+    skips nothing and an unknown/absent prior state refuses, because a successor
+    that accepted before A committed would be a second leader for one port. The
+    record is a handoff, not a lock: unknown or unreadable state leaves BOTH roots
+    and both processes alive for the owning recovery path to reconcile.
+    """
+    from local_operator.service_handoff import HANDOFF_STATES
+
+    if state not in HANDOFF_STATES:
+        raise InstallTransactionError("handoff state has no verified contract")
+    allowed = {
+        "nonce", "from_pid", "from_birth", "to_pid", "to_birth",
+        "target_generation", "listener_ino", "control_fd_role", "inherited",
+    }
+    unknown = set(fields) - allowed
+    if unknown:
+        raise InstallTransactionError("handoff field is unsupported")
+    with transaction(root, operation=f"handoff {state}") as held:
+        held.validate(root)
+        path = _operation_path(root, identifier)
+        record = read_record(path)
+        if record is None or record.get("operation_id") != identifier:
+            raise InstallTransactionError("handoff has no durable operation; preserve both roots")
+        previous = record.get("handoff") if isinstance(record.get("handoff"), dict) else None
+        # `ready` is the FIRST state (no prior); each later state names exactly
+        # its predecessor. A `commit` with no `ready`, or an `ack` with no
+        # `commit`, refuses — a successor that accepted before A committed would
+        # be a second leader for one port.
+        required = {"ready": None, "commit": "ready", "ack": "commit", "aborted": None}
+        prior_state = (previous or {}).get("state")
+        if prior_state != required[state]:
+            expected = required[state] or "no prior handoff"
+            raise InstallTransactionError(
+                f"handoff {state} requires {expected}; refusing out of order"
+            )
+        merged = dict(previous or {})
+        merged.update(fields)
+        merged["state"] = state
+        record["handoff"] = merged
+        record["updated_at"] = time.time()
+        _persist_operation(path, record)
+        held.validate(root)
+        return merged
 
 
 def operation_status(root: Path, identifier: str) -> dict[str, Any] | None:

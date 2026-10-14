@@ -9929,6 +9929,17 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # Retain the Server object so a ready-successor handoff can pause/resume
+        # ACCEPTORS on it without a kill: the listener socket lives in this frame
+        # and the handoff runs in the lifespan's loop, so app.state is the one
+        # channel that reaches both. The owner holds a DUP of the listener, so
+        # nothing here can close the bound socket the way a forced restart would.
+        from local_operator import service_handoff
+
+        server = uvicorn.Server(config)
+        asgi_app.state.listener_owner = service_handoff.ListenerOwner(
+            asgi_app, servers=[], listener=listener
+        )
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -9936,7 +9947,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         # those windows are exactly where a traceback would otherwise reach the
         # operator instead of a plain exit.
         try:
-            uvicorn.Server(config).run(sockets=[listener])
+            server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
     else:
