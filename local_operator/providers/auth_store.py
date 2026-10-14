@@ -1086,6 +1086,11 @@ class AuthStore:
         HTTP clients stay per-process.
     """
 
+    #: The WRITABLE handle, definitely typed. A read-only store never assigns it
+    #: (its handle lives in :attr:`_ro_conn`); the annotation keeps the type
+    #: non-Optional for every unguarded ``self._conn.x`` on the writable path.
+    _conn: _SerializedConnection
+
     def __init__(
         self,
         db_path: str | Path | None = None,
@@ -1093,8 +1098,14 @@ class AuthStore:
         config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
+        read_only: bool = False,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
+        #: Metadata-only mode for the paired-phone usage seam. Every open is
+        #: ``mode=ro`` over an existing file and constructor performs NO disk
+        #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
+        #: (:meth:`list_credentials`) work; write paths must not be reached.
+        self._read_only = read_only
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1141,7 +1152,133 @@ class AuthStore:
         #: Set by :meth:`close`. Read by :func:`shared_auth_store` to decide
         #: whether the process-level store it is holding is still usable.
         self._closed = False
-        self._conn = self._connect()
+        if read_only:
+            # Construction must WRITE NOTHING: an absent database is simply an
+            # empty store, so the read-only handle is allowed to be ``None``
+            # instead of raising out of the constructor (the mode=ro open cannot
+            # be created, only opened). It lives in its OWN Optional attribute,
+            # and the WRITABLE ``self._conn`` is left UNASSIGNED here, so pyright
+            # keeps ``self._conn``'s declared type definite -- assigning a
+            # possibly-``None`` to it widened the attribute to Optional and made
+            # every unguarded ``store._conn.x`` across the tree a pyright error.
+            # Read paths branch on ``self._read_only`` and never touch
+            # ``self._conn`` on such a store.
+            self._ro_conn = self._connect_read_only()
+        else:
+            self._ro_conn = None
+            self._conn = self._connect()
+
+    @classmethod
+    def open_read_only(cls, db_path: str | Path | None = None) -> "AuthStore":
+        """A metadata-only store that writes nothing on construction or read.
+
+        The paired-phone seam must be able to read persisted credential
+        METADATA (which providers/rows exist) without the default store's
+        constructor side effects: ``mkdir`` of the config root, ``O_CREAT`` of
+        auth.db, the WAL PRAGMA, the schema ``executescript`` and three
+        ``chmod`` calls. Building a default store and merely refraining from
+        writing would still have performed all of those, so the read-only open
+        is a distinct constructor rather than a flag a caller could forget.
+        An absent database reads as an empty store.
+        """
+        store = cls(db_path, read_only=True)
+        return store
+
+    def _connect_read_only(self) -> _SerializedConnection | None:
+        """The metadata-only handle, or ``None`` when there is nothing to read.
+
+        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
+        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
+        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
+        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
+        promise forbids. sqlite also refuses every write through this handle.
+
+        Returns ``None`` when there is nothing to read: an ABSENT database
+        (legitimately empty) or one that will not open. Callers distinguish the
+        two states by :meth:`read_only_unavailable`; returning a bare ``None``
+        here is what keeps construction from creating a file to find out.
+        """
+        if not self._db_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro&immutable=1",
+                timeout=5.0,
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return _SerializedConnection(conn)
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+
+    def read_only_unavailable(self) -> bool:
+        """Whether a read-only store could not be read (vs. genuinely empty).
+
+        ``False`` when the database is simply absent — "empty" is a legitimate
+        answer, and the seam must be able to say it without creating the file.
+        ``True`` when the file exists but cannot yield credentials: it will not
+        open (corrupt/locked), OR it opens but lacks the tables/columns this
+        store's read path requires. The second case is a foreign or half-built
+        database — a valid SQLite file that is NOT a credential store — and
+        reporting it as empty would tell the phone "no accounts" when the truth
+        is "this is not a store I can read". Only meaningful for a read-only
+        store; a writing store always has a live, schema-applied handle.
+        """
+        if not self._read_only:
+            return False
+        if not self._db_path.exists():
+            return False
+        if self._ro_conn is None:
+            return True
+        return not self._has_required_schema()
+
+    def _has_required_schema(self) -> bool:
+        """Whether the required credential table AND its columns are present.
+
+        ``sqlite_master`` alone is not enough: a database can hold a
+        ``auth_credentials`` table missing ``identity_key`` (an older or foreign
+        build), which then fails at the first SELECT rather than at open. Both
+        the table and every column the read path selects are required.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return False
+        try:
+            cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
+            }
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        required = {
+            "id",
+            "provider",
+            "credential_type",
+            "data",
+            "disabled_cause",
+            "identity_key",
+            "created_at",
+            "updated_at",
+        }
+        return required.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a non-empty ``-wal`` sits beside the store's database.
+
+        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
+        so a committed DELETE in the WAL is invisible to it: the reader still
+        sees the removed credential row. A non-empty ``-wal`` is that exact
+        on-disk signal, which the seam surfaces as staleness so a possibly-
+        deleted account is never presented as current. A zero-length WAL holds
+        no frames and is not staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
 
     @property
     def db_path(self) -> Path:
@@ -1207,7 +1344,15 @@ class AuthStore:
         # its only consumer: everything else detects a closed connection the way
         # sqlite does, with ``ProgrammingError`` on use.
         self._closed = True
-        self._conn.close()
+        # A read-only store over an ABSENT database has no handle: closing it
+        # must be a safe no-op, not a ``NoneType.close`` raise. The phone route
+        # closes whatever it opened, and "there was nothing to open" is the
+        # common cold-start case.
+        if self._read_only:
+            if self._ro_conn is not None:
+                self._ro_conn.close()
+        else:
+            self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
             self._usage_cache = None
@@ -1357,15 +1502,18 @@ class AuthStore:
         ``provider`` is resolved through :meth:`_storage_id`, so asking for a
         login flavour returns the rows its login actually wrote.
         """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return []
         if provider is not None:
             provider = self._storage_id(provider)
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
                 (provider,),
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials ORDER BY id"
             ).fetchall()
@@ -1651,7 +1799,10 @@ class AuthStore:
         return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
-        row = self._conn.execute(
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        row = conn.execute(
             "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
             " created_at, updated_at FROM auth_credentials WHERE id = ?",
             (credential_id,),
