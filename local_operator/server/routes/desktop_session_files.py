@@ -233,5 +233,5 @@ async def materialise_session_file(session_id: SessionID, file_id: FileID, reque
 _MATERIALISE_REFUSALS = {
     "file_not_found": (404, _wd.session_files_file_not_found()),
     "not_an_artifact": (409, _wd.session_files_not_an_artifact()),
-    "artifact_bytes_missing": (410, _wd.session_files_artifact_missing()),
+    "artifact_missing": (410, _wd.session_files_artifact_missing()),
 }

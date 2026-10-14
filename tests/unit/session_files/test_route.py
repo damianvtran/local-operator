@@ -450,3 +450,16 @@ async def test_a_cold_scan_over_budget_answers_building_then_completes_in_the_ba
     done = (await client.get(URL + "?limit=200")).json()["result"]
     assert done["state"] == "ready" and done["total"] == 300 and done["scan"]["complete"] is True
     assert done["revision"] > first["revision"]
+
+
+async def test_materialise_of_a_pruned_store_entry_is_410_over_http(api) -> None:
+    client, _, root = api
+    digest = _seed_images(root, 1)[0]
+    row_id = (await client.get(URL)).json()["result"]["rows"][0]["id"]
+    (root / "attachments" / f"{digest}.bin").unlink()
+    gone = await client.post(f"{URL}/{row_id}/materialise")
+    assert (
+        gone.status_code == 410
+        and gone.json()["detail"]["code"] == "session_files_artifact_missing"
+    )
+    assert not (root / "sessions" / SESSION / "scratchpad" / "generated").exists()
