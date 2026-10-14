@@ -52,3 +52,35 @@ def test_duplicate_keys_rejected():
 def test_secret_looking_key_rejected(key):
     with pytest.raises(ValueError, match="credential material"):
         validate_lifecycle_frame(_frame(meta={key: "v"}))
+
+
+def _link_pair():
+    """A dialer/listener ``LinkCrypto`` pair over one key schedule (as test_wire_crypto)."""
+    import os
+
+    from local_operator.network import wire
+
+    keys = wire.link_keys(os.urandom(32), b"t" * 32, b"l" * 16)
+    return wire.LinkCrypto(keys, role="dialer"), wire.LinkCrypto(keys, role="listener")
+
+
+def test_decode_refuses_oversized_lifecycle_frame():
+    from local_operator.network import wire
+
+    dialer, listener = _link_pair()
+    frame = _frame(op="net_broker", kind="lifecycle_announce", note="x" * 16_400)
+    with pytest.raises(wire.LinkCryptoError, match="lifecycle frame"):
+        listener.open(dialer.seal(frame)[4:])
+
+
+def test_decode_passes_small_lifecycle_frame():
+    dialer, listener = _link_pair()
+    frame = _frame(op="net_broker", kind="lifecycle_announce")
+    assert listener.open(dialer.seal(frame)[4:]) == frame
+
+
+def test_decode_leaves_non_lifecycle_frame_untouched():
+    """Discriminating: the same oversized body under another kind is not validated."""
+    dialer, listener = _link_pair()
+    frame = _frame(op="net_broker", kind="grant", note="x" * 16_400)
+    assert listener.open(dialer.seal(frame)[4:]) == frame
