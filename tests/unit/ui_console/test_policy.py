@@ -17,7 +17,9 @@ def test_invalid_values_never_mean_unlimited(raw: object) -> None:
 
 
 def test_hand_edits_clamp_and_user_reservation_tracks_ceiling() -> None:
-    assert effective_policy({"console": {"max_live": 1, "max_owner": 999, "user_reserved": 999}}) == {
+    assert effective_policy(
+        {"console": {"max_live": 1, "max_owner": 999, "user_reserved": 999}}
+    ) == {
         "max_live": 32, "max_owner": 32, "user_reserved": 8,
     }
     assert effective_policy({"console": {"max_live": 999, "max_owner": 0, "user_reserved": 0}}) == {

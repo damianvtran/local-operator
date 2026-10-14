@@ -39,7 +39,9 @@ from local_operator.ui_console import backend, state
 
 
 @pytest.mark.asyncio
-async def test_completed_owner_cleanup_skips_old_host_without_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_completed_owner_cleanup_skips_old_host_without_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class OldClient:
         def __init__(self, root: Path | None = None) -> None:
             del root
@@ -57,7 +59,9 @@ async def test_completed_owner_cleanup_skips_old_host_without_transport(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_completed_owner_cleanup_is_owner_scoped_and_never_enumerates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_completed_owner_cleanup_is_owner_scoped_and_never_enumerates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     class NewClient:
@@ -84,7 +88,12 @@ def test_capacity_projection_never_accepts_foreign_identity_or_nonfinite_values(
     projected = backend.aggregate_console_metrics({
         "generation": 3, "sampled_at": 1234,
         "surface": "con:999:synthetic-foreign", "command": "synthetic-private-command",
-        "resources": {"ptys": 64, "log_bytes": float("nan"), "fd_available": None, "command": "private"},
+        "resources": {
+            "ptys": 64,
+            "log_bytes": float("nan"),
+            "fd_available": None,
+            "command": "private",
+        },
         "states": {"running": {"user": 6, "agent": 58, "session_id": "synthetic-foreign"}},
         "caps": {"maxLive": 128, "maxOwner": True, "userReserved": 10**1000},
     })
@@ -102,8 +111,14 @@ def test_console_epoch_projection_is_a_single_defined_uuid4_field() -> None:
         "host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001,
         "instance_id": "synthetic-private-instance", "session_id": "synthetic-private-session",
     }) == {"host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001}
-    for malformed in ("con:999:synthetic-private", "synthetic-command", epoch + " private", epoch.upper(),
-                      "11111111-1111-1111-8111-111111111111", {"command": "private"}):
+    for malformed in (
+        "con:999:synthetic-private",
+        "synthetic-command",
+        epoch + " private",
+        epoch.upper(),
+        "11111111-1111-1111-8111-111111111111",
+        {"command": "private"},
+    ):
         assert "host_epoch" not in backend.aggregate_console_metrics({"host_epoch": malformed})
     assert backend.aggregate_console_metrics({"started_at": True, "sampled_at": float("inf")}) == {}
 
@@ -290,7 +305,10 @@ def test_every_console_method_has_a_budget_and_a_name() -> None:
     """A method without a budget silently takes the unknown-method fallback, and a
     name outside the frozen vocabulary is a call the app will refuse."""
     assert set(backend.CONSOLE_METHODS) == set(backend.CONSOLE_TIMEOUTS)
-    assert len(backend.CONSOLE_METHODS) == 10
+    # Twelve after the capacity/cleanup wave added `console_resources` and
+    # `console_cleanup` (design §10.2 methods grew from ten). The count is the
+    # real tuple length, not a restatement: a new method must update this.
+    assert len(backend.CONSOLE_METHODS) == 12
 
 
 def test_the_discovery_helpers_never_raise(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -238,7 +238,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
     # wire (the description keeps one sentence; this holds the rest).
     "code_requests": 475,
-    "console": 1096,
+    # RE-MEASURED via this test's own print (the count_text_tokens ledger path):
+    # 1096 -> 1232 is the deliberate cost of advertising `console_resources` and
+    # `console_cleanup` in the console doc — the ONLY entry that moved. The two
+    # new methods and the capacity/cleanup detail are the whole delta.
+    "console": 1232,
     "edit": 351,
     "eval": 376,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names

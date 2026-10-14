@@ -24434,7 +24434,10 @@ def _console_status_text(result: dict[str, Any]) -> str:
         lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
     dropped_grid = result.get("dropped_grid_bytes")
     if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
-        lines.append(f"grid degraded: {dropped_grid} parser bytes omitted under resource pressure; retained history may contain them")
+        lines.append(
+            f"grid degraded: {dropped_grid} parser bytes omitted under resource "
+            "pressure; retained history may contain them"
+        )
     if result.get("cursor") is not None:
         lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
@@ -24762,7 +24765,10 @@ async def execute_console(
         return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
 
     client = ConsoleHostClient()
-    if method in ("resources", "cleanup") and f"console_{method}" not in client.capabilities().methods:
+    if (
+        method in ("resources", "cleanup")
+        and f"console_{method}" not in client.capabilities().methods
+    ):
         return _error(
             tool_call_id, "console",
             "This desktop app does not support console capacity/cleanup methods yet. "
@@ -24783,10 +24789,18 @@ async def execute_console(
             projected = aggregate_console_metrics(result)
         else:
             projected = {
-                key: value for key in ("released", "protected", "running")
-                if isinstance(value := result.get(key), int) and not isinstance(value, bool) and value >= 0
+                key: value
+                for key in ("released", "protected", "running")
+                if isinstance(value := result.get(key), int)
+                and not isinstance(value, bool)
+                and value >= 0
             }
-        return _text(tool_call_id, "console", json.dumps(projected, separators=(",", ":")), details=projected)
+        return _text(
+            tool_call_id,
+            "console",
+            json.dumps(projected, separators=(",", ":")),
+            details=projected,
+        )
     if method == "list":
         surfaces = result.get("surfaces") if isinstance(result, dict) else None
         return _text(
