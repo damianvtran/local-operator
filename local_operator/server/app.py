@@ -57,6 +57,7 @@ from local_operator.server.routes import (
     desktop_quota,
     desktop_radient,
     desktop_runtimes,
+    desktop_session_files,
     desktop_sessions,
     desktop_team_bridge,
     desktop_tunnel,
@@ -904,6 +905,13 @@ app.include_router(desktop_approvals.router)
 # `/code-requests` child of a session, and the two-segment `/refresh` path is declared
 # after its own parent here, so the literal suffix cannot be swallowed.
 app.include_router(desktop_code_requests.router)
+# The SESSION-FILE index (`features.session_files`): the per-session list of files the
+# conversation and its subagents produced, and the materialise child that copies a digest-only
+# artifact out to a real file. Registered after the code-request block for the same
+# declaration-order reason; its templates (`/v1/desktop/sessions/{id}/files` and
+# `/files/{file_id}/materialise`) match no sessions-router route (no `/files` child of a
+# session is declared there) and the POST's literal suffix cannot be swallowed by a parent.
+app.include_router(desktop_session_files.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

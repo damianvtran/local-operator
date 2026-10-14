@@ -544,6 +544,7 @@ def _receipt_from_record(record: dict[str, Any], job_id: str) -> dict[str, Any]:
         "model": result.get("model") or record.get("model"),
         "digest": result.get("digest"),
         "digests": result.get("digests"),
+        "artifacts": result.get("artifacts"),
         "content_type": result.get("content_type"),
         "duration_s": result.get("duration_s"),
         "cost_usd": result.get("cost_usd"),
