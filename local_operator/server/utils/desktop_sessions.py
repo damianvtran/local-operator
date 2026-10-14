@@ -6441,6 +6441,21 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     parent_dir = sessions / session_id
     if not parent_dir.is_dir() or not is_user_session(parent_dir):
         raise SubagentChildUnavailable()
+    return _prove_child(root, child_id, _persisted_children(parent_dir))
+
+
+def _prove_child(root: Path, child_id: str, records: Sequence[Any]) -> Path:
+    """The tail of :func:`_contained_child_dir`, over ALREADY-READ roster ``records``.
+
+    Split out so :func:`contained_descendants` can prove many children against ONE read of a
+    roster (a heavy session's sidecar is several MB; re-parsing it per child would turn a
+    64-child family walk into 64 parses). The clauses are exactly the ones documented above -
+    id shape and the parent's own-conversation rule stay in the caller, the roster naming, the
+    resolved-inside-the-store check and the subagent-marker check live here - and there is one
+    copy of them, so the single-child route and the family walk cannot disagree about who is a
+    child.
+    """
+    sessions = root / "sessions"
     resolved_root = sessions.resolve()
     try:
         child_dir = (sessions / child_id).resolve()
@@ -6450,7 +6465,7 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     if not child_dir.is_relative_to(resolved_root):
         raise SubagentChildUnavailable()
     named = False
-    for record in _persisted_children(parent_dir):
+    for record in records:
         raw_dir = record_field(record, "session_dir")
         if not raw_dir:
             continue
@@ -6465,6 +6480,69 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     ):
         raise SubagentChildUnavailable()
     return child_dir
+
+
+#: Bounds on a conversation's FAMILY walk (``session_files``): how deep a subagent chain is
+#: followed and how many children are read. Past either, a child is COUNTED as skipped and the
+#: response says so - a cap that is invisible reads as "that is everything".
+FAMILY_MAX_DEPTH = 3
+FAMILY_MAX_CHILDREN = 64
+
+
+def contained_descendants(root: Path, session_id: str) -> tuple[list[Any], int]:
+    """``(children, skipped)``: the subagent sessions ``session_id`` launched, each PROVEN.
+
+    ``children`` are :class:`~local_operator.session_files.service.ChildRef` values. A child is
+    listed only if :func:`_prove_child` accepts it against the parent's persisted roster -
+    the same containment proof the child transcript route applies, run once per record over one
+    roster read. The parent's roster is FLAT (a grandchild is a record with ``parent_job_id``
+    and ``depth`` 2 in the root's own sidecar), so one read covers the whole tree.
+
+    ``skipped`` counts records dropped by the depth/count caps or refused by the proof; both are
+    "the list may not be complete" and the caller reports them as one number. Never raises for
+    a missing or unreadable roster (that is an empty family), and does not touch a session's
+    runtime: it reads files.
+    """
+    from local_operator.session_files.service import ChildRef
+
+    if not SESSION_ID.fullmatch(session_id):
+        return [], 0
+    parent_dir = root / "sessions" / session_id
+    if not parent_dir.is_dir() or not is_user_session(parent_dir):
+        return [], 0
+    try:
+        records = _persisted_children(parent_dir)
+    except (OSError, ValueError):
+        return [], 0
+    children: list[Any] = []
+    seen: set[str] = set()
+    skipped = 0
+    for record in records:
+        raw_dir = record_field(record, "session_dir")
+        child_id = Path(str(raw_dir or "").rstrip("/")).name
+        if not SESSION_ID.fullmatch(child_id) or child_id == session_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        depth = record_field(record, "depth")
+        depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 1
+        if depth > FAMILY_MAX_DEPTH or len(children) >= FAMILY_MAX_CHILDREN:
+            skipped += 1
+            continue
+        try:
+            child_dir = _prove_child(root, child_id, records)
+        except SubagentChildUnavailable:
+            skipped += 1
+            continue
+        label = record_field(record, "label") or record_field(record, "agent_role")
+        children.append(
+            ChildRef(
+                child_id=child_id,
+                label=str(label) if label else None,
+                depth=max(depth, 1),
+                session_dir=child_dir,
+            )
+        )
+    return children, skipped
 
 
 def _persisted_child_for_job(parent_dir: Path, job_id: str) -> str:
@@ -7963,6 +8041,43 @@ class DesktopSessions:
         deadline = time.monotonic() - DRAFT_TTL_S
         for draft_id in [key for key, draft in self.drafts.items() if draft.created < deadline]:
             del self.drafts[draft_id]
+
+    async def files_target(self, session_id: str) -> tuple[str, Path | None]:
+        """Where a session's FILE INDEX lives, without taking a bridge: ``(kind, directory)``.
+
+        ``kind`` is ``"local"`` (the journal is on this disk; ``directory`` is its session
+        directory), ``"draft"`` (a registered, unmaterialised draft: nothing to list, but not a
+        404 either - the pane asks for it as it opens) or ``"peer"`` (another device holds the
+        journal). Raises ``KeyError`` for an unknown id and ``PeerSessionUnresolved`` when a
+        silent peer might hold it, exactly the door's two refusals, so the route's shared
+        failure ladder answers both the way every other desktop read does.
+
+        WHY NOT ``self.session(...)``: the index is derived from the journal on disk and lives
+        outside the session directory (``session_files/ledger.py``), so answering needs no
+        runtime, no attach and no warm. A bridge would also bring the door's retirement latch
+        and attach grace into a read that has no use for either. The admission rule IS the
+        door's (``_door_may_open``): a user session or a configuration run opens, a subagent
+        directory does not - a subagent's files are reached through its PARENT's family, never
+        by naming the child.
+        """
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        if self._draft_for(session_id) is not None:
+            return "draft", None
+        path = self.root / "sessions" / session_id
+        if await asyncio.to_thread(lambda: path.is_dir() and _door_may_open(path)):
+            return "local", path
+        from local_operator.session.remote_open import (
+            PeerSessionUnresolved,
+            remote_row_and_silence,
+        )
+
+        row, silent = await asyncio.to_thread(remote_row_and_silence, session_id, self.root)
+        if row is None:
+            if silent:
+                raise PeerSessionUnresolved(session_id, silent)
+            raise KeyError("Unknown session")
+        return "peer", None
 
     def _draft_for(self, session_id: str) -> _Draft | None:
         """The registered, unexpired draft ``session_id`` names, or ``None``.

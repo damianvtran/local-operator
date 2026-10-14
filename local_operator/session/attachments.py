@@ -376,3 +376,33 @@ def cache_media(
         duration_s=duration_s,
         name=name,
     )
+
+
+def artifact_details(blocks: "list[AttachmentContent]") -> list[dict[str, object]]:
+    """The durable ``details.artifacts`` list for a tool result's ``AttachmentContent`` blocks.
+
+    WHY IT EXISTS. A generated image or video has no filesystem path: its only durable identity
+    is the digest in the result's CONTENT, and content is exactly what compaction and pruning
+    blank (``transcript._pruned_entry`` keeps ``provider_payload.details`` and replaces the
+    content with a notice). Mirroring the digest and its display facts into ``details`` is what
+    lets the per-session file index (``session_files/scan.py``) still list the artifact after
+    the row was pruned. ADDITIVE: no existing key changes, and an older reader ignores it.
+
+    Blocks the store refused (no digest) are skipped: a listing entry for bytes that were never
+    stored would be a lie. Field names are the ``AttachmentContent`` ones, and nothing in an
+    entry is a filesystem path (``name`` is a display handle; see its docstring).
+    """
+    return [
+        {
+            "digest": block.attachment,
+            "kind": block.kind,
+            "name": block.name,
+            "content_type": block.content_type,
+            "size_bytes": block.size_bytes,
+            "width": block.width,
+            "height": block.height,
+            "duration_s": block.duration_s,
+        }
+        for block in blocks
+        if block.attachment
+    ]

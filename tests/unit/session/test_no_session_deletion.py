@@ -151,6 +151,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops both derived files for one session id, on that session's own deletion",
     ),
+    # -- session-file index (derived cache + one confined copy) --------------------------
+    # ``_write_json``: the cache path is ``<config>/cache/session_files/<stem>.json`` where
+    # ``cache_path`` refuses any stem outside ``[A-Za-z0-9_-]{1,128}`` (no separator, no
+    # ``..``), and the temp is the same path with a pid/thread suffix. The file is DERIVED -
+    # the transcript is the truth, a deleted cache is rebuilt by the next scan.
+    (
+        "local_operator/session_files/ledger.py::_write_json",
+        "<path>.replace",
+        "Atomic pid-temp replace of one <config>/cache/session_files/<stem>.json (derived cache)",
+    ),
+    # ``materialise``: the unlink removes a HALF-WRITTEN artifact copy this same call just
+    # created with ``open("xb")``. Its path is ``<session>/scratchpad/generated/<name>`` -
+    # four components below ``sessions/`` - where ``<name>`` is ``sanitise_name``'s single
+    # component (no separator, no leading dot), and the resolved parent is asserted equal to
+    # the resolved ``generated`` directory first. It cannot name ``sessions/<id>`` or a
+    # transcript, and it only ever removes a file this call created.
+    (
+        "local_operator/session_files/service.py::materialise",
+        "<path>.unlink",
+        "Removes the partial copy this call just created under <session>/scratchpad/generated",
+    ),
     # -- the code-request FETCH cache (1b): same derived-store argument as the
     # ledger entries above. Every path here is built from ``fetch_dir()``
     # (``<config>/cache/code_requests``) plus a sanitized host segment and a

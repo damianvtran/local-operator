@@ -160,6 +160,12 @@ export type MessageParams = {
   "wire.errors.desktop.scope_name_required": undefined;
   "wire.errors.desktop.scope_name_too_long": { "max_length": string };
   "wire.errors.desktop.session_copy_terminal_only": { "flag": string };
+  "wire.errors.desktop.session_files_artifact_missing": undefined;
+  "wire.errors.desktop.session_files_bad_cursor": undefined;
+  "wire.errors.desktop.session_files_bad_filter": { "field": string; "value": string };
+  "wire.errors.desktop.session_files_file_not_found": undefined;
+  "wire.errors.desktop.session_files_materialise_failed": { "reason": string };
+  "wire.errors.desktop.session_files_not_an_artifact": undefined;
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
