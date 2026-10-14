@@ -7032,17 +7032,46 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     # A generation install USED to short-circuit here, returning every supervised
     # unit `pending`. The caution rested on a fear a bounce disturbs owned
     # wake/monitor/browser/mobile/mesh work; the fact that retires it is that
-    # session runtimes are their OWN child processes (spawned with
-    # ``start_new_session=True`` and SIGHUP ignored), so bouncing a SUPERVISOR does
-    # not terminate them — they keep serving from their immutable roots (see
-    # ``supervisors._systemd_unit``'s ``KillMode=process`` note and
-    # ``process._install_sighup_ignore``). The per-unit repairs below already ran on
-    # the mutable path; the only thing that stopped them on a generation install
-    # was that branch, so the two paths now share this ONE body. Continuity per
-    # unit: browser bridge — in-flight requests drop and the client reconnects;
-    # tunnel — the link blips and re-attaches; wakes supervisor — wake MOMENTS are
-    # persisted, so a restart defers them (they fire after it returns); network
-    # relay — accepted links are not blockers by design (they drop and re-dial).
+    # SESSION RUNTIMES DETACH THEMSELVES — they are spawned with
+    # ``start_new_session=True`` (``setsid``) and SIGHUP ignored, so a bounce of
+    # the SUPERVISOR does not terminate them and they keep serving from their
+    # immutable roots. NOTE WHAT THIS DOES AND DOES NOT REST ON: it is the CHILD's
+    # own detachment, NOT any launchd courtesy. The generated plists carry NO
+    # ``AbandonProcessGroup`` (grep the renderers), so launchd's default reaps a
+    # same-process-group descendant when the job is booted out — a child that did
+    # NOT setsid would be killed by the ``bootout``+``bootstrap`` bounce
+    # (``launchd.reload_job``) or the ``kickstart -k`` (``restart_if_build_moved``)
+    # this enables. RESIDUAL: any supervised unit whose child is not detached (see
+    # ``tunnels/service.py``) loses that child on a bounce; the tunnel is
+    # deliberately not detached because its cloudflared connector is the unit's
+    # OWN child (its gateway dies with it, so it must go down with it), so it is
+    # EXCLUDED from this continuity claim rather than a counterexample to it. The
+    # per-unit repairs below already ran on the mutable path; the only thing that
+    # stopped them on a generation install was that branch, so the two paths now
+    # share this ONE body.
+    #
+    # CONTINUITY PER UNIT — disposition NAMED, and the bounded half tested (the
+    # per-unit reconnect/in-flight rigs are a QA residual where noted):
+    # browser bridge — on a replaced wire the backend returns EXTENSION_DISCONNECTED
+    # + REPLACED_PHASE, the extension RECONNECTS, and an in-flight command is
+    # DROPPED for the model to retry (no replay; a non-idempotent retry can
+    # duplicate — a residual);
+    # tunnel — the tunnel unit MANAGES its connector: on restart the old cloudflared
+    # is killed by the unit's own teardown (``tunnels/service.py``'s finally
+    # terminates+KILLs with a 5s bound) and a new one dials with the SAME token, so
+    # no orphan and no duplicate. Its connector is deliberately NOT detached.
+    # wakes supervisor — wake MOMENTS are persisted, so a restart defers them
+    # (they fire after it returns);
+    # network relay — on an epoch change ``_rehandshake_network`` sends net_bye +
+    # close("epoch_stale") and the client RE-DIALS on backoff; queued slow ops are
+    # CANCELLED (``_slow_pool.shutdown(cancel_futures=True)``) and a running slow-op
+    # effect is DROPPED (not persisted), so this is at-least-once — a client-side
+    # duplicate on retry is possible, bounded by the caller, NOT exactly-once.
+    # The relay's worker-cancel/re-dial cycle is an UNEXERCISED QA residual here
+    # (its rig — N concurrent slow ops on one link — was not built to a bounded
+    # standard in this slice); the browser bridge's replaced-phase retry copy IS
+    # tested (tests/unit/browser_bridge/test_backend.py), which is the one
+    # representative path this slice proves at the model-facing boundary.
     #
     # The relay's reload fence is NOT applied here, reported rather than faked:
     # ``RelayServer.begin_reload/reload_blocker`` are methods of the RUNNING relay
