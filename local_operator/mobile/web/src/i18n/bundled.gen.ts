@@ -47,6 +47,8 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string, stri
     "relay.shell.usage.paid": "Paid allowance",
     "relay.shell.usage.remaining": "{value} {unit} left",
     "relay.shell.usage.reset": "Resets at {value}",
+    "relay.shell.usage.row": "{label} \u00b7 {window}: {value}",
+    "relay.shell.usage.row_family": "{label} ({family}) \u00b7 {window}: {value}",
     "relay.shell.usage.stale": "May be out of date.",
     "relay.shell.usage.title": "usage",
     "relay.shell.usage.unavailable": "Cached usage unavailable.",

@@ -106,6 +106,17 @@ def usage_reset(*, value: str) -> Msg:
     return Msg("relay.shell.usage.reset", {"value": value})
 
 
+def usage_row(*, label: str, window: str, value: str) -> Msg:
+    return Msg("relay.shell.usage.row", {"label": label, "window": window, "value": value})
+
+
+def usage_row_family(*, label: str, family: str, window: str, value: str) -> Msg:
+    return Msg(
+        "relay.shell.usage.row_family",
+        {"label": label, "family": family, "window": window, "value": value},
+    )
+
+
 def usage_stale() -> Msg:
     return Msg("relay.shell.usage.stale", {})
 

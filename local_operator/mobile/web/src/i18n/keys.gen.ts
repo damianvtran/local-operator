@@ -47,6 +47,8 @@ export type MessageParams = {
   "relay.shell.usage.paid": undefined;
   "relay.shell.usage.remaining": { "value": string; "unit": string };
   "relay.shell.usage.reset": { "value": string };
+  "relay.shell.usage.row": { "label": string; "window": string; "value": string };
+  "relay.shell.usage.row_family": { "label": string; "family": string; "window": string; "value": string };
   "relay.shell.usage.stale": undefined;
   "relay.shell.usage.title": undefined;
   "relay.shell.usage.unavailable": undefined;

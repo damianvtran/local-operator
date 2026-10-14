@@ -43,10 +43,16 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 								const value = amount.remaining !== null ? messageRuntime.t("relay.shell.usage.remaining", { value: String(amount.remaining), unit: amount.unit })
 									: amount.used !== null ? messageRuntime.t("relay.shell.usage.used", { value: String(amount.used), unit: amount.unit })
 										: amount.used_fraction !== null ? messageRuntime.t("relay.shell.usage.fraction", { value: String(amount.used_fraction * 100) }) : messageRuntime.t("relay.shell.usage.amount_unknown");
+								const label = limit.paid_fallback ? messageRuntime.t("relay.shell.usage.paid") : limit.family_cap ? messageRuntime.t("relay.shell.usage.family") : messageRuntime.t("relay.shell.usage.included");
+								const window = limit.window === "5h" ? messageRuntime.t("relay.shell.usage.window_five") : limit.window === "7d" ? messageRuntime.t("relay.shell.usage.window_week") : limit.window === "1mo" ? messageRuntime.t("relay.shell.usage.window_month") : limit.window === "lifetime" ? messageRuntime.t("relay.shell.usage.window_lifetime") : messageRuntime.t("relay.shell.usage.window_unknown");
+								// Translate the whole row so locales own field order and punctuation.
+								// Separate variants omit unknown/non-family identifiers without leaving
+								// empty parentheses; even an unknown window has a translated label.
+								const summary = limit.family_cap && limit.family !== "unknown"
+									? messageRuntime.t("relay.shell.usage.row_family", { label, family: limit.family, window, value })
+									: messageRuntime.t("relay.shell.usage.row", { label, window, value });
 								return <div key={row}>
-									<p>{limit.paid_fallback ? messageRuntime.t("relay.shell.usage.paid") : limit.family_cap ? messageRuntime.t("relay.shell.usage.family") : messageRuntime.t("relay.shell.usage.included")}
-										{limit.family_cap && limit.family !== "unknown" ? ` (${limit.family})` : ""}
-										{` · ${limit.window === "5h" ? messageRuntime.t("relay.shell.usage.window_five") : limit.window === "7d" ? messageRuntime.t("relay.shell.usage.window_week") : limit.window === "1mo" ? messageRuntime.t("relay.shell.usage.window_month") : limit.window === "lifetime" ? messageRuntime.t("relay.shell.usage.window_lifetime") : messageRuntime.t("relay.shell.usage.window_unknown")}`}: {value}</p>
+									<p>{summary}</p>
 									{limit.resets_at_ms !== null && Number.isFinite(new Date(limit.resets_at_ms).getTime()) && <p>{messageRuntime.t("relay.shell.usage.reset", { value: new Date(limit.resets_at_ms).toISOString() })}</p>}
 									{limit.paid_fallback && limit.available === false && <p>{messageRuntime.t("relay.shell.usage.blocked")}</p>}
 									{limit.paid_fallback && limit.available === null && <p>{messageRuntime.t("relay.shell.usage.eligibility_unknown")}</p>}
