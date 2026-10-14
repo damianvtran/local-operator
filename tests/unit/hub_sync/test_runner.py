@@ -920,3 +920,67 @@ async def test_end_to_end_auto_push_against_the_decoder_faithful_hub(rig, monkey
     merged = agents.get_agent_system_prompt(row.id)
     assert "HUB-SIDE" in merged and "LOCAL-" in merged
     assert report.failed == 0
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_link_publishes_after_a_local_edit_from_the_seeded_receipt(
+    rig, monkeypatch
+) -> None:
+    """QN7 end to end on the REAL entry points: pull -> resolve_source -> check
+    -> up-to-date apply (seed + clean lineage + revision) -> local edit -> tick
+    publishes. Nothing injects identity, lineage or a receipt."""
+
+    from local_operator.hub_sync import provenance as prov_mod
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.service import PUBLICATION_CONTRACT
+    from tests.unit.hub_sync.fake_hub import FakeHub
+
+    runner, hub, agents, root, cm, _ = rig
+    fake = FakeHub(document={"instructions": BASE, "description": "d"})
+    fake.revision = '"hub-rev-1"'  # the token the seeded receipt will condition on
+    fake.install(monkeypatch)
+
+    row = _pull_agent(agents, hub, root)
+    ctx = await runner.context()
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.lineage == "unknown"
+    link_id = resolved.identity.link_id if resolved.identity is not None else ""
+    cm.set_config_value(
+        "hub",
+        {
+            "links": {link_id: {"subscribe": True, "auto_push": True}},
+            "auto_update": {"agents": True, "teams": True, "skills": True},
+            "check_interval_min": 0,
+            "public_egress_grants": {
+                link_id: {"link_id": link_id, "publication_contract": PUBLICATION_CONTRACT}
+            },
+        },
+    )
+
+    await runner.tick(reason="startup")  # grace: checks record the attestation only
+    await runner.tick(reason="timer")  # up-to-date apply: seeds, cleans, no paid call
+
+    assert fake.commit_calls == [], "an agreed no-op must settle before any paid call"
+    stored = prov_mod.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    assert stored.lineage == "clean"
+    assert stored.outbound is not None
+    assert stored.outbound.remote_revision == '"hub-rev-1"'
+
+    agents.set_agent_system_prompt(row.id, BASE + "\n\nLOCAL-ADDITION")
+    await runner.tick(reason="timer")
+
+    assert fake.commit_calls, "the seeded receipt must carry the local edit to the hub"
+    body = fake.bare_commit_bodies()[-1]
+    assert body["instructions"].endswith("LOCAL-ADDITION")
+    assert '"hub-rev-1"' == fake.commit_calls[0].headers.get("If-Match")
+    after = prov_mod.read_baseline(root, "agent", row.id)
+    assert after is not None and after.outbound is not None
+    assert after.outbound.remote_revision == fake.revision

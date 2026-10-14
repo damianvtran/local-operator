@@ -702,3 +702,60 @@ def test_five_conflicts_refund_their_attempts_and_a_quiet_remote_proceeds(
     monkeypatch.setattr(outbox_mod, "now_iso", lambda: future[0])
     quiet, _o2, server2 = asyncio.run(_run(tmp_path, transport=FakeTransport()))
     assert quiet.state == "pushed" and len(server2.commit_calls) == 1
+
+
+@pytest.mark.parametrize("outage_code", ["http-503", "hub-error"])
+def test_hub_outages_refund_their_attempts_and_a_healthy_hub_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outage_code: str
+) -> None:
+    """QN8: an outage -- a 503 reply or a transport failure -- must never
+    permanently exhaust the cap; the bytes were never answered."""
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    for i in range(5):
+        future = [f"2099-01-0{i + 1}T00:00:00Z"]
+        monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+        outcome, _out, _srv = asyncio.run(
+            _run(tmp_path, transport=FakeTransport(fail_commit=PushRefused(outage_code, "outage")))
+        )
+        assert outcome.state == "refused" and outcome.reason == outage_code
+
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.attempts == 0, "an outage is not an attempt"
+    assert record.state == "failed" and record.next_retry_at  # still spaced by backoff
+
+    future = ["2099-02-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+    pushed, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert pushed.state == "pushed" and len(server.commit_calls) == 1
+
+
+def test_a_deterministic_refusal_still_consumes_attempts_and_dead_letters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QN8 contrast: a server ANSWER still spends attempts; the cap still holds."""
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    for i in range(5):
+        future = [f"2099-01-0{i + 1}T00:00:00Z"]
+        monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+        outcome, _out, _srv = asyncio.run(
+            _run(
+                tmp_path,
+                transport=FakeTransport(
+                    fail_commit=PushRefused("invalid_skill_document", "the document is invalid")
+                ),
+            )
+        )
+        assert outcome.state == "refused"
+
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.attempts == 5, "deterministic refusals keep consuming attempts"
+
+    future = ["2099-02-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+    skipped, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert skipped.state == "skipped" and skipped.reason == "push-retries-exhausted"
+    assert len(server.commit_calls) == 0

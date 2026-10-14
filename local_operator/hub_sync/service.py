@@ -325,6 +325,19 @@ def _seed_receipt_if_agreed(
     record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
     if record is None or record.identity is None:
         return False
+    # LINEAGE GATE (round-3 QN9): a receipt is a durable claim that "this text
+    # was accepted for this origin", so it must not be minted from content whose
+    # provenance is unestablished or crosses origins. Mixed-lineage never seeds
+    # (any scope); a PUBLIC origin seeds only from clean lineage, because a
+    # receipt is what a later unattended push would project -- an unknown-lineage
+    # public seed could be weaponised by a later flip. A non-public origin may
+    # seed from unknown lineage: egress there never leaves the organization, and
+    # the trusted-origin integration that produced the agreement is the same
+    # evidence the lifecycle records.
+    if record.lineage == "mixed-lineage":
+        return False
+    if record.identity.visibility == "public" and record.lineage != "clean":
+        return False
     from dataclasses import replace as dc_replace
 
     from local_operator.hub_sync.push import receipt_for
@@ -785,6 +798,58 @@ def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -
     if c.remote_revision:
         record = replace(record, remote_revision=c.remote_revision)
     prov.write_baseline(ctx.config_dir, record)
+    _mark_integrated(ctx, c)
+
+
+def _mark_integrated(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
+    """Record that remote content from the link's OWN origin integrated here.
+
+    THE LINEAGE LIFECYCLE, in one place (round-3 QN7): ``resolve_source`` can
+    only ever say ``unknown`` -- it proves who the origin is, not that content
+    from it ever landed. A pull/apply (or an L == R agreement with a live
+    revision) that read through the link's OWN recorded base IS that landing, so
+    the record advances to ``clean``. Guards, all refusals:
+
+    * no identity, or no corroborated ``served_by`` -> no write;
+    * a base that is not the recorded ``hub_source`` -> no write (an integration
+      answered by another source says nothing about this origin);
+    * ``mixed-lineage`` never advances (that is the state the guard exists for)
+      and ``clean`` is left alone; only the unestablished states flip.
+
+    This must NEVER launder: a local edit, a mixed-origin state, or an
+    unlinked/local-only row has no path through here at all -- only the two
+    trusted-origin events reach it, and both were read from the origin the
+    identity names.
+    """
+
+    from dataclasses import replace as dc_replace
+
+    if not c.served_by:
+        return
+    record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    if record is None or record.identity is None:
+        return
+    if c.hub_id != record.hub_id or c.served_by != record.identity.hub_source:
+        return
+    updated = record
+    if record.lineage not in ("clean", "mixed-lineage"):
+        updated = dc_replace(updated, lineage="clean")
+    if record.recorded_by == prov.UNKNOWN_BASELINE:
+        # The resolve only LINKED the item to a source ("adopt-unknown" does not
+        # vouch for its content); this agreement with the origin (content equal
+        # to a live-revision read that came from the recorded base) IS the
+        # verification A2.3 asks for, so the record advances to a vouching one.
+        updated = dc_replace(updated, recorded_by="adopt")
+    if c.remote_revision and c.remote_revision != updated.remote_revision:
+        # The revision is the ancestry fact this agreement observed, and the
+        # fallback expected token a later conditional write uses.
+        updated = dc_replace(updated, remote_revision=c.remote_revision)
+    if updated == record:
+        return
+    try:
+        prov.write_baseline(ctx.config_dir, updated)
+    except (prov.BaselineError, OSError, LinkError):
+        logger.debug("could not record integration lineage for %s %s", c.kind, c.local_id)
 
 
 def _local_fields_for_backup(c: chk.ItemCheck) -> dict[str, Any]:
@@ -890,6 +955,9 @@ def _apply_skill(
     # Source-name space comparison: nothing to write when the merge reproduced the
     # local document exactly (the remote and local already agree on content).
     if merged.to_json() == local_doc.to_json() and replace is None:
+        if not dry_run:
+            _mark_integrated(ctx, c)
+            _seed_receipt_if_agreed(ctx, c, merged.to_json())
         fold(st.settle_unchanged)
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
     if dry_run:
@@ -940,6 +1008,7 @@ def _apply_skill(
 
     # The merged document IS the remote's canonical text when the pull integrated
     # it (fingerprint equality decides); that is the skill's agreed point.
+    _mark_integrated(ctx, c)
     _seed_receipt_if_agreed(ctx, c, merged.to_json())
     summary = _summary(results)
     fold(lambda item: st.settle_applied(item, summary, None))
@@ -989,6 +1058,13 @@ def apply_one(
         and c.local_fp != c.remote_fp
     )
     if c.verdict == "up-to-date" and not replace_differs:
+        if not dry_run:
+            # L == R and a live revision: the agreed point (round-3 QN7). A pull
+            # that finds nothing to change still IS the integration event that
+            # establishes the origin's lineage and the (A, P) receipt the first
+            # unattended push derives from.
+            _mark_integrated(ctx, c)
+            _seed_receipt_if_agreed(ctx, c, c.local)
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "up-to-date")
 
     if c.kind == "skill":

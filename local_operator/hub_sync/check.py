@@ -234,47 +234,60 @@ def check_hub_agents(
                 )
             )
             continue
-        try:
-            if tenant:
-                text, desc = fetcher(
-                    client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
-                )
-            else:
-                text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
-        except Exception as error:  # noqa: BLE001 - classified below
-            reason, detail = _failure_reason(error)
-            checks.append(
-                ItemCheck(
-                    "agent",
-                    agent.id,
-                    name,
-                    hub_id,
-                    tenant,
-                    "unavailable",
-                    local_fp=local_fp,
-                    local=local,
-                    reason=reason,
-                    detail=detail,
-                )
-            )
-            continue
-        remote = _agent_fields(text, desc)
-        remote_fp = prov.fingerprint_agent(remote["instructions"], remote["description"])
-        # LIVE REVISION + CONTRACT from the DETAIL read (server source:
-        # internal/responses/agent.go AgentResponse carries `revision` and
-        # `sync_contract`). The legacy zip pull cannot expose either, which made
-        # agent auto-push unverifiable (round-2 QN2a); a detail failure only
-        # leaves them None -- the push then refuses by name, never unconditionally.
+        # ONE CONSISTENT SNAPSHOT (round-3 R18): the hub DETAIL read carries the
+        # agent's instructions+description AND its revision+sync_contract in ONE
+        # response (server source: internal/responses/agent.go AgentResponse), so
+        # the content a push merges from and the ETag it conditions on can never
+        # come from two different moments -- the two-read shape let a CAS write
+        # silently erase an edit made between the reads. The legacy zip read
+        # stays as the fallback; it cannot expose a revision, and a revision is
+        # NEVER borrowed from a later read (that is the same hazard again).
         detail_payload: Mapping[str, Any] | None = None
         try:
             fetched = client.get_agent(hub_id, **{"with_credential": bool(tenant)})
-            if isinstance(fetched, Mapping):
-                detail_payload = fetched
-        except Exception:  # noqa: BLE001 - metadata is additive; the zip already landed
-            detail_payload = None
-        revision, sync_contract = (
-            _remote_meta(detail_payload) if detail_payload is not None else (None, None)
-        )
+        except Exception:  # noqa: BLE001 - the zip fallback below is the report
+            fetched = None
+        if isinstance(fetched, Mapping):
+            # The hub's API-wide envelope is a mapping with ``result``; a flat
+            # mapping (an older client or a test stub) is the result itself.
+            inner = fetched.get("result")
+            detail_payload = inner if isinstance(inner, Mapping) else fetched
+        if detail_payload is not None and isinstance(detail_payload.get("instructions"), str):
+            remote = _agent_fields(
+                str(detail_payload.get("instructions") or ""),
+                str(detail_payload.get("description") or ""),
+            )
+            revision, sync_contract = _remote_meta(detail_payload)
+        else:
+            # Content without a revision: the name-refusing push path, never an
+            # unconditional write.
+            try:
+                if tenant:
+                    text, desc = fetcher(
+                        client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
+                    )
+                else:
+                    text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
+            except Exception as error:  # noqa: BLE001 - classified below
+                reason, detail = _failure_reason(error)
+                checks.append(
+                    ItemCheck(
+                        "agent",
+                        agent.id,
+                        name,
+                        hub_id,
+                        tenant,
+                        "unavailable",
+                        local_fp=local_fp,
+                        local=local,
+                        reason=reason,
+                        detail=detail,
+                    )
+                )
+                continue
+            remote = _agent_fields(text, desc)
+            revision, sync_contract = None, None
+        remote_fp = prov.fingerprint_agent(remote["instructions"], remote["description"])
         served_by = _served_by(client)
 
         base_fields: Mapping[str, Any] | None = None

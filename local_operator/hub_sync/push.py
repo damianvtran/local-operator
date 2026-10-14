@@ -639,11 +639,30 @@ def _projection_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _is_outage(code: str) -> bool:
+    """Whether a refusal means the hub produced NO decision (round-3 QN8).
+
+    A transport failure (``hub-error``) or a server-side 5xx (``http-5xx``) is
+    the outage class: nothing about the request was answered, so retrying the
+    SAME bytes can plausibly succeed once the hub returns. Those outcomes MUST
+    NOT exhaust the attempt cap -- five failed requests during an outage used to
+    permanently dead-letter a healthy link (QA QN8) -- so they REFUND their
+    attempt like conflicts do, while the exponential backoff still spaces the
+    retries (one request per backoff window, never per tick). Deterministic
+    refusals (the server's own codes) keep consuming attempts and still
+    dead-letter: those ARE answers, and re-sending an answered request would be
+    paid work with a known outcome.
+    """
+
+    return code == "hub-error" or code.startswith("http-5")
+
+
 def _settle_refused(outbox: Outbox, operation_id: str, generation: int, code: str) -> PushOutcome:
     outbox.settle(
         operation_id,
         generation=generation,
         error_class=code,
+        refund_attempt=_is_outage(code),
         next_retry_at=_retry_at(generation, outbox, operation_id),
     )
     return PushOutcome("refused", operation_id=operation_id, reason=code)

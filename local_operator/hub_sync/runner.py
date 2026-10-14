@@ -279,7 +279,12 @@ class HubSyncRunner:
             grace = await self._offload(self._first_run_grace, ctx)
             policies = self._link_policies(links)
             for c in checks:
-                if c.verdict != "available":
+                # UP-TO-DATE items still carry an AGREEMENT (QN7): an L == R
+                # check with a live revision is where the origin's lineage
+                # becomes established and the (A, P) receipt is seeded, so those
+                # route through the SAME apply entry point too. The apply writes
+                # nothing but the baseline/receipt facts there.
+                if c.verdict not in ("available", "up-to-date"):
                     continue
                 auto = settings.auto_for(c.kind) and not grace
                 policy = policies.get(c.link_id) if c.link_id else None
@@ -307,7 +312,8 @@ class HubSyncRunner:
                 if not st.pull_due(item, settings.interval_min):
                     continue
                 result = await self._offload(svc.apply_one, ctx, c, auto=True)
-                report.reports.append(result)
+                if result.outcome != "up-to-date":
+                    report.reports.append(result)
                 if result.applied:
                     report.applied += 1
                 elif result.error_class:

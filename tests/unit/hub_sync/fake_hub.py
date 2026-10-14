@@ -27,11 +27,71 @@ needs to prove, never with a permissive branch.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Mapping
 
 import httpx
 
 REVISION_COUNTER = [0]
+
+#: The server's CLOSED top-level field sets per family, read from
+#: agent-server@bdd03ab (internal/requests/instruction_set.go
+#: ``instructionSetAllowedFields``, internal/requests/hub_team.go
+#: ``teamDocumentAllowedFields``, internal/requests/skills.go
+#: ``skillDocumentAllowedFields``). The real decoders stream the top-level keys
+#: and refuse the first one outside the set BY NAME (``firstKeyOutside`` +
+#: ``DisallowUnknownFields``); this fake now says the same thing, so a client
+#: that sends a field the server drops-or-refuses fails HERE (round-3 R19).
+CLOSED_DOCUMENT_FIELDS: dict[str, frozenset[str]] = {
+    "agents": frozenset(
+        {
+            "document_type",
+            "document_version",
+            "name",
+            "description",
+            "instructions",
+            "kind",
+            "when_to_use",
+            "tools",
+            "effort",
+            "delegate",
+            "version",
+            "categories",
+            "tags",
+            "model_suggestion",
+        }
+    ),
+    "teams": frozenset(
+        {
+            "name",
+            "description",
+            "manager",
+            "members",
+            "instructions",
+            "project",
+            "version",
+            "model_suggestion",
+        }
+    ),
+    "skills": frozenset({"document_version", "name", "description", "files", "version"}),
+}
+
+
+def _closed_fields_for(path: str) -> frozenset[str]:
+    """The family whose decoder answers this publish path."""
+
+    if "/agents" in path:
+        return CLOSED_DOCUMENT_FIELDS["agents"]
+    if "/teams" in path:
+        return CLOSED_DOCUMENT_FIELDS["teams"]
+    return CLOSED_DOCUMENT_FIELDS["skills"]
+
+
+def _unknown_key(body: Mapping[str, Any], allowed: frozenset[str]) -> str | None:
+    for key in body:
+        if key not in allowed:
+            return str(key)
+    return None
 
 
 def _etag(n: int) -> str:
@@ -51,6 +111,9 @@ class FakeHub:
         self.pins: dict[str, dict[str, Any]] = {}
         self.receipts: dict[str, dict[str, Any]] = {}
         self.accepts_anonymous_skill_get = True
+        #: The real pins expire (15 minutes); a test can shrink this to drive
+        #: the expiry branch (a commit with a dead pin is refused, never served).
+        self.pin_ttl_seconds = 900.0
         self.skill_public: dict[str, Any] = {
             "document_version": 1,
             "name": "s",
@@ -116,13 +179,29 @@ class FakeHub:
             return httpx.Response(
                 422, json={"error": {"code": "invalid_preview_request", "field": "preview_version"}}
             )
+        unknown = _unknown_key(body["document"], _closed_fields_for(request.url.path))
+        if unknown is not None:
+            return httpx.Response(
+                422,
+                json={
+                    "error": {
+                        "code": "invalid_skill_document",
+                        "field": unknown,
+                        "rule": "is not a recognised field",
+                    }
+                },
+            )
         expected = request.headers.get("If-Match", "")
         if expected != self.revision:
             # 412 without disclosing the current document (revision only).
             return httpx.Response(412, json={"error": {"code": "remote-revision-changed"}})
         REVISION_COUNTER[0] += 1
         token = f"pin-{REVISION_COUNTER[0]}"
-        self.pins[token] = {"revision": expected, "document": dict(body["document"])}
+        self.pins[token] = {
+            "revision": expected,
+            "document": dict(body["document"]),
+            "expires_at_monotonic": time.monotonic() + self.pin_ttl_seconds,
+        }
         self.preview_calls.append(request)
         return httpx.Response(
             200,
@@ -157,10 +236,28 @@ class FakeHub:
                 422,
                 json={"error": {"code": "invalid_skill_document", "field": "preview_version"}},
             )
+        unknown = _unknown_key(body, _closed_fields_for(request.url.path))
+        if unknown is not None:
+            return httpx.Response(
+                422,
+                json={
+                    "error": {
+                        "code": "invalid_skill_document",
+                        "field": unknown,
+                        "rule": "is not a recognised field",
+                    }
+                },
+            )
         token = request.headers.get("X-Radient-Preview-Token", "")
         pin = self.pins.get(token)
         if pin is None:
             return httpx.Response(422, json={"error": {"code": "invalid_preview_request"}})
+        if pin.get("expires_at_monotonic") is not None and (
+            time.monotonic() > float(pin["expires_at_monotonic"])
+        ):
+            return httpx.Response(
+                422, json={"error": {"code": "invalid_preview_request", "rule": "preview expired"}}
+            )
         if token in self.receipts:
             # Idempotent replay: the SAME receipt, even if the row moved since.
             return httpx.Response(200, json={"msg": "ok", "result": dict(self.receipts[token])})

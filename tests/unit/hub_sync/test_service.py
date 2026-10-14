@@ -1087,3 +1087,153 @@ def test_a_broken_skill_row_never_costs_the_agent_checks(env, monkeypatch) -> No
     assert kinds == {"agent", "skill"}
     agent_check = next(c for c in checks if c.kind == "agent")
     assert agent_check.verdict in ("up-to-date", "available")
+
+
+def test_the_agent_check_reads_content_and_revision_from_one_snapshot(env) -> None:
+    """R18: a hub edit between the zip read and the detail read must not pair the
+    OLD content with the NEW ETag -- that pair is what let a CAS write erase the
+    unseen edit (reviewer repro: RACING-REMOTE overwritten)."""
+
+    from local_operator.hub_sync import check as chk
+
+    ctx, hub, agents, _t, root = env
+    _pull_agent(agents, hub, root)
+    # The row moved BEFORE the check: a new text and a new ETag are live, while
+    # the legacy ZIP read still answers the pre-edit body.
+    hub.agents["h1"] = (BASE + "\n\nRACING-REMOTE", "d")
+    hub.revision = '"hub-rev-2"'
+    stale = (BASE, "d")
+
+    def zip_reads_stale(_client: Any, hub_id: str, **_kw: Any) -> tuple[str, str]:
+        return stale
+
+    (c,) = chk.check_hub_agents(
+        agents, client_for_tenant=ctx.client_for_tenant, fetch=zip_reads_stale
+    )
+    # ONE snapshot: the detail read -- which carries content AND revision -- is
+    # the deciding read; the raced edit is IN the check, so the merge keeps it.
+    assert c.remote is not None and c.remote["instructions"].endswith("RACING-REMOTE")
+    assert c.remote_revision == '"hub-rev-2"'
+    assert c.served_by == "https://hub.test/v1"
+
+
+def test_a_resolved_pull_that_agrees_seeds_and_establishes_clean_lineage(env) -> None:
+    """QN7: an up-to-date apply against the link's own origin seeds the receipt,
+    records the live revision, and leaves lineage clean + eligibility able."""
+
+    from local_operator.hub_sync.service import PUBLICATION_CONTRACT
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.lineage == "unknown"  # the resolve proves WHO, not that content landed
+
+    checks = svc.check_items(ctx, kinds=("agent",))
+    svc.record_checks(ctx, checks)
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+
+    assert report.reports[0].outcome == "up-to-date"
+    assert not report.reports[0].applied
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None and stored.identity is not None
+    # The integration event: clean lineage, the observed revision, the (A, P) seed.
+    assert stored.lineage == "clean"
+    assert stored.remote_revision == '"hub-rev-1"'
+    receipt = stored.outbound
+    assert receipt is not None
+    assert receipt.remote_revision == '"hub-rev-1"'
+
+    link_id = stored.identity.link_id
+    ctx.config_manager.set_config_value(
+        "hub",
+        {
+            "links": {link_id: {"subscribe": True, "auto_push": True}},
+            "public_egress_grants": {
+                link_id: {"link_id": link_id, "publication_contract": PUBLICATION_CONTRACT}
+            },
+        },
+    )
+    verdict = svc.push_eligibility(ctx, prov.read_baseline(root, "agent", row.id))
+    assert verdict["can_auto_push"] is True, verdict
+
+
+def test_seeding_guards_lineage_for_public_and_mixed_origins(env) -> None:
+    """QN9: seeding must never mint a receipt that a later lineage flip could
+    weaponise -- mixed never seeds; a PUBLIC origin seeds only from clean."""
+
+    import dataclasses
+
+    from local_operator.hub_sync.check import ItemCheck
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    ctx, _hub, _agents, _t, root = env
+
+    def check_for(local_id: str, hub_id: str, *, source: str) -> ItemCheck:
+        return ItemCheck(
+            "agent",
+            local_id,
+            "a",
+            hub_id,
+            None,
+            "up-to-date",
+            local={"instructions": "x"},
+            remote={"instructions": "x"},
+            remote_revision='"rev-1"',
+            served_by=source,
+        )
+
+    from local_operator.hub_sync.identity import Visibility
+
+    def seed_record(
+        local_id: str, hub_id: str, visibility: Visibility, tenant: str | None, lineage: str
+    ):
+        identity = LinkIdentity(
+            "agent", local_id, "https://hub.test/v1", visibility, tenant, hub_id
+        )
+        record = prov.make_record(
+            "agent", local_id, hub_id, tenant, {"instructions": "x"}, "adopt-unknown"
+        )
+        record = dataclasses.replace(
+            record, identity=identity, remote_revision='"rev-1"', lineage=lineage
+        )
+        prov.write_baseline(root, record)
+        return identity
+
+    # mixed-lineage: refused for EVERY origin, and nothing new is minted.
+    mixed = seed_record("amix", "h3", "public", None, "mixed-lineage")
+    assert (
+        svc._seed_receipt_if_agreed(
+            ctx, check_for("amix", "h3", source=mixed.hub_source), {"instructions": "x"}
+        )
+        is False
+    )
+    stored = prov.read_baseline(root, "agent", "amix")
+    assert stored is not None and stored.outbound is None
+
+    # a PUBLIC origin with unknown lineage: refused until an integration says clean.
+    public = seed_record("apub", "h2", "public", None, "unknown")
+    assert (
+        svc._seed_receipt_if_agreed(
+            ctx, check_for("apub", "h2", source=public.hub_source), {"instructions": "x"}
+        )
+        is False
+    )
+
+    # a NON-public origin with unknown lineage: the trusted-origin agreement seeds.
+    org = seed_record("aorg", "h4", "org", "t1", "unknown")
+    assert (
+        svc._seed_receipt_if_agreed(
+            ctx, check_for("aorg", "h4", source=org.hub_source), {"instructions": "x"}
+        )
+        is True
+    )
+    stored = prov.read_baseline(root, "agent", "aorg")
+    assert stored is not None and stored.outbound is not None
+    assert stored.outbound.remote_revision == '"rev-1"'

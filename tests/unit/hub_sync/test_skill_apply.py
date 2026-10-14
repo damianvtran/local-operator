@@ -375,3 +375,67 @@ def test_a_fast_forward_pull_seeds_the_outbound_receipt(tmp_path: Path) -> None:
     assert stored.outbound is not None
     assert stored.outbound.remote_revision == hub.revision
     assert stored.outbound.accepted_fields == v2.to_json()
+
+
+def test_the_fake_refuses_unknown_keys_and_expired_pins_like_the_server() -> None:
+    """R19: the fake enforces the server's CLOSED top-level key sets per family
+    on preview and commit, and refuses an expired pin."""
+
+    import httpx
+
+    from tests.unit.hub_sync.fake_hub import FakeHub
+
+    hub = FakeHub()
+    valid = {
+        "document_version": 1,
+        "name": "s",
+        "description": "d",
+        "files": [{"path": "SKILL.md", "content": "---\nname: s\ndescription: d\n---\n\nbody\n"}],
+    }
+    headers = {"Authorization": "Bearer test", "If-Match": hub.revision}
+
+    def preview(url: str, document: object) -> httpx.Response:
+        return hub.handler(
+            httpx.Request(
+                "PUT",
+                url,
+                headers=headers,
+                json={"preview_version": 1, "document": document},
+            )
+        )
+
+    # Unknown key named BY the decoder, on preview and on commit, per family.
+    bad = preview("https://hub.test/v1/skills/publish/preview", {**valid, "sneaky": 1})
+    assert bad.status_code == 422 and "sneaky" in bad.text
+    bad_agent = preview(
+        "https://hub.test/v1/agents/h1/publish/preview",
+        {"instructions": "x", "model": "gpt-5"},  # model is REFUSED by the agent decoder
+    )
+    assert bad_agent.status_code == 422 and "model" in bad_agent.text
+
+    ok = preview("https://hub.test/v1/skills/publish/preview", valid)
+    assert ok.status_code == 200
+    token = ok.json()["result"]["pin"]["token"]
+    commit_bad = hub.handler(
+        httpx.Request(
+            "PUT",
+            "https://hub.test/v1/skills/publish",
+            headers={**headers, "X-Radient-Preview-Token": token},
+            json={**valid, "sneaky": 1},
+        )
+    )
+    assert commit_bad.status_code == 422 and "sneaky" in commit_bad.text
+
+    # Pin TTL: an elapsed pin is refused, never served.
+    hub.pin_ttl_seconds = -1.0
+    ok2 = preview("https://hub.test/v1/skills/publish/preview", valid)
+    token2 = ok2.json()["result"]["pin"]["token"]
+    commit_expired = hub.handler(
+        httpx.Request(
+            "PUT",
+            "https://hub.test/v1/skills/publish",
+            headers={**headers, "X-Radient-Preview-Token": token2},
+            json=valid,
+        )
+    )
+    assert commit_expired.status_code == 422

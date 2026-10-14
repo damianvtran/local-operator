@@ -203,7 +203,16 @@ async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again
     def boom(_client: Any, _hub_id: str, **_kw: Any) -> tuple[str, str]:
         raise RuntimeError("500 Server Error")
 
+    # "The hub went down" is BOTH reads failing: the check reads the DETAIL
+    # first (one consistent content+revision snapshot, round-3 R18) and only
+    # falls back to the zip, so a live detail with a dead zip is not an outage.
+    original_get_agent = hub.get_agent
+
+    def boom_detail(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("500 Server Error")
+
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", boom)
+    monkeypatch.setattr(hub, "get_agent", boom_detail)
     failed = await client.post("/v1/desktop/hub/updates/check", json=mutation())
     (item,) = failed.json()["result"]["status"]["items"]
     assert item["error_class"] == "hub-error" and item["state"] == "available"
@@ -211,6 +220,7 @@ async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again
     monkeypatch.setattr(
         "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]
     )
+    monkeypatch.setattr(hub, "get_agent", original_get_agent)
     retried = await client.post(
         "/v1/desktop/hub/updates/retry", json=mutation(kind="agent", name="coder")
     )
