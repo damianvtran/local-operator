@@ -519,9 +519,7 @@ class SessionSpec:
         if self.tools is not None and not self.tools:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(
-                wire_errors_sdk_spec.tools_empty().envelope(locale="en")["text"]
-            )
+            raise SessionSpecError(wire_errors_sdk_spec.tools_empty().envelope(locale="en")["text"])
         if self.yolo and self.approvals.mode in ("refuse", "callback"):
             # yolo short-circuits the gate object on the session side, so a
             # refuse/callback gate installed here could never be consulted —

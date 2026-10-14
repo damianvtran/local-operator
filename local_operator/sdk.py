@@ -1051,9 +1051,9 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
         raise SessionSpecError(
-            wire_errors_sdk_spec.spawn_output_unsupported(
-                fields=", ".join(output_fields)
-            ).envelope(locale="en")["text"]
+            wire_errors_sdk_spec.spawn_output_unsupported(fields=", ".join(output_fields)).envelope(
+                locale="en"
+            )["text"]
         )
     if spec.yolo:
         blockers.append("yolo")
