@@ -4455,6 +4455,26 @@ def bridge_decision_target(
     return (row.ask_id, picked[0][0], picked[0][1])
 
 
+def _is_bridge_ask_row(row: Any) -> bool:
+    """Whether an ask row is a Team Bridge carriage (D2).
+
+    The predicate is STRUCTURAL, not a status or a label: a bridge question
+    carries the locator seat (``bridge``) and/or the ``question_id`` that only
+    the bridge carriage stamps (the same reading ``_is_bridge_ask_record`` uses
+    on the fold). Anything else is an ordinary ask and keeps the ordinary copy —
+    a name-based test would relabel the user's own asks the moment a string
+    drifted.
+    """
+    for question in getattr(row, "questions", ()) or ():
+        if not isinstance(question, Mapping):
+            continue
+        if question.get("bridge"):
+            return True
+        if str(question.get("question_id") or "").strip():
+            return True
+    return False
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -27874,11 +27894,25 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        bridge = _is_bridge_ask_row(row)
         if row.status == STATUS_TIMED_OUT:
+            if bridge:
+                # D2: a carriage's ask is not this user's own agent. The
+                # timeout line says the same true thing; only the SUBJECT
+                # changes, so a reader is not told their own agent asked when
+                # the request came from another member's.
+                return (
+                    f"{ASK_MARKER} this request timed out — the sender moved on; "
+                    "your answer still reaches them"
+                )
             return (
                 f"{ASK_MARKER} this ask timed out — the agent moved on; "
                 "your answer still reaches it"
             )
+        if bridge:
+            # A cross-member request: the answer travels back to the requester,
+            # so "the agent asked" (this user's own) is the wrong subject.
+            return f"{ASK_MARKER} another member's agent asked — " "your answer goes back to them"
         return f"{ASK_MARKER} the agent asked and moved on — your answer still reaches it"
 
     def _on_queue_ask_settle(self, ask_id: str, answers: dict[str, list[str]] | None) -> None:
