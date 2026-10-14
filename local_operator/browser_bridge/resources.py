@@ -222,7 +222,13 @@ class BrowserResource:
         self.record: dict[str, Any] = {}
         self.generation = ""
         self.previous_generation = ""
-        self.recovered = False
+        #: Lanes whose peer has been reconciled in THIS run (see `recovered`).
+        #: Reconciliation is per HOST — the app and the extension each keep their
+        #: own scope and fence — so one boolean for the whole resource let the
+        #: app's acknowledgement stand in for the extension's. Initialised
+        #: directly (not through the `recovered` setter) because the setter
+        #: resolves the current lane, which needs `host`, assigned below.
+        self._recovered_lanes: set[str] = set()
         #: WHICH host owns this session's surface: "" (not learned yet), "ui" or
         #: "bridge". Written into the record on the first successful `open`, so a
         #: resumed session selects the lane it opened on. Everything the lane
@@ -305,6 +311,34 @@ class BrowserResource:
             if host:
                 return host
         return ""
+
+    @property
+    def recovered(self) -> bool:
+        """Whether the CURRENT lane's peer has been reconciled in this run.
+
+        Why this is per lane and not one flag: an execution-lease change (a resume
+        of the same durable session) leaves every host holding a scope stamped
+        with the OLD generation. Each host must be told, once, via `owner_recover`
+        carrying `previous_generation(s)` — the only verb that advances a scope.
+        The extension fences every other verb with strict generation equality, so
+        a plain `open` against an unreconciled extension is refused as stale. With
+        a single boolean, reconciling the app first marked the extension
+        reconciled too; a later explicit `backend=extension` open then skipped its
+        recovery and was refused on a perfectly legitimate resume.
+
+        Kept as a property so every existing reader and writer (`recover`,
+        `_degraded_recover`, `refresh_identity`, the tool's allocation reset)
+        keeps its spelling and now acts on the lane it is talking to.
+        """
+        return self._lane().name in self._recovered_lanes
+
+    @recovered.setter
+    def recovered(self, value: bool) -> None:
+        lane = self._lane().name
+        if value:
+            self._recovered_lanes.add(lane)
+        else:
+            self._recovered_lanes.discard(lane)
 
     def _retarget_lane(self, host: str) -> None:
         """Move the lane to `host` and drop every verdict cached for the old one.
@@ -673,9 +707,9 @@ class BrowserResource:
         are intended and are the opposite of "no churn": this method still CLEARS
         ``recovered`` (forcing a reconcile) on a resolved same-lane peer change,
         which is exactly the CR1 defect's cure; and it drops the cached
-        ``ownership`` verdict on a LANE move without resetting ``recovered`` (see
-        the lane-scope branch below). "Does not churn on None" governs the
-        same-lane unresolvable case only.
+        ``ownership`` verdict on a LANE move without touching any lane's
+        reconciliation state (see the lane-scope branch below). "Does not churn
+        on None" governs the same-lane unresolvable case only.
 
         The cache is LANE-SCOPED. ``_peer_identity`` reads the CURRENT lane's
         discovery while ``_ownership_peer`` may have been learned on the other
@@ -685,8 +719,13 @@ class BrowserResource:
         and issue a spurious ``owner_recover`` before an ordinary finish. So when
         the resolved lane differs from the one the cache was learned on, the
         verdict is dropped and the peer is RE-SCOPED to the new lane WITHOUT
-        being treated as a change (no recover is owed; re-learn lazily). Only a
-        change WITHIN the same lane resets ``recovered``.
+        being treated as a change (re-learn lazily). Only a change WITHIN the same
+        lane resets that lane's ``recovered``.
+
+        Whether a lane move owes a recovery is decided by the per-lane
+        ``recovered`` state, not by this branch: a lane already reconciled (or
+        that just served this run's successful allocation, see ``remember``) owes
+        nothing, and a lane never reconciled in this run owes exactly one.
         """
         lane = self._lane().name
         if lane != self._ownership_peer_lane:
@@ -972,6 +1011,12 @@ class BrowserResource:
             # a capability held on another host keeps it too (see `select_host`).
             if surface_id:
                 self._retarget_lane(host)
+                # The host that just SERVED an open under this run's generation
+                # holds a scope stamped with it (a strict-fence peer refuses the
+                # open otherwise), so it owes no reconciliation before the
+                # finish. Without this, per-lane state would make the lane move
+                # after a fresh allocation send a spurious `owner_recover`.
+                self.recovered = True
             else:
                 self.select_host(host)
         if self.host:
