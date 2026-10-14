@@ -4993,18 +4993,24 @@ def test_daemon_children_are_launchd_children_that_survive_a_bounce() -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
-def test_a_detached_child_survives_a_supervisor_kill(tmp_path: Path) -> None:
-    """REAL survival proof for the continuity claim the wiring rests on.
+def test_a_detached_child_survives_a_supervisor_bounce(tmp_path: Path) -> None:
+    """A DETACHED child (``setsid``) outlives a supervisor bounce.
 
-    Models the documented supervised-restart semantics (``KillMode=process`` /
-    launchd job children survive): a "unit main" process spawns a DETACHED child
-    (its own session, SIGHUP ignored — the shape ``process._install_sighup_ignore``
-    gives a session runtime) that writes a heartbeat, then the unit main is
-    terminated as a restart would. LIVENESS IS PROVEN BY WORK, not by ``kill(pid,
-    0)``: a killed-but-unreaped process is a zombie that still answers that probe,
-    so the assertion is that the heartbeat file keeps GROWING after the supervisor
-    is gone. (A negative run with a non-orphaned child is the control — see the
-    separate non-detached variant below.)
+    WHAT THIS IS: a SYNTHETIC process-group proof. It models the killing
+    semantics the real bounce uses — ``bootout``+``bootstrap``
+    (``launchd.reload_job``) and ``kickstart -k`` (``restart_if_build_moved``) —
+    by signal-killing the supervisor's WHOLE PROCESS GROUP (``killpg`` on the
+    supervisor's pgid), which is the shape that reaches an undetached child. It
+    is NOT an actual launchd bounce and does not exercise ``launchctl``; that is
+    stated plainly rather than implied, and real launchd coverage is a QA item.
+
+    WHAT IT PROVES: with the group signalled, the child that called ``os.setsid()``
+    (its own session — the shape ``process._install_sighup_ignore`` gives a session
+    runtime) keeps working. Liveness is proven by WORK, not ``kill(pid, 0)`` (a
+    zombie still answers that): the heartbeat file must keep GROWING. The paired
+    :func:`test_a_nondetached_child_dies_with_the_supervisor_group` is the negative
+    control that makes this discriminating — without it, this would pass with or
+    without ``setsid``.
     """
     beat = tmp_path / "beat.txt"
     running = tmp_path / "running"
@@ -5035,18 +5041,79 @@ def test_a_detached_child_survives_a_supervisor_kill(tmp_path: Path) -> None:
             if running.exists() and beat.exists() and child_pid_file.exists():
                 break
             time.sleep(0.05)
-        unit.terminate()
-        unit.wait(timeout=10)
+        _bounce_group(unit)
         grown_at = beat.stat().st_size
         time.sleep(0.5)
         assert (
             beat.stat().st_size > grown_at
-        ), "the detached child stopped writing after the supervisor restart"
+        ), "the detached child stopped writing after the supervisor bounce"
     finally:
-        # REAP THE DETACHED CHILD TOO: it survived the supervisor on purpose, so
+        # REAP THE DETACHED CHILD TOO: it survived the bounce on purpose, so
         # nothing else will end it. Its own pid is the only handle — it is in its
         # own session, so the supervisor's group never covered it.
         with contextlib.suppress(Exception):
             os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
         with contextlib.suppress(Exception):
             unit.kill()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_nondetached_child_dies_with_the_supervisor_group(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL (synthetic): an UNDETACHED child does NOT survive.
+
+    Same shape as its sibling EXCEPT the child never calls ``os.setsid()``, so it
+    stays in the supervisor's process group. When that group is signal-killed (the
+    ``killpg`` shape of a real bounce), a child that did not detach is reaped —
+    which is exactly why survival rests on the child's OWN ``setsid`` and not on
+    any launchd courtesy. This is what makes the sibling test discriminating.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert beat.stat().st_size == grown_at, (
+            "the undetached child kept writing after a group kill — the control is not "
+            "discriminating, so the sibling test proves nothing"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+def _bounce_group(unit: subprocess.Popen) -> None:
+    """Signal-kill the supervisor's WHOLE PROCESS GROUP, as a real bounce does.
+
+    ``unit`` is spawned ``start_new_session=True``, so its pgid IS its pid; this
+    reaches an undetached descendant (the detached one has left the group).
+    """
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(os.getpgid(unit.pid), signal.SIGTERM)
+    with contextlib.suppress(Exception):
+        unit.wait(timeout=10)
