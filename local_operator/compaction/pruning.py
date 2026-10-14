@@ -39,7 +39,7 @@ Prompt-cache guards (the whole point of doing this carefully):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 
 from local_operator.harness.types import (
     CapturedFrame,
@@ -135,17 +135,32 @@ def _has_frame(message: Message) -> bool:
     return any(isinstance(block, ImageContent) for block in message.content)
 
 
-def _without_frames(content: Sequence[Content]) -> list[Content]:
+def _without_frames(
+    content: Sequence[Content],
+    *,
+    index: int = 0,
+    reclaimable: Collection[tuple[int, int]] | None = None,
+) -> list[Content]:
     """``content`` with every image replaced by ONE notice.
 
     Consecutive images collapse into a single notice rather than one each: a
     message that carried three views of a surface reads as "a screenshot was
     here", not as three lines of the same boilerplate, and the point of the
     prune is to spend fewer tokens on the past, not to spend them on notices.
+
+    ``reclaimable`` narrows which image blocks may be replaced at all: when
+    given, a block is a candidate only when its ``(index, content position)``
+    is listed -- the coordinates :func:`partition_captures` reports, so the
+    prune and the epoch elision agree block for block about what is
+    superseded. ``None`` keeps the legacy every-image contract for callers
+    that manage protection themselves.
     """
     out: list[Content] = []
-    for block in content:
+    for position, block in enumerate(content):
         if isinstance(block, ImageContent):
+            if reclaimable is not None and (index, position) not in reclaimable:
+                out.append(block)
+                continue
             if out and isinstance(out[-1], TextContent) and out[-1].text == STALE_FRAME_NOTICE:
                 continue
             out.append(TextContent(text=STALE_FRAME_NOTICE))
@@ -155,7 +170,10 @@ def _without_frames(content: Sequence[Content]) -> list[Content]:
 
 
 def prune_stale_frames(
-    messages: Sequence[Message], *, keep_recent_frames: int
+    messages: Sequence[Message],
+    *,
+    keep_recent_frames: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace every image except those in the newest ``keep_recent_frames``
     frame-bearing messages with :data:`STALE_FRAME_NOTICE`.
@@ -179,15 +197,24 @@ def prune_stale_frames(
     decision (the runner rebuilds its whole prefix on a frame budget, the
     session would do it inside a compaction pass) and encoding a frontier
     here would make two callers disagree about it.
+
+    ``reclaimable`` gates WHICH blocks the prune may replace, in
+    :func:`partition_captures` coordinates: the render fallback passes the
+    superseded-capture set, so user uploads, unknown images and every
+    stream's latest capture survive the hard-wire shed exactly as they
+    survive the epoch elision. ``None`` keeps the legacy every-image
+    contract for callers that own protection themselves.
     """
     if keep_recent_frames < 0:
         raise ValueError("keep_recent_frames must be non-negative")
     # Walk from the end: the newest ``keep_recent_frames`` frame-bearing
-    # messages are kept verbatim, everything older loses its images.
+    # messages are kept verbatim; any older message loses only the image
+    # blocks ``reclaimable`` admits (all of them under the legacy default).
     remaining = keep_recent_frames
     out: list[Message] = []
     dropped = 0
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if not _has_frame(message):
             out.append(message)
             continue
@@ -195,11 +222,24 @@ def prune_stale_frames(
             remaining -= 1
             out.append(message)
             continue
-        dropped += sum(1 for block in message.content if isinstance(block, ImageContent))
+        replaced_count = sum(
+            1
+            for position, block in enumerate(message.content)
+            if isinstance(block, ImageContent)
+            and (reclaimable is None or (index, position) in reclaimable)
+        )
+        if replaced_count == 0:
+            out.append(message)
+            continue
+        dropped += replaced_count
         # A copy rather than in-place mutation, so the caller's identity test
         # (see the docstring) holds; ``model_copy`` keeps the id, which is
         # what the token-estimate cache is keyed on, so invalidate it.
-        replaced = message.model_copy(update={"content": _without_frames(message.content)})
+        replaced = message.model_copy(
+            update={
+                "content": _without_frames(message.content, index=index, reclaimable=reclaimable)
+            }
+        )
         invalidate_message_cache(replaced)
         out.append(replaced)
     out.reverse()
@@ -207,7 +247,11 @@ def prune_stale_frames(
 
 
 def downscale_stale_frames(
-    messages: Sequence[Message], *, keep_recent_frames: int, max_edge: int
+    messages: Sequence[Message],
+    *,
+    keep_recent_frames: int,
+    max_edge: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace every image except those in the newest ``keep_recent_frames``
     frame-bearing messages with a smaller re-rendering bounded to ``max_edge``.
@@ -235,6 +279,12 @@ def downscale_stale_frames(
     image blocks whose bytes were replaced, not messages touched.
     ``keep_recent_frames`` counts frame-bearing MESSAGES from the end, so a
     message with two frames costs one slot (the same unit the prune uses).
+
+    ``reclaimable`` gates WHICH blocks are re-rendered, in
+    :func:`partition_captures` coordinates -- the same protection contract
+    :func:`prune_stale_frames` documents. ``None`` keeps the legacy
+    every-image contract; the render fallback passes the superseded-capture
+    set so protected pixels are never re-rendered by this walk.
     """
     # Imported HERE, not at module scope, and the placement is load-bearing:
     # this module sits on the shared renderer's import closure
@@ -250,7 +300,8 @@ def downscale_stale_frames(
     remaining = keep_recent_frames
     out: list[Message] = []
     downscaled = 0
-    for message in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
         if not _has_frame(message):
             out.append(message)
             continue
@@ -260,8 +311,11 @@ def downscale_stale_frames(
             continue
         content: list[Content] = []
         changed = False
-        for block in message.content:
+        for position, block in enumerate(message.content):
             if isinstance(block, ImageContent):
+                if reclaimable is not None and (index, position) not in reclaimable:
+                    content.append(block)
+                    continue
                 shrunk = downscale_context_frame(block.data, block.mime_type, max_edge=max_edge)
                 if shrunk is not None:
                     data, mime_type = shrunk
@@ -284,7 +338,10 @@ def downscale_stale_frames(
 
 
 def shed_frames_to_wire_budget(
-    messages: Sequence[Message], *, budget: int
+    messages: Sequence[Message],
+    *,
+    budget: int,
+    reclaimable: Collection[tuple[int, int]] | None = None,
 ) -> tuple[list[Message], int]:
     """Replace the OLDEST frames with notices until the request fits ``budget``
     bytes, keeping as many recent frames as possible.
@@ -310,11 +367,17 @@ def shed_frames_to_wire_budget(
     The loop mirrors ``_shed_stale_turns`` in the evaluation runner's provider
     client: walk the keep count DOWN and stop when a step frees nothing.
     Termination is structural — ``keep`` strictly decreases toward 0, and
-    ``keep=0`` drops every image there is — so a payload still over budget
-    with no images left exits rather than spinning. That residual case is
-    real: a text-only history cannot be shed here, and the caller must be
-    prepared for "still over" rather than assuming success (this is what the
-    byte-side auto-continue band checks).
+    ``keep=0`` drops every image there is that ``reclaimable`` admits — so a
+    payload still over budget with no eligible images left exits rather than
+    spinning. That residual case is real: a text-only history, or one whose
+    remaining images are all protected, cannot be shed here, and the caller
+    must be prepared for "still over" rather than assuming success (this is
+    what the byte-side auto-continue band checks).
+
+    ``reclaimable`` carries the same protection gate
+    :func:`prune_stale_frames` documents; the render fallback passes the
+    superseded-capture set so the shed can never drop user uploads, unknown
+    images or a stream's latest capture.
 
     Sheds the FEWEST frames that fit, not a fixed count, because every frame
     dropped is evidence the user may still need. Returns ``(messages,
@@ -331,7 +394,9 @@ def shed_frames_to_wire_budget(
     dropped = 0
     while keep > 0:
         keep -= 1
-        candidate, candidate_dropped = prune_stale_frames(messages, keep_recent_frames=keep)
+        candidate, candidate_dropped = prune_stale_frames(
+            messages, keep_recent_frames=keep, reclaimable=reclaimable
+        )
         if candidate_dropped <= dropped:
             # This step freed nothing new; another turn of the loop cannot
             # either, since the keep count only shrinks.
@@ -381,6 +446,14 @@ def fit_frames_to_wire_budget(
        tightest candidate to the existing
        :func:`shed_frames_to_wire_budget`, whose minimal-drop loop stays the
        backstop.
+
+    PROTECTION, the shared-image-compaction contract: steps 1 and 3 degrade
+    only SUPERSEDED captures -- the same set the epoch elision consumes
+    (:func:`partition_captures`) -- so user uploads, unknown images and every
+    stream's latest capture are never resized or dropped by them; a still-over
+    return with nothing eligible is the honest disposition rather than silent
+    loss. Step 2's descent of the newest frame is the remaining OPEN boundary
+    (see the in-body note).
 
     WHY DOWNSCALE FIRST, stated as the failure it repairs: the shed's steady
     state on a long screenshot session is one MORE frame dropped per turn
@@ -435,18 +508,37 @@ def fit_frames_to_wire_budget(
         return list(messages), 0, 0, None
     if estimate_wire_bytes(messages) <= budget:
         return list(messages), 0, 0, None
+    # The render fallback obeys the SAME protection rules as the epoch
+    # elision: steps 1 and 3 may degrade only SUPERSEDED captures -- user
+    # uploads, unknown images and every stream's latest capture are
+    # unreachable, so the hard-wire path cannot quietly lose what the epoch
+    # guaranteed. The terminal descent (step 2) deliberately keeps the
+    # pre-existing last-resort for the newest frame: a provider refusal is
+    # worse than a degraded view it alone can prevent, and replacing that
+    # with the absolute "latest captures are never resized" contract (plus
+    # its typed pre-dispatch transport-limit disposition) is an OPEN
+    # boundary with the architect rather than something improvised here.
+    partition = partition_captures(messages)
+    reclaimable = frozenset(
+        (capture.message_index, capture.content_index) for capture in partition.reclaimable
+    )
     working: list[Message] = list(messages)
     downscaled_total = 0
     for edge in IMAGE_CONTEXT_EDGES:
         candidate, downscaled = downscale_stale_frames(
-            messages, keep_recent_frames=keep_recent_frames, max_edge=edge
+            messages,
+            keep_recent_frames=keep_recent_frames,
+            max_edge=edge,
+            reclaimable=reclaimable,
         )
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
             return working, downscaled_total, 0, edge
     # Step 2 (see the docstring): the same ladder with the newest frame's
     # exemption removed, reached only when no protected rung fits so the
-    # common path never pays for it. Run from the ORIGINAL ``messages`` — like
+    # common path never pays for it. Deliberately NOT gated by
+    # ``reclaimable`` -- see the open-boundary note above. Run from the
+    # ORIGINAL ``messages`` — like
     # every rung above — so a replacement stays the deterministic, memoized
     # function of (bytes, rung) the prompt-cache argument rests on.
     for edge in IMAGE_CONTEXT_EDGES:
@@ -456,7 +548,7 @@ def fit_frames_to_wire_budget(
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
             return working, downscaled_total, 0, edge
-    working, dropped = shed_frames_to_wire_budget(working, budget=budget)
+    working, dropped = shed_frames_to_wire_budget(working, budget=budget, reclaimable=reclaimable)
     return working, downscaled_total, dropped, IMAGE_CONTEXT_EDGES[-1]
 
 
