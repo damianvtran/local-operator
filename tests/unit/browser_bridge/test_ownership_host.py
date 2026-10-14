@@ -52,6 +52,11 @@ class FakeUiClient:
         if method == "owner_recover":
             if self.recover_state == "unresolved":
                 return {"ownership_version": 1, "state": "unresolved", "tab": ""}
+            if self.recover_state == "closed":
+                # The app's real answer for a settled scope with no live tab
+                # (local-operator-ui src/main/browser/ownership.ts): a SUCCESSFUL
+                # acknowledgement, which is what collapses the replay chain.
+                return {"ownership_version": 1, "state": "closed", "tab": ""}
             return {"ownership_version": 1, "state": "owned", "tab": "ui:100:capability"}
         if method == "owner_retain":
             return {"state": "retained"}
@@ -1704,3 +1709,172 @@ async def test_approval_after_a_denied_explicit_extension_open_stays_on_the_exte
     assert resource.record["surface_id"] == ""
     assert "pending_access_host" not in resource.record
     lease2.release()
+
+
+async def _crash_after_initialize(directory: Path) -> None:
+    """A run that publishes its generation durably and dies before any host ACKs.
+
+    `initialize()` appends the run's generation to the replay chain and saves it;
+    no peer has heard of it. The lease is released as a crashed owner's would be
+    once proven dead, so the next resume acquires a fresh one.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    lease = acquire_session_lease(directory)
+    _context(directory)[1].initialize()
+    lease.release()
+
+
+@pytest.mark.asyncio
+async def test_one_lanes_ack_keeps_the_other_lanes_replay_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """Review R1 / QA Q1: the app's ACK must not erase what the extension still needs.
+
+    The extension's scope is stamped G1 (its last acknowledged generation). G2 is
+    published and the run dies; G3 resumes, works on the APP (whose successful
+    `owner_recover` ACK used to replace the whole chain with `[G3]`), and only then
+    opens explicitly on the extension. The extension's fence accepts G1 only as
+    the current generation, `previous_generation` (G2 here, not G1) or a member of
+    `previous_generations` — so the chain must still carry G1 or the open is
+    refused as stale on a legitimate resume.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    lease1 = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=False, bridge=True)
+    first_context, first = _context(directory)
+    for action in ("open", "close"):
+        done = await builtin.execute_browser(
+            "t", {"action": action, "url": "https://example.com"}, None, None, first_context
+        )
+        assert not done.is_error, done.text
+    g1 = lease1.generation
+    assert fenced_bridge.scopes[str(first.params()["owner_proof"])]["generation"] == g1
+    lease1.release()
+    await _crash_after_initialize(directory)
+
+    lease3 = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    ui_client.recover_state = "closed"
+    context, resource = _context(directory)
+    worked = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+    assert not worked.is_error, worked.text
+    assert resource._lane().name == "ui"
+    assert resource.previous_generation != g1, "G1 must not be the immediate predecessor"
+
+    fenced_bridge.calls.clear()
+    opened = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+
+    assert not opened.is_error, opened.text
+    assert [m for m, _p in fenced_bridge.calls] == ["owner_recover", "open"]
+    assert g1 in fenced_bridge.calls[0][1]["previous_generations"]
+    lease3.release()
+
+
+@pytest.mark.asyncio
+async def test_the_replay_chain_collapses_once_every_lane_acked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """The converse of retention: it must END. One lane's ACK trims only that
+    lane's view; the shared chain (what a never-acknowledged lane is owed)
+    collapses only when EVERY lane has acknowledged."""
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    lease1 = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=False, bridge=True)
+    first_context, _first = _context(directory)
+    for action in ("open", "close"):
+        done = await builtin.execute_browser(
+            "t", {"action": action, "url": "https://example.com"}, None, None, first_context
+        )
+        assert not done.is_error, done.text
+    lease1.release()
+
+    lease2 = acquire_session_lease(directory)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    ui_client.recover_state = "closed"
+    context, resource = _context(directory)
+    worked = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+    assert not worked.is_error, worked.text
+    # Only the app has acknowledged: its own view collapsed, the extension's did not.
+    assert resource.lane_generations("ui") == [resource.generation]
+    assert len(resource.lane_generations("bridge")) > 1, "the extension still owes an ACK"
+    assert len(resource.record["bridge_generations"]) > 1
+
+    opened = await builtin.execute_browser(
+        "t",
+        {"action": "open", "backend": "extension", "url": "https://example.com"},
+        None,
+        None,
+        context,
+    )
+    assert not opened.is_error, opened.text
+    # Both lanes acknowledged: nothing older can be held by any host any more.
+    assert resource.record["bridge_generations"] == [resource.generation]
+    assert resource.lane_generations("ui") == [resource.generation]
+    assert resource.lane_generations("bridge") == [resource.generation]
+    lease2.release()
+
+
+@pytest.mark.asyncio
+async def test_a_lane_that_never_acknowledges_cannot_grow_the_chain_unbounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    fenced_bridge: FencedBridgeClient,
+) -> None:
+    """Retention for an absent lane is bounded: across many resumes where only the
+    app works, the durable chain and what is sent never exceed the cap."""
+    from local_operator.browser_bridge.resources import MAX_REPLAY_GENERATIONS
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    _hosts(monkeypatch, ui=True, bridge=True)
+    ui_client.recover_state = "closed"
+    for _ in range(MAX_REPLAY_GENERATIONS + 8):
+        lease = acquire_session_lease(directory)
+        context, resource = _context(directory)
+        worked = await builtin.execute_browser("t", {"action": "tabs"}, None, None, context)
+        assert not worked.is_error, worked.text
+        assert len(resource.record["bridge_generations"]) <= MAX_REPLAY_GENERATIONS
+        assert len(resource.lane_generations("bridge")) <= MAX_REPLAY_GENERATIONS
+        lease.release()
+    assert len(resource.record["bridge_generations"]) == MAX_REPLAY_GENERATIONS
+
+
+def test_a_record_without_lane_chains_behaves_as_the_shared_chain(tmp_path: Path) -> None:
+    """Compatibility: a record written before per-lane chains existed has no
+    `lane_generations`, and every lane is then owed the one shared chain, exactly
+    as before. The first acknowledgement is what introduces the new field."""
+    directory = tmp_path / "sessions" / "sid"
+    directory.mkdir(parents=True)
+    old = BrowserResource(directory, "sid")
+    old.initialize()
+    assert "lane_generations" not in old.record, "initialize must not introduce the field"
+    old.record["bridge_generations"] = ["g-old", "g-mid", old.generation]
+    old._save()
+
+    resumed = BrowserResource(directory, "sid")
+    resumed.initialize()
+    for lane in ("ui", "bridge"):
+        assert resumed.lane_generations(lane) == resumed.record["bridge_generations"]
+        assert "g-old" in resumed.lane_generations(lane)
+    assert "lane_generations" not in resumed.record
