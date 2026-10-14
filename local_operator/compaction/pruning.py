@@ -60,6 +60,7 @@ __all__ = [
     "STALE_FRAME_NOTICE",
     "SUPERSEDED_NOTICE",
     "USELESS_NOTICE",
+    "apply_capture_elisions",
     "compute_suffix_tokens",
     "count_frame_messages",
     "count_stale_observations",
@@ -560,6 +561,80 @@ def partition_captures(messages: Sequence[Message]) -> CapturePartition:
     return CapturePartition(reclaimable=tuple(reclaimable), protected=tuple(protected))
 
 
+def _elide_capture_prefix(
+    messages: Sequence[Message],
+    candidates: Sequence[CaptureElision],
+    *,
+    fit_budget: int | None = None,
+    limit: int | None = None,
+) -> tuple[list[Message], int]:
+    """Apply a deterministic prefix of ``candidates``; ONE elision algorithm.
+
+    Shared by the byte-band rung (:func:`reclaim_captures_to_wire_budget`)
+    and the replay watermark (:func:`apply_capture_elisions`) so projection
+    and replay can never drift into two opinions about what an epoch elided.
+
+    - ``fit_budget``: stop as soon as the estimate is at or below it.
+    - ``limit``: apply exactly this many eligible elisions (deterministic
+      skips do not count toward it), for replaying a persisted frontier.
+    - Neither: apply every eligible elision.
+
+    ``candidates`` must come from :func:`partition_captures` over the SAME
+    ``messages``; addresses resolve through the source block objects by
+    identity, and the never-empty guard skips rather than ever producing an
+    empty content list. Sources are never mutated: only elided messages are
+    rebuilt as copies.
+    """
+    working = list(messages)
+    contents: dict[int, list[Content]] = {}
+    elided = 0
+    for candidate in candidates:
+        if limit is not None and elided >= limit:
+            break
+        message_index = candidate.message_index
+        content = contents.get(message_index)
+        if content is None:
+            content = list(messages[message_index].content)
+            contents[message_index] = content
+        # Identity, not equality: two captures may compare equal by VALUE, and
+        # earlier elisions from the same message shift positions -- so the
+        # SOURCE address is resolved through the original block object.
+        block = messages[message_index].content[candidate.content_index]
+        if not any(item is block for item in content):
+            continue
+        if len(content) <= 1:
+            # Never-empty guard (see :func:`reclaim_captures_to_wire_budget`);
+            # deterministic skip.
+            continue
+        content[:] = [item for item in content if item is not block]
+        working[message_index] = messages[message_index].model_copy(
+            update={"content": list(content)}
+        )
+        elided += 1
+        if fit_budget is not None and estimate_wire_bytes(working) <= fit_budget:
+            break
+    return working, elided
+
+
+def apply_capture_elisions(messages: Sequence[Message], *, limit: int) -> tuple[list[Message], int]:
+    """Reapply a persisted elision frontier to ``messages`` (replay side).
+
+    The compaction record persists HOW MANY eligible superseded captures an
+    epoch elided; replay re-derives the partition from the same source and
+    applies the same number -- same candidates, same never-empty skips,
+    same identity resolution -- so the projected history a resumed session
+    replays is the one the live session sent, without storing image copies
+    or a second registry. ``limit`` beyond the eligible count applies all of
+    them; ``limit <= 0`` returns the input list untouched.
+    """
+    if limit <= 0:
+        return list(messages), 0
+    candidates = partition_captures(messages).reclaimable
+    if not candidates:
+        return list(messages), 0
+    return _elide_capture_prefix(messages, candidates, limit=limit)
+
+
 def reclaim_captures_to_wire_budget(
     messages: Sequence[Message], *, budget: int
 ) -> tuple[list[Message], int]:
@@ -603,36 +678,10 @@ def reclaim_captures_to_wire_budget(
     if estimate_wire_bytes(messages) <= budget:
         return list(messages), 0
 
-    partition = partition_captures(messages)
-    if not partition.reclaimable:
+    candidates = partition_captures(messages).reclaimable
+    if not candidates:
         return list(messages), 0
-
-    working = list(messages)
-    contents: dict[int, list[Content]] = {}
-    elided = 0
-    for candidate in partition.reclaimable:
-        message_index = candidate.message_index
-        content = contents.get(message_index)
-        if content is None:
-            content = list(messages[message_index].content)
-            contents[message_index] = content
-        # Identity, not equality: two captures may compare equal by VALUE, and
-        # earlier elisions from the same message shift positions -- so the
-        # SOURCE address is resolved through the original block object.
-        block = messages[message_index].content[candidate.content_index]
-        if not any(item is block for item in content):
-            continue
-        if len(content) <= 1:
-            # Never-empty guard (see docstring); deterministic skip.
-            continue
-        content[:] = [item for item in content if item is not block]
-        working[message_index] = messages[message_index].model_copy(
-            update={"content": list(content)}
-        )
-        elided += 1
-        if estimate_wire_bytes(working) <= budget:
-            break
-    return working, elided
+    return _elide_capture_prefix(messages, candidates, fit_budget=budget)
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

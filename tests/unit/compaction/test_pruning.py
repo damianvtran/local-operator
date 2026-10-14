@@ -7,6 +7,7 @@ from local_operator.compaction.pruning import (
     STALE_FRAME_NOTICE,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
+    apply_capture_elisions,
     compute_suffix_tokens,
     partition_captures,
     prune_stale_frames_in_place,
@@ -790,4 +791,57 @@ def test_reclaim_is_deterministic_and_pure():
 
     assert count == count_again == 2  # the two superseded captures; latest stays
     assert first == second
+    assert [message.model_dump() for message in messages] == before
+
+
+def test_apply_capture_elisions_reproduces_the_byte_rung_projection():
+    """The persisted frontier replays to the live projection: same source, same plan."""
+    messages = [
+        Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("mid", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+        Message.user("now", images=[_big_capture(stream="screen", revision="3", scope="mcp:s:a")]),
+    ]
+    rung, elided_count = reclaim_captures_to_wire_budget(messages, budget=1)
+    assert elided_count == 2
+
+    replayed, applied = apply_capture_elisions(messages, limit=elided_count)
+
+    assert applied == elided_count
+    assert replayed == rung
+
+
+def test_apply_capture_elisions_skips_do_not_consume_the_limit():
+    """A skipped candidate (never-empty guard) is not an applied elision."""
+    only = Message(role="user")
+    only.content = [_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
+    latest = Message.user(
+        "x", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]
+    )
+    messages = [only, latest]
+
+    out, applied = apply_capture_elisions(messages, limit=5)
+
+    assert applied == 0
+    assert len(out[0].content) == 1
+    assert out[0] is only
+
+
+def test_apply_capture_elisions_limit_zero_or_beyond_and_purity():
+    messages = [
+        Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("mid", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+        Message.user("now", images=[_big_capture(stream="screen", revision="3", scope="mcp:s:a")]),
+    ]
+    before = [message.model_dump() for message in messages]
+
+    zero, applied_zero = apply_capture_elisions(messages, limit=0)
+    assert applied_zero == 0
+    assert zero[0] is messages[0]
+
+    beyond, applied_beyond = apply_capture_elisions(messages, limit=99)
+    assert applied_beyond == 2  # every eligible capture; the latest stays
+    assert beyond[2] is messages[2]
+
+    again, applied_again = apply_capture_elisions(messages, limit=2)
+    assert (again, applied_again) == (beyond, 2)
     assert [message.model_dump() for message in messages] == before
