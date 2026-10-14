@@ -34,7 +34,10 @@ sequence is:
 3. Follow the reported blocker. Setup reads the selected account and billing
    fresh, requires positive credit for new enrollment, and checks cloudflared
    **2025.4.0 or newer** plus a supported user supervisor before any cloud
-   mutation. Install missing software through the supported package manager
+   mutation. If the phone origin is not already healthy/protected, its bundle
+   must be ready too: prepare it explicitly with `lop mobile install` under
+   normal tool approval. A plan does not build the interface or install services.
+   Install missing software through the supported package manager
    with normal tool approval (macOS: `brew install cloudflared`); the runner
    never installs it silently. Cached `/usage` is not permission. Starter credit
    counts; with zero/unverified credit the human repairs/top-ups in the console.

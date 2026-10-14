@@ -48727,7 +48727,7 @@ class OperatorApp(App[None]):
             notice(mobile_text(ms.busy()))
             return
         self._tunnel_action_busy = True
-        notice(mobile_text(ms.checking()))
+        notice(mobile_text(ms.applying() if action == "enable" else ms.checking()))
 
         async def run() -> None:
             from local_operator.tunnels.cli import mobile_action
@@ -48741,7 +48741,7 @@ class OperatorApp(App[None]):
                     progress=lambda message: self.call_from_thread(self._system_notice, message),
                 )
             except Exception:  # noqa: BLE001 — no provider bodies or secrets in a notice
-                result = "Mobile setup failed. Check lop tunnel status and /login radient."
+                result = mobile_text(ms.unexpected_failure())
             finally:
                 self._tunnel_action_busy = False
             self._system_notice(result)

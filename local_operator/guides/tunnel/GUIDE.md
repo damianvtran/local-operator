@@ -23,7 +23,10 @@ it does not expose the machine by itself.
 3. Follow its local prerequisite blockers before any cloud mutation. Install
    cloudflared >=2025.4.0 using the supported package manager (normal tool
    approval; macOS `brew install cloudflared`). A supported user supervisor is
-   required. The runner does not silently install software or change listener
+   required. A phone origin that is not already healthy/protected also needs
+   its interface bundle ready; use the explicit approved `lop mobile install`
+   prerequisite when reported. The plan never builds/installs it.
+   The runner does not silently install software or change listener
    binds. A deliberately stopped setup stays stopped, and a dead/different
    owning credential cannot silently repoint an existing configuration.
 4. Run `lop tunnel setup apply --credential-id <id>` only when instructed.

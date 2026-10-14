@@ -30,14 +30,14 @@
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
   },
   "mobile.setup.choose_login": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.login": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.account_failed": {
     "role": "Mobile setup progress or blocker",
@@ -45,9 +45,9 @@
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
   },
   "mobile.setup.complete": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.cloudflared": {
     "role": "Mobile setup progress or blocker",
@@ -65,21 +65,16 @@
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
   },
   "mobile.setup.verification": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.failed": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.activated": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
-  },
-  "mobile.setup.title": {
     "role": "Mobile setup progress or blocker",
     "tone": "Plain, actionable and cautious",
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
@@ -100,9 +95,9 @@
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
   },
   "mobile.setup.quote": {
-    "role": "Mobile setup progress or blocker",
-    "tone": "Plain, actionable and cautious",
-    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price."
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
   "mobile.setup.apply": {
     "role": "Mobile setup progress or blocker",
@@ -128,5 +123,245 @@
     "role": "Completed setup receipt",
     "tone": "Factual",
     "note": "Only after fresh exact-price activation succeeds; retained if later cloud reservation fails."
+  },
+  "mobile.setup.identity_unavailable": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.account": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.mobile_bundle": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.mobile_bundle_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.supervisor_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.consent": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.quote_changed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.failed_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.login_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.verification_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.complete_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.applying": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.activating": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.reserving": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.configuring": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.installing": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.verifying": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.failure_stage": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_billing": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_reservation": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_configuration": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_installation": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_verification": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.stage_prerequisites": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.billing_not_activated": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.billing_already_active": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.billing_activated_status": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.billing_unconfirmed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.reservation_saved": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.reservation_existing": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.reservation_unconfirmed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.cloudflared_tui": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_login": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_owner_choice": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_owner_missing": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_quote": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_quote_changed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_cloudflared": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_mobile_bundle": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_supervisor": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_balance": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_account": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_apply": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_complete": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_verification": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_failed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.title_stopped": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.unexpected_failure": {
+    "role": "Unexpected failure fallback",
+    "tone": "Cautious",
+    "note": "Never infer rollback or print raw exception; slash action only."
   }
 }
