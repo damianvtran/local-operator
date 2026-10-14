@@ -28319,16 +28319,21 @@ def _ask_report(
     counts = image_counts or {}
     lines: list[str] = []
     for question in questions:
-        chosen = [text for text in answers.get(question.id, []) if text.strip()]
-        attached = int(counts.get(question.id, 0))
         # ``render._question_models`` falls back to ``model_construct`` for a log
-        # row pydantic rejects, and such an object has no ``question`` at all:
-        # reading it unguarded raised AttributeError out of the render, which the
-        # session's guarded background task swallowed — one malformed (forged or
-        # pre-dating-the-field) row took the whole reconcile pass down. A missing
-        # prompt is shown as the id alone rather than as a crash.
+        # row pydantic rejects, so such an object can be missing ``id`` as well
+        # as ``question``: reading either unguarded raised AttributeError out of
+        # the render, which the session's guarded background task swallowed —
+        # one malformed (forged, or pre-dating-the-field) row took the whole
+        # reconcile pass down. The id is the key the answers are stored under, so
+        # a missing one can match nothing by construction: it is shown as a
+        # placeholder, and a missing prompt as the id alone, rather than as a
+        # crash.
+        question_id = str(getattr(question, "id", "") or "")
+        chosen = [text for text in answers.get(question_id, []) if text.strip()]
+        attached = int(counts.get(question_id, 0))
         prompt = str(getattr(question, "question", "") or "")
-        lines.append(f"{question.id} — {prompt}" if prompt else str(question.id))
+        label = question_id or "(unnamed question)"
+        lines.append(f"{label} — {prompt}" if prompt else label)
         if chosen and attached:
             noun = "image" if attached == 1 else "images"
             body = f"{'; '.join(chosen)} (+{attached} {noun}, shown below)"
