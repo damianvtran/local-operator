@@ -162,7 +162,12 @@ export function derSignatureToRaw(der: Uint8Array): Uint8Array {
 		const length = der[offset + 1];
 		let start = offset + 2;
 		if (length === 33 && der[start] === 0x00) start += 1;
-		out.set(der.subarray(start, offset + 2 + length), half * 32);
+		const value = der.subarray(start, offset + 2 + length);
+		// DER omits leading zero bytes, but each raw scalar is a 32-byte
+		// big-endian integer. Restore zeros on the LEFT: left-aligning a short
+		// value changes its magnitude and made the test-only inverse reject
+		// otherwise valid randomly generated phone signatures.
+		out.set(value, half * 32 + (32 - value.length));
 		offset += 2 + length;
 	}
 	return out;
