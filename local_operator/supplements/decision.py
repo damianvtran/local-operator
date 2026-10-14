@@ -427,6 +427,20 @@ def qualifying_ids(
     return qualifying
 
 
+def drawable(evidence: Evidence) -> bool:
+    """Whether a figure CAN be drawn: the structured signal AND at least one extracted dataset.
+
+    The signal's form (c) (>= 4 numbers sharing a unit in the answer's prose) is true with ZERO
+    datasets -- e.g. a comparison table whose first column is text, or numbers in running prose.
+    The generator's validator admits only values copied from ``evidence.datasets``, so a fork
+    run over none rejects every block it writes as "not in the evidence", fails the repair turn
+    too and journals ``failed``/``bound:turns``: the UI's "Couldn't prepare highlights · Retry"
+    under an answer that merely had nothing to draw. Gate on datasets so that job is never asked
+    for or started (and no paid decision/generator call is spent on it).
+    """
+    return evidence.structured and bool(evidence.datasets)
+
+
 def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
     """The graphics half's ONE rule: threshold AND evidence (memo §2.3).
 
@@ -437,7 +451,7 @@ def apply_graphics(answer: Any, evidence: Evidence) -> tuple[float, bool]:
     if answer is None or not isinstance(getattr(answer, "value", None), (int, float)):
         return 0.0, False
     probability = round(float(answer.value), 4)
-    return probability, probability >= GRAPHICS_THRESHOLD and evidence.structured
+    return probability, probability >= GRAPHICS_THRESHOLD and drawable(evidence)
 
 
 def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
@@ -481,7 +495,7 @@ async def decide(
     literals = _egress_literals(candidates)
     options = option_ids(candidates) if want_files else {}
     ask_files = bool(options)
-    ask_graphics = want_graphics and evidence.structured
+    ask_graphics = want_graphics and drawable(evidence)
     vendor = "none"
     files_task = (
         _ask(

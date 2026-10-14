@@ -83,3 +83,20 @@ def test_dataset_titles_are_sanitised_single_lines() -> None:
     text = "\x1b[31m## Evil\x1b[0m\u202etitle\n" + TABLE
     title = ev.extract([], text).datasets[0].title
     assert "\x1b" not in title and "\n" not in title and "\u202e" not in title
+
+
+def test_units_only_signal_is_not_drawable_without_datasets() -> None:
+    """Regression: 'units' alone (no dataset) used to start a fork whose every block was
+    rejected as 'not in the evidence' -> a failed row -> "Couldn't prepare highlights"."""
+    from local_operator.supplements.decision import apply_graphics, drawable
+
+    found = ev.extract([], "Runs took 12 ms, 15 ms, 9 ms and 22 ms respectively.")
+    assert found.structured and not found.datasets
+    assert not drawable(found)
+
+    class Yes:
+        value = 0.95
+
+    assert apply_graphics(Yes(), found) == (0.95, False)
+    table = ev.extract([], "| r | ms |\n|---|---|\n| a | 12 |\n| b | 40 |\n| c | 7 |\n")
+    assert drawable(table) and apply_graphics(Yes(), table) == (0.95, True)
