@@ -54,7 +54,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator, NoReturn, Optional
+from typing import Any, Iterator, Mapping, NoReturn, Optional
 
 from local_operator.network import store
 from local_operator.network.credentials import consent, placement
@@ -486,10 +486,140 @@ def parse_entries(frame: Any, *, required: tuple[str, ...]) -> list[dict[str, An
         if not (_ref_ok(key) and _ref_ok(scope)):
             raise ValueError("lifecycle entry has an invalid credential or scope reference")
         for name in required:
-            if not _revision_ok(item[name]):
+            if name == "state":
+                if item[name] not in WIRE_STATES:
+                    raise ValueError("lifecycle entry state is not in the declared enum")
+            elif not _revision_ok(item[name]):
                 raise ValueError(f"lifecycle entry {name} is not a valid revision")
         if (key, scope) in seen:
             raise ValueError("lifecycle frame repeats an entry")
         seen.add((key, scope))
         out.append(dict(item))
     return out
+
+
+# ---------------------------------------------------------------------------
+# The recipient half of ``lifecycle_announce``
+# ---------------------------------------------------------------------------
+
+#: States an announcement may carry. ``scope_unknown`` is a READ-side answer only
+#: (the owner declining to infer a scope for a specific read), not something an
+#: owner pushes.
+_ANNOUNCE_STATES = WIRE_STATES - {STATE_SCOPE_UNKNOWN}
+
+#: Evidence that can only RESTRICT. Applying one again at an unchanged counter is
+#: safe and necessary: the owner's sticky deny does not move either counter, so a
+#: forward-only rule alone would drop the very announcement that withdraws access.
+_RESTRICTIVE_STATES = frozenset({STATE_WITHDRAWN, STATE_NON_PORTABLE, STATE_UNSUPPORTED})
+
+
+def _announce_error(code: str, key: str, message: str) -> dict[str, Any]:
+    return {"kind": "error", "code": code, "key": key, "message": message}
+
+
+def member_lifecycle_announce(server: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any]:
+    """Serve a ``lifecycle_announce`` (owner -> recipient). Returns a ``detail`` object.
+
+    Analog of ``sync.member_announce``. Order, each step refusing BEFORE any write:
+    the frame validator, the authenticated sender (``link.device_id``, never the
+    frame), the sender being the placement OWNER of every named key, the frame's
+    ``recipient_device`` being THIS device, then the forward-only high-water.
+
+    THE ACK PROVES METADATA WAS APPLIED, NOT AUTH. Nothing here can make a
+    credential usable: the observation only records pending/withdrawn/unsupported
+    evidence (``effective.note_lifecycle_observation``); material still arrives
+    only through ``grant``, and only a successful resolve marks access usable.
+    """
+    from local_operator.network.credentials import effective
+    from local_operator.network.credentials.placement import PlacementDocument
+    from local_operator.network.credentials.types import validate_lifecycle_frame
+
+    root = getattr(server, "root", None)
+    self_device = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    if server is None or root is None or not self_device:
+        return _announce_error(
+            "unavailable",
+            "",
+            "this device has no identity to observe lifecycle metadata; nothing applied",
+        )
+    sender = str(getattr(link, "device_id", "") or "")
+    claimed = str(frame.get("from_device") or "")
+    if not sender or (claimed and claimed != sender):
+        return _announce_error(
+            "identity_mismatch", "", "the announcement's sender is not the authenticated device"
+        )
+    try:
+        validate_lifecycle_frame(frame)
+        entries = parse_entries(
+            frame, required=("state", "material_generation", "login_chain_revision")
+        )
+        if any(item["state"] not in _ANNOUNCE_STATES for item in entries):
+            raise ValueError("lifecycle announcement carries a state an owner does not push")
+    except ValueError as exc:
+        return _announce_error("malformed_announce", "", str(exc))
+    if frame.get("recipient_device") != self_device:
+        return _announce_error(
+            "identity_mismatch",
+            "",
+            "the announcement is addressed to another device; nothing applied",
+        )
+    if frame.get("owner_device") != sender:
+        return _announce_error(
+            "not_owner",
+            "",
+            "the announcement names an owner other than its sender; nothing applied",
+        )
+    network_id = str(getattr(link, "network_id", "") or "")
+    document = (
+        PlacementDocument.load(network_id, root, self_device=self_device)
+        if network_id
+        else PlacementDocument.resolve(root, self_device=self_device)
+    )
+    if document is None:
+        return _announce_error(
+            "unknown_key", "", "this device holds no sharing list; nothing applied"
+        )
+    providers: dict[str, str] = {}
+    for item in entries:
+        entry = document.entry(item["credential_key"])
+        if entry is None:
+            return _announce_error(
+                "unknown_key", item["credential_key"], "no such shared credential; nothing applied"
+            )
+        if str(entry.owner_device) != sender:
+            return _announce_error(
+                "not_owner",
+                item["credential_key"],
+                "the announcement came from a device that does not own this credential; "
+                "nothing applied",
+            )
+        providers[item["credential_key"]] = str(entry.provider or item["credential_key"])
+    life = LifecycleStore(document.network_id, root)
+    results: list[dict[str, Any]] = []
+    for item in entries:
+        key, scope = item["credential_key"], item["account_scope_ref"]
+        result = life.observe(
+            Observation(
+                sender, key, scope, item["login_chain_revision"], item["material_generation"]
+            )
+        )
+        if result.reason == NEEDS_AUTHORITATIVE_BASELINE:
+            return _announce_error(
+                NEEDS_AUTHORITATIVE_BASELINE,
+                key,
+                "this device's lifecycle record needs an authoritative baseline; nothing applied",
+            )
+        applied = result.applied or (
+            result.reason == OBSERVED_REPLAY and item["state"] in _RESTRICTIVE_STATES
+        )
+        if applied:
+            effective.note_lifecycle_observation(root, providers[key], item["state"], owner=sender)
+        results.append(
+            {
+                "credential_key": key,
+                "account_scope_ref": scope,
+                "applied": applied,
+                "reason": result.reason,
+            }
+        )
+    return {"kind": "ack", "entries": results}
