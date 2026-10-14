@@ -1148,12 +1148,12 @@ def run_subagent(
         # absence. The runner still overwrites this once the child is built, and
         # that write must win: a restored provider fallback is the model the
         # child actually calls, and pricing reads this field.
+        # Mirror the builder's selected-spec precedence, not the parent's
+        # transient effective route: a fresh child does not inherit that fallback.
         named = model_spec if model_spec is not None else inherited_model
-        job.model_label = (
-            f"{named.provider}/{named.model_id}"
-            if named is not None
-            else (getattr(parent_session, "effective_model_label", "") or None)
-        )
+        if named is None:
+            named = parent_session.model
+        job.model_label = f"{named.provider}/{named.model_id}"
         # And whose choice that was, on the same registration-time rule. Stamped
         # here rather than inferred from the label later: a tier or role pin
         # that resolves to the session's OWN model produces a label identical to
