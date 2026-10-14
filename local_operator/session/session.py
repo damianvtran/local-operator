@@ -9067,21 +9067,34 @@ class Session:
                     _tb_store = _TBStore(_self_runtime.config_dir)
                     _tb_owner = _tb_store.active_owner()
                     if _tb_owner is not None:
+                        _tb_dref = str(bridge_meta.get("delivery_ref") or "")
+                        _tb_mid = str(bridge_meta.get("message_id") or "")
                         _envelope = _tb_store.screened_request_delivery(
                             _tb_owner,
-                            delivery_ref=str(bridge_meta.get("delivery_ref") or ""),
-                            message_id=str(bridge_meta.get("message_id") or ""),
+                            delivery_ref=_tb_dref,
+                            message_id=_tb_mid,
                         )
                         if _envelope is not None:
-                            account_display = str(_envelope.get("account_id") or "")
+                            # TB-11 (PR #2378, S-R3-4): the display identity is
+                            # the REMOTE SENDER's account, and the read above
+                            # bound BOTH locators (ref AND message id) so a
+                            # borrowed/echoed reference cannot show another
+                            # delivery's identity. The local owner's own
+                            # ``account_id`` column is never shown as the
+                            # sender — absent beats wrong.
+                            account_display = str(_envelope.get("sender_account_id") or "")
                             if not account_display:
                                 import json as _json
 
                                 _raw_scope = str(_envelope.get("scope_json") or "")
                                 if _raw_scope:
-                                    account_display = str(
-                                        _json.loads(_raw_scope).get("account_id") or ""
-                                    )
+                                    try:
+                                        account_display = str(
+                                            _json.loads(_raw_scope).get("sender_account_id")
+                                            or ""
+                                        )
+                                    except ValueError:
+                                        account_display = ""
                 except Exception:  # noqa: BLE001 — a display lookup must
                     # not abort the receive; absent beats guessed.
                     account_display = ""
@@ -9132,8 +9145,17 @@ class Session:
                 logger.warning("bridge_meta: invalid locator dropped at receive", exc_info=True)
                 validated = None
             if validated is not None:
-                if getattr(self, "bridge_runtime", None) is not None:
-                    details["bridge"] = validated
+                _stamp_runtime = getattr(self, "bridge_runtime", None)
+                # S-R3-5: the locator is stamped on the LIVE fence, never on
+                # construction-time runtime presence — a runtime that is bound
+                # but no longer authorized must not put a bridge locator on a
+                # delivered row (nothing downstream could then tell that the
+                # authority had lapsed).
+                if _stamp_runtime is not None:
+                    from local_operator.team_bridge.authority import authority_fence
+
+                    if authority_fence(_stamp_runtime) is None:
+                        details["bridge"] = validated
                 else:
                     # TB-11: with no live bridge binding in THIS session the
                     # locator is not stamped at all — the receive path consults
@@ -9987,6 +10009,21 @@ class Session:
         from local_operator.team_bridge.authority import scope_matches_runtime
 
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
+        if not str(delivery_ref or ""):
+            # A frame with NO reference cannot be bound to an ORIGINAL envelope:
+            # the opaque reference IS the locator, so a legacy/omitting producer's
+            # frame is visible-and-NON-AUTHORIZING rather than read by message id
+            # alone — an id is not a secret, and a bare-id match would let any
+            # frame bind whichever row happens to share its id.
+            ledger.claim(
+                owner,
+                str(message_id or ""),
+                {},
+                delivery_ref="",
+                local_row_id=local_row_id,
+            )
+            ledger.mark_unrecoverable(owner, str(message_id or ""), "no_original_envelope")
+            return
         envelope = store.screened_request_delivery(
             owner, delivery_ref=delivery_ref, message_id=message_id
         )
@@ -11072,14 +11109,29 @@ class Session:
         """
 
         runtime = self.bridge_runtime
+        _session_id = str(getattr(runtime, "session_id", "") or "")
+
+        def _refuse(copy: str) -> dict[str, Any]:
+            # S-R3-3: the grant was minted at ADMISSION, before this door could
+            # validate the ask/question/word — a refusal must not leave it live
+            # for a later stale spend.
+            from local_operator.harness.approval import withdraw_bridge_decide_grant
+
+            withdraw_bridge_decide_grant(
+                session_id=_session_id,
+                ask_id=str(ask_id),
+                question_id=str(question_id),
+            )
+            return {"ok": False, "error": copy}
+
         if runtime is None:
-            return {"ok": False, "error": "agent messages are not active in this session."}
+            return _refuse("agent messages are not active in this session.")
         queue = self.ask_queue()
         if queue is None:
-            return {"ok": False, "error": "this session's runtime predates queued asks"}
+            return _refuse("this session's runtime predates queued asks")
         record = queue.find(ask_id)
         if record is None:
-            return {"ok": False, "error": _ask_refusal_copy(None)}
+            return _refuse(_ask_refusal_copy(None))
         question = None
         for candidate in record.get("questions") or ():
             if isinstance(candidate, Mapping) and str(
@@ -11088,26 +11140,26 @@ class Session:
                 question = candidate
                 break
         if question is None:
-            return {"ok": False, "error": "that request's question is not on this ask."}
+            return _refuse("that request's question is not on this ask.")
         from local_operator.team_bridge.decide import NotAHumanDecision, human_decision
 
         try:
             decision = human_decision(message_id=str(question_id), ask_id=ask_id, word=word)
         except NotAHumanDecision as failure:
-            return {"ok": False, "error": str(failure)}
+            return _refuse(str(failure))
         question_slot = str(question.get("id") or "")
         existing = record.get("answers") or {}
         picks = [str(value) for value in (existing.get(question_slot) or ())]
         existing_word = picks[0].strip().lower() if len(picks) == 1 else ""
         if existing_word:
             from local_operator.asks import store as _asks_store
-            from local_operator.harness.approval import bridge_decide_grant_seen
+            from local_operator.harness.approval import bridge_decide_grant_committed
 
             if (
                 str(record.get("status") or "")
                 in (_asks_store.STATUS_ANSWERED, _asks_store.STATUS_LATE)
-                and not bridge_decide_grant_seen(
-                    session_id=str(getattr(runtime, "session_id", "") or ""),
+                and not bridge_decide_grant_committed(
+                    session_id=_session_id,
                     ask_id=ask_id,
                     question_id=str(question_id),
                     word=existing_word,
@@ -11118,17 +11170,18 @@ class Session:
                 # revision window while the response row is still undelivered
                 # (once delivered the ordinary refusal stands, and the
                 # dispatcher's grant check has already kept the unproven
-                # answer from POSTing).
+                # answer from POSTing). S-R3-1: the test is whether the EXISTING
+                # answer was proven (a CONSUMED grant for its word), never
+                # whether such a grant exists — the operator's own minted grant
+                # would otherwise make a forged same-word line look proven and
+                # silently drop the operator's decision.
                 if not queue.revision_refusal(ask_id):
                     revised = queue.revise(ask_id, {question_slot: [decision.word]}, by="operator")
                     if revised.get("ok"):
                         return {"ok": True, "revised": True, "word": decision.word}
         outcome = queue.respond(ask_id, {question_slot: [decision.word]}, by="operator")
         if not outcome.get("ok"):
-            return {
-                "ok": False,
-                "error": str(outcome.get("error") or "the decision was refused."),
-            }
+            return _refuse(str(outcome.get("error") or "the decision was refused."))
         return {"ok": True, "word": decision.word}
 
     def respond_ask(
@@ -11253,6 +11306,12 @@ class Session:
         record = queue.find(ask_id)
         if record is None:
             return {"ok": False, "error": _ask_refusal_copy(None)}
+        if Session._is_bridge_ask_record(record):
+            # TB-02 P1 / S-R3-2 (PR #2378): the same door rule as `respond_ask`
+            # and `answer_ask_question` — a bridge request is re-worded only
+            # through the verified door (`bridge_decide`), never by a raw
+            # revision this route carries no proof for.
+            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
         # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
         # without writing; see the docstring for what doing it in the other order
         # costs. Nothing can interleave between the two — this method is sync and

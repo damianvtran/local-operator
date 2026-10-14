@@ -4420,6 +4420,45 @@ class TranscriptScreen(Screen[None]):
 AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
 
 
+def bridge_decision_target(
+    row: AskRow, answers: Mapping[str, Sequence[str]]
+) -> tuple[str, str, str] | None:
+    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
+
+    ``None`` for every ordinary ask: a decision exists only for a request whose
+    question carries the producer's ``question_id`` AND whose picked value
+    resolves to one of that question's own option ids. The word sent on the
+    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
+    door validates the word against the request's closed set, and a label is
+    display copy that can be re-worded without touching the decision.
+
+    Ambiguity is ``None`` rather than a guess: two picked request questions, or
+    a value that maps to no option id, must fall back to the ordinary door and
+    its refusal rather than decide something the human did not choose.
+    """
+
+    picked: list[tuple[str, str]] = []
+    for question in row.questions:
+        if not isinstance(question, Mapping):
+            continue
+        question_id = str(question.get("question_id") or "")
+        if not question_id:
+            continue
+        selected = answers.get(str(question.get("id") or "")) or ()
+        if len(selected) != 1:
+            continue
+        options = {
+            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
+            for option in (question.get("options") or ())
+            if isinstance(option, Mapping)
+        }
+        value = str(selected[0]).strip()
+        picked.append((question_id, options.get(value.lower()) or value.lower()))
+    if len(picked) != 1:
+        return None
+    return (row.ask_id, picked[0][0], picked[0][1])
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -27617,7 +27656,17 @@ class OperatorApp(App[None]):
             )
             try:
                 if op == "respond":
-                    await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                    target = bridge_decision_target(row, answers or {})
+                    if target is not None:
+                        # An agent-messages request: the card's answer IS a
+                        # decision and rides the verified door (`bridge_decide`
+                        # — authority-admitted, grant-bearing). The plain ask
+                        # door refuses these asks by construction, so sending it
+                        # here would leave the human with a card that cannot
+                        # answer (TB-02 wiring, PR #2378).
+                        await client.bridge_decide(*target)
+                    else:
+                        await client.ask_respond(row.ask_id, answers or {}, by="terminal")
                 elif op == "decline":
                     await client.ask_decline(row.ask_id, by="terminal")
                 else:

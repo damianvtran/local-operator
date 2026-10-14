@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,38 @@ from tests.unit.team_bridge.test_h5_envelope_negatives import (
 from tests.unit.team_bridge.test_h5_session_glue import _session
 
 
+def _assert_fence_open(runtime) -> None:
+    """The fixture must satisfy the AUTHORITY FENCE, not replace it.
+
+    Every door this file exercises sits BEHIND ``authority_fence``: a fixture
+    that fails the fence would make each case pass vacuously (nothing reaches
+    the door), so the guard fails loudly with the fence's own typed refusal
+    and the reason is never guessed.
+    """
+
+    from local_operator.team_bridge.authority import authority_fence
+
+    refusal = authority_fence(runtime)
+    assert refusal is None, f"fixture does not satisfy the fence: {refusal}"
+
+
+@pytest.fixture(autouse=True)
+def _enabled_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every case in THIS file runs with the feature enabled.
+
+    The doors exercised here sit BEHIND ``authority_fence``, and a default-off
+    config makes the fence return ``feature_off`` before any door is reached —
+    the case would then pass or fail for the wrong reason. ``autouse`` because
+    a test that forgets to request an opt-in fixture is exactly the case that
+    regresses silently (the store/enrollment reads stay real).
+    """
+
+    monkeypatch.setattr(
+        "local_operator.config.read_config_values",
+        lambda config_dir: {"team_bridge": {"enabled": True}},
+    )
+
+
 @pytest.fixture
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Home, config and cwd out of the way of the developer's real ones.
@@ -63,10 +96,6 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        "local_operator.config.read_config_values",
-        lambda config_dir: {"team_bridge": {"enabled": True}},
-    )
     return tmp_path
 
 
@@ -99,6 +128,7 @@ def test_live_chain_meta_survives_the_real_spool_and_raises_the_ask(
     # Byte-equal canonical JSON across the spool boundary.
     assert json.dumps(drained, sort_keys=True) == json.dumps(dict(meta), sort_keys=True)
     stub = _StubSession(_runtime(tmp_path), object(), config_dir=tmp_path)
+    _assert_fence_open(stub.bridge_runtime)
     message = Session._peer_custom_message(
         stub,
         "[team_bridge_message] body",
@@ -277,15 +307,56 @@ async def test_the_cold_spool_drain_receives_through_the_real_session(
     await session.dispose()
 
 
+def test_the_wrap_shows_the_sender_account_never_the_local_owner(tmp_path) -> None:
+    """TB-11: the displayed identity is the REMOTE sender's account.
+
+    The envelope stamps the local owner's ``account_id`` beside the sender's;
+    reading the owner's column labels every arrival with the OPERATOR's own
+    account. The fixture makes the two differ, so the assertion discriminates.
+    """
+
+    store = _seed_store(tmp_path)
+    _stamp(store, sender_account_id="acc_remote_9")
+    drained = _spool_roundtrip(_meta())
+    stub = _StubSession(_runtime(tmp_path), object(), config_dir=tmp_path)
+    _assert_fence_open(stub.bridge_runtime)
+    message = Session._peer_custom_message(
+        stub,
+        "[team_bridge_message] body",
+        {"account_id": "acc_sender"},
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+        bridge_meta=drained,
+        entry_id=LOCAL_ROW_ID,
+    )
+    text = str((getattr(message, "details", {}) or {}).get("text") or "")
+    assert "from_account='acc_remote_9'" in text
+    assert "from_account='acc_1'" not in text
+
+
 def test_a_stale_scope_over_the_wire_never_raises(tmp_path, _no_enqueue) -> None:
     store = _seed_store(tmp_path)
     _stamp(store)
+    # The drift is in the STORED ORIGINAL scope — the door's own subject — not
+    # in the live binding: the enrollment and the runtime stay the CURRENT
+    # owner (so the fence is satisfied), while the stamped row names the
+    # PREVIOUS generation. Direct SQL is this suite's documented fixture
+    # boundary, and the write API refuses anything but a live owner, so a
+    # drifted scope can only be seeded (S-8's door exists for exactly this
+    # case: a stored block that no longer matches the receiver).
+    conn = sqlite3.connect(store._path)
+    try:
+        conn.execute(
+            "UPDATE screened_request_deliveries SET native_generation = 6 "
+            "WHERE message_id = ?",
+            (MESSAGE_ID,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     drained = _spool_roundtrip(_meta())
     runtime = _runtime(tmp_path)
-    # The receiving binding moved (a successor generation): the ORIGINAL scope
-    # cannot match it and is never backfilled.
-    runtime.owner = _owner(enrollment_generation=8)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
+    _assert_fence_open(stub.bridge_runtime)
     message = Session._peer_custom_message(
         stub,
         "[team_bridge_message] body",

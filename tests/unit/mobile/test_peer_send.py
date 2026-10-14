@@ -1179,6 +1179,9 @@ async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
         sender: Any,
         message_id: str | None = None,
         custom_type: str | None = None,
+        # The declared provenance kind rides the production call (H5 F3); the
+        # double mirrors the signature so the frame stays the production one.
+        bridge_meta: dict[str, Any] | None = None,
         deadline_s: float | None = None,
     ) -> str:
         assert rec is record

@@ -233,6 +233,125 @@ async def test_a_model_surface_answer_never_posts(
 
 
 @pytest.mark.asyncio
+async def test_a_forged_same_word_line_never_suppresses_the_operator_decision(
+    tmp_path: Path, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-R3-1: the forged answer happens to carry the operator's OWN word.
+
+    The provenance test is whether the RECORDED answer was proven — a CONSUMED
+    grant for its word — never whether such a grant merely EXISTS: with the
+    operator's grant minted and not yet consumed, reading "a grant exists" as
+    "the record was proven" let the forged line win and left the grant unspent.
+    The forged record is superseded and the operator's decision posts once.
+    """
+
+    session = await _session(tmp_path)
+    ask_id = _enqueue_bridge_ask(session, issuance_key="iss-p1-sameword")
+    _forged_message(session, ask_id)  # the fold now holds a forged 'approve'
+    mint_bridge_decide_grant(
+        session_id=session.session_id,
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+    )
+    decided = session.bridge_decide(ask_id, MESSAGE_ID, "approve")
+    assert decided.get("ok") is True, decided
+    assert decided.get("revised") is True, decided
+    posted: list[str] = []
+
+    async def recording_decide(client, decision, **kwargs):
+        posted.append(str(getattr(decision, "word", "")))
+        return {"request": {}}
+
+    monkeypatch.setattr(decide_mod, "decide_from_human_answer", recording_decide)
+    monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
+    queue = session.ask_queue()
+    record = [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]
+    message = queue.refresh_delivery_message(queue._response_message(record))
+    await session._append_injected_message(message)
+    await wait_for(
+        lambda: len(posted) == 1
+        and not _tasks_pending(session)
+        and _decide_settled(tmp_path, "success"),
+        5.0,
+    )
+    assert posted == ["approve"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_minted_for_another_session_is_never_spent(
+    tmp_path: Path, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mint and consume must agree on ONE session id (production objects).
+
+    The mint belongs to the session whose runtime admitted the gesture; a grant
+    minted for a different session id is not spendable by this one's dispatcher,
+    so the mismatched grant produces NO POST even though the door answered.
+    """
+
+    session = await _session(tmp_path)
+    ask_id = _enqueue_bridge_ask(session, issuance_key="iss-p1-xsession")
+    mint_bridge_decide_grant(
+        session_id="another-session",
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+    )
+    decided = session.bridge_decide(ask_id, MESSAGE_ID, "approve")
+    assert decided.get("ok") is True, decided
+    posted: list[str] = []
+
+    async def recording_decide(client, decision, **kwargs):
+        posted.append(str(getattr(decision, "word", "")))
+        return {"request": {}}
+
+    monkeypatch.setattr(decide_mod, "decide_from_human_answer", recording_decide)
+    monkeypatch.setattr(fence_mod, "authority_fence", lambda runtime: None)
+    queue = session.ask_queue()
+    record = [r for r in queue.records() if str(r.get("ask_id") or "") == ask_id][-1]
+    message = queue.refresh_delivery_message(queue._response_message(record))
+    await session._append_injected_message(message)
+    await _settle_for(posted, session)
+    assert posted == [], "a grant minted for another session was spent here"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_decision_leaves_no_grant_behind(
+    tmp_path: Path, isolated_config: Path
+) -> None:
+    """S-R3-3: a refusal must withdraw the minted-but-unconsumed grant.
+
+    The grant is minted at ADMISSION, before the door can validate the ask, the
+    question and the word; a door that then refuses must not leave a live grant
+    for the same target to be spent later without a fresh admitted decision.
+    """
+
+    session = await _session(tmp_path)
+    ask_id = _enqueue_bridge_ask(session, issuance_key="iss-p1-withdraw")
+    mint_bridge_decide_grant(
+        session_id=session.session_id,
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+    )
+    refused = session.bridge_decide(ask_id, MESSAGE_ID, "maybe")
+    assert refused.get("ok") is False
+    assert not consume_bridge_decide_grant(
+        session_id=session.session_id,
+        ask_id=ask_id,
+        question_id=MESSAGE_ID,
+        word="approve",
+    )
+    # And the bridge ask refuses the plain doors, including the revise door.
+    revised = session.revise_ask(ask_id, {f"bridge-{MESSAGE_ID}": ["deny"]})
+    assert revised.get("ok") is False
+    assert "agent-messages" in str(revised.get("error"))
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_same_scenario_posts_when_the_grant_check_is_bypassed(
     tmp_path: Path, isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -445,3 +564,36 @@ def test_bridge_asks_ride_a_separate_budget(tmp_path: Path) -> None:
         None,
     )
     assert calm["ok"] is True, calm
+    # …and the converse, which is the other half of the split: a FULL model
+    # queue never blocks a waiting request (EACH direction is checked against
+    # the INCOMING ask's own class).
+    (tmp_path / "model-full").mkdir(exist_ok=True)
+    other = _queue(tmp_path / "model-full")
+    for index in range(policy.OPEN_ASK_CAP):
+        outcome = other.enqueue(
+            [
+                {
+                    "id": f"plain-{index}",
+                    "question": f"proceed {index}?",
+                    "options": [],
+                    "multi": False,
+                    "secret": False,
+                }
+            ],
+            None,
+        )
+        assert outcome["ok"] is True, outcome
+    request = other.enqueue_idempotent(
+        issuance_key="iss-cap-model-full",
+        fingerprint=FP,
+        questions=[
+            bridge_request_question(
+                message_id="bmsg_model_full",
+                sender="s",
+                summary="t",
+                excerpt="",
+                scope=SCOPE,
+            )
+        ],
+    )
+    assert request["ok"] is True, request
