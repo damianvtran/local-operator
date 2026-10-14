@@ -467,7 +467,10 @@ async def test_serialized_extension_refusals_reach_python_recovery(
     """
     from local_operator.browser_bridge.backend import BridgeClient, BridgeError
     from local_operator.browser_bridge.protocol import ErrorCode
-    from local_operator.browser_bridge.resources import BrowserOwnershipError, BrowserResource
+    from local_operator.browser_bridge.resources import (
+        BrowserOwnershipError,
+        BrowserResource,
+    )
 
     resource = BrowserResource(headless_tui_env / "sessions" / "wire-sid", "wire-sid")
     resource.initialize()

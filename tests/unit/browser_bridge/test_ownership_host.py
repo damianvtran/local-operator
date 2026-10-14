@@ -18,7 +18,10 @@ from typing import Any
 import pytest
 
 from local_operator.browser_bridge import resources
-from local_operator.browser_bridge.resources import BrowserOwnershipError, BrowserResource
+from local_operator.browser_bridge.resources import (
+    BrowserOwnershipError,
+    BrowserResource,
+)
 from local_operator.harness.types import BrowserSurface, ToolContext
 from local_operator.tools import builtin
 
@@ -142,8 +145,8 @@ def _hosts(monkeypatch: pytest.MonkeyPatch, *, ui: bool, bridge: bool) -> None:
     a test that set one and not the other would leave the decision half-faked.
     """
 
-    from local_operator.ui_browser import state as ui_state
     from local_operator.browser_bridge import state as bridge_state
+    from local_operator.ui_browser import state as ui_state
 
     # A reachable successful transport has a record. Always-unknown fake peer
     # identity hid the pre-action refresh and could resurrect closed fake tabs.
