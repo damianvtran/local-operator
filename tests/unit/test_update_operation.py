@@ -1,6 +1,7 @@
 """Durable update intent/recovery on owned roots, not installation/handoff proof."""
 
 from pathlib import Path
+import os
 
 import pytest
 
@@ -85,3 +86,44 @@ def test_interrupted_owner_identity_is_not_permission_to_complete(tmp_path, monk
     row = tx.operation_status(tmp_path, operation.identifier)
     assert row["owner_state"] == "unknown"
     assert row["phase"] == "queued"
+
+
+def test_occurrence_running_then_terminal_round_trips_durably(tmp_path) -> None:
+    operation = tx.start_operation(tmp_path, baseline="A", target="B", route="latest")
+    tx.record_occurrence(
+        tmp_path, operation.identifier, "sched-1", kind="scheduler", state="running"
+    )
+    row = tx.occurrence_status(tmp_path, operation.identifier)
+    assert row["sched-1"]["state"] == "running" and row["sched-1"]["terminal"] == ""
+    assert row["sched-1"]["birth"] and row["sched-1"]["started_by_pid"] == os.getpid()
+    tx.record_occurrence(
+        tmp_path,
+        operation.identifier,
+        "sched-1",
+        kind="scheduler",
+        state="terminal",
+        terminal="done",
+    )
+    row = tx.occurrence_status(tmp_path, operation.identifier)
+    assert row["sched-1"]["state"] == "terminal" and row["sched-1"]["terminal"] == "done"
+
+
+def test_occurrence_map_absent_reads_none_not_empty(tmp_path) -> None:
+    operation = tx.start_operation(tmp_path, baseline="A", target="B", route="latest")
+    # No occurrences written yet: unreadable/absent must be None, NOT {} — the
+    # successor treats None as "unknown" and {} as "nothing in flight".
+    assert tx.occurrence_status(tmp_path, operation.identifier) is None
+    tx.record_occurrence(tmp_path, operation.identifier, "r-1", kind="relay", state="running")
+    assert set(tx.occurrence_status(tmp_path, operation.identifier)) == {"r-1"}
+
+
+def test_occurrence_rejects_bad_kind_state_and_terminal(tmp_path) -> None:
+    operation = tx.start_operation(tmp_path, baseline="A", target="B", route="latest")
+    with pytest.raises(tx.InstallTransactionError):
+        tx.record_occurrence(tmp_path, operation.identifier, "x", kind="wat", state="running")
+    with pytest.raises(tx.InstallTransactionError):
+        tx.record_occurrence(tmp_path, operation.identifier, "x", kind="scheduler", state="")
+    with pytest.raises(tx.InstallTransactionError):
+        tx.record_occurrence(
+            tmp_path, operation.identifier, "x", kind="scheduler", state="terminal"
+        )

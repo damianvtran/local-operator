@@ -428,6 +428,83 @@ def handoff_status(root: Path, identifier: str) -> dict[str, Any] | None:
     return handoff if isinstance(handoff, dict) else None
 
 
+#: Occurrence record vocabulary. ``running``/``terminal`` is the only durable
+#: signal a successor can trust; a crash between the two writes leaves a
+#: readable ``running`` entry, which is exactly the signal that must survive.
+OCCURRENCE_KINDS = ("scheduler", "relay")
+OCCURRENCE_TERMINALS = ("done", "failed", "cancelled")
+
+
+def record_occurrence(
+    root: Path,
+    identifier: str,
+    occurrence_id: str,
+    *,
+    kind: str,
+    state: str,
+    terminal: str = "",
+) -> None:
+    """Write one occurrence marker into the EXISTING durable operation record.
+
+    No new lock and no new ledger: this rides ``handoff.occurrences`` on the
+    operation the transaction already guards. The successor's exactly-once
+    guarantee is that it suppresses an inherited id ONLY while this entry is
+    present and non-terminal, so a crash between the ``running`` write and the
+    ``terminal`` write leaves a running entry — the conservative, readable
+    direction — rather than a silent gap.
+    """
+    from local_operator import procstate
+
+    if kind not in OCCURRENCE_KINDS:
+        raise InstallTransactionError("occurrence kind has no durable contract")
+    if state not in ("running", "terminal"):
+        raise InstallTransactionError("occurrence state has no durable contract")
+    if state == "terminal" and terminal not in OCCURRENCE_TERMINALS:
+        raise InstallTransactionError("terminal occurrence needs a terminal outcome")
+    with transaction(root, operation=f"occurrence {state}") as held:
+        held.validate(root)
+        path = _operation_path(root, identifier)
+        record = read_record(path)
+        if record is None or record.get("operation_id") != identifier:
+            raise InstallTransactionError("occurrence has no durable operation; preserving work")
+        handoff = record.get("handoff") if isinstance(record.get("handoff"), dict) else {}
+        occurrences = handoff.get("occurrences")
+        if not isinstance(occurrences, dict):
+            occurrences = {}
+        occurrences[occurrence_id] = {
+            "kind": kind,
+            "state": state,
+            "started_by_pid": os.getpid(),
+            "birth": f"{procstate.birth_scheme()}:{procstate.self_birth_token()}",
+            "terminal": terminal,
+            "recorded_at": time.time(),
+        }
+        handoff["occurrences"] = occurrences
+        record["handoff"] = handoff
+        record["updated_at"] = time.time()
+        _persist_operation(path, record)
+        held.validate(root)
+
+
+def occurrence_status(root: Path, identifier: str) -> dict[str, dict[str, Any]] | None:
+    """Read the occurrence map; ``None`` means unreadable/missing (not empty).
+
+    The distinction matters: an EMPTY map is "nothing in flight" (feature inert),
+    while ``None`` is "unknown" — and the successor must treat unknown as *not
+    proven still running* rather than suppressing on it.
+    """
+    row = operation_status(root, identifier)
+    if row is None:
+        return None
+    handoff = row.get("handoff")
+    if not isinstance(handoff, dict):
+        return None
+    occurrences = handoff.get("occurrences")
+    if not isinstance(occurrences, dict):
+        return None
+    return {key: value for key, value in occurrences.items() if isinstance(value, dict)}
+
+
 def advance_handoff(
     root: Path,
     identifier: str,

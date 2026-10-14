@@ -77,9 +77,38 @@ def test_listener_travels_over_the_control_channel_with_its_record() -> None:
     asyncio.run(scenario())
 
 
-def test_inherited_occurrence_exclusions_read_from_the_record() -> None:
-    assert handoff._scheduler_occurrence_exclusions(None) == []
-    assert handoff._scheduler_occurrence_exclusions({"handoff": {"inherited": ["a", 3]}}) == ["a"]
+def test_suppression_never_acts_on_unreadable_or_terminal() -> None:
+    # Unreadable/missing => suppress NOTHING and report the set as unreadable.
+    suppress, unreadable = handoff.suppressed_occurrences(None)
+    assert suppress == set() and unreadable == {"<unreadable>"}
+    # Terminal => never suppressed.
+    terminal = {"s1": {"state": "terminal", "terminal": "done", "recorded_at": 0.0}}
+    assert handoff.suppressed_occurrences(terminal) == (set(), set())
+    # Present and running => suppressed; empty map => inert.
+    running = {"s1": {"state": "running", "recorded_at": 0.0, "birth": "x:y"}}
+    assert handoff.suppressed_occurrences(running, same_birth=lambda _b: True) == ({"s1"}, set())
+    assert handoff.suppressed_occurrences({}) == (set(), set())
+
+
+def test_suppression_reclassifies_only_on_birth_mismatch_not_age() -> None:
+    old = {"s1": {"state": "running", "recorded_at": 1.0, "birth": "x:y"}}
+    now = handoff.OCCURRENCE_STALE_S + 2.0
+    # Age alone (birth still live) keeps suppression.
+    assert handoff.suppressed_occurrences(old, now=now, same_birth=lambda _b: True) == (
+        {"s1"},
+        set(),
+    )
+    # A proved birth mismatch lifts it.
+    assert handoff.suppressed_occurrences(old, now=now, same_birth=lambda _b: False) == (
+        set(),
+        set(),
+    )
+    # Fresh running entry is never reclassified even with a dead birth.
+    fresh = {"s1": {"state": "running", "recorded_at": now, "birth": "x:y"}}
+    assert handoff.suppressed_occurrences(fresh, now=now, same_birth=lambda _b: False) == (
+        {"s1"},
+        set(),
+    )
 
 
 def test_handoff_transitions_are_ordered_and_survive_reread(tmp_path) -> None:
