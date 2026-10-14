@@ -373,10 +373,12 @@ class MeshCredentialBroker:
         elif kind == "lifecycle_ack":
             detail = self.lifecycle_ack(link, frame)
         elif kind == "lifecycle_announce":
-            # The announce is OWNER -> RECIPIENT; the recipient half lands with the
-            # observation slice. Answered BY NAME until then so a build that gets one
-            # early reads "unsupported", never the ``internal`` build-fault branch.
-            detail = _lifecycle_unsupported(kind)
+            # Owner -> recipient: this device is the RECIPIENT of the metadata. The
+            # relay's pre-broker branch (a device that owns nothing) is wired with the
+            # capability slice, not here.
+            from local_operator.network.credentials import lifecycle as lifecycle_mod
+
+            detail = lifecycle_mod.member_lifecycle_announce(self._server, link, frame)
         elif str(kind).startswith("lifecycle_"):
             # An unknown lifecycle kind is a peer newer than this build, not a fault
             # here: by name, and never through the ``internal`` else-branch below.

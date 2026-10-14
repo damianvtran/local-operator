@@ -147,7 +147,7 @@ def test_ack_is_accepted_and_withdrawn_recipient_is_refused(rig):
     assert detail["kind"] == "error" and detail["code"] == "not_a_holder"
 
 
-@pytest.mark.parametrize("kind", ["lifecycle_announce", "lifecycle_future", "lifecycle_"])
+@pytest.mark.parametrize("kind", ["lifecycle_future", "lifecycle_"])
 def test_unserved_lifecycle_kind_is_unsupported_never_internal(rig, kind):
     detail = _call(rig, kind, None)
     assert detail["code"] == "unsupported"

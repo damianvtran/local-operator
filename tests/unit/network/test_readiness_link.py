@@ -194,7 +194,9 @@ def test_an_advertised_lifecycle_frame_is_answered_by_name(tmp_path: Path) -> No
         link = SimpleNamespace(device_id="d_synthetic_peer", network_id="n_" + "1" * 24, epoch=1)
         detail = broker.on_broker(
             link,
-            {"op": "net_broker", "kind": "lifecycle_announce", "req": 1},
+            # ``lifecycle_announce`` is a served kind now; an UNKNOWN lifecycle kind (a
+            # newer peer's) is what must still be answered by name.
+            {"op": "net_broker", "kind": "lifecycle_from_a_newer_peer", "req": 1},
         )["detail"]
     finally:
         broker.close()
