@@ -1,0 +1,23 @@
+{
+  "agent_identity_conflict": "agent_name and agent_id are mutually exclusive",
+  "resume_empty": "resume must be a session id or \"@latest\", not an empty string",
+  "tools_empty": "tools must name at least one tool; leave it None to stay unrestricted",
+  "yolo_approval_unreachable": "yolo=True makes an ApprovalPolicy.refuse() gate unreachable; use ApprovalPolicy.auto() (or drop yolo) instead",
+  "output_format_invalid": "output_format must be one of markdown, json, yaml, toml",
+  "output_schema_requires_format": "output_schema requires output_format",
+  "output_retries_requires_format": "output_retries requires output_format",
+  "output_retries_range": "output_retries must be between 0 and 5",
+  "world_root_empty": "world_root must be a non-empty path when set",
+  "approval_declared_tools_empty": "ApprovalPolicy.declared() must name at least one tool; use ApprovalPolicy.refuse() for an undeclared bound session",
+  "approval_tools_wrong_mode": "ApprovalPolicy.tools is only meaningful for mode 'declared', not 'refuse'",
+  "approval_callback_gate_required": "ApprovalPolicy.callback() requires a callable gate",
+  "approval_handler_wrong_mode": "ApprovalPolicy.handler is only meaningful for mode 'callback', not 'auto'",
+  "attach_output_unsupported": "output enforcement cannot be set on an attached session; the owning runtime decides",
+  "attach_fields_unsupported": "mode='attach' opens a viewer for spec.resume; it does not attach teams, profiles, tools, names, goals or approval policies — that is the owner's side. Set only resume on this spec (or use mode='own'). Offending fields: name.",
+  "spawn_output_unsupported": "spawn_session() cannot carry output enforcement (output_format); open the session with open_session(..., mode='own') and engage it afterwards",
+  "spawn_fields_unsupported": "spawn_session() cannot deliver post-open state to a new runtime child; unsupported fields on this spec: name. Open the session in-process (open_session), attach what you need, dispose, then spawn_session() the same id — resume restores the attachment; or spawn without these fields.",
+  "mode_invalid": "mode must be 'own' or 'attach', not \"opaque-'Ω-{mode}-%(x)s\"",
+  "attach_resume_required": "mode='attach' needs spec.resume: a viewer attaches to an id",
+  "spawn_model_pair_required": "spawn_session() routes hosting/model to a NEW runtime as one birth sample; state both, or neither (the child then resolves its model from the root's config).",
+  "spawn_birth_effort_pair_required": "birth_effort for a new spawned session rides the birth sample and needs the hosting/model pair alongside it; state all three, or open the session in-process (open_session) to set a birth level without a model pair."
+}

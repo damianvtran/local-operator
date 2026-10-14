@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name and agent_id are mutually exclusive",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() requires a callable gate",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() must name at least one tool; use ApprovalPolicy.refuse() for an undeclared bound session",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler is only meaningful for mode ''callback'', not {mode}",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools is only meaningful for mode ''declared'', not {mode}",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' opens a viewer for spec.resume; it does not attach teams, profiles, tools, names, goals or approval policies — that is the owner''s side. Set only resume on this spec (or use mode=''own''). Offending fields: {fields}.",
+  "wire.errors.sdk_spec.attach_output_unsupported": "output enforcement cannot be set on an attached session; the owning runtime decides",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' needs spec.resume: a viewer attaches to an id",
+  "wire.errors.sdk_spec.mode_invalid": "mode must be ''own'' or ''attach'', not {mode}",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format must be one of {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries must be between 0 and 5",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries requires output_format",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema requires output_format",
+  "wire.errors.sdk_spec.resume_empty": "resume must be a session id or \"@latest\", not an empty string",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "birth_effort for a new spawned session rides the birth sample and needs the hosting/model pair alongside it; state all three, or open the session in-process (open_session) to set a birth level without a model pair.",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() cannot deliver post-open state to a new runtime child; unsupported fields on this spec: {fields}. Open the session in-process (open_session), attach what you need, dispose, then spawn_session() the same id — resume restores the attachment; or spawn without these fields.",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() routes hosting/model to a NEW runtime as one birth sample; state both, or neither (the child then resolves its model from the root''s config).",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() cannot carry output enforcement ({fields}); open the session with open_session(..., mode=''own'') and engage it afterwards",
+  "wire.errors.sdk_spec.tools_empty": "tools must name at least one tool; leave it None to stay unrestricted",
+  "wire.errors.sdk_spec.world_root_empty": "world_root must be a non-empty path when set",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True makes an ApprovalPolicy.{approval_mode}() gate unreachable; use ApprovalPolicy.auto() (or drop yolo) instead"
+}

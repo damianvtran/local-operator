@@ -1611,7 +1611,21 @@ async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
         pytest.fail("pre-root refusal must not resolve/render locale")
 
     monkeypatch.setattr(resolve, "resolve_language", forbidden)
-    monkeypatch.setattr(messages, "render", forbidden)
+    source_render = messages.render
+    source_calls = []
+
+    def source_only(code, params, *, locale=None):
+        # Spec input diagnostics are keyed but stay English before isolation;
+        # they must not resolve configuration or construct a scoped manager.
+        assert locale == "en"
+        source_calls.append(code)
+        return source_render(code, params, locale=locale)
+
+    monkeypatch.setattr(
+        messages,
+        "render",
+        source_only if refusal in ("invalid_mode", "attach_no_resume") else forbidden,
+    )
     state = sdk4_boundary
     mode = "own"
     spec = SessionSpec()
@@ -1640,6 +1654,11 @@ async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
         async with sdk.open_session(spec, roots=state.roots, mode=mode):
             pytest.fail("pre-root refusal yielded a session")
     assert state.calls == [] and state.managers == 0 and state.reads == 0 and state.disposed == 0
+    expected_code = {
+        "invalid_mode": "wire.errors.sdk_spec.mode_invalid",
+        "attach_no_resume": "wire.errors.sdk_spec.attach_resume_required",
+    }.get(refusal)
+    assert source_calls == ([expected_code] if expected_code else [])
 
 
 def test_sdk4_import_preserves_lazy_locale_boundary():
