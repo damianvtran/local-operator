@@ -213,6 +213,7 @@ from local_operator.slash_commands import (
     unknown_flag_refusal,
 )
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
@@ -55979,7 +55980,12 @@ class OperatorApp(App[None]):
             # too — the peer-typed card this used to paint would ALSO dedup
             # the correct bridge card away on a later replay of this attach
             # (the replay skips ids in ``_live_peer_receipts``).
-            self._append_block(TeamBridgeBlock(message.body, message.sender))
+            self._append_block(
+                TeamBridgeBlock(
+                    bridge_card_text(message.details),
+                    bridge_card_sender(message.details),
+                )
+            )
         else:
             self._append_block(PeerMessageBlock(message.body, message.sender))
 

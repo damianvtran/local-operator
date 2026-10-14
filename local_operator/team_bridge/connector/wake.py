@@ -439,6 +439,7 @@ async def deliver_wake(
     session_id: str,
     config_dir: Path,
     bridge_meta: dict[str, Any] | None = None,
+    sender_display: dict[str, str] | None = None,
 ) -> str:
     """SEAM: hand the wake to the designated CoS session (lazy heavy import).
 
@@ -455,6 +456,18 @@ async def deliver_wake(
     )
 
     sender = {"account_id": owner.account_id, "source": TEAM_BRIDGE_MESSAGE_TYPE}
+    if sender_display:
+        # D1: the human card must be able to NAME the member. This dict is all
+        # the receiving row carries about the sender, and on its own it holds
+        # only THIS side's account plus the provenance kind — the member's
+        # screened name/organization is what a reader needs, and it is already
+        # validated for this carriage (``_display_fields``). Empty values are
+        # omitted rather than blanked, so a carriage without them stamps a row
+        # byte-identical to what this function built before.
+        for key, field in (("name", "sender_name"), ("organization", "organization")):
+            value = " ".join(str(sender_display.get(field) or "").split())
+            if value:
+                sender[key] = value
     if session_has_durable_history(session_id):
         # Live, or cold WITH durable history: the primitive owns delivery and
         # answers with the TYPED outcome — no exception-type or message-string
@@ -771,6 +784,7 @@ async def handle_message_available(
                 session_id=designation,
                 config_dir=config_dir,
                 bridge_meta=bridge_meta,
+                sender_display=_display_fields(item) or {},
             )
         except ValueError:
             # R1-1 (PR #2378): the send hop re-validates the locator; any

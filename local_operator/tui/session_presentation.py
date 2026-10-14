@@ -19,6 +19,7 @@ from textual.binding import Binding
 from textual.message import Message
 
 from local_operator.harness.types import ImageContent
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
@@ -1384,8 +1385,8 @@ def project_settled_rows(
                     if not hide_cross_session:
                         self._append_block(
                             TeamBridgeBlock(
-                                str(details.get("body", "")),
-                                details.get("sender") or {},
+                                bridge_card_text(details),
+                                bridge_card_sender(details),
                                 fold_width=fold_width,
                             )
                         )
