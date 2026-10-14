@@ -3496,17 +3496,24 @@ def install_into_generation(
                     origin=origin,
                     note=note,
                 )
-                # Ordinary pointer errors remain actionable, but publication
-                # starts a retention boundary BEFORE the write. Even a failed
-                # flip/rollback cannot prove no concurrent runtime observed B;
-                # its owned attempt stays protected instead of being deleted.
-                install_transaction.preserve_publication(generation, nonce)
+                # EXPOSURE BEGINS AT THE SWAP, NOT BEFORE IT (manager decision, this
+                # commit). ``preserve_publication`` starts the retention boundary, and
+                # the boundary is real only once a runtime can observe B — which is the
+                # instant ``flip_pointer`` RETURNS. Marking before the call over-retained
+                # a candidate a failed flip never exposed: the base contract (and its
+                # test) is that a flip that raises before the swap discards its own tree
+                # and leaves the previous generation alone. ``flip_pointer``'s atomic
+                # ``os.rename`` either swapped the pointer or raised before it did (its
+                # post-rename staged-unlink errors are swallowed), so a successful return
+                # IS the proof. A failure AFTER this point retains for the independent
+                # reason ``_discard_candidate`` checks first: the pointer now names B.
                 try:
                     flip_pointer(generation)
                 except OSError as exc:
                     raise UpdateError(
                         f"could not point current at {generation.name}: {exc}"
                     ) from exc
+                install_transaction.preserve_publication(generation, nonce)
             except BaseException:
                 # A pointer operation could expose B before a later refusal or
                 # rollback. Only the owned discard guard may reclaim a candidate

@@ -202,6 +202,35 @@ def test_failed_publication_never_becomes_unreferenced_delete_permission(isolate
     assert candidate.exists() and tx.attempt_protected(candidate)
 
 
+def test_a_failure_after_a_landed_flip_keeps_the_now_current_tree(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the exposure boundary: once the swap has happened, the
+    tree the pointer now names is RETAINED even if a later step of the same
+    promotion raises. ``_discard_candidate`` returns on ``current_generation() ==
+    generation`` before it reads the attempt record, so retention here does not
+    depend on the ``ever_exposed`` marker being written.
+    """
+    monkeypatch.setattr(update, "_HOST_IS_MACOS", False)
+    previous = update.install_into_generation(
+        isolated, version="0.70.6", runner=source_runner("0.70.6")
+    )
+
+    def _boom(_generation: Path) -> None:
+        raise RuntimeError("later promotion step failed")
+
+    # ``ensure_daemon_image`` runs AFTER the flip and outside its try/except, so a
+    # raise here exercises exactly "flip landed, a later step failed".
+    monkeypatch.setattr(update, "ensure_daemon_image", _boom)
+    with pytest.raises(RuntimeError, match="later promotion step failed"):
+        update.install_into_generation(isolated, version="0.70.7", runner=source_runner("0.70.7"))
+
+    current = update.current_generation()
+    assert current is not None and current != previous.resolve()
+    # The tree the pointer names is still on disk — retention, not deletion.
+    assert current.is_dir()
+
+
 def test_duplicate_target_refuses_before_second_build(isolated: Path) -> None:
     generation, nonce, _baseline = update._register_candidate("A", "0.70.7", "exact")
     with pytest.raises(update.UpdateError, match="another candidate"):
