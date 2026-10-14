@@ -4294,7 +4294,9 @@ async def _drain_inbox_into(handle: object) -> int:
                         # malformed block is dropped here (the row still
                         # delivers as a plain peer message) so no downstream
                         # hop can be asked to trust it.
-                        from local_operator.harness.message_types import validate_bridge_meta
+                        from local_operator.harness.message_types import (
+                            validate_bridge_meta,
+                        )
 
                         try:
                             candidate = validate_bridge_meta(candidate)

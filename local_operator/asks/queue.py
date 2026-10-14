@@ -319,9 +319,9 @@ class AskQueue:
         # ``a-<hex>`` namespace — ``parse_mirror_request_id`` refuses anything
         # else — while staying DETERMINISTIC, so a retry/dedupe resolves to
         # the same id.
-        ask_id = "a-" + hashlib.sha1(
-            ("bridge-idem:" + issuance_key).encode("utf-8")
-        ).hexdigest()[:16]
+        ask_id = (
+            "a-" + hashlib.sha1(("bridge-idem:" + issuance_key).encode("utf-8")).hexdigest()[:16]
+        )
         timeout_s, bounds_error = policy.parse_timeout_param(timeout)
         if bounds_error is not None:
             return {"ok": False, "error": bounds_error}
@@ -523,8 +523,7 @@ class AskQueue:
             # dispatcher consumes it, so an answer without one still never
             # reaches the model.
             if not (
-                str(record.get("status") or "")
-                in (store.STATUS_DECLINED, store.STATUS_DISMISSED)
+                str(record.get("status") or "") in (store.STATUS_DECLINED, store.STATUS_DISMISSED)
                 and self._is_bridge_ask_record(record)
             ):
                 return {"ok": False, "error": refusal}
@@ -1341,10 +1340,7 @@ class AskQueue:
             candidate = str(question.get("question_id") or "")
             if not candidate:
                 continue
-            values = [
-                str(value)
-                for value in ((answers.get(str(question.get("id") or "")) or ()))
-            ]
+            values = [str(value) for value in ((answers.get(str(question.get("id") or "")) or ()))]
             if len(values) != 1:
                 continue
             picks.append((candidate, values[0].strip().lower()))
@@ -1587,9 +1583,7 @@ class AskQueue:
         # from the append-time refresh (which re-takes the verdict), and a
         # record that cannot show an admitted decision must not be able to earn
         # the marker by merely looking like a bridge row.
-        bridge_proven = self._is_bridge_ask_record(
-            record
-        ) and self._bridge_answer_is_proven(record)
+        bridge_proven = self._is_bridge_ask_record(record) and self._bridge_answer_is_proven(record)
         if images:
             # THE IMAGES RIDE AS A TOP-LEVEL ``content`` EXTRA, not inside
             # ``details`` -- measured, not assumed (design §1.3, spikes A and B):
@@ -1641,11 +1635,7 @@ class AskQueue:
                 # is itself writable. The AUTHORITY stays the consumed grant; an
                 # absent marker means "not written by this path" and is
                 # non-authorizing on its own.
-                **(
-                    {"bridge_provenance": "authority_grant"}
-                    if bridge_proven
-                    else {}
-                ),
+                **({"bridge_provenance": "authority_grant"} if bridge_proven else {}),
                 # REFS for the cards (TUI, desktop, phone): thumbnails come from
                 # the digest route, never from bytes on the row. Absent for a
                 # text-only answer so the row is unchanged for every existing ask.
@@ -2116,9 +2106,7 @@ def _as_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _ask_cap_refusal(
-    rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: bool
-) -> str:
+def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: bool) -> str:
     """The typed cap refusal for one readiness window, split by custody (TB-13).
 
     OPEN_ASK_CAP is the MODEL's asking capacity — "free for the model and

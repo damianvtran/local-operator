@@ -15,23 +15,21 @@ run as production does. The contract pinned:
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from local_operator.team_bridge import authority as fence_mod
-from local_operator.team_bridge import pull as pull_mod
-from local_operator.team_bridge.ask_issuance import AskIssuance
-from local_operator.team_bridge.store import Store
-from local_operator.team_bridge.store import OwnerReceipt
-from local_operator.team_bridge.types import OwnerSnapshot
+from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
 from local_operator.harness.message_types import (
-    TEAM_BRIDGE_MESSAGE_TYPE,
     display_context_digest as canonical_display_digest,
 )
 from local_operator.session.session import Session
+from local_operator.team_bridge import authority as fence_mod
+from local_operator.team_bridge import pull as pull_mod
+from local_operator.team_bridge.ask_issuance import AskIssuance
+from local_operator.team_bridge.store import OwnerReceipt, Store
+from local_operator.team_bridge.types import OwnerSnapshot
 
 pytestmark = pytest.mark.asyncio
 
@@ -167,9 +165,7 @@ def _pending_row(tmp_path: Path, *, legacy: bool = False) -> None:
     ledger = AskIssuance(tmp_path)
     # ATOMIC: the trusted local row id rides the claim's own INSERT — there is
     # no separate setter, and a NEW row can never be committed unmapped.
-    ledger.claim(
-        OWNER, MESSAGE_ID, {"v": 1}, delivery_ref="dref_standing", local_row_id=PEER_ID
-    )
+    ledger.claim(OWNER, MESSAGE_ID, {"v": 1}, delivery_ref="dref_standing", local_row_id=PEER_ID)
     if legacy:
         # A CONSCIOUS old-release row: the column did not exist then, so the
         # fixture clears it with raw SQL instead of asking the new API for an
@@ -284,9 +280,7 @@ async def test_off_after_access_is_still_resolved_blocks_the_read(
     # Fence order per row: (1) pre-fence, (2) pre-access fence, (3) the
     # post-access fence, (4) the post-GET fence. An off switch landing after
     # the access await but before the GET settles must produce ZERO reads.
-    reads, row = await _drive(
-        tmp_path, monkeypatch, fence_results=["", "", "bridge_off"]
-    )
+    reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", "", "bridge_off"])
     assert len(_ACCESS_CALLS) == 1
     assert reads == []
     assert row["state"] == "held" and row["reason"] == "standing_fence"
@@ -340,9 +334,7 @@ async def test_offline_transport_holds_without_ask(
 async def test_mismatched_standing_fields_hold_without_ask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: dict, expected_reason: str
 ) -> None:
-    reads, row = await _drive(
-        tmp_path, monkeypatch, fence_results=["", ""], ref=_ref(**overrides)
-    )
+    reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", ""], ref=_ref(**overrides))
     assert reads == [1]
     assert row["state"] == "held" and row["reason"] == expected_reason
 
@@ -354,9 +346,7 @@ async def test_missing_durable_context_holds_without_grant(
     # check but has NO sanctioned durable row must HOLD — and a HOLD is
     # recoverable, never an unrecoverable mark and never a current-scope
     # backfill.
-    reads, row = await _drive(
-        tmp_path, monkeypatch, fence_results=["", "", "", ""], seed=False
-    )
+    reads, row = await _drive(tmp_path, monkeypatch, fence_results=["", "", "", ""], seed=False)
     assert reads == [1]
     assert row["state"] == "held" and row["reason"] == "standing_no_context"
     assert _LAST_GRANTS == {}

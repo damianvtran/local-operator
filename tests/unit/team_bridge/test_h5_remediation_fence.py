@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import store as store_mod
 from local_operator.team_bridge.authority import (
     authority_fence,
@@ -97,9 +96,7 @@ async def test_torn_config_read_is_not_still_enabled(
 ) -> None:
     # read_config_values returns None for a file it cannot parse RIGHT NOW:
     # the fence must fail closed rather than treat a torn read as "unset".
-    monkeypatch.setattr(
-        "local_operator.config.read_config_values", lambda config_dir: None
-    )
+    monkeypatch.setattr("local_operator.config.read_config_values", lambda config_dir: None)
     refusal = authority_fence(_runtime())
     assert refusal is not None and refusal["code"] == "feature_off"
 
@@ -124,9 +121,7 @@ async def test_empty_generation_is_non_authorizing(
 async def test_dead_generation_is_owner_changed(
     _enabled: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        store_mod, "Store", lambda config_dir: _Store(owner=_owner(), live=False)
-    )
+    monkeypatch.setattr(store_mod, "Store", lambda config_dir: _Store(owner=_owner(), live=False))
     refusal = authority_fence(_runtime())
     assert refusal is not None and refusal["code"] == "owner_changed"
 
@@ -134,9 +129,7 @@ async def test_dead_generation_is_owner_changed(
 async def test_consent_loss_is_typed_consent_revoked(
     _enabled: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        store_mod, "Store", lambda config_dir: _Store(owner=_owner(), consent=None)
-    )
+    monkeypatch.setattr(store_mod, "Store", lambda config_dir: _Store(owner=_owner(), consent=None))
     refusal = authority_fence(_runtime())
     assert refusal is not None and refusal["code"] == "consent_revoked"
 

@@ -982,9 +982,7 @@ def _prune_bridge_grants(now: float) -> None:
             _BRIDGE_DECIDE_GRANTS_CONSUMED.pop(key, None)
 
 
-def mint_bridge_decide_grant(
-    *, session_id: str, ask_id: str, question_id: str, word: str
-) -> None:
+def mint_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str, word: str) -> None:
     """Record that THIS runtime admitted a human decision for this ask.
 
     TB-02 NIT: a CONSUMED grant is EVIDENCE — it is what the supersede test and
@@ -1046,9 +1044,7 @@ def consume_bridge_decide_grant(
     return True
 
 
-def bridge_decide_grant_seen(
-    *, session_id: str, ask_id: str, question_id: str, word: str
-) -> bool:
+def bridge_decide_grant_seen(*, session_id: str, ask_id: str, question_id: str, word: str) -> bool:
     """Whether this exact decision was EVER admitted (live or spent)."""
     import time
 
@@ -1060,8 +1056,7 @@ def bridge_decide_grant_seen(
     if entry is not None and str(entry.get("word")) == wanted:
         return True
     return any(
-        str(spent.get("word")) == wanted
-        for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
+        str(spent.get("word")) == wanted for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
     )
 
 
@@ -1086,8 +1081,7 @@ def bridge_decide_grant_committed(
     wanted = str(word).strip().lower()
     key = (str(session_id), str(ask_id), str(question_id))
     return any(
-        str(spent.get("word")) == wanted
-        for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
+        str(spent.get("word")) == wanted for spent in _BRIDGE_DECIDE_GRANTS_CONSUMED.get(key, ())
     )
 
 

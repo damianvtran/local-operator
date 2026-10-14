@@ -44,9 +44,7 @@ BODY_HASH = "9f2a" * 16
 
 def _enrolled_store(tmp_path) -> Store:
     store = Store(tmp_path)
-    store.commit_enrollment(
-        OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1"
-    )
+    store.commit_enrollment(OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1")
     return store
 
 
@@ -160,7 +158,7 @@ def _request_item(text: str) -> dict:
     "text,label",
     [
         ("y" * 5000, "ascii"),
-        (("\"" + "\n") * 600, "quotes-newlines"),
+        (('"' + "\n") * 600, "quotes-newlines"),
         ("é" * 1200, "accented"),
         ("中" * 400, "cjk"),
     ],

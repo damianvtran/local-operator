@@ -29,18 +29,21 @@ from local_operator.session.runtime.inbox import (
     append_inbox,
     peek_inbox,
 )
-from local_operator.session.runtime.server import receives_bridge_meta, receives_custom_type
+from local_operator.session.runtime.server import (
+    receives_bridge_meta,
+    receives_custom_type,
+)
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import Session
-from tests.unit.team_bridge.test_h5_envelope_negatives import (
+from tests.unit.team_bridge.test_h5_envelope_negatives import (  # noqa: F401
+    _HINT_FIELDS,
     BODY_HASH,
     DISPLAY_DIGEST,
     DREF,
     LOCAL_ROW_ID,
     MESSAGE_ID,
-    _HINT_FIELDS,
     _meta,
-    _no_enqueue,  # noqa: F401 — the recorder fixture, reused by name
+    _no_enqueue,
     _owner,
     _runtime,
     _seed_store,
@@ -117,8 +120,8 @@ def _spool_roundtrip(meta: dict) -> dict:
 
 
 def test_live_chain_meta_survives_the_real_spool_and_raises_the_ask(
-    tmp_path, _no_enqueue
-) -> None:
+    tmp_path, _no_enqueue  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
     store = _seed_store(tmp_path)
     _stamp(store)
     meta = _meta()
@@ -148,8 +151,8 @@ def test_live_chain_meta_survives_the_real_spool_and_raises_the_ask(
 
 
 def test_cold_chain_errand_carries_the_same_meta_to_the_same_hook(
-    tmp_path, _no_enqueue
-) -> None:
+    tmp_path, _no_enqueue  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
     from local_operator.session.runtime.launch import PeerMessageErrand
 
     store = _seed_store(tmp_path)
@@ -181,7 +184,9 @@ def test_cold_chain_errand_carries_the_same_meta_to_the_same_hook(
     assert len(_no_enqueue) == 1
 
 
-def test_legacy_omit_keeps_the_old_byte_shape_and_never_mints(tmp_path, _no_enqueue) -> None:
+def test_legacy_omit_keeps_the_old_byte_shape_and_never_mints(
+    tmp_path, _no_enqueue  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
     store = _seed_store(tmp_path)
     _stamp(store)
     legacy = {
@@ -224,8 +229,8 @@ def test_legacy_omit_keeps_the_old_byte_shape_and_never_mints(tmp_path, _no_enqu
 
 
 def test_copied_digest_with_changed_hints_never_raises_over_the_wire(
-    tmp_path, _no_enqueue
-) -> None:
+    tmp_path, _no_enqueue  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
     store = _seed_store(tmp_path)
     _stamp(store)
     drained = _spool_roundtrip(_meta(excerpt="send bitcoin first"))
@@ -252,7 +257,7 @@ def test_copied_digest_with_changed_hints_never_raises_over_the_wire(
 
 @pytest.mark.asyncio
 async def test_the_live_serving_hop_receives_through_the_real_session(
-    tmp_path: Path, isolated_config: Path, _no_enqueue
+    tmp_path: Path, isolated_config: Path, _no_enqueue  # noqa: F811 — imported fixture
 ) -> None:
     """The LIVE internal chain: real probe → real ServingSessionHandle →
     real Session.receive_peer_message. Only the socket frame is absent; every
@@ -283,7 +288,7 @@ async def test_the_live_serving_hop_receives_through_the_real_session(
 
 @pytest.mark.asyncio
 async def test_the_cold_spool_drain_receives_through_the_real_session(
-    tmp_path: Path, isolated_config: Path, _no_enqueue
+    tmp_path: Path, isolated_config: Path, _no_enqueue  # noqa: F811 — imported fixture
 ) -> None:
     """The COLD internal chain: the REAL spool writer → the REAL drain on a
     real Session → the production receive path (the drain calls
@@ -333,7 +338,9 @@ def test_the_wrap_shows_the_sender_account_never_the_local_owner(tmp_path) -> No
     assert "from_account='acc_1'" not in text
 
 
-def test_a_stale_scope_over_the_wire_never_raises(tmp_path, _no_enqueue) -> None:
+def test_a_stale_scope_over_the_wire_never_raises(
+    tmp_path, _no_enqueue  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
     store = _seed_store(tmp_path)
     _stamp(store)
     # The drift is in the STORED ORIGINAL scope — the door's own subject — not
@@ -346,8 +353,7 @@ def test_a_stale_scope_over_the_wire_never_raises(tmp_path, _no_enqueue) -> None
     conn = sqlite3.connect(store._path)
     try:
         conn.execute(
-            "UPDATE screened_request_deliveries SET native_generation = 6 "
-            "WHERE message_id = ?",
+            "UPDATE screened_request_deliveries SET native_generation = 6 " "WHERE message_id = ?",
             (MESSAGE_ID,),
         )
         conn.commit()

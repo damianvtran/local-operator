@@ -133,9 +133,7 @@ async def test_attempt_and_retry_refuse_settled_states_with_zero_posts(
 
 
 @pytest.mark.parametrize("state", ["pending", "signin", "sent", "refused"])
-async def test_duplicate_consumption_in_every_state_is_not_created(
-    tmp_path, state: str
-) -> None:
+async def test_duplicate_consumption_in_every_state_is_not_created(tmp_path, state: str) -> None:
     intents = DecideIntents(tmp_path)
     runtime = _runtime(tmp_path)
     intent, created = _record(intents, runtime)
@@ -186,9 +184,7 @@ async def test_settlement_interleavings_are_terminal_safe(
 
 async def test_tool_has_no_decide_or_retry_authority(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
-    monkeypatch.setattr(
-        host_mod, "admission_refusal", lambda runtime, *, is_read=False: None
-    )
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     runtime = BridgeRuntime(
         client=object(),
         config_dir=tmp_path,
@@ -203,9 +199,7 @@ async def test_tool_has_no_decide_or_retry_authority(tmp_path, monkeypatch) -> N
     assert retried["ok"] is False and retried["code"] == "invalid_request"
 
 
-async def test_take_up_read_passes_gates_without_minting_a_decide(
-    tmp_path, monkeypatch
-) -> None:
+async def test_take_up_read_passes_gates_without_minting_a_decide(tmp_path, monkeypatch) -> None:
     posted: list[object] = []
 
     async def _fake_decide(client, decision, **kwargs):
@@ -214,9 +208,7 @@ async def test_take_up_read_passes_gates_without_minting_a_decide(
 
     monkeypatch.setattr(decide_mod, "decide_from_human_answer", _fake_decide)
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
-    monkeypatch.setattr(
-        host_mod, "admission_refusal", lambda runtime, *, is_read=False: None
-    )
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     text = "the screened body"
 
     class _Client:

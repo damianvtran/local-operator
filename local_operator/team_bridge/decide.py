@@ -23,13 +23,13 @@ client), results are per-item.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from .client import TeamBridgeClient
-from .client import _require_ask_ref  # the SAME validator the decide path uses
 from .asks_bridge import bridge_ask_ref
+from .client import _require_ask_ref  # the SAME validator the decide path uses
+from .client import TeamBridgeClient
 
 #: The only two words that may become a server decision (§10.3):
 #: approve → "approved"; deny → "denied".
@@ -77,9 +77,7 @@ def human_decision(*, message_id: str, ask_id: str, word: str) -> HumanDecision:
             "only Approve/Deny drive /decide"
         )
     if normalized not in HUMAN_DECISION_WORDS:
-        raise NotAHumanDecision(
-            f"not a human decision word: {word!r} (closed set: approve | deny)"
-        )
+        raise NotAHumanDecision(f"not a human decision word: {word!r} (closed set: approve | deny)")
     if not str(message_id or "").strip() or not str(ask_id or "").strip():
         raise NotAHumanDecision("a human decision names both the message id and the ask id")
     return HumanDecision(message_id=str(message_id), ask_id=str(ask_id), word=normalized)

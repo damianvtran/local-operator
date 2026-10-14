@@ -16,7 +16,8 @@ import json
 
 from local_operator.asks.queue import AskQueue
 from local_operator.team_bridge.asks_bridge import bridge_request_question
-from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
+from tests.unit.asks.test_queue import BASE
+from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
 MESSAGE_ID = "bmsg_1"
 SCOPE = {
@@ -50,14 +51,10 @@ def _question() -> dict:
 
 def test_same_key_and_fingerprint_return_the_same_ask(tmp_path) -> None:
     queue = _queue(tmp_path)
-    first = queue.enqueue_idempotent(
-        issuance_key="iss-1", fingerprint=FP, questions=[_question()]
-    )
+    first = queue.enqueue_idempotent(issuance_key="iss-1", fingerprint=FP, questions=[_question()])
     assert first["ok"] is True
     ask_id = str(first["details"]["ask_id"])
-    second = queue.enqueue_idempotent(
-        issuance_key="iss-1", fingerprint=FP, questions=[_question()]
-    )
+    second = queue.enqueue_idempotent(issuance_key="iss-1", fingerprint=FP, questions=[_question()])
     assert second["ok"] is True
     assert str(second["details"]["ask_id"]) == ask_id
     assert second["details"]["status"] == "existing"
@@ -65,24 +62,18 @@ def test_same_key_and_fingerprint_return_the_same_ask(tmp_path) -> None:
 
 def test_the_same_key_after_consumption_still_returns_the_same_ask(tmp_path) -> None:
     queue = _queue(tmp_path)
-    first = queue.enqueue_idempotent(
-        issuance_key="iss-1", fingerprint=FP, questions=[_question()]
-    )
+    first = queue.enqueue_idempotent(issuance_key="iss-1", fingerprint=FP, questions=[_question()])
     ask_id = str(first["details"]["ask_id"])
     answered = queue.respond(ask_id, {f"bridge-{MESSAGE_ID}": ["approve"]}, by="human")
     assert answered.get("ok") is True
-    again = queue.enqueue_idempotent(
-        issuance_key="iss-1", fingerprint=FP, questions=[_question()]
-    )
+    again = queue.enqueue_idempotent(issuance_key="iss-1", fingerprint=FP, questions=[_question()])
     assert again["ok"] is True
     assert str(again["details"]["ask_id"]) == ask_id
 
 
 def test_a_mismatched_fingerprint_refuses(tmp_path) -> None:
     queue = _queue(tmp_path)
-    queue.enqueue_idempotent(
-        issuance_key="iss-1", fingerprint=FP, questions=[_question()]
-    )
+    queue.enqueue_idempotent(issuance_key="iss-1", fingerprint=FP, questions=[_question()])
     other = hashlib.sha256(b"a different original block").hexdigest()
     refused = queue.enqueue_idempotent(
         issuance_key="iss-1", fingerprint=other, questions=[_question()]
@@ -95,9 +86,7 @@ def test_the_generic_enqueue_api_is_unchanged(tmp_path) -> None:
     queue = _queue(tmp_path)
     generic = queue.enqueue([_question()], None)
     assert generic["ok"] is True
-    keyed = queue.enqueue_idempotent(
-        issuance_key="iss-2", fingerprint=FP, questions=[_question()]
-    )
+    keyed = queue.enqueue_idempotent(issuance_key="iss-2", fingerprint=FP, questions=[_question()])
     assert keyed["ok"] is True
     assert str(keyed["details"]["ask_id"]) != str(generic["details"]["ask_id"])
 
@@ -121,17 +110,13 @@ def test_the_derived_id_is_in_the_store_namespace_and_deterministic(tmp_path) ->
     from local_operator.asks import store as asks_store
 
     queue = _queue(tmp_path)
-    first = queue.enqueue_idempotent(
-        issuance_key="iss-ns", fingerprint=FP, questions=[_question()]
-    )
+    first = queue.enqueue_idempotent(issuance_key="iss-ns", fingerprint=FP, questions=[_question()])
     assert first["ok"] is True
     ask_id = str(first["details"]["ask_id"])
     assert ask_id.startswith("a-")
     mirrored = f"{ask_id}{asks_store.MIRROR_REQUEST_SEPARATOR}1"
     assert asks_store.parse_mirror_request_id(mirrored) == (ask_id, 1)
-    same = queue.enqueue_idempotent(
-        issuance_key="iss-ns", fingerprint=FP, questions=[_question()]
-    )
+    same = queue.enqueue_idempotent(issuance_key="iss-ns", fingerprint=FP, questions=[_question()])
     assert str(same["details"]["ask_id"]) == ask_id
 
 

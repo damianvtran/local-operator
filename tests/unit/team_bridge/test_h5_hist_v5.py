@@ -225,8 +225,19 @@ def _baseline(tmp_path: Path) -> Path:
             "INSERT INTO enrollments (owner_key, credential_id, account_id, tenant_id, "
             "endpoint_id, canonical_base_url, enrollment_generation, consent_version, "
             "consent_ref, designated_session, state) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (KEY, 7, "acc_1", "ten_1", "ep_1", "https://hub.example", 3,
-             "consent-v1", "ref-1", "s1", "committed"),
+            (
+                KEY,
+                7,
+                "acc_1",
+                "ten_1",
+                "ep_1",
+                "https://hub.example",
+                3,
+                "consent-v1",
+                "ref-1",
+                "s1",
+                "committed",
+            ),
         )
         conn.execute(
             "INSERT INTO claims (owner_key, message_id, session_id, token, generation, "
@@ -237,16 +248,42 @@ def _baseline(tmp_path: Path) -> Path:
             "INSERT INTO ack_intents (intent_id, owner_key, message_id, target, client_ref, "
             "verdict, model, prompt_version, template_sha256, body_sha256, categories, "
             "state, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("intent-1", KEY, "bmsg_1", "read", "cref-1", "allow", "model-a", "prompt-v1",
-             "aa11" * 16, "9f2a" * 16, '["spam"]', "confirmed", NOW),
+            (
+                "intent-1",
+                KEY,
+                "bmsg_1",
+                "read",
+                "cref-1",
+                "allow",
+                "model-a",
+                "prompt-v1",
+                "aa11" * 16,
+                "9f2a" * 16,
+                '["spam"]',
+                "confirmed",
+                NOW,
+            ),
         )
         conn.execute(
             "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
             "template_sha256, prompt_version, model, verdict, categories, envelope_digest, "
             "admission_revision, policy_epoch, creator_generation, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (KEY, "bmsg_1", "9f2a" * 16, "aa11" * 16, "prompt-v1", "model-a", "allow",
-             '["spam"]', "bb22" * 16, "rev-1", 3, 3, NOW),
+            (
+                KEY,
+                "bmsg_1",
+                "9f2a" * 16,
+                "aa11" * 16,
+                "prompt-v1",
+                "model-a",
+                "allow",
+                '["spam"]',
+                "bb22" * 16,
+                "rev-1",
+                3,
+                3,
+                NOW,
+            ),
         )
         conn.execute(
             "INSERT INTO screening_policy (owner_key, version, template_sha256, default_model, "
@@ -300,9 +337,7 @@ def _snapshot(path: Path) -> dict[str, list[tuple]]:
 def _version(path: Path) -> str:
     conn = sqlite3.connect(path)
     try:
-        row = conn.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
         return str(row[0]) if row else ""
     finally:
         conn.close()
