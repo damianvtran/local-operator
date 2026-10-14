@@ -206,6 +206,8 @@ def _record(call, **fields):
 def moveTo(x, y, duration=0.0):
     _record("moveTo", x=x, y=y, duration=duration)
     failure = os.environ.get("DRAG_FAILURE")
+    if failure == "prepress":
+        raise RuntimeError("approach move refused")
     if failure == "motion" and duration:
         raise RuntimeError("motion refused")
     if failure == "cancel" and duration:
@@ -353,6 +355,26 @@ def test_drag_failure_still_releases_under_a_restored_failsafe(
     assert calls[-1]["call"] == "probe"
     assert calls[-1]["failsafe"] is True
     assert calls[-1]["held"] is None
+
+
+def test_drag_prepress_failure_presses_nothing_and_leaves_failsafe_untouched(
+    drag_guest: dict[str, str], tmp_path: Path
+) -> None:
+    """The approach move can fail before any press: say so truthfully.
+
+    No mouseDown was attempted, so there is nothing to release and the
+    FAILSAFE switch must never be written; the message must not claim a press
+    or a release that did not happen.
+    """
+
+    drag_guest["DRAG_FAILURE"] = "prepress"
+    result = run_source(_drag_source_with_probe(), drag_guest)
+    assert result.returncode != 0
+    assert "before the press" in result.stderr
+    assert "after the press" not in result.stderr
+    calls = _drag_calls(tmp_path)
+    assert [call["call"] for call in calls] == ["moveTo", "probe"]
+    assert all(call["failsafe"] is True for call in calls)
 
 
 def test_drag_release_failure_is_reported_not_laundered(

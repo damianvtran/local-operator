@@ -230,14 +230,20 @@ def _drag_x11(
                 # would either leave a held button or permanently disarm the
                 # movement failsafe.
                 try:
-                    pyautogui.FAILSAFE = False
+                    # setattr: pyautogui is a MODULE, and the failsafe switch
+                    # IS a module attribute (pyautogui reads pyautogui.FAILSAFE
+                    # on every move). A plain assignment trips the type checker
+                    # on ModuleType, and suppressing that diagnostic would also
+                    # hide a misspelled name; setattr performs the documented
+                    # switch without either.
+                    setattr(pyautogui, "FAILSAFE", False)
                     try:
                         pyautogui.mouseUp(button=button)
                         released = True
                     except Exception as exc:
                         release_failure = exc
                 finally:
-                    pyautogui.FAILSAFE = original_failsafe
+                    setattr(pyautogui, "FAILSAFE", original_failsafe)
             except Exception as exc:
                 if release_failure is None:
                     release_failure = exc
@@ -249,6 +255,12 @@ def _drag_x11(
             "the guest may still be holding a mouse button"
         ) from (failure or release_failure)
     if failure is not None:
+        if not press_attempted:
+            # The failing step was the approach move: no button was ever
+            # pressed, nothing was released, and the failsafe switch was never
+            # touched. Saying "after the press" here would be a false
+            # statement about the guest's input state.
+            raise RuntimeError("drag failed before the press; no button was pressed") from failure
         raise RuntimeError("drag failed after the press; the button was released") from failure
 
 
