@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,6 +125,12 @@ def test_default_page_stats_only_the_page(big, monkeypatch: pytest.MonkeyPatch) 
     assert len(stats) == 200, "recent/name/kind sorts never stat the candidate set"
     stats.clear()
     service.forget_stats()
+    # This is a structural count assertion, not a native filesystem speed requirement.
+    # Freeze only the service's clock: CI contention or a slow mount may legitimately
+    # exhaust the 0.75 s production budget. The separate expiry test covers that branch.
+    monkeypatch.setattr(
+        service, "time", SimpleNamespace(monotonic=lambda: 0.0, time=time.time, sleep=time.sleep)
+    )
     answer = service.list_files(
         config, family, service.Query(sort="modified", limit=200), budget_s=None, home=HOME
     )
@@ -141,3 +148,49 @@ def test_incremental_append_reads_only_the_appended_bytes(big) -> None:
     second = ledger.refresh(config, SESSION, session_dir, cwd=CWD, home=HOME)
     assert second is not None and len(second.scan.records) == RECORDS + 1
     assert second.sig["offset"] - first.sig["offset"] < 2_000, "two small rows, not a rescan"
+
+
+def test_stat_budget_expiry_reports_partial_sort_and_still_stats_the_page(big, monkeypatch):
+    """Deadline exhaustion is a supported result, independently of native I/O/host load.
+
+    Advance a module-local clock per real stat: precisely four candidates fit the default
+    0.75 s budget. A false stat_complete is honest, not a test failure; page rows must still
+    receive their stats and no further candidate-wide work may be hidden behind fallback.
+    """
+    config, session_dir, _ = big
+    clock = [0.0]
+    stats: list[str] = []
+    sort_stats: list[int] = []
+    real_stat, real_sort = service.stat_path, service._sort
+    monkeypatch.setattr(
+        service,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time, sleep=time.sleep),
+    )
+
+    def controlled_stat(path, now=None):
+        stats.append(path)
+        clock[0] += 0.25
+        return real_stat(path, now)
+
+    def counted_sort(entries, query):
+        result = real_sort(entries, query)
+        sort_stats.append(len(stats))
+        return result
+
+    monkeypatch.setattr(service, "stat_path", controlled_stat)
+    monkeypatch.setattr(service, "_sort", counted_sort)
+    answer = service.list_files(
+        config,
+        service.Family(SESSION, session_dir),
+        service.Query(sort="modified", limit=200),
+        budget_s=None,
+        home=HOME,
+    )
+    assert answer["stat_complete"] is False
+    assert sort_stats == [4], "deadline must stop candidate stat work at the controlled boundary"
+    assert 200 <= len(stats) <= 204, "only the four candidates plus page rows are statted"
+    assert answer["total"] == RECORDS and len(answer["rows"]) == 200 and answer["next_cursor"]
+    assert all(
+        row["exists"] is False for row in answer["rows"]
+    ), "page stats still refresh missing files"
