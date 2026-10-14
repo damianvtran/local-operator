@@ -13158,6 +13158,32 @@ class Session:
             return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
+    async def _silent_end_is_a_failure(self) -> bool:
+        """Whether THIS run must not end silently -- the loop's recovery bit.
+
+        The quiet-end rule, INVERTED (see ``_quiet_end_refusal`` above), read
+        at the one place a turn's config is built: a run whose words someone
+        is waiting on -- a person asked or awaits, a notify wake -- is a run
+        where a wordless stop is a LOST ANSWER, and the loop recovers it with
+        one bounded re-ask (``LoopConfig.recover_wordless_stop``). Every
+        internal arrival -- peer, hub_message, job_result, session_state,
+        catch-up, a non-notify wake -- may end quietly, and the bare stop
+        stays its legitimate ending: those runs are exactly where an extra
+        provider call would be noise (the session cells that pin delivery,
+        wake and latch request counts measure this half).
+
+        The env kill switch is checked FIRST and turns the recovery off
+        entirely: it exists so the pre-quiet-turn world (where a plain stop
+        WAS the quiet path) needs no config edit to restore, and re-opening
+        an ending the switch re-legitimized would make one switch change two
+        behaviours.
+        """
+        from local_operator.tools import builtin
+
+        if not builtin.no_reply_enabled():
+            return False
+        return (await self._quiet_end_refusal()) is not None
+
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -14939,6 +14965,14 @@ class Session:
                 post_tool_hooks=self._run_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
+                # Whether a WORDLESS stop in this run is a failure the loop
+                # must recover: the quiet-end rule inverted, so a person-asked
+                # or notify run gets one bounded re-ask while an internal
+                # arrival (delivery, catch-up, a non-notify wake) keeps the
+                # bare-stop ending. Read here -- the one place a turn's config
+                # is built -- for the same reason the contract is: every
+                # consumer of this session gets the one answer.
+                recover_wordless_stop=await self._silent_end_is_a_failure(),
                 # This session's output contract (or None). Read here, at the one
                 # place a turn's config is built, so every consumer of this
                 # session — exec foreground, the detached worker, an SDK

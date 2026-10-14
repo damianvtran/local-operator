@@ -21,6 +21,7 @@ from local_operator.harness.loop import (
     MAX_CONNECTIVITY_CONTINUATIONS,
     STEERING_INTERRUPT_POLL_S,
     TRUNCATED_RESULT_TEXT,
+    WORDLESS_STOP_RECOVERY_PROMPT,
     AgentLoop,
     LoopContext,
     _consume_claim,
@@ -30,6 +31,7 @@ from local_operator.harness.loop import (
 from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.rows import (
     assistant_stop_notice,
+    harness_chrome_prompts,
     is_harness_chrome,
     output_limit_call_receipt,
 )
@@ -6707,6 +6709,200 @@ async def test_nameless_call_recovery_is_bounded():
     assert all("re-asking" in text for text in drops[:2]), drops
     assert drops[-1].endswith("no further re-asks; ending the turn"), drops[-1]
     assert len(stream.requests) == 3
+
+
+# ---------------------------------------------------------------------------
+# Wordless stops (OSWorld episode 2026-10-14): a blank terminal turn is re-asked
+# ---------------------------------------------------------------------------
+
+
+def _wordless_stop_turn() -> list[StreamEvent]:
+    """One turn in the measured wordless-stop shape: blank text, no calls.
+
+    The live terminal message carried a bare newline of text and no tool calls
+    (OSWorld arm 325633a, episode ep-ccea28e40a23) -- nothing on any channel;
+    the episode ended ``agent_stop``/``empty-message``.
+    """
+    return [StreamTextDelta(delta="\n\n"), StreamEndEvent(stop_reason="stop")]
+
+
+@pytest.mark.asyncio
+async def test_a_wordless_stop_gets_one_re_ask_and_the_turn_continues():
+    """When the session bit says silence is a failure, the blank terminal turn
+    must not end the run: the loop knows
+    the one fact the model cannot see -- its message arrived empty -- and
+    re-asks ONCE, after which the turn continues normally. The empty assistant
+    row must never reach the wire: it is illegal on the Anthropic wire, and it
+    teaches the re-ask to repeat it."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            _wordless_stop_turn(),
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"ok"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
+        events.append(event)
+
+    # The run continued: the model's next action executed, and the run ended
+    # on its own terms.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None and end.aborted is False
+    assert executed == ["echo"]
+    # The model was told why it was re-asked, in the harness's own words.
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("arrived empty" in text for text in notices), notices
+    # The re-ask reached the next model call ...
+    reasked = any(
+        isinstance(message, Message)
+        and message.role == "user"
+        and message.text.strip() == WORDLESS_STOP_RECOVERY_PROMPT
+        for message in stream.requests[1].messages
+    )
+    assert reasked, "the recovery message must reach the next model call"
+    # ... and it is persisted, so a resumed session can see why the
+    # conversation continued.
+    assert any(
+        isinstance(message, Message)
+        and message.role == "user"
+        and message.text.strip() == WORDLESS_STOP_RECOVERY_PROMPT
+        for message in end.messages
+    )
+    # No request ever carried the empty assistant row.
+    for request in stream.requests:
+        for message in request.messages:
+            assert not (
+                isinstance(message, Message)
+                and message.role == "assistant"
+                and not message.text.strip()
+                and not message.tool_calls
+            ), "the empty assistant turn must be removed from the wire history"
+
+
+@pytest.mark.asyncio
+async def test_wordless_stop_recovery_is_bounded():
+    """One re-ask, not a relay: a second wordless stop in the run is the
+    model's answer and ends the turn the ordinary way -- no third request."""
+    stream = ScriptedStream(
+        [
+            _wordless_stop_turn(),
+            _wordless_stop_turn(),
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    recoveries = [
+        message
+        for message in end.messages
+        if isinstance(message, Message)
+        and message.role == "user"
+        and message.text.strip() == WORDLESS_STOP_RECOVERY_PROMPT
+    ]
+    assert len(recoveries) == 1
+    # Exactly two requests: the empty turn, then the re-ask's own empty turn.
+    assert len(stream.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_requested_stop_skips_the_wordless_re_ask():
+    """A supervisor's stop outranks the recovery (the nameless rule): the
+    re-ask would spend a request on a turn the caller already stopped, so the
+    turn falls through and ends as before."""
+    stream = ScriptedStream([_wordless_stop_turn(), _wordless_stop_turn()])
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        context,
+        make_config(
+            stream,
+            recover_wordless_stop=True,
+            graceful_cancel_requested=lambda: len(stream.requests) >= 1,
+        ),
+        None,
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+    assert not any(
+        isinstance(message, Message)
+        and message.role == "user"
+        and message.text.strip() == WORDLESS_STOP_RECOVERY_PROMPT
+        for message in end.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_answer_gets_no_wordless_re_ask():
+    """The re-ask exists only for the turn that carried NOTHING: an ordinary
+    prose stop still ends the turn on the first response."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, recover_wordless_stop=True), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not any(
+        isinstance(event, NoticeEvent) and "arrived empty" in event.text for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_without_the_session_bit_keeps_the_old_ending():
+    """Silence is a LEGITIMATE ending for internal arrivals -- delivery,
+    catch-up, a non-notify wake -- so with the session bit unset (the default)
+    the bare stop ends the turn exactly as before and spends no extra provider
+    call. This is the shape the session delivery/wake/latch cells pin."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not any(
+        isinstance(event, NoticeEvent) and "arrived empty" in event.text for event in events
+    )
+
+
+def test_wordless_stop_prompt_is_harness_chrome():
+    """The re-ask is harness chrome: no surface may paint it as the user's own
+    words (the tuple in ``harness.rows`` is the single decision)."""
+    assert is_harness_chrome(WORDLESS_STOP_RECOVERY_PROMPT)
+    assert WORDLESS_STOP_RECOVERY_PROMPT in harness_chrome_prompts()
 
 
 @pytest.mark.asyncio

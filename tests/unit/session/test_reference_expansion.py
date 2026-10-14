@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.harness.types import StreamEndEvent
+from local_operator.harness.types import StreamEndEvent, StreamTextDelta
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 
@@ -130,7 +130,10 @@ async def test_a_declined_reference_still_completes_the_turn(tmp_path):
     outside.mkdir()
     (outside / "elsewhere.txt").write_text("body", encoding="utf-8")
     typed = f"read @{outside / 'elsewhere.txt'}"
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The prompt turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which this cell's count of
+    # requests does not admit.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(
         tmp_path, stream, cwd=str(workspace), request_approval=SpyGate(reply=False)
     )
