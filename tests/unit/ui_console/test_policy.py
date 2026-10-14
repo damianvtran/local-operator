@@ -20,8 +20,12 @@ def test_hand_edits_clamp_and_user_reservation_tracks_ceiling() -> None:
     assert effective_policy(
         {"console": {"max_live": 1, "max_owner": 999, "user_reserved": 999}}
     ) == {
-        "max_live": 32, "max_owner": 32, "user_reserved": 8,
+        "max_live": 32,
+        "max_owner": 32,
+        "user_reserved": 8,
     }
     assert effective_policy({"console": {"max_live": 999, "max_owner": 0, "user_reserved": 0}}) == {
-        "max_live": 256, "max_owner": 1, "user_reserved": 4,
+        "max_live": 256,
+        "max_owner": 1,
+        "user_reserved": 4,
     }

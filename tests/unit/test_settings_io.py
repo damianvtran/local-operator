@@ -154,13 +154,14 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.ui_console.policy import (
+        DEFAULT_LIVE_LIMIT,
+        DEFAULT_OWNER_LIMIT,
+        DEFAULT_USER_RESERVED,
+    )
     from local_operator.wakes.display import DEFAULT_TIME_FORMAT
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
-
-    from local_operator.ui_console.policy import (
-        DEFAULT_LIVE_LIMIT, DEFAULT_OWNER_LIMIT, DEFAULT_USER_RESERVED,
-    )
 
     retry = RetrySettings()
     compaction = CompactionSettings()

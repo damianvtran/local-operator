@@ -65,11 +65,6 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
-from local_operator.ui_console.policy import (
-    DEFAULT_LIVE_LIMIT,
-    DEFAULT_OWNER_LIMIT,
-    DEFAULT_USER_RESERVED,
-)
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
@@ -78,6 +73,11 @@ from local_operator.providers.local import (
     LOCAL_PRESETS,
     model_overrides,
     validate_endpoint_setting,
+)
+from local_operator.ui_console.policy import (
+    DEFAULT_LIVE_LIMIT,
+    DEFAULT_OWNER_LIMIT,
+    DEFAULT_USER_RESERVED,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
@@ -4370,19 +4370,37 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # -- console admission --------------------------------------------------
     Setting(
-        key="console.max_live", path=("console", "max_live"), section="console",
-        label=_t(_cs.max_live_label()), kind=Kind.INT, default=DEFAULT_LIVE_LIMIT,
-        minimum=32, maximum=256, help=_t(_cs.max_live_help()),
+        key="console.max_live",
+        path=("console", "max_live"),
+        section="console",
+        label=_t(_cs.max_live_label()),
+        kind=Kind.INT,
+        default=DEFAULT_LIVE_LIMIT,
+        minimum=32,
+        maximum=256,
+        help=_t(_cs.max_live_help()),
     ),
     Setting(
-        key="console.max_owner", path=("console", "max_owner"), section="console",
-        label=_t(_cs.max_owner_label()), kind=Kind.INT, default=DEFAULT_OWNER_LIMIT,
-        minimum=1, maximum=32, help=_t(_cs.max_owner_help()),
+        key="console.max_owner",
+        path=("console", "max_owner"),
+        section="console",
+        label=_t(_cs.max_owner_label()),
+        kind=Kind.INT,
+        default=DEFAULT_OWNER_LIMIT,
+        minimum=1,
+        maximum=32,
+        help=_t(_cs.max_owner_help()),
     ),
     Setting(
-        key="console.user_reserved", path=("console", "user_reserved"), section="console",
-        label=_t(_cs.user_reserved_label()), kind=Kind.INT, default=DEFAULT_USER_RESERVED,
-        minimum=4, maximum=32, help=_t(_cs.user_reserved_help()),
+        key="console.user_reserved",
+        path=("console", "user_reserved"),
+        section="console",
+        label=_t(_cs.user_reserved_label()),
+        kind=Kind.INT,
+        default=DEFAULT_USER_RESERVED,
+        minimum=4,
+        maximum=32,
+        help=_t(_cs.user_reserved_help()),
     ),
     Setting(
         key="desktop.launch_command",

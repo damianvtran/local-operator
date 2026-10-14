@@ -79,24 +79,30 @@ async def test_completed_owner_cleanup_is_owner_scoped_and_never_enumerates(
 
     monkeypatch.setattr(backend, "ConsoleHostClient", NewClient)
     assert await backend.cleanup_owner_completed("synthetic-owner") == {
-        "released": 2, "protected": 3, "running": 1,
+        "released": 2,
+        "protected": 3,
+        "running": 1,
     }
     assert calls == [("console_cleanup", {"session_id": "synthetic-owner"})]
 
 
 def test_capacity_projection_never_accepts_foreign_identity_or_nonfinite_values() -> None:
-    projected = backend.aggregate_console_metrics({
-        "generation": 3, "sampled_at": 1234,
-        "surface": "con:999:synthetic-foreign", "command": "synthetic-private-command",
-        "resources": {
-            "ptys": 64,
-            "log_bytes": float("nan"),
-            "fd_available": None,
-            "command": "private",
-        },
-        "states": {"running": {"user": 6, "agent": 58, "session_id": "synthetic-foreign"}},
-        "caps": {"maxLive": 128, "maxOwner": True, "userReserved": 10**1000},
-    })
+    projected = backend.aggregate_console_metrics(
+        {
+            "generation": 3,
+            "sampled_at": 1234,
+            "surface": "con:999:synthetic-foreign",
+            "command": "synthetic-private-command",
+            "resources": {
+                "ptys": 64,
+                "log_bytes": float("nan"),
+                "fd_available": None,
+                "command": "private",
+            },
+            "states": {"running": {"user": 6, "agent": 58, "session_id": "synthetic-foreign"}},
+            "caps": {"maxLive": 128, "maxOwner": True, "userReserved": 10**1000},
+        }
+    )
     assert projected["resources"] == {"ptys": 64, "fd_available": None}
     assert projected["caps"] == {"maxLive": 128}
     text = json.dumps(projected)
@@ -107,10 +113,16 @@ def test_capacity_projection_never_accepts_foreign_identity_or_nonfinite_values(
 
 def test_console_epoch_projection_is_a_single_defined_uuid4_field() -> None:
     epoch = "abcdef12-abcd-4abc-8abc-abcdef123456"
-    assert backend.aggregate_console_metrics({
-        "host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001,
-        "instance_id": "synthetic-private-instance", "session_id": "synthetic-private-session",
-    }) == {"host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001}
+    assert backend.aggregate_console_metrics(
+        {
+            "host_epoch": epoch,
+            "started_at": 1000,
+            "generation": 7,
+            "sampled_at": 1001,
+            "instance_id": "synthetic-private-instance",
+            "session_id": "synthetic-private-session",
+        }
+    ) == {"host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001}
     for malformed in (
         "con:999:synthetic-private",
         "synthetic-command",

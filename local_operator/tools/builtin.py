@@ -24770,7 +24770,8 @@ async def execute_console(
         and f"console_{method}" not in client.capabilities().methods
     ):
         return _error(
-            tool_call_id, "console",
+            tool_call_id,
+            "console",
             "This desktop app does not support console capacity/cleanup methods yet. "
             "Update the desktop app; its existing console methods remain available. "
             "No global listing or automatic close was attempted.",

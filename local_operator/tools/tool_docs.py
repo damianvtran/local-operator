@@ -289,8 +289,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="resources",
                 blurb=(
-                    "Aggregate live/history/resource counts only; no foreign "
-                    "handles or output."
+                    "Aggregate live/history/resource counts only; no foreign " "handles or output."
                 ),
             ),
             ToolDocOp(
