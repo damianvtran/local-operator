@@ -293,6 +293,11 @@ local_operator = [
     # deps) are never packaged.
     "mobile/web/package.json",
     "mobile/web/pnpm-lock.yaml",
+    # The panel design note beside the sources it documents (paid-credit
+    # continuation across the terminal, desktop and phone usage views). It is a
+    # tracked file of the web tree, so the installed tree carries it with them;
+    # test_web_package_data derives this from the tree and fails when it is missing.
+    "mobile/web/PAID_USAGE.md",
     # Tailwind decides which files may hold class names with GITIGNORE
     # semantics, and `uv` writes an allow-list `.gitignore` (the single line
     # `*`) at the root of every venv and every tool generation — so an
