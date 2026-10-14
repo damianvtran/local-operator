@@ -16,8 +16,12 @@ from local_operator.session.request_observation import RequestSubscriberHolder
 from tests.unit.providers.test_failover import FakeAuth, _request
 from tests.unit.session.shutdown_accounting import ShutdownAccounting
 from tests.unit.session.test_request_observation_sdk import Wire
+from tests.unit.session.test_request_observation_sdk import scratch as _scratch_fixture
 from tests.unit.session.test_request_observation_sdk import (
     shutdown_accounting as _accounting_fixture,
+)
+from tests.unit.session.test_request_observation_sdk import (
+    shutdown_world as _world_fixture,
 )
 from tests.unit.session.test_request_observation_sdk import wire as _wire_fixture
 
@@ -25,6 +29,8 @@ from tests.unit.session.test_request_observation_sdk import wire as _wire_fixtur
 # every control's parameter list (the suite treats that as flake8 F811).
 wire = _wire_fixture
 shutdown_accounting = _accounting_fixture
+scratch = _scratch_fixture
+shutdown_world = _world_fixture
 
 
 def _recorder(rows: list[Any]) -> SessionStreamFn:
@@ -130,3 +136,34 @@ async def test_unmatched_or_misattributed_rows_are_still_rejected(
         shutdown_accounting.logical[0].during_shutdown = False
     with pytest.raises(AssertionError):
         shutdown_accounting.validate(rows, 0)
+
+
+def test_shutdown_world_excludes_the_owned_ancestor_skill(
+    scratch: Any, shutdown_world: Any
+) -> None:
+    from local_operator.skills.api import PACKAGED_SKILL_ROOT, default_skill_roots
+    from local_operator.skills.discovery import discover_skills
+
+    world = scratch.cwd_path
+    outside = scratch.config_path / "skills" / "synthetic-outside-world-canary"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text(
+        "---\ndescription: synthetic ancestor canary\n---\nSynthetic fixture only.\n",
+        encoding="utf-8",
+    )
+    # Demonstrate the old walk's actual read using ONLY our synthetic ancestor.
+    # Never hand live operator ancestor roots to the discovery loader in RED.
+    unbounded = default_skill_roots(world)
+    owned = [root for root in unbounded if root.is_relative_to(scratch.config_path.parent)]
+    baseline, _warnings = discover_skills(owned, config_dir=scratch.config_path)
+    assert "synthetic-outside-world-canary" in {skill.name for skill in baseline}
+
+    # Fail before discovery if this opt-in fixture loses its guard; that keeps
+    # even the negative mutation from reading real operator libraries.
+    assert shutdown_world == world, "the SDK shutdown fixture lost its world boundary"
+    bounded = default_skill_roots(world, boundary=shutdown_world)
+    assert all(root == PACKAGED_SKILL_ROOT or root.is_relative_to(world) for root in bounded)
+    contained, _warnings = discover_skills(
+        bounded, boundary=shutdown_world, config_dir=scratch.config_path
+    )
+    assert "synthetic-outside-world-canary" not in {skill.name for skill in contained}
