@@ -463,12 +463,15 @@ def neutralize_bridge_tag(text: str) -> str:
     hyphen (U+2010/U+2011) or whitespace, and the slash may be spaced
     (``< / team-bridge-message>``). A variant the reader would still
     recognise as the tag must not survive this hop just because it is spelled
-    differently from the one the wrap emits.
+    differently from the one the wrap emits — the separators covered are
+    whitespace, hyphen and its unicode forms (U+2010, U+2011, U+2013, U+2014),
+    the soft hyphen, underscore, dot and slash, in any number.
     """
     import re
 
     return re.sub(
-        r"<\s*/?\s*team[\s\-\u2010\u2011_.]*bridge[\s\-\u2010\u2011_.]*message",
+        r"<\s*/?\s*team[\s\-\u00ad\u2010\u2011\u2013\u2014_./]*bridge"
+        r"[\s\-\u00ad\u2010\u2011\u2013\u2014_./]*message",
         lambda match: match.group(0).replace("<", "&lt;"),
         text,
         flags=re.IGNORECASE,

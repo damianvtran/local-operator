@@ -951,7 +951,7 @@ def _prune_bridge_grants(now: float) -> None:
     ]
     for key in stale:
         entry = _BRIDGE_DECIDE_GRANTS.pop(key, None)
-        if entry is None or entry.get("consumed"):
+        if entry is None:
             continue
         session_id, ask_id, question_id = key
         _BRIDGE_DECIDE_GRANT_DROPS.append(
@@ -1002,7 +1002,6 @@ def mint_bridge_decide_grant(
     _BRIDGE_DECIDE_GRANTS[key] = {
         "word": str(word).strip().lower(),
         "at": now,
-        "consumed": False,
     }
     _prune_bridge_grants(now)
 
@@ -1014,8 +1013,9 @@ def consume_bridge_decide_grant(
 
     Pop-then-check discipline: the decision word is part of the match, so a
     grant minted for one word cannot be spent on the other, and a second
-    consume of the same grant fails — the m8 exact-replay rule covers the
-    (already recorded) replay, never a downgrade.
+    consume of the same target finds no LIVE grant (the first spend moved it to
+    the spent ledger) — the m8 exact-replay rule covers the (already recorded)
+    replay, never a downgrade.
     """
     import time
 
@@ -1023,7 +1023,7 @@ def consume_bridge_decide_grant(
     _prune_bridge_grants(now)
     key = (str(session_id), str(ask_id), str(question_id))
     entry = _BRIDGE_DECIDE_GRANTS.get(key)
-    if entry is None or entry.get("consumed"):
+    if entry is None:
         return False
     if str(entry.get("word")) != str(word).strip().lower():
         return False
@@ -1109,7 +1109,7 @@ def withdraw_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: s
     _prune_bridge_grants(now)
     key = (str(session_id), str(ask_id), str(question_id))
     entry = _BRIDGE_DECIDE_GRANTS.get(key)
-    if entry is None or entry.get("consumed"):
+    if entry is None:
         return
     _BRIDGE_DECIDE_GRANTS.pop(key, None)
 

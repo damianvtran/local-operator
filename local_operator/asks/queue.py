@@ -512,7 +512,22 @@ class AskQueue:
             return {"ok": False, "error": render.refusal_copy(None)}
         refusal = render.refusal_copy(record)
         if refusal:
-            return {"ok": False, "error": refusal}
+            # F5-1: a bridge carriage's declined/dismissed row is a same-uid
+            # RECORD, not proof that a human declined anything, and it carries no
+            # answers for :meth:`revise` to supersede (the fold applies a
+            # revision only on top of an ``answered`` event), so the human's
+            # admitted decision is taken here as the FIRST answer — the fold's
+            # own ordering does the rest, since a genuine ``answered`` event
+            # outranks a recorded ``declined`` row. This is not the bypass: the
+            # grant is minted by the authority seam, the door checks it, and the
+            # dispatcher consumes it, so an answer without one still never
+            # reaches the model.
+            if not (
+                str(record.get("status") or "")
+                in (store.STATUS_DECLINED, store.STATUS_DISMISSED)
+                and self._is_bridge_ask_record(record)
+            ):
+                return {"ok": False, "error": refusal}
         cleaned, map_refusal = self._whole_ask_cells(record, answers)
         if map_refusal:
             return {"ok": False, "error": map_refusal}
@@ -846,6 +861,11 @@ class AskQueue:
         if status not in (store.STATUS_ANSWERED, store.STATUS_LATE):
             # declined / dismissed / expired: the state table's own sentence,
             # byte-for-byte the one every other path gives for that state.
+            # F5-1 does NOT change this: a revision supersedes a recorded
+            # ANSWER, and ``fold`` applies one only on top of an ``answered``
+            # event, so a revision of a declined carriage could carry nothing
+            # (measured, not assumed) — the declined/dismissed BRIDGE case is
+            # admitted as a FIRST answer in :meth:`respond` instead.
             return record, render.refusal_copy(record)
         response_id = store.response_row_id(ask_id)
         if response_id in present or response_id in self._committing:
@@ -1460,7 +1480,9 @@ class AskQueue:
             # The preview the queue already deemed owed is returned unchanged:
             # that content came from the fold at the moment the gate passed, and
             # dropping the row here would be the silent loss this method's own
-            # contract forbids.
+            # contract forbids — so the row that lands is the gate-approved
+            # PREVIEW: nothing that failed the gate is written, and nothing owed
+            # is dropped.
             logger.warning(
                 "bridge ask %s no longer proves its decision at the append — the "
                 "rebuilt row is refused and the pre-append preview is kept",
