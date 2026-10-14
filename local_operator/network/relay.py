@@ -2068,6 +2068,12 @@ class MembershipReport:
     not_due: list[dict[str, Any]] = field(default_factory=list)
     #: Device ids this refresh ADDED to the table — the ones that were invisible.
     learned: list[str] = field(default_factory=list)
+    #: A fresher pass is STILL RUNNING. Set only on the copy a bounded status
+    #: read presents when its wait expired with the target pass incomplete
+    #: (see :meth:`RelayServer._fresh_membership_read_state`) — never on a
+    #: published report — so the row says the read is in flight instead of
+    #: re-presenting this report's older failure headline as a verdict.
+    in_flight: bool = False
 
     @property
     def complete(self) -> bool:
@@ -2110,6 +2116,7 @@ class MembershipReport:
             # the old keys is unaffected.
             "refreshed_at": self.refreshed_at,
             "learned": list(self.learned),
+            "in_flight": self.in_flight,
             "sentence": self.sentence(),
         }
 
@@ -2146,6 +2153,13 @@ class MembershipReport:
         """
         age = self.oldest_answer_age_s
         age_text = _age_words(age)
+        if self.in_flight and not self.complete:
+            # STILL RUNNING, NOT FAILED AGAIN: this report is the last COMPLETED
+            # pass, and its failure headline is a verdict about that older read.
+            # While the fresher pass this status kicked is incomplete, the only
+            # honest claim is that the table is being re-read — no verified claim,
+            # and not the stale "no table came back" beside a reachable peer.
+            return "members NOT verified: table read still running — retrying"
         if self.complete:
             return f"members verified with all {len(self.answered)} peer(s) ({age_text})"
         from local_operator.resume import short_device_id, table_reason_words
@@ -2466,6 +2480,10 @@ def membership_marker(row: dict[str, Any]) -> str:
     aged = f" ({answered_age})" if answered_age else ""
     if table.get("complete"):
         return f"  [members verified with all {answered} peer(s){aged}]"
+    if table.get("in_flight"):
+        # The bounded read's fresher pass has not landed: say it is still
+        # running rather than repeating the last completed read's failure.
+        return "  [members NOT verified: table read still running — retrying]"
     if answered:
         # THE MISSING PEERS ARE NAMED HERE TOO (design round 1, D4): the long form
         # says "NOT verified with …" and the sibling arm below names its peers, so
@@ -5072,9 +5090,23 @@ class RelayServer:
         Safe to call when the loop is not running (a relay that was never started, or
         a stopping one): the wake is set, nothing completes it, and the wait expires
         on its own bound.
+
+        The state variant also answers whether the wait expired with the target
+        pass INCOMPLETE: that is the still-running fact :meth:`status` renders
+        instead of the last completed pass's failure headline. A completed
+        VERIFIED report is never downgraded by it — the bounded read keeps
+        reporting that aged evidence (see the hung-pass tests) — only a
+        not-complete report is re-presented as in-flight.
         """
+        reports, _in_flight = self._fresh_membership_read_state(wait_s=wait_s)
+        return reports
+
+    def _fresh_membership_read_state(
+        self, *, wait_s: float = MEMBERSHIP_READ_WAIT_S
+    ) -> tuple[dict[str, MembershipReport], bool]:
+        """The bounded read plus its pass-in-flight answer; see the wrapper above."""
         if self._stop.is_set():
-            return self._membership_reports
+            return self._membership_reports, False
         with self._membership_cond:
             target = self._membership_seq + 1
             self._membership_wake.set()
@@ -5084,7 +5116,7 @@ class RelayServer:
                 if remaining <= 0:
                     break
                 self._membership_cond.wait(remaining)
-            return self._membership_reports
+            return self._membership_reports, self._membership_seq < target
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -12110,7 +12142,18 @@ class RelayServer:
         and want the smallest, fastest reply — though they too see the last completed
         pass's table rather than a placeholder, when one exists.
         """
-        reports = self._fresh_membership_read() if refresh else self._membership_reports
+        reports, read_in_flight = (
+            self._fresh_membership_read_state() if refresh else (self._membership_reports, False)
+        )
+        if read_in_flight:
+            # Present COPIES flagged in-flight, never the published reports:
+            # the last completed pass keeps its own (possibly failed) record,
+            # while THIS read says its fresher pass is still running. Verified
+            # reports pass through untouched (aged evidence, not a downgrade).
+            reports = {
+                network_id: (report if report.complete else replace(report, in_flight=True))
+                for network_id, report in reports.items()
+            }
         record = self.peer_record()
         return {
             "pid": os.getpid(),
