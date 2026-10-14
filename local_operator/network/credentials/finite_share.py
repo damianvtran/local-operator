@@ -10,12 +10,13 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Any
 
 from local_operator.network import approvals, identity, onboard_approvals, store
-from local_operator.network.credentials import consent, placement
+from local_operator.network.credentials import consent, finite_journal, placement
 from local_operator.network.types import MeshRefusal
 
 OP = "credential_finite_share"
@@ -34,9 +35,105 @@ def summary(record: dict[str, Any]) -> str | None:
     return (
         f"Restore FINITE sharing of {data.get('key', '')!r} with "
         f"{data.get('recipient_device', '')} ({data.get('scope', '')}); "
-        "clear only the listed withdrawals. No automatic future-sign-in inheritance "
+        "clear only the withdrawals listed below. No automatic future-sign-in inheritance "
         "enabled by this operation; no install, join or trust."
     )
+
+
+def details(record: dict[str, Any]) -> list[str]:
+    data = intent(record)
+    heading = summary(record)
+    if data is None or heading is None:
+        return []
+    # Full escaped metadata disclosure, not silent truncation: all signed deny
+    # selectors/revisions/references must be inspectable BEFORE the signer runs.
+    try:
+        for name in ("owner_device", "network_id", "recipient_device"):
+            store.safe_component(data[name])
+        if (
+            data["scope"] not in {"device", "session"}
+            or not isinstance(data["key"], str)
+            or not data["key"]
+            or len(data["key"].encode()) > 200
+            or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in data["key"])
+        ):
+            consent.refuse("finite_disclosure_invalid")
+        denies = data["denies"]
+        if not isinstance(denies, list) or not 0 < len(denies) <= finite_journal.MAX_DENIES:
+            consent.refuse("finite_disclosure_invalid")
+        lines = [heading, f"Signed policy revision: {consent._revision(data['policy_revision'])}"]
+        guard = data["guard"]
+        if guard:
+            consent._exact(guard, {"id", "revision"}, {"id", "revision"})
+            lines.append("Recover retained fence: " + json.dumps(guard, ensure_ascii=True))
+        for number, deny in enumerate(denies, 1):
+            consent._selector(deny["selector"])
+            consent._revision(deny["revision"])
+            consent._ref(deny["approval_ref"])
+            lines.append(
+                f"Withdrawal {number}: "
+                + json.dumps(
+                    {name: deny[name] for name in ("selector", "revision", "approval_ref")},
+                    sort_keys=True,
+                    ensure_ascii=True,
+                )
+            )
+        if len("\n".join(lines).encode("utf-8")) > finite_journal.LIMIT:
+            consent.refuse("finite_disclosure_invalid")
+        return lines
+    except (KeyError, TypeError, ValueError):
+        consent.refuse("finite_disclosure_invalid")
+
+
+def _remedy(expected: dict[str, Any]) -> str:
+    # Quote public context as command arguments, never concatenate arbitrary
+    # selector account strings, signatures, request digests or credential data.
+    import shlex
+
+    argv = [
+        "lop",
+        "network",
+        "credential",
+        "share",
+        str(expected.get("key", "")),
+        "--with",
+        str(expected.get("recipient_device", "")),
+        "--network",
+        str(expected.get("network_id", "")),
+        "--scope",
+        str(expected.get("scope", "session")),
+        "--request-approval",
+    ]
+    return (
+        "Inspect the current key, recipient fingerprint, scope and withdrawals. "
+        "Regenerate exact finite approval: "
+        + shlex.join(argv)
+        + ". Then lop network approvals approve <new-approval-id>; apply the same "
+        "key/peer/network/scope with --approval <new-approval-id>. "
+        "This is finite sharing, not onboarding or operator-anchor installation."
+    )
+
+
+def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+    try:
+        return _apply(approval_id, expected, root)
+    except MeshRefusal as exc:
+        labels = {
+            "approval_expired": "The finite approval expired; no recovery was authorized.",
+            "approval_denied": "The finite approval was denied; no recovery was authorized.",
+            "approval_already_connected": (
+                "The finite approval is consumed; replay cannot recover a later fence."
+            ),
+            "finite_subject_mismatch": (
+                "The current owner/key/recipient fingerprint differs from the signed finite intent."
+            ),
+            "finite_scope_mismatch": "The selected finite scope differs from the signed intent.",
+            "consent_conflict": "The current withdrawal policy revision changed.",
+            "finite_denial_mismatch": "The current or retained withdrawal tuples changed.",
+            "finite_journal_conflict": "The retained transaction fence changed.",
+        }
+        leading = labels.get(exc.code, "The finite-share operation was refused (" + exc.code + ").")
+        raise MeshRefusal(exc.code, leading + " " + _remedy(expected)) from exc
 
 
 def _reject_future_overlap(rec: dict[str, Any], key: str) -> None:
@@ -133,6 +230,39 @@ def _subject(
     }
 
 
+def _complete_capability(data: dict[str, Any], root: Path | None) -> None:
+    from local_operator.network.relay import set_member_capabilities
+
+    # Revoke legitimately removes this capability when its last key goes away.
+    # Complete the existing local capability producer under its write lock, not
+    # the CLI's relay-first variant (no socket/native I/O under journal locks).
+    target = store.record_path(data["network_id"], root)
+    with store._write_lock(target):
+        if (
+            _subject(
+                data["network_id"],
+                data["owner_device"],
+                data["recipient_device"],
+                data["key"],
+                root,
+            )["public_key_fingerprint"]
+            != data["public_key_fingerprint"]
+        ):
+            consent.refuse("finite_subject_mismatch")
+        record = store.load(data["network_id"], root)
+        set_member_capabilities(
+            record, device_id=data["recipient_device"], grant=["broker_credential"]
+        )
+        store.save(record, root)
+        readback = store.load(data["network_id"], root).member(data["recipient_device"])
+        if (
+            readback is None
+            or not readback.active
+            or "broker_credential" not in readback.capabilities
+        ):
+            consent.refuse("finite_capability_unconfirmed")
+
+
 def request(
     network: str, owner: str, recipient: str, key: str, scope: str, root: Path | None = None
 ) -> dict[str, Any]:
@@ -140,7 +270,8 @@ def request(
     if scope not in {"device", "session"} or (key == "github" and scope != "device"):
         consent.refuse("finite_scope_mismatch")
     authority = consent.ConsentDocument(network, owner, root)
-    with authority.locked():
+    journal = finite_journal.Journal(network, owner, root)
+    with authority.locked(), journal.locked():
         row = authority.load()
         rec = row["recipients"].get(recipient, {})
         _reject_future_overlap(rec, key)
@@ -149,9 +280,23 @@ def request(
             for d in rec.get("denies", [])
             if d["selector"]["credential_key"] == key
         ]
+        guard = journal.pending(recipient, key)
+        if guard:
+            # Retained original withdrawals remain signed/disclosed even when
+            # failed policy compensation left no corresponding consent rows.
+            if not authority.path.exists():
+                consent.refuse("finite_policy_unknown")
+            for original in guard["denies"]:
+                if original not in denies:
+                    denies.append(copy.deepcopy(original))
         if not denies:
             consent.refuse("finite_supersede_unneeded")
-        subject.update(scope=scope, denies=denies, policy_revision=row["revision"])
+        subject.update(
+            scope=scope,
+            denies=denies,
+            policy_revision=row["revision"],
+            guard={"id": guard["id"], "revision": guard["revision"]} if guard else None,
+        )
     anchor = approvals.local_anchor_trio(root)
     if anchor is None:
         consent.refuse("approval_anchor_unavailable")
@@ -176,7 +321,7 @@ def request(
     return result
 
 
-def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
     source = approvals.load_record(approval_id, root=root)
     if source.get("state") == approvals.STATE_CONNECTED:
         raise MeshRefusal(
@@ -199,6 +344,7 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             "scope",
             "denies",
             "policy_revision",
+            "guard",
         },
         {
             "owner_device",
@@ -209,6 +355,7 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             "scope",
             "denies",
             "policy_revision",
+            "guard",
         },
     )
     for field in ("owner_device", "network_id", "recipient_device", "key", "scope"):
@@ -222,11 +369,13 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
     run = onboard_approvals.begin_run(approval_id, root=root, operation=OP)
     authority = consent.ConsentDocument(data["network_id"], data["owner_device"], root)
     projection_path = placement.placement_path(data["network_id"], root)
+    journal = finite_journal.Journal(data["network_id"], data["owner_device"], root)
     # Writers below are existing factored LOCKED entrypoints. No await/network,
     # SSH/onboarding/copy work or reentrant record flock occurs in this transaction.
     with (
         approvals._record_lock(approval_id, root),
         authority.locked(),
+        journal.locked(),
         placement._document_lock(projection_path),
     ):
         admitted = consent._admitted(approval_id, run.run_id, root)
@@ -245,8 +394,17 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
             if rec
             else []
         )
-        if not actual or actual != data["denies"]:
+        guarded = journal.pending(data["recipient_device"], data["key"])
+        retained = copy.deepcopy(actual)
+        if guarded:
+            for original in guarded["denies"]:
+                if original not in retained:
+                    retained.append(copy.deepcopy(original))
+        if not retained or retained != data["denies"]:
             consent.refuse("finite_denial_mismatch")
+        # No mutable holder/policy operation occurs until PENDING is durable,
+        # fsynced and read back. A fresh signed request must bind the old fence.
+        permit = journal._begin(data, approval_id, run.run_id, admitted["request_digest"])
         old_row = copy.deepcopy(row)
         projection = placement.PlacementDocument.load(
             data["network_id"], root, self_device=data["owner_device"]
@@ -298,6 +456,55 @@ def apply(approval_id: str, expected: dict[str, Any], root: Path | None = None) 
                 consent.refuse("finite_subject_mismatch")
             rec["denies"] = [d for d in rec["denies"] if d not in actual]
             authority.save(row, data["policy_revision"])
+            checked_policy = authority.load()
+            if checked_policy != row:
+                consent.refuse("finite_write_unconfirmed")
+            checked = placement.PlacementDocument.load(data["network_id"], root).entry(data["key"])
+            if checked is None or not checked.is_holder(data["recipient_device"]):
+                consent.refuse("finite_write_unconfirmed")
+            completed = approvals._load_raw(approval_id, root)
+            if (
+                completed["state"] != approvals.STATE_CONNECTED
+                or completed["request_digest"] != admitted["request_digest"]
+                or completed["run"]["run_id"] != run.run_id
+                or time.time() >= float(completed["expires_at"])
+                or not any(
+                    receipt["step"] == STEP
+                    and receipt["run_id"] == run.run_id
+                    and receipt["ok"]
+                    and receipt["digest"] == admitted["request_digest"]
+                    for receipt in completed["receipts"]
+                )
+            ):
+                consent.refuse("finite_write_unconfirmed")
+            # Verify the same current member/key/capability after every publish;
+            # connected/source receipts ALONE cannot clear a later fence.
+            if (
+                _subject(
+                    data["network_id"],
+                    data["owner_device"],
+                    data["recipient_device"],
+                    data["key"],
+                    root,
+                )
+                != current
+            ):
+                consent.refuse("finite_subject_mismatch")
+            _complete_capability(data, root)
+            if (
+                _subject(
+                    data["network_id"],
+                    data["owner_device"],
+                    data["recipient_device"],
+                    data["key"],
+                    root,
+                )
+                != current
+            ):
+                consent.refuse("finite_subject_mismatch")
+            if time.time() >= float(completed["expires_at"]):
+                consent.refuse("approval_expired")
+            journal._finish(permit)
             result = entry.to_json()
         except (MeshRefusal, OSError, ValueError):
             # Original valid tombstones are conservative even if restoring the
