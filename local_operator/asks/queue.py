@@ -63,6 +63,7 @@ from local_operator.harness.message_types import (
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
 from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +314,11 @@ class AskQueue:
 
         if not issuance_key or not fingerprint:
             return {"ok": False, "error": "an issuance key and fingerprint are required."}
-        ask_id = "ask-bridge-" + hashlib.sha1(
+        # R1-3 (PR #2378): the derived id MUST sit inside the store's own
+        # ``a-<hex>`` namespace — ``parse_mirror_request_id`` refuses anything
+        # else — while staying DETERMINISTIC, so a retry/dedupe resolves to
+        # the same id.
+        ask_id = "a-" + hashlib.sha1(
             ("bridge-idem:" + issuance_key).encode("utf-8")
         ).hexdigest()[:16]
         timeout_s, bounds_error = policy.parse_timeout_param(timeout)
@@ -328,7 +333,7 @@ class AskQueue:
             self.session_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(
                 store.asks_log_path(self.session_dir),
-                os.O_CREAT | os.O_WRONLY | os.O_APPEND,
+                os.O_CREAT | os.O_WRONLY | os.O_APPEND | store._O_BINARY,
                 0o600,
             )
         except OSError:
@@ -1946,11 +1951,7 @@ def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:
         if isinstance(question, Mapping):
             bridge = question.get("bridge")
             if isinstance(bridge, Mapping):
-                return hashlib.sha256(
-                    json.dumps(dict(bridge), separators=(",", ":"), sort_keys=True).encode(
-                        "utf-8"
-                    )
-                ).hexdigest()
+                return bridge_scope_digest(bridge)
     return ""
 
 

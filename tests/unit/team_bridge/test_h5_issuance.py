@@ -39,7 +39,7 @@ from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import store as bridge_store
 from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.asks_bridge import enqueue_bridge_request_ask
-from local_operator.team_bridge.connector.wake import build_bridge_meta
+from local_operator.team_bridge.connector.wake import EXCERPT_MAX_CHARS, build_bridge_meta
 from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
 
 SENDER = "dana@acme.example"
@@ -194,7 +194,7 @@ def test_the_locator_validator_normalizes_and_stays_closed() -> None:
     assert set(normalized) <= BRIDGE_META_KEYS
 
 
-def test_build_bridge_meta_stays_within_the_closed_set() -> None:
+def test_build_bridge_meta_fits_the_carriage_for_any_body_size() -> None:
     def _item(text: str) -> dict:
         return {
             "message": {
@@ -208,17 +208,16 @@ def test_build_bridge_meta_stays_within_the_closed_set() -> None:
             "delivery": {"state": "new"},
         }
 
-    # The BUILDER bounds the excerpt to the wake cap (2400 chars, §11.4) and
-    # emits only closed-set keys; it does not enforce the carriage's byte
-    # budget — that is the VALIDATOR's job at the send hop.
+    # R1-1 (PR #2378): the SHARED excerpt bound now FITS the carriage — a
+    # full-length body builds a locator the validator ACCEPTS (the ask is
+    # deliverable), because the excerpt window IS the display-context bound
+    # both digest sides normalize by; a larger window made the send hop
+    # refuse the producer's own block.
     long_meta = build_bridge_meta(_item("y" * 5000), message_id="bmsg_1", body_sha256=BODY_HASH)
     assert set(long_meta) <= BRIDGE_META_KEYS
-    assert len(long_meta["excerpt"]) == 2400
-    # The serialized block is capped at 2 KiB (BRIDGE_META_MAX_BYTES), which a
-    # full 2400-char excerpt plus the fixed locator fields cannot fit.
-    with pytest.raises(ValueError, match="2 KiB"):
-        validate_bridge_meta(long_meta)
-    # A body inside the byte budget round-trips the validator unchanged.
+    assert len(long_meta["excerpt"]) == EXCERPT_MAX_CHARS
+    assert validate_bridge_meta(long_meta) == long_meta
+    # A body inside the window is sent WHOLE and round-trips unchanged.
     short_meta = build_bridge_meta(_item("y" * 1200), message_id="bmsg_1", body_sha256=BODY_HASH)
     assert set(short_meta) <= BRIDGE_META_KEYS
     assert len(short_meta["excerpt"]) == 1200

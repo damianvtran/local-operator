@@ -839,6 +839,18 @@ class Store:
     def __init__(self, config_dir: Path) -> None:
         self._path = state_db_path(config_dir)
 
+    @property
+    def config_dir(self) -> Path:
+        """The config directory THIS store was opened under.
+
+        The named inverse of :func:`state_db_path` (NIT-3, PR #2378): the
+        producer fence's fresh config read must self-evidently consult the
+        SAME directory the store's state lives in — never a path spelled
+        ``.parent.parent`` at the read site.
+        """
+
+        return self._path.parent.parent
+
     def _begin_write(self, conn: sqlite3.Connection) -> None:
         """Take the write lock BEFORE any read a generation fence depends on.
 
