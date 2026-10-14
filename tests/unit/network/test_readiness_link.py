@@ -24,6 +24,7 @@ import json
 import socket
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,6 +33,7 @@ from local_operator.network import addresses as addresses_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import identity as identity_mod
 from local_operator.network import readiness, relay, store, wire
+from local_operator.network.credentials import owner as owner_mod
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
     devices,
@@ -171,6 +173,34 @@ def test_credential_lifecycle_is_advertised_once_in_the_negotiated_set() -> None
     """
     assert wire.CREDENTIAL_LIFECYCLE_V1 == "credential-lifecycle-v1"
     assert wire.LINK_CAPABILITIES.count(wire.CREDENTIAL_LIFECYCLE_V1) == 1
+
+
+def test_an_advertised_lifecycle_frame_is_answered_by_name(tmp_path: Path) -> None:
+    """THE OTHER HALF OF THE ADVERTISEMENT: a lifecycle frame is not a build fault.
+
+    The capability is advertised BEFORE its sender exists, so no lifecycle frame
+    should arrive yet — but when one does (a newer peer, a hand-driven probe), the
+    broker must answer it BY NAME rather than fall through to the ``internal``
+    else-branch, which reads as a broken owner build. The pin is the code, not the
+    sentence: ``internal`` here would make the advertisement a false promise.
+    """
+    broker = owner_mod.MeshCredentialBroker(
+        root=tmp_path / "isolated-owner",
+        self_device="d_synthetic_owner",
+        self_device_name="synthetic-owner",
+        network_id="n_" + "1" * 24,
+    )
+    try:
+        link = SimpleNamespace(device_id="d_synthetic_peer", network_id="n_" + "1" * 24, epoch=1)
+        detail = broker.on_broker(
+            link,
+            {"op": "net_broker", "kind": "lifecycle_announce", "req": 1},
+        )["detail"]
+    finally:
+        broker.close()
+    assert detail["kind"] == "error", detail
+    assert detail["code"] != "internal", detail
+    assert detail["code"] == "unsupported", detail
 
 
 def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
