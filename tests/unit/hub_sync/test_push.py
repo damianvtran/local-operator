@@ -870,3 +870,78 @@ def test_a_deterministic_refusal_still_consumes_attempts_and_dead_letters(
     skipped, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
     assert skipped.state == "skipped" and skipped.reason == "push-retries-exhausted"
     assert len(server.commit_calls) == 0
+
+
+def test_a_huge_outage_streak_cannot_overflow_the_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R23: the persisted streak is unbounded, and the doubling must be clamped
+    BEFORE the power -- streak 1024 raised OverflowError mid-refund, leaving the
+    attempts pending and wedging even a healthy unchanged input forever."""
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    out = Outbox(tmp_path)
+    out.enqueue(operation_id="op1", kind="agent", local_id="a1", direction="push", generation=1)
+    seeded = _stored(out, "op1")
+    out._atomic_write(
+        OutboxRecord(
+            operation_id=seeded.operation_id,
+            kind=seeded.kind,
+            local_id=seeded.local_id,
+            direction=seeded.direction,
+            generation=seeded.generation,
+            state="failed",
+            created_at=seeded.created_at,
+            updated_at=seeded.updated_at,
+            error_class="hub-unavailable",
+            attempts=0,
+            next_retry_at=None,
+            outage_streak=1024,
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"code": "hub-unavailable"}})
+
+    refused, _out, _srv = asyncio.run(_run(tmp_path, transport=_transport(_dispatcher(handler))))
+    assert refused.state == "refused" and refused.reason == "hub-unavailable"
+
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.attempts == 0, "the refund must survive the huge streak"
+    assert record.outage_streak == 1025
+    assert record.next_retry_at is not None  # capped, never a crash
+
+    future = ["2099-02-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+    pushed, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert pushed.state == "pushed", "never exhausted after a capped outage"
+    assert len(server.commit_calls) == 1
+
+
+def test_a_legacy_record_without_the_streak_reads_zero(tmp_path: Path) -> None:
+    """R23 companion: a record written before the streak existed parses as 0."""
+
+    out = Outbox(tmp_path)
+    legacy = {
+        "schema": 1,
+        "operation_id": "op-legacy",
+        "kind": "agent",
+        "local_id": "a1",
+        "direction": "push",
+        "generation": 1,
+        "state": "failed",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "error_class": "hub-error",
+        "attempts": 3,
+        "next_retry_at": None,
+        "intent": None,
+        "waiting_input": False,
+        "input_fp": None,
+    }
+    path = out._path("op-legacy")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    record = out.read("op-legacy")
+    assert record is not None and record.outage_streak == 0

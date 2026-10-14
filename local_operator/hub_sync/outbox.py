@@ -62,10 +62,21 @@ PUSH_RETRY_BASE_S = 900.0
 PUSH_RETRY_MAX_S = 21600.0
 
 
+#: Hard ceiling on the DOUBLING exponent (R23). The persisted outage streak is
+#: unbounded (it is a counter, and 255 days of uninterrupted capped outages
+#: would reach streak 1024), and ``base * 2**exponent`` raises OverflowError on
+#: the float conversion long before the ``min()`` could cap it -- which wedged
+#: the push BEFORE its refund (attempts stuck 1..5, then a permanent
+#: push-retries-exhausted skip even for healthy unchanged input). Six doublings
+#: already reach 57,600s, past the six-hour cap, so everything beyond is the
+#: cap: clamp HERE, before the power.
+PUSH_MAX_EXPONENT = 6
+
+
 def push_backoff_seconds(attempts: int) -> float:
     """Exponential backoff for attempt N (1-based), capped at six hours."""
 
-    exponent = max(0, int(attempts) - 1)
+    exponent = min(max(0, int(attempts) - 1), PUSH_MAX_EXPONENT)
     return min(PUSH_RETRY_BASE_S * (2**exponent), PUSH_RETRY_MAX_S)
 
 
