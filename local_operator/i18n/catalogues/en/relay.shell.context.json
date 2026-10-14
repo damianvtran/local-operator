@@ -27,7 +27,7 @@
   "relay.shell.session.waiting": {
     "role": "session view placeholder",
     "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
-    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is connected but has not delivered a frame yet."
+    "note": "Owned relay SPA shell chrome. Rendered when the projection stream is connected but has not delivered a frame yet. Projection is daemon jargon for the session's live view/state snapshot, not a graphical projection or prediction. Translate the intended meaning: waiting for the session view to arrive; the connection is already established. Keep the English source unchanged."
   },
   "relay.shell.session.connecting": {
     "role": "session view pre-connection placeholder",
@@ -60,5 +60,15 @@
   "relay.shell.usage.reset": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
   "relay.shell.usage.command": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
   "relay.shell.usage.as_of": {"role": "cache freshness disclosure", "tone": "Factual timestamp, no live-refresh promise.", "note": "value is the immutable read-only cache timestamp in epoch milliseconds, formatted for the phone locale."},
-  "relay.shell.usage.stale": {"role": "cache freshness warning", "tone": "Clear and non-alarmist.", "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."}
+  "relay.shell.usage.stale": {"role": "cache freshness warning", "tone": "Clear and non-alarmist.", "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."},
+  "relay.shell.usage.row": {
+    "role": "complete usage allowance row without a named model family",
+    "tone": "Compact, neutral status summary.",
+    "note": "Own the entire field order and punctuation, including the separator before the value. {label} is an already localized allowance category; {window} is an already localized time-window label, including Unknown window; {value} is the already localized amount or eligibility/status text. Reorder placeholders and use locale-appropriate punctuation; do not translate their supplied contents again. Used when family_cap is false or the family identifier is unknown, so there must be no empty family parentheses. All parameters are strings; preserve their names."
+  },
+  "relay.shell.usage.row_family": {
+    "role": "complete usage allowance row with a named model family",
+    "tone": "Compact, neutral status summary.",
+    "note": "Own the entire field order and punctuation, including parentheses and the separator before the value. {label}, {window}, and {value} are already localized text as in relay.shell.usage.row. {family} is the provider's machine model-family identifier (for example opus), not prose to translate. Reorder all placeholders and use locale-appropriate punctuation. Used only when family_cap is true and the family identifier is known. All parameters are strings; preserve their names."
+  }
 }
