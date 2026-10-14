@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from pathlib import Path
 
 import pytest
 
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
 from local_operator.harness.types import ImageContent, Message, TextContent
-from local_operator.session.attachment_hints import with_attachment_hints
+from local_operator.session.attachment_hints import _reachable, with_attachment_hints
 from local_operator.session.attachments import AttachmentStore
+from local_operator.tools.confinement import ToolConfinement
 
 #: A payload well over the transcript's externalization floor, so tests speak
 #: the store's real regime rather than the inline one.
@@ -200,3 +202,95 @@ def test_a_missing_note_for_a_stripped_image_is_the_honest_degrade():
 
     (out,) = with_attachment_hints([message])
     assert out is message
+
+
+def test_the_unset_boundary_is_byte_identical_to_the_old_render():
+    """``world_root=None`` must not move one byte: every ordinary session
+    (exec/TUI/mobile/server) renders exactly as before the parameter existed."""
+    store = AttachmentStore()
+    assert store.put(PNG_B64, "image/png") is not None
+    original = _image_message()
+
+    (implicit,) = with_attachment_hints([original])
+    (explicit,) = with_attachment_hints([original], world_root=None)
+
+    assert implicit.model_dump() == explicit.model_dump()
+
+
+def test_confined_render_drops_the_path_and_the_read_promise(tmp_path):
+    """A world-root session must not be told to read a file its own tools
+    refuse: the facts stay, the controller path and the read/edit promise go,
+    and the pixels are untouched."""
+    store = AttachmentStore()
+    assert store.put(PNG_B64, "image/png") is not None
+    world = tmp_path / "world"
+    world.mkdir()
+    original = _image_message()
+
+    (hinted,) = with_attachment_hints([original], world_root=str(world))
+
+    note = hinted.content[-1]
+    assert isinstance(note, TextContent)
+    assert str(store.path_for(PNG_DIGEST)) not in note.text
+    assert "read or edit" not in note.text
+    assert "do not search" in note.text
+    assert f"digest {PNG_DIGEST}" in note.text
+    assert "; no workspace file)" in note.text
+    assert any(isinstance(block, ImageContent) for block in hinted.content)
+    assert hinted.id == f"{original.id}~ah"
+
+
+def test_confined_multi_image_message_uses_the_marked_opening(tmp_path):
+    store = AttachmentStore()
+    second = base64.b64encode(PNG_BYTES + b"second").decode("ascii")
+    assert store.put(PNG_B64, "image/png") is not None
+    assert store.put(second, "image/jpeg") is not None
+    world = tmp_path / "world"
+    world.mkdir()
+    message = Message(
+        role="user",
+        content=[
+            TextContent(text="two shots"),
+            ImageContent(data=PNG_B64, mime_type="image/png"),
+            ImageContent(data=second, mime_type="image/jpeg"),
+        ],
+    )
+
+    (hinted,) = with_attachment_hints([message], world_root=str(world))
+
+    note = hinted.content[-1]
+    assert isinstance(note, TextContent)
+    assert note.text.startswith("[image attachments —")
+    assert note.text.count("; no workspace file)") == 2
+    assert str(store.path_for(PNG_DIGEST)) not in note.text
+
+
+def test_confined_render_keeps_full_hints_when_the_store_is_inside(tmp_path):
+    """The boundary changes only what it must: when the store file is inside
+    the world, the note is the pre-existing one, byte for byte."""
+    store = AttachmentStore()
+    assert store.put(PNG_B64, "image/png") is not None
+    original = _image_message()
+
+    (unset,) = with_attachment_hints([original])
+    (inside,) = with_attachment_hints([original], world_root=str(tmp_path))
+
+    assert inside.model_dump() == unset.model_dump()
+
+
+def test_symlink_escape_and_unresolvables_count_as_outside(tmp_path):
+    """Reachability is judged on the resolved path, like the confinement
+    itself: a symlink out of the world, or a path that cannot be resolved, is
+    never advertised as readable."""
+    world = tmp_path / "world"
+    world.mkdir()
+    alien = tmp_path / "alien"
+    alien.mkdir()
+    (alien / "x.bin").write_bytes(b"x")
+    (world / "esc").symlink_to(alien)
+    boundary = ToolConfinement.at(world)
+
+    assert _reachable(boundary, world / "plain.bin")
+    assert not _reachable(boundary, world / "esc" / "x.bin")
+    assert not _reachable(boundary, alien / "x.bin")
+    assert not _reachable(boundary, Path("bad\x00name"))
