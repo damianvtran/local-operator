@@ -101,6 +101,7 @@ UNIT_LABELS = {
     "percent": "%",
     "tokens": "tokens",
     "requests": "req",
+    "credits": "credits",
     "unknown": "",
 }
 
@@ -326,6 +327,29 @@ class UsageLimit:
     #: Free-form display text, never parsed back — a fetcher that has no split
     #: to report leaves it empty and the renderer emits no line.
     detail: str = ""
+    #: Paid allowance is an ALTERNATIVE to included quota, never an additional
+    #: gate. Eligibility must be explicit vendor evidence, not inferred from an
+    #: id suffix or a positive wallet the account cannot actually spend.
+    paid_fallback: bool = False
+    available: bool | None = None
+    #: Only providers whose paid allowance explicitly covers model-family caps
+    #: may bypass those caps. Unknown scope conservatively retains them.
+    supersedes_tiers: bool = False
+    #: Uncapped is distinct from missing/malformed amounts; it requires explicit
+    #: endpoint evidence and never manufactures a denominator or percentage.
+    unlimited: bool = False
+
+    def paid_usable(self) -> bool:
+        """Definite eligibility AND definite headroom; unknown cannot unblock."""
+        if not self.paid_fallback or self.available is not True:
+            return False
+        if self.unlimited:
+            return True
+        fraction = self.amount.fraction()
+        if fraction is not None:
+            return math.isfinite(fraction) and 0 <= fraction < 1
+        remaining = self.amount.remaining
+        return remaining is not None and math.isfinite(remaining) and remaining > 0
 
     def effective_status(self) -> str:
         return self.status or self.amount.status()
@@ -408,29 +432,54 @@ def usage_health(
     reserve_percent: float = 10.0,
     now_ms: float | None = None,
 ) -> QuotaHealth:
-    """Reduce a normalized report to the limits that gate ``model_id``.
+    """Included plan OR payable headroom, with independent model caps retained.
 
-    Shared windows always apply; tier windows apply only when their tier name
-    appears in the model id. Anthropic's enabled extra-usage meter supersedes
-    the included-plan windows because paid headroom keeps requests runnable
-    after the plan reaches 100%.
+    A depleted paid meter cannot close an unexhausted included plan. Conversely,
+    balance-only credits can keep an exhausted plan serving without a fictional
+    percentage; reserve thresholds only apply to amounts with real denominators.
     """
     lowered_model = model_id.lower()
-    extra = [
+    included = [limit for limit in report.limits if not limit.paid_fallback]
+    relevant = [
         limit
-        for limit in report.limits
-        if limit.id.endswith(":extra") and limit.amount.fraction() is not None
+        for limit in included
+        if limit.shared or not limit.tier or limit.tier.lower() in lowered_model
     ]
-    if extra:
-        relevant = extra
-    else:
-        relevant = [
-            limit
-            for limit in report.limits
-            if limit.shared
-            or (limit.tier and limit.tier.lower() in lowered_model)
-            or (not limit.shared and not limit.tier)
-        ]
+    plan = _usage_windows_health(relevant, reserve_percent=reserve_percent, now_ms=now_ms)
+    if plan.state == "healthy":
+        return plan
+    best = plan
+    for paid in report.limits:
+        if not paid.paid_usable():
+            continue
+        tiers = [limit for limit in relevant if limit.tier and not limit.shared]
+        if not paid.supersedes_tiers and tiers:
+            cap = _usage_windows_health(tiers, reserve_percent=reserve_percent, now_ms=now_ms)
+            if cap.state == "depleted":
+                continue
+        else:
+            cap = QuotaHealth("healthy")
+        paid_health = (
+            _usage_windows_health([paid], reserve_percent=reserve_percent, now_ms=now_ms)
+            if paid.amount.fraction() is not None and not paid.unlimited
+            else QuotaHealth("healthy")
+        )
+        if cap.state == "reserve" and (
+            paid_health.remaining_fraction is None
+            or (cap.remaining_fraction or 0) < paid_health.remaining_fraction
+        ):
+            paid_health = cap
+        if paid_health.state == "healthy":
+            return paid_health
+        if paid_health.state == "reserve" and best.state not in ("healthy", "reserve"):
+            best = paid_health
+    return best
+
+
+def _usage_windows_health(
+    relevant: list[UsageLimit], *, reserve_percent: float, now_ms: float | None
+) -> QuotaHealth:
+    """Reduce conjunctive windows after choosing the included or paid path."""
     measured: list[tuple[UsageLimit, float]] = []
     for limit in relevant:
         fraction = limit.amount.fraction()
@@ -574,7 +623,7 @@ def shared_tier_saturation(
     shared: list[float] = []
     tier_binding = False
     for limit in report.limits:
-        if limit.id.endswith(":extra"):
+        if limit.paid_fallback:
             continue
         fraction = limit.amount.fraction()
         if fraction is None:
@@ -1286,16 +1335,30 @@ def _anthropic_extra_usage(payload: dict[str, Any]) -> UsageLimit | None:
                 unit="usd",
             ),
             window="1 month",
+            paid_fallback=True,
+            available=(cap is not None and cap > 0)
+            or ("limit" in spend and spend["limit"] is None),
+            unlimited=("limit" in spend and spend["limit"] is None),
+            supersedes_tiers=True,
         )
     extra = payload.get("extra_usage")
     if not isinstance(extra, dict) or extra.get("is_enabled") is not True:
         return None
-    places = extra.get("decimal_places")
+    places = extra.get("decimal_places", 2)
+    # Reject invalid precision before exponentiation: a malformed vendor object
+    # must neither grant uncapped spend nor overflow the float normalization.
+    if type(places) is not int or not 0 <= places <= 308:
+        return None
     used = _num(extra.get("used_credits"))
-    if used is None:
+    if used is None or used < 0 or isinstance(extra.get("used_credits"), bool):
         return None
     monthly = _num(extra.get("monthly_limit"))
-    divisor = 10 ** (places if isinstance(places, int) and places >= 0 else 2)
+    if isinstance(extra.get("monthly_limit"), bool):
+        return None
+    divisor = 10**places
+    # Both legacy amounts are minor units; scaling only the cap falsely
+    # exhausts an account with $12.50 used of $100.00 at 1250% utilization.
+    used /= divisor
     cap = monthly / divisor if monthly and monthly > 0 else None
     return UsageLimit(
         id="anthropic:extra",
@@ -1307,6 +1370,11 @@ def _anthropic_extra_usage(payload: dict[str, Any]) -> UsageLimit | None:
             unit="usd",
         ),
         window="1 month",
+        paid_fallback=True,
+        available=(cap is not None and cap > 0)
+        or ("monthly_limit" in extra and extra["monthly_limit"] is None),
+        unlimited=("monthly_limit" in extra and extra["monthly_limit"] is None),
+        supersedes_tiers=True,
     )
 
 
@@ -1557,6 +1625,44 @@ async def fetch_openai_oauth(
                     limit.label = f"{limit.window} ({display})"
                     limits.append(limit)
 
+    credits = payload.get("credits")
+    spend = payload.get("spend_control")
+    if isinstance(credits, dict):
+        # WHAM's balance is decimal credits, not money. Message estimates are
+        # advisory only; reset-credit counts are a different product entirely.
+        balance = _num(credits.get("balance"))
+        if isinstance(credits.get("balance"), bool) or (balance is not None and balance < 0):
+            balance = None
+        eligible = (
+            credits.get("has_credits") is True
+            and isinstance(credits.get("unlimited"), bool)
+            and credits.get("overage_limit_reached") is False
+            and isinstance(spend, dict)
+            and spend.get("reached") is False
+        )
+        unlimited = credits.get("unlimited") is True
+        estimates = []
+        for key, label in (("approx_local_messages", "local"), ("approx_cloud_messages", "cloud")):
+            counts = credits.get(key)
+            if (
+                isinstance(counts, list)
+                and counts
+                and all(type(n) is int and n >= 0 for n in counts)
+            ):
+                estimates.append(f"approx. {label} messages: {'/'.join(str(n) for n in counts)}")
+        limits.append(
+            UsageLimit(
+                id="openai:credits",
+                label="Extra credits",
+                amount=UsageAmount(remaining=balance, unit="credits"),
+                paid_fallback=True,
+                available=eligible,
+                unlimited=unlimited,
+                detail=" · ".join(estimates),
+                # No evidence that credits supersede additional Spark caps.
+                supersedes_tiers=False,
+            )
+        )
     if not limits:
         return None
     plan = payload.get("plan_type")
@@ -1760,6 +1866,8 @@ def _xai_on_demand(config: dict[str, Any]) -> UsageLimit | None:
         ),
         window="1 month",
         shared=True,
+        paid_fallback=True,
+        available=True,
     )
 
 
@@ -1893,6 +2001,12 @@ async def fetch_xai_oauth(client: httpx.AsyncClient, access_token: str) -> Usage
         monthly_config = await _xai_billing_config(client, access_token, XAI_BILLING_URL)
         if monthly_config is not None:
             limits.extend(_xai_monthly_limits(monthly_config))
+            # Each response owns its paid meter. Keeping the first config
+            # alone hides a monthly on-demand allowance when credits returned
+            # only the migration flag (the two endpoints need not duplicate it).
+            monthly_paid = _xai_on_demand(monthly_config)
+            if monthly_paid is not None:
+                limits.append(monthly_paid)
             config = config or monthly_config
 
     if config is not None:
@@ -2153,7 +2267,9 @@ async def fetch_qwencloud_token_plan(client: httpx.AsyncClient, token: str) -> U
             UsageLimit(
                 id="credits-packs",
                 label="Credit Packs",
-                amount=UsageAmount(remaining=packs, unit="unknown"),
+                amount=UsageAmount(remaining=packs, unit="credits"),
+                paid_fallback=True,
+                available=True,
             )
         )
     return UsageReport(provider="alibaba-token-plan", limits=limits) if limits else None

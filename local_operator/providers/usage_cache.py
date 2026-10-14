@@ -201,6 +201,14 @@ def report_from_dict(data: Any) -> UsageReport | None:
                 # while the live fetch still carries it — the annotation would
                 # appear on a cold `/usage` and vanish on every warm one.
                 detail=str(limit.get("detail") or ""),
+                # Old cache rows lack the additive fields: default to no paid
+                # evidence, never turn a foreign truthy string into eligibility.
+                paid_fallback=limit.get("paid_fallback") is True,
+                available=(
+                    limit.get("available") if isinstance(limit.get("available"), bool) else None
+                ),
+                supersedes_tiers=limit.get("supersedes_tiers") is True,
+                unlimited=limit.get("unlimited") is True,
             )
             for limit in data.get("limits", [])
         ]

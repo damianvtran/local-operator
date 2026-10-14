@@ -547,3 +547,38 @@ async def test_preflight_none_result_preserves_last_good_and_fails_open(tmp_path
         assert retained is not None and retained[0].limits[0].amount.used == 50.0
     finally:
         store.close()
+
+
+def test_paid_metadata_cache_roundtrip_and_legacy_defaults() -> None:
+    from local_operator.providers.usage import (
+        UsageAmount,
+        UsageLimit,
+        UsageReport,
+        usage_health,
+    )
+    from local_operator.providers.usage_cache import report_from_dict, report_to_dict
+
+    report = UsageReport(
+        provider="openai",
+        limits=[
+            UsageLimit(
+                "openai:credits",
+                "Credits",
+                UsageAmount(remaining=61899.95877, unit="credits"),
+                paid_fallback=True,
+                available=True,
+                unlimited=False,
+            ),
+        ],
+    )
+    encoded = report_to_dict(report)
+    decoded = report_from_dict(encoded)
+    assert decoded == report
+    assert usage_health(decoded, "gpt-codex").state == "healthy"
+    assert usage_health(decoded, "gpt-codex").remaining_fraction is None
+    for field in ("paid_fallback", "available", "supersedes_tiers", "unlimited"):
+        encoded["limits"][0].pop(field)
+    legacy = report_from_dict(encoded)
+    assert legacy is not None
+    assert legacy.limits[0].paid_fallback is False
+    assert usage_health(legacy, "gpt-codex").state == "unknown"

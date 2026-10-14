@@ -5132,6 +5132,9 @@ async def _recover_quota_blocked(
         if report is None:
             continue
         health = usage_health(report, model_id, reserve_percent=reserve_percent)
+        # The normalized verdict includes eligible paid credits even when their
+        # endpoint provides no percentage. Do not require remaining_fraction:
+        # that would leave a credits-only account behind yesterday's quota block.
         if health.state not in ("healthy", "reserve"):
             continue  # genuinely spent for this family: the block stands
         _clear_blocks_for_model(auth, row.id, provider, model_id)

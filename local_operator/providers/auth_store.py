@@ -3122,7 +3122,9 @@ class AuthStore:
         # recency contest below would mask a slightly older real preflight
         # report and rank a 95%-used account as neutral (review round 2, F7).
         candidates = [
-            r for r in candidates if any(limit.amount.fraction() is not None for limit in r.limits)
+            r
+            for r in candidates
+            if any(limit.amount.fraction() is not None or limit.paid_usable() for limit in r.limits)
         ]
         if not candidates:
             return None
@@ -3136,6 +3138,10 @@ class AuthStore:
             # carries a ``resets_at_ms`` in the past, so "every reset is still
             # ahead" is exactly that test. A window with no reset timestamp
             # cannot be vouched for, so it makes the whole report unknown.
+            # A paid wallet can change independently of a future plan reset.
+            # Never vouch for stale credits with the included window's horizon.
+            if any(limit.paid_usable() for limit in report.limits):
+                return None
             measured = [limit for limit in report.limits if limit.amount.fraction() is not None]
             if not measured or any(
                 limit.resets_at_ms is None or limit.resets_at_ms <= now_ms for limit in measured
