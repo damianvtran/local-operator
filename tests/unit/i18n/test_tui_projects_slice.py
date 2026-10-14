@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from textual.widgets import Input
 
 from local_operator.i18n import catalogues, resolve, runtime, text
 from local_operator.i18n.keys import tui_projects as copy
@@ -58,7 +59,13 @@ def test_real_card_chrome_matches_golden() -> None:
     card = send.SendTargetCard([])
     widgets = list(card.compose())
     assert str(widgets[0].render()) == _en("title")
-    assert widgets[2].placeholder == _en("filter")
+    # ``compose`` yields the title and rule as ``Static`` before the filter, so the
+    # filter is the third widget. Assert its concrete type first: pyright types the
+    # list as ``Widget``, and ``placeholder`` lives on ``Input`` only, so the type
+    # check needs the narrowing that the runtime already guarantees here.
+    filter_widget = widgets[2]
+    assert isinstance(filter_widget, Input)
+    assert filter_widget.placeholder == _en("filter")
     assert str(widgets[-1].render()) == _en("legend")
     assert [
         b.description for bindings in card._bindings.key_to_bindings.values() for b in bindings
@@ -97,16 +104,63 @@ def test_backend_locale_refreshes_constants_bindings_and_dynamic_receipts(corpus
     assert send.pending_line(target) == "FR " + _en("pending", handle="◆ abc")
     assert card._bindings.key_to_bindings["enter"][0].description == "FR Choose"
     assert send.SendTargetCard([])._bindings.key_to_bindings["enter"][0].description == "FR Choose"
-    assert list(card.compose())[2].placeholder == "FR " + _en("filter")
+    fr_filter = list(card.compose())[2]
+    assert isinstance(fr_filter, Input)
+    assert fr_filter.placeholder == "FR " + _en("filter")
     text.set_active_locale("en")
     assert card._bindings.key_to_bindings["enter"][0].description == "Choose"
 
 
 def test_missing_namespace_falls_back_with_english_plural_rules(corpus) -> None:
+    # The production English branches deliberately paint identical bytes. A
+    # fixture-only distinct body makes the wrong source-locale choice observable:
+    # Russian 21 selects one, whereas English 21 must select other.
+    source = "{count, plural, one {EN ONE {label}} other {EN OTHER {label}}}"
+    values = dict(GOLDEN, **{"tui.projects.send.more": source})
+    path = catalogues.catalogue_root() / "en" / "tui.projects.json"
+    path.write_text(json.dumps(values), encoding="utf-8")
+    text._sources.cache_clear()
+    params = {"count": 21, "label": "21"}
+    assert runtime.render_message(source, params, "ru") == "EN ONE 21"
     text.set_active_locale("ru")
     assert text.active_locale() == "ru"
-    assert send._t(copy.send_more(count=21, label="21")) == "+21 more"
+    assert send._t(copy.send_more(count=21, label="21")) == "EN OTHER 21"
     assert send.NO_TARGET_FOOTER == _en("empty")
+
+
+@pytest.mark.asyncio
+async def test_app_fault_consumer_resolves_after_backend_locale_move(corpus, monkeypatch) -> None:
+    """Exercise the real worker's fault branch, not just a refreshed module global."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from local_operator.mobile import peer_send
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    async def identity(_pid):
+        return {"session_id": "synthetic-sender"}
+
+    def fail_resolution(**_kwargs):
+        raise RuntimeError("synthetic local fault")
+
+    monkeypatch.setattr(peer_send, "peer_sender_identity_async", identity)
+    monkeypatch.setattr(peer_send, "validate_peer_body", lambda _body: None)
+    monkeypatch.setattr(peer_send, "resolve_peer_target", fail_resolution)
+    settled = []
+    host = cast(
+        OperatorApp, SimpleNamespace(_quick_send_settled=lambda *args: settled.append(args))
+    )
+    view = cast(ProjectsView, object())
+    target = send.SendTarget("session", "synthetic-recipient", "work")
+    # Import the application BEFORE moving locale: a by-value notice import
+    # would retain English here despite the source module's refreshed constant.
+    text.set_active_locale("fr")
+    await OperatorApp._quick_send_worker(host, view, target, "synthetic draft")
+    assert settled == [(view, target, "FR " + _en("fault"), "synthetic draft")]
+    text.set_active_locale("en")
+    await OperatorApp._quick_send_worker(host, view, target, "synthetic draft")
+    assert settled[-1] == (view, target, _en("fault"), "synthetic draft")
 
 
 def test_disk_only_locale_fails_explicit_eligibility(corpus, monkeypatch) -> None:
