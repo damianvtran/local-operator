@@ -43,6 +43,15 @@ from local_operator.hub_sync.settings import HubSyncSettings
 
 logger = logging.getLogger(__name__)
 
+
+def prov_fingerprint(check: Any) -> str:
+    """The input-side fingerprint a prompt-too-long eligibility check compares."""
+
+    from local_operator.hub_sync import provenance as prov
+
+    return prov.fingerprint_snapshot(check.kind, check.local or {})
+
+
 T = TypeVar("T")
 
 #: Startup delay so a daemon boot is never blocked or slowed by a network pass.
@@ -264,7 +273,17 @@ class HubSyncRunner:
                     continue
                 auto = settings.auto_for(c.kind) and not grace
                 item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
-                if not auto or not st.auto_apply_due(item):
+                if not auto:
+                    continue
+                # A prompt-too-long item keeps a cheap SCHEDULED retry but only
+                # re-sends when the input/config fingerprint moved; a plain
+                # due-time check would spend tokens re-learning "still too long"
+                # (and its fingerprint gate is unbounded, never retired).
+                if item.get("error_class") == "prompt-too-long":
+                    current_fp = prov_fingerprint(c)
+                    if not st.prompt_too_long_eligible(item, current_fp):
+                        continue
+                elif not st.auto_apply_due(item):
                     continue
                 result = await self._offload(svc.apply_one, ctx, c, auto=True)
                 report.reports.append(result)

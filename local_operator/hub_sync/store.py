@@ -57,7 +57,11 @@ MISSING_RETRY_S = 24 * 3600
 LEASE_TTL_S = 180.0
 
 #: Classes that are decided by a human, not a timer (B4.3).
-NO_AUTO_RETRY = {"merge-refused", "prompt-too-long"}
+NO_AUTO_RETRY = {"merge-refused"}
+#: prompt-too-long is NOT here: it stays on a cheap SCHEDULED eligibility retry
+#: (never a permanent human-only dead end), gated by the input/config fingerprint
+#: so an unchanged request is never re-sent to the paid model.
+PROMPT_TOO_LONG_RETRY_S = 3600
 #: Classes that are not counted attempts.
 UNCOUNTED = {"no-credential", "concurrent-edit"}
 #: Systemic: one item hitting these stops an apply-all run (B4.4).
@@ -424,6 +428,11 @@ def record_failure(
     delay: float | None
     if cls in NO_AUTO_RETRY:
         item["auto_retry"], delay = False, None
+    elif cls == "prompt-too-long":
+        # A cheap SCHEDULED eligibility retry, never a permanent retirement: the
+        # next due time is recorded, but the request itself is only re-sent when
+        # its input/config fingerprint changes (``prompt_too_long_due``).
+        item["auto_retry"], delay = True, PROMPT_TOO_LONG_RETRY_S
     elif cls == "concurrent-edit":
         delay = None  # next tick
     elif cls == "hub-item-missing":
@@ -432,7 +441,14 @@ def record_failure(
         delay = MODEL_UNAVAILABLE_RETRY_S
     else:
         delay = backoff_delay_s(int(item["attempts"]), rng)
-    if item.get("attempts", 0) >= MAX_ATTEMPTS and cls not in UNCOUNTED:
+    # Six counted failures retire the automatic retry EXCEPT for prompt-too-long,
+    # which must not become a forever dead end: it retries when its fingerprint
+    # changes however many times it has failed (no-forever-retirement rule).
+    if (
+        item.get("attempts", 0) >= MAX_ATTEMPTS
+        and cls not in UNCOUNTED
+        and cls != "prompt-too-long"
+    ):
         item["auto_retry"], delay = False, None
     item["next_retry_at"] = _iso(now + timedelta(seconds=delay)) if delay is not None else None
 
@@ -457,6 +473,21 @@ def clear_retry(item: dict[str, Any]) -> None:
     """Manual Retry: user intent outranks the schedule (B4.3)."""
 
     item.update(attempts=0, next_retry_at=None, auto_retry=True)
+
+
+def prompt_too_long_eligible(item: Mapping[str, Any], current_fingerprint: str) -> bool:
+    """Whether a scheduled prompt-too-long retry may re-send the paid request.
+
+    A prompt-too-long item keeps a scheduled eligibility check, but the request
+    is only re-sent when its INPUT/config fingerprint differs from the one on the
+    failed attempt: an unchanged request that was too long once is still too long,
+    so re-sending it would spend tokens to learn nothing. A changed fingerprint
+    (the edits shrank, the window grew, the model changed) re-arms it, and the
+    rule is unbounded -- six failures do not retire it.
+    """
+    if item.get("error_class") != "prompt-too-long":
+        return auto_apply_due(item)
+    return str(item.get("prompt_fingerprint") or "") != current_fingerprint
 
 
 def auto_apply_due(

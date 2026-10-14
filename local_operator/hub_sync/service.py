@@ -662,7 +662,17 @@ def apply_one(
         ctx.store().mutate(inner)
 
     def fail(cls: str, message: str, outcome: str = "failed") -> ItemMergeReport:
-        fold(lambda item: st.record_failure(item, cls, message, summary=summary))
+        # Bind the input/config fingerprint on a prompt-too-long failure so the
+        # cheap scheduled eligibility retry can refuse to re-send an unchanged
+        # (still-too-long) request and only re-arm when it actually changed.
+        fp = prov.fingerprint_snapshot(c.kind, c.local or {})
+
+        def record(item: dict[str, Any]) -> None:
+            st.record_failure(item, cls, message, summary=summary)
+            if cls == "prompt-too-long":
+                item["prompt_fingerprint"] = fp
+
+        fold(record)
         return _with(report, outcome=outcome, error_class=cls, message=message)
 
     if report.outcome in ("needs-review", "refused"):

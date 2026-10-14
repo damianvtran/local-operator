@@ -57,6 +57,13 @@ _STRENGTH: dict[str, int] = {
 #: text field the registries hold.
 DEFAULT_MAX_CHARS = 32_768
 
+#: Bounded segmentation for ONE item: at most this many conflict groups are
+#: resolved. A pathological input cannot make the merge loop (or its paid calls)
+#: unbounded; the remainder stays ``unresolved`` and is reported, never silently
+#: dropped. Transport attempts per subunit and the whole-item wall budget are
+#: bounded separately (``resolver.MAX_ATTEMPTS``, ``MERGE_ITEM_TIMEOUT_S``).
+MAX_CONFLICT_SUBUNITS = 32
+
 #: A local shortening counts as a deliberate removal (A5) at or below this
 #: fraction of the base atom's tokens.
 _REDUCED_RATIO = 0.85
@@ -661,6 +668,10 @@ class _Ctx:
         self.systemic_failure: ResolverError | None = None
         self.region_counter = [0]
         self.atom_counter = [0]
+        #: Bounded segmentation: at most MAX_CONFLICT_SUBUNITS conflict groups are
+        #: resolved for ONE item. Beyond it the remainder stays unresolved rather
+        #: than looping (or spending) without limit.
+        self.subunits = 0
 
 
 def _regions_for(inp: FieldInput, opts: MergeOptions, ctx: _Ctx) -> list[_Region]:
@@ -882,6 +893,12 @@ def _merge_text(inp: FieldInput, opts: MergeOptions) -> MergeResult:
     for region in regions:
         for t in region.triples:
             if t.is_conflict:
+                if ctx.subunits >= MAX_CONFLICT_SUBUNITS:
+                    # Over the bounded subunit count: leave it unresolved and
+                    # reported rather than merging/spending without bound.
+                    t.prov, t.failure = "unresolved", t.failure or "too-many-conflicts"
+                    continue
+                ctx.subunits += 1
                 req = _build_request(ctx, region, t, len(provisional))
                 proposal, failure = _resolve_conflict(ctx, req)
                 if proposal is not None:
