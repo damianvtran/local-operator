@@ -111,10 +111,14 @@ LOCAL_PREFIX_LEN = 4  # uint32_be length prefix on every record
 #: Link feature strings. A feature is used only when BOTH sides advertise it;
 #: absent means "old peer" and unknown is ignored, which is what lets a new
 #: capability ship without moving either protocol version.
+#: Advertised together with its receiver and sender: an old peer negotiates
+#: neither and receives no lifecycle kinds; its finite-grant path is unchanged.
+CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
     "credential-broker-v1",
+    CREDENTIAL_LIFECYCLE_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
@@ -552,6 +556,40 @@ class UncompressedFrame(dict[str, Any]):
     """
 
 
+class _AmbiguousJSONFrame(dict[str, Any]):
+    """Last-wins legacy values, with parse provenance for opt-in protocols only."""
+
+    duplicate_json_keys = True
+
+
+def _decode_lifecycle_json(text: str) -> Any:
+    duplicate = False
+    lifecycle_objects: list[dict[str, Any]] = []
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal duplicate
+        result: dict[str, Any] = {}
+        lifecycle = False
+        for key, value in items:
+            if key in result:
+                duplicate = True
+            if key == "kind" and isinstance(value, str) and value.startswith("lifecycle_"):
+                lifecycle = True
+            result[key] = value
+        if lifecycle:
+            lifecycle_objects.append(result)
+        return result
+
+    frame = json.loads(text, object_pairs_hook=pairs)
+    if duplicate and isinstance(frame, dict):
+        # Do not globally tighten the legacy parser. Requests opt in here; replies
+        # opt in at checked_reply_detail, where their request protocol is known.
+        if frame.get("op") == "net_broker" and any(frame is obj for obj in lifecycle_objects):
+            raise ValueError("duplicate keys in credential lifecycle JSON")
+        return _AmbiguousJSONFrame(frame)
+    return frame
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -724,7 +762,7 @@ class LinkCrypto:
         if plaintext.startswith(COMPRESSED_MARKER):
             plaintext = self._decompress(plaintext)
         try:
-            frame = json.loads(plaintext.decode("utf-8"))
+            frame = _decode_lifecycle_json(plaintext.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise LinkCryptoError(
                 "a record decrypted to something that is not a JSON frame; the link is closed",
@@ -734,6 +772,25 @@ class LinkCrypto:
             raise LinkCryptoError(
                 "a record decrypted to a JSON value that is not an object", kind="parse"
             )
+        # Lifecycle frames are metadata-only and strictly bounded, so the strict
+        # validator runs HERE, on receipt, before the frame reaches any handler. It is
+        # scoped to net_broker lifecycle kinds so no other frame's legacy-tolerant
+        # decoding changes; the import is lazy because wire.py must stay stdlib-light
+        # and must not pull the credentials package in at module import time.
+        if frame.get("op") == "net_broker" and str(frame.get("kind") or "").startswith(
+            "lifecycle_"
+        ):
+            from local_operator.network.credentials.types import (
+                validate_lifecycle_frame,
+            )
+
+            try:
+                validate_lifecycle_frame(frame)
+            except ValueError as exc:
+                raise LinkCryptoError(
+                    f"a lifecycle frame failed validation: {exc}; the link is closed",
+                    kind="parse",
+                ) from exc
         return frame
 
     @staticmethod

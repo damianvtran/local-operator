@@ -3691,6 +3691,9 @@ class PeerLink:
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
+        # Preserve local transcript advertisements separately: capabilities is
+        # historically the raw peer set, not a bilateral feature intersection.
+        self.local_capabilities = frozenset(result.local_capabilities)
         # The PEER'S build stamp, kept beside its capabilities because the two
         # travel together in the handshake (hello/challenge, inside the
         # transcript the auth MAC covers) and are read together by
