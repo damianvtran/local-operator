@@ -460,9 +460,7 @@ async def test_an_empty_vocabulary_resolves_nothing_but_still_dims(tmp_path, mon
     # root. `_discovered_skills` imports `default_skill_roots` from
     # `skills.api` at call time — that module attribute is the seam patched
     # here.
-    monkeypatch.setattr(
-        "local_operator.skills.api.default_skill_roots", lambda cwd=None, **kwargs: [root]
-    )
+    monkeypatch.setattr("local_operator.skills.api.default_skill_roots", lambda cwd=None: [root])
     monkeypatch.chdir(tmp_path)
 
     app = OperatorApp(lambda: _factory(FakeSession()))

@@ -103,68 +103,6 @@ class TestDefaultSkillRoots:
         assert roots[0] == tmp_path / _SKILLS_SUBDIR
 
 
-class TestProfileSkillRoots:
-    def test_active_profile_precedes_home_but_not_project(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        home = tmp_path / "home"
-        project = home / "repo"
-        project.mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
-        profile = tmp_path / "profile"
-        roots = default_skill_roots(project, config_dir=profile)
-        assert roots.index(project / _SKILLS_SUBDIR) < roots.index(profile / "skills")
-        assert roots.index(profile / "skills") < roots.index(home / _SKILLS_SUBDIR)
-        assert roots.count(profile / "skills") == 1
-
-    def test_default_profile_is_byte_equivalent_to_old_roots(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        home = tmp_path / "home"
-        project = home / "repo"
-        project.mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
-        assert default_skill_roots(project) == default_skill_roots(
-            project, config_dir=home / ".local-operator"
-        )
-
-    def test_world_boundary_clips_managed_profile(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        world = tmp_path / "world"
-        world.mkdir()
-        monkeypatch.setenv("HOME", str(tmp_path / "outside"))
-        outside = tmp_path / "profile"
-        assert outside / "skills" not in default_skill_roots(
-            world, boundary=world, config_dir=outside
-        )
-        inside = world / "profile"
-        assert inside / "skills" in default_skill_roots(world, boundary=world, config_dir=inside)
-
-    def test_nondefault_profiles_read_their_own_skill_through_protocol(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from local_operator.skills.discovery import discover_skills
-
-        home = tmp_path / "home"
-        home.mkdir()
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
-        project = tmp_path / "project"
-        project.mkdir()
-        profiles = (tmp_path / "profile_a", tmp_path / "profile_b")
-        for number, profile in enumerate(profiles):
-            _make_skill(profile / "skills", f"profile_{number}")
-        for number, profile in enumerate(profiles):
-            roots = default_skill_roots(project, config_dir=profile, boundary=tmp_path)
-            skills, _warnings = discover_skills(roots)
-            resolver = make_skill_resolver({s.name: s for s in skills}, roots)
-            content = resolver(f"skill://profile_{number}")
-            assert content is not None and f"# profile_{number}" in content
-            other = resolver(f"skill://profile_{1 - number}")
-            assert other is not None and "Unknown skill" in other
-
-
 class TestMakeSkillResolver:
     def test_non_skill_url_returns_none(self, tmp_path: Path) -> None:
         resolver = make_skill_resolver({"alpha": _make_skill(tmp_path, "alpha")})
