@@ -80,7 +80,11 @@ class UiHostClient(HostClient):
                     return await self.call_once(current, method, params, deadline=deadline)
                 except HostPreDeliveryFailure:
                     replacement = self._read()
-                    changed = replacement is None or (
+                    # An ABSENT record means "nothing new to try": re-raise the
+                    # typed pre-delivery failure rather than dispatch with None
+                    # (which would raise AttributeError in preflight). Only a
+                    # present record that CHANGED identity is worth a retry.
+                    changed = replacement is not None and (
                         self._record_identity(replacement) != self._record_identity(current)
                     )
                     if not changed:
