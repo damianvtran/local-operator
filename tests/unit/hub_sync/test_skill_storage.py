@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.config_writer import nonblocking_file_claim
+from local_operator.hub_sync import skill_storage
 from local_operator.hub_sync.identity import LinkIdentity
 from local_operator.hub_sync.provenance import make_record, read_baseline
 from local_operator.hub_sync.skill_document import SkillDocument
@@ -14,7 +15,11 @@ from local_operator.hub_sync.skill_storage import (
     managed_skill_read,
 )
 from local_operator.hub_sync.transactions import LocalTransaction, TransactionError
-from local_operator.skills.discovery import discover_skills, managed_root_context
+from local_operator.skills.discovery import (
+    discover_skills,
+    managed_root_context,
+    roots_fingerprint,
+)
 from local_operator.skills.protocol import resolve_skill_url
 
 from .test_skill_document import manifest
@@ -150,3 +155,103 @@ def test_crash_gap_preserves_external_backup_edit_instead_of_promoting_it(tmp_pa
     assert not destination.exists()
     assert body.read_bytes() == actual
     assert storage.journal.read(pending.operation_id).phase == "blocked"
+
+
+def test_fingerprint_cannot_recover_external_symlinked_profile(tmp_path: Path) -> None:
+    """R3: the fingerprint path must apply the SAME world containment as discovery.
+
+    A bounded session reaches its native root only through the world. A world-
+    external profile addressed by an in-world symlink must not be locked,
+    recovered, or have a prepared journal completed merely because the
+    fingerprint stat'd it first.
+    """
+    world = tmp_path / "world"
+    world.mkdir()
+    external = tmp_path / "external-profile"
+    skill_dir = external / "skills" / "example-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: example-skill\ndescription: Example\n---\n# B\n"
+    )
+    link = world / "skills"
+    link.symlink_to(external / "skills")
+
+    assert roots_fingerprint([link], config_dir=external, boundary=world) is not None
+    assert not external.exists() or not (external / "hub").exists()
+
+
+def test_roots_fingerprint_still_locks_an_in_world_native_root(tmp_path: Path) -> None:
+    """R3 positive control: an IN-world native root still uses read discipline."""
+    world = tmp_path / "world"
+    native = world / "profile" / "skills"
+    (native / "example-skill").mkdir(parents=True)
+    (native / "example-skill" / "SKILL.md").write_text(
+        "---\nname: example-skill\ndescription: Example\n---\n# B\n"
+    )
+    assert roots_fingerprint([native], config_dir=world / "profile", boundary=world) is not None
+
+
+def test_differing_origin_cannot_claim_a_temporarily_absent_alias(tmp_path: Path) -> None:
+    """R5: a crash gap must not let another ORG origin take the PUBLIC owner's alias."""
+    public_identity, public_doc, public_baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(
+        public_identity, public_doc.name, public_doc, public_baseline, expected_fingerprint=None
+    )
+
+    def crash(phase: str) -> None:
+        if phase == "old-renamed":
+            raise RuntimeError("synthetic crash")
+
+    _, changed, next_baseline = _input("# New body\n")
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        storage.apply(
+            public_identity,
+            changed.name,
+            changed,
+            next_baseline,
+            expected_fingerprint=public_doc.fingerprint,
+            checkpoint=crash,
+        )
+    destination, _, _ = storage._locations(storage.journal.pending(kind="skill")[0])
+    assert not destination.exists()
+
+    org_identity = LinkIdentity(
+        "skill", "org-local", "https://example.invalid/v1", "org", "org-tab", "remote"
+    )
+    # A well-formed ORG baseline that would otherwise validate, but claims the
+    # PUBLIC owner's exact alias while that owner sits in the crash gap.
+    org_baseline = replace(
+        public_baseline,
+        kind="skill",
+        local_id="org-local",
+        hub_id="remote",
+        tenant_id="org-tab",
+        identity=org_identity,
+        local_alias=public_doc.name,
+    )
+    with pytest.raises(Exception) as excinfo:
+        storage.apply(
+            org_identity, public_doc.name, public_doc, org_baseline, expected_fingerprint=None
+        )
+    assert "alias belongs to another" in str(excinfo.value)
+
+
+def test_rename_ancestors_are_fsynced_before_swap(tmp_path: Path, monkeypatch) -> None:
+    """R4: the backup/staging parent directory entries are fsynced exactly at swap."""
+    calls: list[Path] = []
+    real = skill_storage._sync_ancestors
+
+    def spy(directory: Path, stop: Path) -> None:
+        calls.append(Path(directory))
+        real(directory, stop)
+
+    monkeypatch.setattr(skill_storage, "_sync_ancestors", spy)
+    identity, document, baseline = _input()
+    storage = ManagedSkillStorage(tmp_path / "profile")
+    storage.apply(identity, document.name, document, baseline, expected_fingerprint=None)
+    hub = storage.config_dir / "hub"
+    # The exact parents whose directory entries change at the swap: the backup
+    # collection and the staged operation's parent.
+    assert (hub / "backups") in calls
+    assert any(path.parent == hub / "staging" for path in calls)

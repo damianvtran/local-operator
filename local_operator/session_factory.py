@@ -2347,10 +2347,10 @@ def _skills_fingerprint(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
     try:
         from local_operator.skills.discovery import roots_fingerprint
 
-        return (
-            roots_fingerprint(roots)
-            if hooks.skill_config_dir is None
-            else roots_fingerprint(roots, config_dir=hooks.skill_config_dir)
+        return roots_fingerprint(
+            roots,
+            config_dir=hooks.skill_config_dir,
+            boundary=hooks.world_root,
         )
     except Exception:  # noqa: BLE001 — a fingerprint is an optimisation, never a gate
         logger.debug("classification: skill fingerprint failed", exc_info=True)

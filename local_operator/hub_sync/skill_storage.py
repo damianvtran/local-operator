@@ -23,6 +23,7 @@ from local_operator.hub_sync.identity import LinkError, LinkIdentity
 from local_operator.hub_sync.policies import materialize_policy, read_policy
 from local_operator.hub_sync.provenance import (
     BaselineRecord,
+    alias_owner,
     parse_baseline_record,
     read_baseline,
     write_baseline,
@@ -32,6 +33,7 @@ from local_operator.hub_sync.transactions import (
     LocalTransaction,
     TransactionError,
     TransactionJournal,
+    _sync_ancestors,
     _sync_directory,
 )
 
@@ -208,6 +210,17 @@ class ManagedSkillStorage:
             self.recover(local_id=identity.local_id)
             current_record = read_baseline(self.config_dir, "skill", identity.local_id)
             current = self._document(alias)
+            # ALIAS OWNERSHIP IS DURABLE, NOT LIVE-DIRECTORY-LOCAL. A crash
+            # between the two renames leaves the alias absent from the root while
+            # its baseline still owns it; reading only the live directory let a
+            # DIFFERENT origin install the same alias and then serve the other
+            # origin's text (reviewer R5). An alias that belongs to another
+            # immutable local id is refused, present or not.
+            owner = alias_owner(self.config_dir, "skill", alias)
+            if owner is not None and owner != identity.local_id:
+                raise LinkError(
+                    "origin-conflict", "managed alias belongs to another local skill origin"
+                )
             if current is not None and (
                 current_record is None
                 or current_record.local_alias != alias
@@ -280,6 +293,13 @@ class ManagedSkillStorage:
                     )
                 self.root.mkdir(mode=0o700, exist_ok=True)
                 backup.parent.mkdir(mode=0o700, exist_ok=True)
+                # A rename is durable only in the directory whose entries changed.
+                # The backup/staging PARENT entries (and any ancestor created this
+                # call) are fsynced exactly once before the swap, so a power loss
+                # cannot leave the newly-created hubs undurable; no blanket fsync of
+                # unrelated tree members (reviewer R4).
+                _sync_ancestors(backup.parent, self.config_dir / "hub")
+                _sync_ancestors(staged.parent, self.config_dir / "hub")
                 if before != document.fingerprint:
                     if destination.exists():
                         os.replace(destination, backup)

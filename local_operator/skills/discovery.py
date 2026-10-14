@@ -452,9 +452,12 @@ def managed_root_context(root: Path, config_dir: Path | None, *, boundary: Path 
     """Lock only the caller's explicit active native root, not authored inputs."""
     if config_dir is None or root.resolve() != (Path(config_dir) / "skills").resolve():
         return nullcontext()
-    if boundary is not None and not root.resolve().is_relative_to(boundary.resolve()):
+    if boundary is not None and not _within_boundary(str(root.resolve()), boundary.resolve()):
         # Recovery is a write capability. A world-scoped scan cannot reach the
         # controller's external profile merely to discover that scan clips it.
+        # Uses the SAME containment rule the scanner applies, so a native root
+        # reached only through an external symlink is never locked or recovered
+        # (reviewer R3).
         return nullcontext()
     from local_operator.hub_sync.skill_storage import managed_skill_read
 
@@ -532,7 +535,10 @@ def discover_skills(
 
 
 def roots_fingerprint(
-    roots: Sequence[Path], *, config_dir: Path | None = None
+    roots: Sequence[Path],
+    *,
+    config_dir: Path | None = None,
+    boundary: Path | None = None,
 ) -> tuple[object, ...]:
     """Cheap change-detector for the skill tree, used to gate a full rescan.
 
@@ -572,7 +578,11 @@ def roots_fingerprint(
     max_depth = skill_max_depth()
     for raw_root in roots:
         root = Path(raw_root).expanduser()
-        with managed_root_context(root, config_dir):
+        # The fingerprint must apply the SAME containment rule the scanner uses: a
+        # bounded session reaches native roots only through its world, so a
+        # world-external symlinked profile must not lock/recover merely because the
+        # fingerprint was the caller (reviewer R3).
+        with managed_root_context(root, config_dir, boundary=boundary):
             try:
                 root_stat = root.stat()
             except OSError:

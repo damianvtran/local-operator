@@ -46,6 +46,23 @@ def _directory(root: Path) -> Path:
     return directory
 
 
+def _sync_ancestors(directory: Path, stop: Path) -> None:
+    """Fsync a directory and its newly-created ancestors up to ``stop`` (exclusive).
+
+    A successful rename only durably renames the parent whose directory entry
+    changed. When ``hub``/``transactions``/``backups``/``staging`` are FIRST
+    created, their entries live in grandparents that were never fsynced, so a
+    power loss could leave the directory absent after the rename that used it.
+    Syncing the exact chain (not the whole tree) is what reviewer R4 requires.
+    """
+    current = directory
+    while True:
+        _sync_directory(current)
+        if current == stop or current.parent == current:
+            return
+        current = current.parent
+
+
 def _sync_directory(directory: Path) -> None:
     if os.name == "nt":  # directory fsync is not supported on Windows
         return
@@ -72,6 +89,9 @@ def atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         raise TransactionError("skill-too-large", "hub transaction record exceeds its bound")
     path.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.mkdir(mode=0o700, exist_ok=True)
+    # The record's own directory and any ancestors this call first created must
+    # be durable before the record is trusted after a crash (reviewer R4).
+    _sync_ancestors(path.parent, path.parent.parent.parent)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".transaction-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as stream:

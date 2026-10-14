@@ -70,6 +70,30 @@ def baselines_dir(config_dir: Path) -> Path:
     return hub_root(config_dir) / "baselines"
 
 
+def alias_owner(config_dir: Path, kind: Kind, alias: str) -> str | None:
+    """The immutable local id a managed alias belongs to, durable across a crash gap.
+
+    A crash between the two directory renames leaves the alias temporarily absent
+    from the live root, but its baseline still names it. Reading only the live
+    directory therefore let a DIFFERENT origin install the same alias and then
+    return the other origin's text for the original id (reviewer R5). This reads
+    the durable baselines so an alias that belongs to one origin is never
+    claimable by another, present or not.
+    """
+
+    directory = baselines_dir(config_dir)
+    try:
+        entries = list(directory.glob(f"{kind}-*.json"))
+    except OSError:
+        return None
+    for path in entries:
+        local_id = path.name[len(kind) + 1 : -len(".json")]
+        record = read_baseline(config_dir, kind, local_id)
+        if record is not None and record.local_alias == alias:
+            return record.local_id
+    return None
+
+
 def backups_dir(config_dir: Path) -> Path:
     return hub_root(config_dir) / "backups"
 

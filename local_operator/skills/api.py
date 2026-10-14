@@ -299,11 +299,20 @@ def _refresh_if_changed(
     """
     with state.lock:
         try:
-            fingerprint = (
-                roots_fingerprint(roots)
-                if config_dir is None
-                else roots_fingerprint(roots, config_dir=config_dir)
-            )
+            # The fingerprint path must apply the SAME world containment the
+            # scanner does (reviewer R3): a bounded session reaches native roots
+            # only through its world, so a world-external symlinked profile must
+            # not be locked/recovered just because the fingerprint ran first.
+            # Keep the byte-identical two-argument shape on the ordinary path so
+            # a reduced fake written against the historical signature still works.
+            if config_dir is None and boundary is None:
+                fingerprint = roots_fingerprint(roots)
+            elif boundary is None:
+                fingerprint = roots_fingerprint(roots, config_dir=config_dir)
+            elif config_dir is None:
+                fingerprint = roots_fingerprint(roots, boundary=boundary)
+            else:
+                fingerprint = roots_fingerprint(roots, config_dir=config_dir, boundary=boundary)
         except OSError:
             # The fingerprint swallows OSError per-entry already; this is the
             # belt-and-braces case, and a resolver may never raise.
