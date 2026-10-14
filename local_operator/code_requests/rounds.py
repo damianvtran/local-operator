@@ -122,8 +122,14 @@ _VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.I
 
 #: ``base..head``, with or without backticks. Both sides must be hex for the END
 #: to be a reviewed head; a symbolic base (``main..72bea95``) is fine.
+#:
+#: A backtick may wrap the WHOLE range or sit on just one side of the ``..``: real
+#: reviews write ``(`82adb042eb`..`3ea522cc21`)`` as readily as ``` `a..b` ```, and
+#: the per-token spelling is the shape a base-first fallback used to misread as the
+#: reviewed head (local-operator#2345, comment 6152890889).
 _SHA_RANGE = re.compile(
-    r"`?\b(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]+)\.\.(?P<head>[0-9a-f]{7,40})`?"
+    r"`?\s*(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]+)\s*`?\s*\.\.\s*`?\s*"
+    r"(?P<head>[0-9a-f]{7,40})\s*`?"
 )
 _SHA = re.compile(r"\b(?P<sha>[0-9a-f]{7,40})\b")
 
@@ -683,23 +689,47 @@ def classify_verdict(verdict: str) -> str:
 
 
 def _reviewed_head(scope: str, head: str) -> str | None:
-    """The reviewed SHA: the END of a ``sha..sha`` range in Scope, else Scope's, else Head's.
+    """The reviewed SHA: a ``sha..sha`` range's END in Scope, else Scope's hash, else Head's.
 
     Priority matters and comes from the gate's own rule — the round is fresh when
     the reviewed head IS the current head, and the head is the RIGHT-hand side of
     the scope range. The ``Head:``/``Head under test:`` field is consulted last
     because a QA round that quotes a range in Scope has already said the same thing
     more precisely.
+
+    A scope naming MORE THAN ONE head is read two ways and never guessed at:
+
+    * a **connected fold chain** — each range's base is the previous range's head,
+      the ``old..new + fold new..final`` spelling this lane uses — ends at the
+      final head, the head the review closed on;
+    * ranges that are **unconnected or contradictory** say nothing about which head
+      was reviewed, so the answer is ``None`` and freshness reads ``unknown``.
+
+    One deliberate narrowing: a line that speaks range syntax (``..``) but carries
+    no well-formed ``base..head`` is not mined for a bare hash, because that is the
+    shape a base-first fallback turned into a wrong head. The cost is recall, never
+    safety — every rejected shape degrades to ``unknown``, and none of them can
+    report a stale round as fresh.
     """
     for text in (scope, head):
         if not text:
             continue
-        match = _SHA_RANGE.search(text)
-        if match is not None:
-            return match.group("head").lower()
-        found = _SHA.search(text)
-        if found is not None:
-            return found.group("sha").lower()
+        ranges = list(_SHA_RANGE.finditer(text))
+        if ranges:
+            bases = [match.group("base").lower() for match in ranges]
+            heads = [match.group("head").lower() for match in ranges]
+            if len(set(heads)) == 1:
+                return heads[0]
+            if all(bases[index] == heads[index - 1] for index in range(1, len(heads))):
+                return heads[-1]
+            return None
+        if ".." in text:
+            continue
+        found = {match.group("sha").lower() for match in _SHA.finditer(text)}
+        if len(found) == 1:
+            return found.pop()
+        if found:
+            return None
     return None
 
 
