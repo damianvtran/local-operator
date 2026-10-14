@@ -3905,11 +3905,14 @@ def replay_entries(
         if entries[i].type == ENTRY_COMPACTION:
             compaction_index = i
             break
+    # Bound on ALL paths, not inside a later gate: the replay block below
+    # re-reads the record, and a loop-bound-only binding is both a type
+    # checker complaint and a real foot-gun if the gates ever diverge.
+    compaction = entries[compaction_index] if compaction_index is not None else None
 
     start = 0
     prefix: list[AgentMessage] = []
-    if compaction_index is not None:
-        compaction = entries[compaction_index]
+    if compaction is not None:
         prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
         # re-injected VERBATIM right after the marker, so the user's own
@@ -3974,7 +3977,7 @@ def replay_entries(
         start = context_cut_index(entries)
 
     prunes = collect_prunes(entries)
-    out: list[AgentMessage] = list(prefix)
+    kept: list[AgentMessage] = []
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
             continue
@@ -3984,8 +3987,36 @@ def replay_entries(
         notice = prunes.get(entry.id)
         if notice is not None and isinstance(message, Message):
             _apply_prune(message, notice)
-        out.append(message)
-    return out
+        kept.append(message)
+    if compaction is not None:
+        # Reapply the epoch's capture-elision record to the KEPT window. The
+        # live pass elided superseded captures from the projection it sent
+        # and recorded their stable addresses (producer scope, stream,
+        # revision) on the compaction payload; source rows and attachment
+        # blobs stayed untouched, so replay elides EXACTLY those blocks.
+        # Deliberately NOT a count re-derived here: a later turn can
+        # retro-supersede a capture the pass protected, so re-deriving a
+        # first-N over the resumed segment would drop a block the live
+        # session kept and resurrect one it elided (reviewer round 1, C1).
+        # A record without identities (every pre-elision record) changes
+        # nothing here, and a malformed one degrades to no elision rather
+        # than a guess.
+        from local_operator.compaction.marker import capture_elision_identities
+
+        identities = capture_elision_identities(compaction.payload)
+        if identities:
+            from local_operator.compaction.pruning import apply_capture_elisions
+
+            projected, _elided = apply_capture_elisions(
+                [message for message in kept if isinstance(message, Message)],
+                identities=identities,
+            )
+            projected_iter = iter(projected)
+            kept = [
+                next(projected_iter) if isinstance(message, Message) else message
+                for message in kept
+            ]
+    return list(prefix) + kept
 
 
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:

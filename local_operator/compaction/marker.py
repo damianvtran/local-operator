@@ -16,6 +16,7 @@ compaction package is consumed by hosts that are forbidden those imports.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from local_operator.harness.types import (
@@ -29,13 +30,17 @@ from local_operator.harness.types import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CAPTURE_ELISION_FRONTIER_KEY",
     "COMPACTION_MARKER_TYPE",
     "build_compaction_marker",
+    "capture_elision_frontier",
+    "capture_elision_identities",
     "marker_details",
     "marker_exists",
     "render_compaction_marker",
     "replayed_user_message",
     "split_leading_marker",
+    "with_capture_elision_frontier",
 ]
 
 #: ``CustomMessage.custom_type`` of the entry a compaction pass leaves behind.
@@ -67,6 +72,123 @@ def build_compaction_marker(
     if preserve_data is not None:
         details["preserve_data"] = preserve_data
     return CustomMessage(custom_type=COMPACTION_MARKER_TYPE, attribution="system", details=details)
+
+
+#: ``preserve_data`` key for the CAPTURE-ELISION record an epoch commits:
+#: ``{"applied": <int>, "identities": [[scope, stream, revision, ordinal], ...]}``
+#: -- which superseded-capture blocks the pass elided under the byte band
+#: (one occurrence-qualified address per elided block, in elision order) plus
+#: the count for diagnostics. ADDITIVE and optional: a record without the key
+#: (every record written before this existed) replays with NO capture
+#: elisions, which is exactly the old behaviour, and a writer with nothing to
+#: record omits the key rather than spelling a zero. REPLAY USES THE
+#: ADDRESSES, never a count re-derived from the resumed segment: a later turn
+#: can retro-supersede a capture the pass protected, so the pass-time
+#: candidate order cannot be rebuilt from the resumed whole (reviewer round
+#: 1, C1), and the per-identity ORDINAL names which occurrence was elided
+#: when a producer repeated a claim and the never-empty guard skipped the
+#: first (reviewer round 1, C2).
+CAPTURE_ELISION_FRONTIER_KEY = "capture_elisions"
+
+
+def capture_elision_frontier(details: Mapping[str, Any] | None) -> int | None:
+    """How many superseded captures a marker's epoch elided, or ``None``.
+
+    ``None`` covers both "this record predates capture elision" and "the
+    value is malformed"; replay then applies NOTHING, which is the
+    conservative reading -- an unknown frontier must never elide more than
+    the epoch did, and older readers ignore the key entirely either way.
+    """
+    if not isinstance(details, Mapping):
+        return None
+    preserve = details.get("preserve_data")
+    if not isinstance(preserve, Mapping):
+        return None
+    frontier = preserve.get(CAPTURE_ELISION_FRONTIER_KEY)
+    if not isinstance(frontier, Mapping):
+        return None
+    applied = frontier.get("applied")
+    # ``bool`` is an ``int``: a spelling of ``True`` here is a malformed
+    # record, not a count of one.
+    if isinstance(applied, bool) or not isinstance(applied, int) or applied < 0:
+        return None
+    return applied
+
+
+def capture_elision_identities(
+    details: Mapping[str, Any] | None,
+) -> tuple[tuple[str, str, str, int], ...]:
+    """The occurrence-qualified addresses of the captures a marker's epoch elided.
+
+    Each entry is ``(producer_scope, stream_id, revision_id, ordinal)``, one
+    per elided block in elision order; ``ordinal`` counts how many
+    same-identity blocks precede it in canonical arrival order (see the key
+    comment for why identity alone cannot name a block). ``()`` covers both
+    "this record predates the identities key" and "the value is malformed"
+    -- replay then applies NOTHING, the conservative reading: an unknown
+    record must never elide anything, and a bare count is not safely
+    re-derivable (reviewer round 1, C1/C2). Wrongly-shaped entries are
+    skipped individually, so one bad entry cannot discard the rest of a
+    valid record.
+    """
+    if not isinstance(details, Mapping):
+        return ()
+    preserve = details.get("preserve_data")
+    if not isinstance(preserve, Mapping):
+        return ()
+    record = preserve.get(CAPTURE_ELISION_FRONTIER_KEY)
+    if not isinstance(record, Mapping):
+        return ()
+    identities = record.get("identities")
+    if not isinstance(identities, (list, tuple)):
+        return ()
+    out: list[tuple[str, str, str, int]] = []
+    for entry in identities:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            continue
+        scope, stream, revision, ordinal = entry
+        if not (
+            isinstance(scope, str)
+            and isinstance(stream, str)
+            and isinstance(revision, str)
+            and isinstance(ordinal, int)
+            and not isinstance(ordinal, bool)
+            and ordinal >= 0
+        ):
+            continue
+        out.append((scope, stream, revision, ordinal))
+    return tuple(out)
+
+
+def with_capture_elision_frontier(
+    preserve_data: Mapping[str, Any] | None, identities: Sequence[tuple[str, str, str, int]]
+) -> dict[str, Any] | None:
+    """``preserve_data`` with the capture-elision record merged in.
+
+    ``identities`` are the stable harness-stamped addresses of the blocks the
+    pass ELIDED -- ``(producer_scope, stream_id, revision_id, ordinal)``, one
+    entry per elided block in elision order, where ``ordinal`` counts how
+    many same-identity blocks preceded it (the never-empty guard can elide a
+    duplicate claim's second occurrence while leaving the first, so the
+    address needs the ordinal to name a block -- reviewer round 1, C2). The
+    persisted form stores them beside their count (``applied``), because
+    replay must re-elide exactly the recorded blocks rather than re-derive a
+    candidate prefix over the resumed segment (see the key comment above).
+
+    A pass that elided nothing commits NOTHING new: the key is omitted rather
+    than written as zero, so a text-only or legacy pass's marker payload
+    stays byte-identical to what it was before this existed. Inputs are
+    copied, never mutated -- the caller's payload may be shared with a
+    strategy archive.
+    """
+    if not identities:
+        return dict(preserve_data) if preserve_data is not None else None
+    merged: dict[str, Any] = dict(preserve_data) if preserve_data else {}
+    merged[CAPTURE_ELISION_FRONTIER_KEY] = {
+        "applied": len(identities),
+        "identities": [list(identity) for identity in identities],
+    }
+    return merged
 
 
 def replayed_user_message(content: list[Content], entry_id: str | None) -> Message:

@@ -293,6 +293,38 @@ class TextContent(BaseModel):
     text: str = ""
 
 
+class CapturedFrame(BaseModel):
+    """Harness-stamped provenance for one producer-owned capture.
+
+    WHY THIS EXISTS. Compaction pressure must be able to reclaim SUPERSEDED
+    captures without ever risking a user upload, an unknown image, or the
+    newest frame of any stream — but today every image block is
+    indistinguishable, so no selection is possible at all. This value is the
+    minimal discriminator: which producing stream and revision a capture
+    belongs to, and which producer scope may supersede it.
+
+    WHAT IT IS NOT. Not authority, and never trusted as one: these fields are
+    stamped by the HARNESS at the actual producer seam, scoped to the real
+    producer identity — a server's own stream/revision claim rides inside
+    that scope, and a producer-supplied copy of either identity is ignored.
+    A malicious producer can therefore only supersede its OWN earlier
+    captures; it can never label a user, unknown, or other-producer image
+    disposable. Absence is not an error either — absent or malformed
+    metadata means PROTECTED, so a bad claim degrades to retention, not to
+    lost content.
+
+    Shape: bounded opaque IDs only (no vocabulary that could drift), compared
+    by exact string. Frozen: a capture identity is a fact about the past, and
+    in-place mutation is how two readers would disagree about it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stream_id: str = Field(min_length=1, max_length=256)
+    revision_id: str = Field(min_length=1, max_length=256)
+    producer_scope: str = Field(min_length=1, max_length=256)
+
+
 class ImageContent(BaseModel):
     """An image block. ``data`` is base64-encoded bytes of ``mime_type``.
 
@@ -317,6 +349,37 @@ class ImageContent(BaseModel):
     data: str = ""
     mime_type: str = "image/png"
     marker: int | None = Field(default=None, exclude=True)
+    #: Harness-stamped capture provenance (see :class:`CapturedFrame`).
+    #: ``None`` for every image without producer-stamped identity — user
+    #: uploads, unknown images, legacy rows — which is exactly the set
+    #: compaction must treat as PROTECTED.
+    #:
+    #: Serialization contract: while unset, EVERY dump omits the key entirely
+    #: (``_omit_absent_capture``, below), so absent metadata leaves wire,
+    #: transcript and context-hash bytes exactly as they were — not a new
+    #: null field. When present, the value travels on durable rows so replay
+    #: can reproduce the same projection. Provider encoders build their
+    #: image parts from ``data``/``mime_type`` explicitly and therefore
+    #: never emit this bookkeeping object, exactly as they never emit
+    #: ``marker``.
+    captured_frame: CapturedFrame | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_capture(self, handler: Any, info: Any) -> Any:
+        """Omit ``captured_frame`` from every dump while it is unset.
+
+        Mirrors the ``_omit_absent_core_source``/``_omit_disabled_drag``
+        pattern rather than a field-level ``exclude_if`` so the guarantee
+        holds at EVERY dump site (plain dumps included, not only the
+        ``exclude_defaults`` ones), which is what the byte-identical
+        absent-metadata contract needs. Only THIS key's unset is dropped;
+        ``marker`` keeps its own ``exclude=True`` rule.
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("captured_frame") is None:
+            data.pop("captured_frame", None)
+        return data
 
 
 class AudioContent(BaseModel):
