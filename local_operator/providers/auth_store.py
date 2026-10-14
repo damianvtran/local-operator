@@ -1092,8 +1092,14 @@ class AuthStore:
         config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
+        read_only: bool = False,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
+        #: Metadata-only mode for the paired-phone usage seam. Every open is
+        #: ``mode=ro`` over an existing file and constructor performs NO disk
+        #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
+        #: (:meth:`list_credentials`) work; write paths must not be reached.
+        self._read_only = read_only
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1140,7 +1146,51 @@ class AuthStore:
         #: Set by :meth:`close`. Read by :func:`shared_auth_store` to decide
         #: whether the process-level store it is holding is still usable.
         self._closed = False
-        self._conn = self._connect()
+        if read_only:
+            # Construction must WRITE NOTHING: an absent database is simply an
+            # empty store, so the read-only open degrades to ``None`` instead
+            # of raising out of the constructor (the mode=ro open cannot be
+            # created, only opened).
+            self._conn = self._connect_read_only()
+        else:
+            self._conn = self._connect()
+
+    @classmethod
+    def open_read_only(cls, db_path: str | Path | None = None) -> "AuthStore":
+        """A metadata-only store that writes nothing on construction or read.
+
+        The paired-phone seam must be able to read persisted credential
+        METADATA (which providers/rows exist) without the default store's
+        constructor side effects: ``mkdir`` of the config root, ``O_CREAT`` of
+        auth.db, the WAL PRAGMA, the schema ``executescript`` and three
+        ``chmod`` calls. Building a default store and merely refraining from
+        writing would still have performed all of those, so the read-only open
+        is a distinct constructor rather than a flag a caller could forget.
+        An absent database reads as an empty store.
+        """
+        store = cls(db_path, read_only=True)
+        return store
+
+    def _connect_read_only(self) -> _SerializedConnection | None:
+        """The metadata-only handle, or ``None`` when there is nothing to read.
+
+        ``mode=ro`` over an existing file only: no mkdir, no O_CREAT, no WAL
+        PRAGMA, no schema DDL, no commit, no chmod. sqlite refuses every write
+        through this handle, so the seam cannot mutate by accident. An absent or
+        unreadable database is an EMPTY store, not an error — the phone route
+        asks "what is cached", and "nothing yet" is a legitimate answer.
+        """
+        if not self._db_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro", timeout=5.0, uri=True, check_same_thread=False
+            )
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return _SerializedConnection(conn)
+        except Exception:  # noqa: BLE001 — absent/corrupt db = empty store
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
 
     @property
     def db_path(self) -> Path:
@@ -1358,12 +1408,16 @@ class AuthStore:
         """
         if provider is not None:
             provider = self._storage_id(provider)
+            if self._conn is None:
+                return []
             rows = self._conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
                 (provider,),
             ).fetchall()
         else:
+            if self._conn is None:
+                return []
             rows = self._conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials ORDER BY id"
@@ -1650,6 +1704,8 @@ class AuthStore:
         return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
+        if self._conn is None:
+            return None
         row = self._conn.execute(
             "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
             " created_at, updated_at FROM auth_credentials WHERE id = ?",

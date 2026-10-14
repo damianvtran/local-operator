@@ -320,12 +320,17 @@ def account_preflight_key(storage_id: str, account_identity: str) -> str:
 class UsageCacheStore:
     """SQLite-backed shared usage cache; every method is exception-safe."""
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *, read_only: bool = False) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_cache_path()
         #: Identity of this process in lease rows, so a release only frees a
         #: lease THIS process took.
         self._holder = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._conn: sqlite3.Connection | None = None
+        #: True for the paired-phone seam: every open is ``mode=ro`` over an
+        #: existing file, and construction itself touches nothing on disk. A
+        #: read-only caller must never be the reason a directory, database file
+        #: or WAL sidecar appears under the operator's config root.
+        self._read_only = read_only
 
     # -- connection ----------------------------------------------------------
     def _connect(self) -> sqlite3.Connection | None:
@@ -337,6 +342,26 @@ class UsageCacheStore:
         """
         if self._conn is not None:
             return self._conn
+        if self._read_only:
+            # Read-only open: no mkdir, no O_CREAT, no WAL PRAGMA, no schema
+            # DDL, no commit, no chmod — a phone GET must not write. An absent
+            # database is an empty cache, not a file this path creates. The URI
+            # form is what makes sqlite itself refuse any write, so a future
+            # caller cannot accidentally mutate through this handle.
+            if not self._db_path.exists():
+                return None
+            try:
+                uri = f"file:{self._db_path}?mode=ro"
+                conn = sqlite3.connect(uri, timeout=5.0, uri=True)
+                # sqlite3.connect in ro mode still opens lazily; force a read
+                # so a corrupt/absent-table file fails HERE (=> empty) rather
+                # than at the first query.
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+                self._conn = conn
+                return conn
+            except Exception:  # noqa: BLE001 — read-only miss, never fatal
+                logger.debug("usage cache: read-only open failed %s", self._db_path, exc_info=True)
+                return None
         try:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             # Create the file 0600 BEFORE sqlite opens it (same rule as
