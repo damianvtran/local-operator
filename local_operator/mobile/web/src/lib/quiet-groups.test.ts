@@ -215,13 +215,16 @@ describe("the relay-web vocabulary's own boundaries", () => {
 		expect(groups.map((group) => group.key)).toEqual(["qg:p1", "qg:p4"]);
 	});
 
-	it("splits on a hub relay card (parent or subagent), which stays readable", () => {
-		/* The relay renders hub traffic as `parent_message` / `subagent_message`
-		 * cards. The shared fixture exercises no hub relay, and this surface
-		 * cannot tell one from an ordinary card, so the mapping keeps them
-		 * visible rather than folding an unattributable receipt. */
-		expect(quietGroupsOf(around({ ...peer("h3"), kind: "parent_message" }))).toHaveLength(2);
-		expect(quietGroupsOf(around({ ...peer("h4"), kind: "subagent_message" }))).toHaveLength(2);
+	it("hub wire kinds bridge the receipt run without guessing from body text", () => {
+		// Parent/subagent are explicit internal receipt kinds, unlike the generic
+		// notice above. Their full rows stay available through the existing fold.
+		for (const kind of ["parent_message", "subagent_message"] as const) {
+			const rows = around({...peer("h3"), kind, details: {direction: "to_child"}});
+			const groups = quietGroupsOf(rows);
+			expect(groups).toHaveLength(1);
+			expect(groups[0]!.rowIds).toEqual(rows.map(row => row.id));
+			expect(groups[0]!.count).toBe(5);
+		}
 	});
 
 	it("sits on an empty assistant row and still splits on visible prose", () => {
@@ -272,6 +275,25 @@ describe("group facts", () => {
 		expect(quietGroupLabel("job")).toBe("Job results");
 		expect(quietGroupLabel("mixed")).toBe("Messages");
 	});
+});
+
+it("one hub bridges three actual tools without counting as work or weakening boundaries", () => {
+	const hub: QuietGroupRecord = {...peer("h"), kind: "parent_message", text: "body", details: {direction: "to_child", expects_reply: true, steer: true}};
+	const tools: QuietGroupRecord[] = [0, 1, 2].map(index => ({...peer(`t${index}`), kind: "tool", text: "", tool_name: "read", tool_state: "done"}));
+	const groups = quietGroupsOf([tools[0]!, hub, tools[1]!, tools[2]!]);
+	expect(groups).toHaveLength(1);
+	expect(groups[0]).toMatchObject({count: 1, actions: 3, mixedActions: true, replyRequested: 1, steered: 1, rowIds: ["t0", "h", "t1", "t2"]});
+	expect(quietGroupsOf(tools)).toEqual([]);
+	expect(quietGroupsOf([tools[0]!, hub, tools[1]!])).toEqual([]);
+	expect(quietGroupsOf([hub, {...hub, id: "h2", kind: "subagent_message"}])).toHaveLength(1);
+	expect(quietGroupsOf([tools[0]!, hub, user("u"), tools[1]!, tools[2]!])).toEqual([]);
+});
+
+it("unclassified legacy parent/subagent launch rows stay semantic boundaries", () => {
+	for (const kind of ["parent_message", "subagent_message"] as const) {
+		const launch = {...peer("launch"), kind, text: "any launch wording", details: {}};
+		expect(quietGroupsOf([peer("p1"), peer("p2"), launch, peer("p3"), peer("p4")]).map(group => group.rowIds)).toEqual([["p1", "p2"], ["p3", "p4"]]);
+	}
 });
 
 function user(id: string): QuietGroupRecord {

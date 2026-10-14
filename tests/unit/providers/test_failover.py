@@ -20,6 +20,7 @@ import pytest
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamReasoningDelta,
@@ -358,16 +359,13 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     assert settings.fallback_chains["anthropic/claude"]
 
 
-def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
-    """The message's list and the gate that refuses a value must be one set.
+def test_the_advertised_fixed_ladder_is_exactly_the_supported_depths() -> None:
+    """Keep fixed depth order separate from chain-only reset sentinels.
 
-    `CHAIN_EFFORT_LADDER` filters `EFFORT_ORDER` by `SUPPORTED_EFFORTS`, so the
-    drift is asymmetric: a rung added to `EFFORT_ORDER` alone is filtered out
-    and can never be advertised while refused (safe), but a rung added to
-    `SUPPORTED_EFFORTS` alone is ACCEPTED and silently missing from the list -
-    something the `sorted(SUPPORTED_EFFORTS)` this replaced could not do
-    (review round 32). Cheap to pin, and the failure it prevents is a user
-    being told a value they just used successfully is not one of the options.
+    `auto` is accepted in a chain but has no ordinal depth. The warning appends
+    it to this fixed ladder; `test_fallback_auto` pins that advertised union
+    against the chain vocabulary so a new accepted value cannot disappear from
+    the diagnostic (the drift pinned in review round 32).
     """
     assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
     # And it is a ladder, stated LITERALLY. Re-deriving it as
@@ -611,6 +609,55 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_google_boundary_after_primary_exhaustion_is_rendered_for_target() -> None:
+    """A fallback must normalize its own family, not reuse the primary wire."""
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body["model"] == "gpt-4o":
+            return httpx.Response(429, json={"error": {"message": "quota exhausted"}})
+        assert body["messages"][-1]["role"] == "user"
+        content = body["messages"][-1]["content"]
+        text = content if isinstance(content, str) else "".join(p.get("text", "") for p in content)
+        # The selector itself may visit Google with an ordinary user prompt;
+        # the continued conversation is the request that needs this boundary.
+        if any(m["role"] == "assistant" for m in body["messages"]):
+            assert "harness continuation" in text
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    original = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o"),
+        messages=[Message.user("Say OK."), Message.assistant("OK.")],
+    )
+    auth = FakeAuth({"openai": ["synthetic-primary"], "openrouter": ["synthetic-fallback"]})
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {"default": ["openrouter/google/gemini-4-argon"]},
+        }
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return OpenAICompatClient("https://synthetic.invalid/v1", http_client=http)
+
+        events = [e async for e in stream_with_failover(original, auth, settings, client_for)]
+    assert bodies[0]["messages"][-1]["role"] == "assistant"
+    assert bodies[-1]["model"] == "google/gemini-4-argon"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "OK" for e in events)
+    assert original.messages[-1].role == "assistant"
 
 
 async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -> None:
@@ -7843,3 +7890,46 @@ async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(
     assert excinfo.value.status == 429
     assert long_attempts == ["k1", "k2"], "no probation may leak onto an unpinned route"
     assert long_sleeps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available,expected", [(True, True), (False, False)])
+async def test_quota_blocked_recovers_with_paid_only(
+    tmp_path, monkeypatch, available, expected
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "openai",
+        {
+            "access": "synthetic",
+            "refresh": "synthetic-refresh",
+            "expires": int(time.time() * 1000) + 3600000,
+            "account_id": "synthetic-account",
+            "email": "synthetic@example.test",
+        },
+    )
+    store.block_credential(row.id, "openai", block_ms=60000)
+
+    async def fetch(*args, **kwargs):
+        return UsageReport(
+            provider="openai",
+            limits=[
+                UsageLimit(
+                    "openai:credits",
+                    "Credits",
+                    UsageAmount(remaining=10, unit="credits"),
+                    paid_fallback=True,
+                    available=available,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("local_operator.providers.usage.fetch_usage", fetch)
+    try:
+        recovered = await failover_module._recover_quota_blocked(store, "openai", "gpt-codex")
+        assert (recovered is not None) is expected
+        assert store.is_blocked_for_model(row.id, "openai", "gpt-codex") is not expected
+    finally:
+        store.close()

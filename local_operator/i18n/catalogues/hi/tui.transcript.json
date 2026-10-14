@@ -1,0 +1,19 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (कुंजी का नाम)",
+  "tui.transcript.ask.not_answered": "कोई उत्तर नहीं",
+  "tui.transcript.ask.not_provided": "प्रदान नहीं किया गया",
+  "tui.transcript.attach.receipt": "↑ {count, plural, one {# छवि} other {# छवियाँ}} संलग्न",
+  "tui.transcript.catchup.headline": "कैच-अप — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# छूटी जागृति} other {# छूटी जागृतियाँ}}",
+  "tui.transcript.queued.newest": "· अगले रनटाइम के लिए कतार में — esc इसे वापस लेता है",
+  "tui.transcript.queued.older": "· अगले रनटाइम के लिए कतार में",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "अन्य सत्र",
+  "tui.transcript.group.messages": "संदेश · {count}",
+  "tui.transcript.group.actions": "{count, plural, one {{label} कार्रवाई} other {{label} कार्रवाइयाँ}}",
+  "tui.transcript.group.reply_requested": "{count, plural, one {{label} उत्तर माँगा गया} other {{label} उत्तर माँगे गए}}",
+  "tui.transcript.group.steered": "{count, plural, one {{label} दिशा बदलने वाला संदेश} other {{label} दिशा बदलने वाले संदेश}}",
+  "tui.transcript.hub.reply_requested": "उत्तर माँगा गया",
+  "tui.transcript.hub.steered": "दिशा बदलने वाला संदेश",
+  "tui.transcript.hub.from": "{identity} से"
+}

@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -129,28 +130,27 @@ from local_operator.session.protocol import (
 from local_operator.session.replay_cache import (
     ColdReplay,
     ReplayKey,
+    build_cold_replay,
     cached_replay,
     load_cold_replay,
-    publish_replay,
     replay_key,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
-from local_operator.session.runtime.types import drain_phrase_for_frame
+from local_operator.session.runtime.types import (
+    JOURNAL_ORDER_EVENT,
+    drain_phrase_for_frame,
+)
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     ATTACHMENT_KEY,
     ATTACHMENT_MISSING,
     Transcript,
-    read_replay_suffix,
-    replay_entries,
-    usages_since_newest_shrink,
 )
 from local_operator.session.usage_seed import (
     denominator_window,
     reading_identity,
     reading_window,
-    seed_reported_usage,
 )
 from local_operator.session_lease import SessionLeaseHeldError
 
@@ -288,6 +288,14 @@ DESKTOP_CONTROL_ATTACH_S = 3.0
 #: background read holds nothing (while still occupying an ``ATTACH_MAX_CLIENTS``
 #: slot). The deadline is right either way; the sentence is narrower than it read.
 SYNC_LANDING_DEADLINE_S = 30.0
+
+#: The most raw-ID ordinals one attachment retains from owner order wakes.
+#:
+#: Mirrors the owner-side correction staging bound (4096): overflow INVALIDATES
+#: the whole retained domain rather than growing without end, because a silently
+#: partial map under a packet-level generation claim would over-release rows the
+#: owner never attested (see ``AttachedSession._note_source_wake``).
+SOURCE_ORDINALS_CAP = 4096
 
 #: How long the DIAL path waits for a desktop presence re-assert's ack.
 #:
@@ -1278,6 +1286,19 @@ class AttachedSession:
         #: after the page) — see :meth:`history_entry_times`. Kept in step with
         #: ``_history``: same loaded interval, same lifetime.
         self._entry_times: dict[str, float] = {}
+        #: THE RETAINED SOURCE DOMAIN (complete peer-source contract): the last
+        #: owner-attested ``(journal_generation, observed_at)`` seen on THIS
+        #: attachment's order wakes, and the raw-ID ordinals attested for that
+        #: generation. Watched only — never synthesized, never fetched. A wake
+        #: observed while this attachment was disconnected is unreplayable (the
+        #: sync seed does not carry the family), so omission is the designed
+        #: common case and the fallback (authority GET -> payload-by-ID) is the
+        #: contract's answer for it, never wrong display. Disposed on every
+        #: rebind; a delta may only claim the domain while
+        #: ``_source_domain_client`` is still the client it was observed under.
+        self._source_domain: tuple[str, float] | None = None
+        self._source_ordinals: dict[str, int] = {}
+        self._source_domain_client: AttachClient | None = None
         self._live_history: dict[str, Any] = {}
         self._display_window_requested = not self._owner.placement.is_local
         # (the line above used to be a flat ``False``. A REMOTE VIEWER ALWAYS
@@ -4896,6 +4917,7 @@ class AttachedSession:
         starts would redial the same runtime and be refused the same way.
         """
         client, self._client = self._client, None
+        self._dispose_source_domain()
         # A RETAINED dial's landing task dies with the dial it belongs to: this
         # boundary is where the future it awaits is cleared, so leaving the task
         # running would have it await a future nothing will ever resolve and then
@@ -5117,6 +5139,10 @@ class AttachedSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        # A NEW CLIENT STARTS WITH NO RETAINED DOMAIN, even for a same-owner
+        # reconnect: the facts were the old attachment's evidence, and the new
+        # dial's own wakes will re-attest whatever it needs.
+        self._dispose_source_domain()
         if self._surface == "desktop" and self._last_drop_at is not None:
             # C5: ONE LINE NAMING THE GAP. The churn story reads as two sides
             # that never met -- the runtime logged "dropped attach client", the
@@ -5201,6 +5227,7 @@ class AttachedSession:
                 # as the mute re-assert's caller and ``connect``'s own arm).
                 client.close()
                 self._client = None
+                self._dispose_source_domain()
                 raise
         return pending_sync
 
@@ -5396,7 +5423,7 @@ class AttachedSession:
             await self._load_history(frontend.live_cursor, strict_cut=window is not None)
             if previous is not None:
                 self._buffered_events.insert(
-                    0, HistoryDeltaEvent(messages=list(self._history), reset=True)
+                    0, self._history_delta(list(self._history), reset=True)
                 )
             elif cold_painted is not None:
                 self._replay_cold_gap(cold_painted)
@@ -5446,7 +5473,7 @@ class AttachedSession:
         self._durable_seed_tool_ids = set(window.durable_seed_tool_ids)
         if reset:
             self._message_events.clear()
-            self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
+            self._buffered_events.insert(0, self._history_delta(rows, reset=True))
         elif self._hydrated_once and previous is not None:
             self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
         elif cold_painted is not None:
@@ -6221,104 +6248,22 @@ class AttachedSession:
         through_id: str | None,
         strict_cut: bool,
     ) -> "ColdReplay":
-        """One cold parse of the journal, published under its file version.
+        """One cold parse of THIS session's journal, off the loop.
 
-        WORKER-THREAD ONLY (the caller wraps it in ``asyncio.to_thread``), and
-        the single place a cold read is built, so the cached and uncached paths
-        cannot drift: the cache stores exactly what this returns.
+        A THIN DELEGATION, and the shape is the point: the read itself lives in
+        ``replay_cache.build_cold_replay`` because the startup preheat's
+        materialization reaches the SAME code, so the cached and uncached paths
+        cannot drift and "the cached bytes are exactly what this returns" is a
+        property of one function rather than a promise kept in step across two
+        files. WORKER-THREAD ONLY (the caller wraps it in ``asyncio.to_thread``).
         """
-        directory = self._config_dir / "sessions" / self._session_id
-        checkpoint_types = (FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()
-        opportunistic = (SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()
-        # NO SECOND STAT (review round 1, F5): the key was taken by the caller
-        # before this read was scheduled, and taking it again here would only
-        # measure a different moment. What matters is the OTHER end of the read —
-        # see the re-check before publishing below.
-        suffix = read_replay_suffix(
-            directory,
-            through_id=through_id,
-            # TWO types out of ONE pass, and the distinction between the two
-            # parameters is load-bearing (review R1-2): the checkpoint is
-            # REQUIRED (the stop condition may wait for it), the spend record
-            # is OPPORTUNISTIC — a pre-ledger journal legitimately has none,
-            # and requiring it made this read the whole file on every cold
-            # open of exactly the sessions that have a checkpoint.
-            checkpoint_types=checkpoint_types,
-            opportunistic_types=opportunistic,
-        )
-        cut = through_id
-        if cut is not None and not suffix.through_present and not strict_cut:
-            # Older owners used best-effort cursors; preserve that fallback
-            # only for legacy full replay, never the negotiated window cut.
-            # ``through_present`` is false only after the reader reached
-            # the file START without meeting the cursor, so this is the
-            # same "id is not in the journal" the whole-file parse saw.
-            cut = None
-        # The accounting fallback rides the SAME read, from the rows already in
-        # hand: the suffix reader stops only once the newest shrink and its kept
-        # window are buffered, so every post-shrink message row — and therefore
-        # every still-valid usage receipt — is in ``suffix.entries``. One parse,
-        # one pass, no extra I/O on a file that reaches 103 MB. See
-        # ``_seed_cold_usage`` for what the reading is used for and why the
-        # checkpoint still wins.
-        #
-        # NOT seeded when a cursor CUTS this read. The cut discards rows above
-        # the cursor from the replay below (the reader even forgets a compaction
-        # met above it), so a receipt from those rows describes a window this
-        # viewer is not showing — and a second implementation of the cut rule
-        # here is exactly the second-boundary defect the shared scan exists to
-        # prevent. Cold passes no cursor today, so this is the correctness of
-        # the shape: an uncut read seeds, a bounded one prefers "no reading"
-        # to a reading from outside the window.
-        seed_usage = (
-            seed_reported_usage(usages_since_newest_shrink(suffix.entries))
-            if want_checkpoint and cut is None
-            else None
-        )
-        # Resolve externalized media against the store that OWNED this journal
-        # (``<config>/attachments``), derived from the session directory rather
-        # than from this reader's environment — the sidebar's saved-preview
-        # reader and this cold replay both know the config dir that owns the
-        # transcript, and only the co-located root is the writer's root by
-        # construction. The obvious-looking alternative, a per-session store at
-        # ``<config>/sessions/<id>``, was the bug (#694): NOTHING ever writes
-        # there, so every digest resolved to None and a live, on-disk
-        # screenshot replayed as "image unavailable — no longer in the
-        # transcript". ``store_for_transcript_dir`` owns that rule for both
-        # readers.
-        messages = replay_entries(
-            suffix.entries,
-            store_for_transcript_dir(directory),
-            through_id=cut,
-        )
-        values = {
-            "checkpoint": suffix.checkpoint,
-            "checkpoints": suffix.checkpoints,
-            "order": suffix.checkpoint_order,
-            "seed_usage": seed_usage,
-            "bytes_read": suffix.bytes_read,
-        }
-        if key is None:
-            return ColdReplay(messages=tuple(messages), retained=0, **values)
-        # RE-STAT AFTER THE READ, and publish only for the version still on disk.
-        # An append that lands mid-read leaves this answer describing the journal
-        # as it was when the read STARTED, which is the version ``key`` names — but
-        # ``_write_entries``' rollback (``os.truncate`` + a restored mtime for a
-        # bookkeeping batch) can bring that exact ``(ino, size, mtime_ns)`` back
-        # with different bytes, so an entry stored for it could be served over a
-        # journal it does not describe. One stat closes that: if the file moved on,
-        # the caller still gets this answer and nothing is cached under a key that
-        # no longer names it.
-        fresh = replay_key(
-            directory,
+        return build_cold_replay(
+            self._config_dir / "sessions" / self._session_id,
+            key=key,
+            want_checkpoint=want_checkpoint,
             through_id=through_id,
             strict_cut=strict_cut,
-            checkpoint_types=checkpoint_types,
-            opportunistic_types=opportunistic,
         )
-        if fresh != key:
-            return ColdReplay(messages=tuple(messages), retained=0, **values)
-        return publish_replay(key, messages=messages, **values)
 
     def _bind_history(
         self,
@@ -6422,6 +6367,126 @@ class AttachedSession:
         self._drain_buffered_events()
         self._maybe_start_gate()
 
+    def _dispose_source_domain(self) -> None:
+        """Disown the retained source domain (any rebind, go-cold, dispose).
+
+        Retention is per-attachment EVIDENCE: a new client, a new owner or a
+        dead socket can never vouch for ids the previous attachment observed,
+        so the domain goes rather than being inherited — unconditionally, even
+        when the reconnect lands on the same owner, which is cheap and
+        fail-closed where a conditional keep would be an inheritance claim.
+        """
+        self._source_domain = None
+        self._source_ordinals.clear()
+        self._source_domain_client = None
+
+    def _peer_source_declared(self) -> bool:
+        """Whether THIS attachment's client declared the complete contract.
+
+        Read off the client that actually made the declaration (set at its own
+        connect against the owner record's advertised capabilities) — never
+        inferred from placement, from wakes having arrived, or from what some
+        other client build might send. A client with no such property (every
+        local attach today) reads False, which is exactly its truth: the local
+        path stays ``journal_order``-only by construction.
+        """
+        return bool(getattr(self._client, "peer_journal_source_declared", False))
+
+    def _note_source_wake(self, event: AgentEvent[Any]) -> None:
+        """Retain owner-attested facts from one decoded order wake.
+
+        THE READ IS PASSIVE AND THE EVENT IS NEVER MUTATED: the same object is
+        handed to every consumer, and rewriting a wake's bytes here would make
+        one reader's bookkeeping another reader's evidence. Facts merge per
+        generation (an append preserves the domain), REPLACE the map on any
+        different generation (the owner rotated; the old ids' lineage is
+        disowned), and a ``reconcile`` wake invalidates the domain outright —
+        the owner itself is saying the lineage can no longer be trusted. The
+        wake arrives as the base ``AgentEvent`` (unknown future types keep
+        their extras), so ``model_extra`` is the only carrier of the attesting
+        facts on this path.
+        """
+        if event.type != JOURNAL_ORDER_EVENT:
+            return
+        extra = event.model_extra or {}
+        if extra.get("reconcile") is True:
+            self._dispose_source_domain()
+            return
+        if not self._peer_source_declared():
+            return
+        generation = extra.get("journal_generation")
+        rows = extra.get("rows")
+        if not isinstance(generation, str) or not generation or not isinstance(rows, list):
+            return
+        held = self._source_domain
+        if held is None or held[0] != generation:
+            # ATOMIC REPLACE: a new map and the new domain together, never the
+            # old map mutated under the new generation's name.
+            self._source_ordinals = {}
+            self._source_domain = (generation, time.monotonic())
+            self._source_domain_client = self._client
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            id_ = row.get("id")
+            seq = row.get("journal_seq")
+            if (
+                isinstance(id_, str)
+                and id_
+                and isinstance(seq, int)
+                and not isinstance(seq, bool)
+                and seq >= 0
+            ):
+                self._source_ordinals[id_] = seq
+        if len(self._source_ordinals) > SOURCE_ORDINALS_CAP:
+            self._dispose_source_domain()
+
+    def _history_delta(self, messages: list[Any], *, reset: bool = False) -> HistoryDeltaEvent:
+        """ONE construction for every emitted history delta, family included.
+
+        Every insertion site routes here so the sites cannot drift, and the
+        family is ALL-OR-NOTHING PER DELTA. The complete-source keys
+        (``journal_generation``, ``journal_ordinals``, ``entry_times``) attach
+        only when THIS attachment declared the complete contract, the retained
+        domain is present and still the one the current client observed, and
+        EVERY row of the delta was owner-attested in it — there is no per-row
+        binding beyond the wake's own attestations, so a partial claim would
+        let uncovered rows ride a packet-level domain claim. Otherwise the
+        delta goes WITHOUT the family: the designed common case for a reconnect
+        (rows committed while disconnected were never observed here) settles
+        through the already-designed authority/payload fallback. ``entry_times``
+        is the SUBSET of the owner-stamped map for the delta's actual messages;
+        an absent stamp stays absent — no synthesis ever rides a wire path (the
+        same rule ``history_entry_times`` states for pages).
+        """
+        extra: dict[str, Any] = {}
+        domain = self._source_domain
+        if (
+            domain is not None
+            and self._source_domain_client is self._client
+            and self._peer_source_declared()
+            and messages
+        ):
+            ordinals: dict[str, int] = {}
+            times: dict[str, float] = {}
+            covered = True
+            for message in messages:
+                message_id = str(getattr(message, "id", "") or "")
+                if not message_id or message_id not in self._source_ordinals:
+                    # ONE uncovered row omits the WHOLE family (see above).
+                    covered = False
+                    break
+                ordinals[message_id] = self._source_ordinals[message_id]
+                stamp = self._entry_times.get(message_id)
+                if isinstance(stamp, float) and math.isfinite(stamp):
+                    times[message_id] = stamp
+            if covered:
+                extra["journal_generation"] = domain[0]
+                extra["journal_ordinals"] = ordinals
+                if times:
+                    extra["entry_times"] = times
+        return HistoryDeltaEvent(messages=messages, reset=reset, **extra)
+
     def _replay_cold_gap(self, cold_painted: set[str]) -> None:
         """Paint the rows a cold facade's owner wrote after the cold read.
 
@@ -6522,7 +6587,7 @@ class AttachedSession:
             self._buffered_events[insert_at], HistoryDeltaEvent
         ):
             insert_at += 1
-        self._buffered_events[insert_at:insert_at] = [HistoryDeltaEvent(messages=gap)]
+        self._buffered_events[insert_at:insert_at] = [self._history_delta(gap)]
 
     def _is_duplicate(self, event: AgentEvent[Any]) -> bool:
         """Whether this event is a true replay duplicate, never a lifecycle peer.
@@ -6881,6 +6946,10 @@ class AttachedSession:
         # an image with an empty payload, silently. See
         # ``resolve_frame_attachments``.
         event = deserialize_event(resolve_frame_attachments(data, self._attachment_store()))
+        # RETENTION READS THE DECODED WAKE BEFORE IT IS PASSED ON — and never
+        # mutates it: the same object goes on to every consumer, and one
+        # reader's bookkeeping must not rewrite another reader's evidence.
+        self._note_source_wake(event)
         # Command completion is an owner lifecycle fact, not a painting event.
         # A canonical display refresh may buffer/dedupe UI replay, but it must
         # never hide the requested turn's terminal outcome from its scheduler.
@@ -7865,6 +7934,7 @@ class AttachedSession:
         on the NEXT runtime's turn instead of this one.
         """
         client, self._client = self._client, None
+        self._dispose_source_domain()
         if client is not None:
             try:
                 client.close()
@@ -9029,11 +9099,58 @@ class AttachedSession:
         # here.
         return self._read_state_label("effective_model_label")
 
+    def _require_owner_can_serve(self, provider: str) -> None:
+        """Refuse provider switches THIS owner cannot serve, before any mutation.
+
+        ONE DEFINITION, TWO SURFACES: the facade's own switch (:meth:`set_model`)
+        and the ``model`` slash a viewer forwards to the owner
+        (:meth:`_require_routed_model_admission`, reached from
+        ``route_shared_slash``). The owner side cannot carry this alone: a
+        pre-Muse owner's ``_model_slash`` predates ``require_owner_provider``
+        entirely, so a desktop pick forwarded blind could move a stale
+        conversation onto a provider that runtime cannot serve — the daemon's
+        catalogue offering the row is not evidence the owner implements it
+        (agent review round 1, R1-1).
+
+        Uses THIS bound owner's record/seed, never daemon-wide support. No
+        await can rebind between this check and choosing the client; a retired
+        client's authenticated socket cannot mutate a successor.
+        """
+        record = self._runtime_record
+        if record is None:
+            return
+        from local_operator.session.model_admission import require_owner_provider
+        from local_operator.update import installed_build
+
+        effective = self.effective_model
+        # The canonical reader (``runtime_model_catalogue``), NOT
+        # ``_read_state_field``: that accessor serves the store's copy-free
+        # allow-list only, and a non-scalar field like ``model_catalogue``
+        # raises through it on the real store (the routed arm caught this in
+        # CI's fork e2e, round 1).
+        rows = self.runtime_model_catalogue()
+        positive = {str(row.get("provider") or "") for row in rows if isinstance(row, dict)}
+        build = installed_build()
+        owner_ref = getattr(record, "source_ref", "")
+        stale = (
+            not record.version
+            or record.version != build.version
+            or bool(owner_ref and build.source_ref and owner_ref != build.source_ref)
+        )
+        require_owner_provider(
+            provider,
+            established={self.model.provider, effective.provider},
+            native=record.native_provider_ids,
+            positive_catalogue=positive,
+            stale=stale,
+        )
+
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         old = self.model
         client = self._client
         if client is None:
             return
+        self._require_owner_can_serve(model.provider)
         # /effort changes only the reasoning rung; /model changes identity.
         if (model.provider, model.model_id) == (old.provider, old.model_id):
             effort = model.reasoning_effort or "auto"
@@ -9472,6 +9589,12 @@ class AttachedSession:
         client = self._client
         if client is None or self._recovering or not client.connected:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))
+        if command == "model":
+            # A forwarded model switch pays the SAME owner-record admission as
+            # the facade's own (``_require_routed_model_admission``): the owner
+            # cannot be relied on to refuse, because a pre-Muse build's
+            # ``_model_slash`` predates the gate entirely (review round 1, R1-1).
+            self._require_routed_model_admission(args)
         try:
             return await client.slash_result(
                 command,
@@ -9480,6 +9603,40 @@ class AttachedSession:
             )
         except ConnectionError as error:
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
+
+    def _require_routed_model_admission(self, args: str) -> None:
+        """The ``model`` arm's admission for a slash FORWARDED to the owner.
+
+        WHY THIS EXISTS (agent review round 1, R1-1): the desktop command path
+        dispatches the picker's choice as ``command.run("model", value)`` →
+        ``POST /v1/desktop/sessions/{id}/commands`` → this seam → the owner's
+        ``slash_result``. The owner-side gate only exists in a build that
+        already implements it — a pre-Muse owner's ``_model_slash`` predates
+        ``require_owner_provider`` entirely and reaches ``build_model_spec``,
+        which constructs an unknown-provider spec without complaint — so a new
+        desktop backend offering Muse rows could move a stale conversation
+        onto a provider that owner cannot serve. The facade's own switch
+        (:meth:`set_model`) pays :meth:`_require_owner_can_serve`; a forwarded
+        slash must pay the SAME gate, before anything reaches the owner.
+
+        The owner's own parse is mirrored deliberately (``_model_slash``): the
+        two non-switch forms (``saved``, ``default …``) and a bare or malformed
+        target are the owner's to answer, not ours to refuse here.
+        """
+        target = (args or "").strip()
+        lowered = target.lower()
+        if (
+            not target
+            or lowered == "saved"
+            or lowered == "default"
+            or lowered.startswith("default ")
+        ):
+            return
+        provider, sep, model_id = target.partition("/")
+        if not sep or not model_id:
+            # The owner answers the usage notice; no provider to admit yet.
+            return
+        self._require_owner_can_serve(provider.lower())
 
     async def compact_now(self) -> CompactionOutcome:
         client = self._client
@@ -10293,6 +10450,7 @@ class AttachedSession:
             # A pending snapshot owns the final close, including failure and
             # cancellation. No new socket, create retry, or owner restart occurs.
             self._client = None
+        self._dispose_source_domain()
 
 
 def _swallow_future(future: asyncio.Future[Any]) -> None:

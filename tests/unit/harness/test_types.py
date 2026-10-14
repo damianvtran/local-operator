@@ -15,6 +15,7 @@ from local_operator.harness.types import (
     AskOption,
     AskQuestion,
     AudioContent,
+    CapturedFrame,
     ChatRequest,
     ImageContent,
     Message,
@@ -329,6 +330,46 @@ def test_an_audio_block_mirrors_the_image_block() -> None:
     assert dumped["type"] == "audio"
     assert dumped["duration_ms"] == 4200
     assert "marker" not in dumped, "a presentation fact must not reach a row or a provider"
+
+
+def test_captured_frame_is_omitted_until_stamped_and_round_trips_when_present() -> None:
+    """Absent capture metadata leaves every serialization byte-identical.
+
+    Compaction may only reclaim a capture carrying harness provenance, so an
+    absent ``captured_frame`` must mean PROTECTED — and it must not disturb
+    any dump a wire, a transcript row or a context hash is built from (not
+    even to a ``null``).
+    """
+    block = ImageContent(data="aGk=", mime_type="image/png")
+    assert "captured_frame" not in block.model_dump()
+    assert "captured_frame" not in block.model_dump(exclude_defaults=True)
+    assert block.model_dump_json() == '{"type":"image","data":"aGk=","mime_type":"image/png"}'
+
+    frame = CapturedFrame(
+        stream_id="stream-1", revision_id="rev-7", producer_scope="episode-actions"
+    )
+    stamped = ImageContent(data="aGk=", mime_type="image/png", captured_frame=frame)
+    dumped = stamped.model_dump()
+    assert dumped["captured_frame"] == {
+        "stream_id": "stream-1",
+        "revision_id": "rev-7",
+        "producer_scope": "episode-actions",
+    }
+    assert ImageContent.model_validate(dumped).captured_frame == frame
+
+
+def test_captured_frame_ids_are_bounded_strict_and_frozen() -> None:
+    for bad in (
+        {"stream_id": "", "revision_id": "r", "producer_scope": "p"},
+        {"stream_id": "s", "revision_id": "r" * 257, "producer_scope": "p"},
+        {"stream_id": "s", "revision_id": "r", "producer_scope": ""},
+        {"stream_id": "s", "revision_id": "r", "producer_scope": "p", "extra": 1},
+    ):
+        with pytest.raises(ValidationError):
+            CapturedFrame.model_validate(bad)
+    frame = CapturedFrame(stream_id="s", revision_id="r", producer_scope="p")
+    with pytest.raises(ValidationError):
+        frame.stream_id = "other"
 
 
 def test_message_user_orders_text_then_images_then_audio() -> None:

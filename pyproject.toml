@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.70.4"
+version = "0.71.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -22,6 +22,10 @@ keywords = ["local", "agent", "execution", "operator", "agent-to-agent", "agenti
 # below. Adding a dependency here is a decision about every user's install
 # time, and on Windows about whether a compiled wheel exists at all.
 dependencies = [
+    # The updater parses wheel filenames and computes compatible host tags
+    # before promoting a published release. Build isolation/dev tools do not
+    # supply runtime imports in a bare pip/uv install, so this must be base.
+    "packaging>=24.0",
     # HTTP + data model. httpx drives every provider client and the OAuth
     # flows; pydantic is the schema layer the whole harness is typed against.
     "httpx>=0.27",
@@ -289,6 +293,11 @@ local_operator = [
     # deps) are never packaged.
     "mobile/web/package.json",
     "mobile/web/pnpm-lock.yaml",
+    # The panel design note beside the sources it documents (paid-credit
+    # continuation across the terminal, desktop and phone usage views). It is a
+    # tracked file of the web tree, so the installed tree carries it with them;
+    # test_web_package_data derives this from the tree and fails when it is missing.
+    "mobile/web/PAID_USAGE.md",
     # Tailwind decides which files may hold class names with GITIGNORE
     # semantics, and `uv` writes an allow-list `.gitignore` (the single line
     # `*`) at the root of every venv and every tool generation — so an
@@ -340,6 +349,9 @@ local_operator = [
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
     "mobile/web/src/lib/*.ts",
+    "mobile/web/src/i18n/*.ts",
+    # The mandatory build/check/test scanner reads this exact fingerprint state.
+    "mobile/web/i18n-baseline.json",
     "mobile/web/src/screens/*.tsx",
     "mobile/web/src/styles/*.css",
     "mobile/web/src/themes/*.ts",

@@ -32,7 +32,7 @@ offset and the focus.
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from rich.cells import cell_len
@@ -214,6 +214,7 @@ class UsageStats:
     exhausted: int = 0
     warning: int = 0
     unknown: int = 0
+    balances: int = 0
 
     def describe(self) -> str:
         """``6 windows · 1 exhausted · 1 near limit`` — worst state first."""
@@ -224,6 +225,8 @@ class UsageStats:
             parts.append(f"{self.exhausted} exhausted")
         if self.warning:
             parts.append(f"{self.warning} near limit")
+        if self.balances:
+            parts.append(f"{self.balances} reported balance{'s' if self.balances != 1 else ''}")
         if self.unknown:
             parts.append(f"{self.unknown} not reported")
         return " · ".join(parts)
@@ -233,7 +236,7 @@ def collect_stats(
     reports,
 ) -> UsageStats:  # noqa: ANN001 — provider types stay off the TUI import graph
     """Tally every window across every report by its effective status."""
-    windows = exhausted = warning = unknown = 0
+    windows = exhausted = warning = unknown = balances = 0
     for report in reports:
         for limit in report.limits:
             windows += 1
@@ -243,8 +246,11 @@ def collect_stats(
             elif status == "warning":
                 warning += 1
             elif status == "unknown":
-                unknown += 1
-    return UsageStats(windows, exhausted, warning, unknown)
+                if format_amount(limit.amount) or getattr(limit, "unlimited", False):
+                    balances += 1
+                else:
+                    unknown += 1
+    return UsageStats(windows, exhausted, warning, unknown, balances)
 
 
 def format_age(ms: float) -> str:
@@ -333,6 +339,16 @@ def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
     return ""
 
 
+def _display_amount(limit):  # noqa: ANN001, ANN201
+    # A blocked paid wallet is still funded. Keep its observed remaining
+    # amount visible without altering the backend's consumed/fraction facts.
+    if getattr(limit, "paid_fallback", False) and limit.amount.remaining is not None:
+        from dataclasses import replace
+
+        return replace(limit.amount, used=None)
+    return limit.amount
+
+
 def usage_bar(fraction: float | None, width: int) -> str:
     """A proportion bar, or dots when the fraction is unmeasurable.
 
@@ -409,7 +425,9 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
     label_cells = [
         cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0) for limit in limits
     ]
-    numbers_cells = [cell_len(format_amount(limit.amount) or "not reported") for limit in limits]
+    numbers_cells = [
+        cell_len(format_amount(_display_amount(limit)) or "not reported") for limit in limits
+    ]
     reset_cells = [cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits]
     # The label truncates rather than pushing the numbers off the row: it is the
     # one column whose content the user can still identify from a prefix.
@@ -469,7 +487,7 @@ def _limit_row(  # noqa: ANN001
             row.append(bar[:filled], style=tint)
             row.append(bar[filled:], style=faint)
 
-    numbers = format_amount(limit.amount) or "not reported"
+    numbers = format_amount(_display_amount(limit)) or "not reported"
     row.append("  ")
     row.append(numbers.rjust(columns.numbers), style=dim)
 
@@ -522,6 +540,23 @@ def _account_status_note(  # noqa: ANN001
     """
     unavailable = bool(getattr(report, "usage_unavailable", False))
     fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+    if (
+        report.provider == "meta-muse"
+        and fetched_at
+        and not getattr(report, "credential_invalid", False)
+    ):
+        from local_operator.providers.usage import (
+            META_MUSE_ALLOWANCE_NOTE,
+            META_MUSE_OBSERVATION_TTL_MS,
+            META_MUSE_STALE_NOTE,
+        )
+
+        # Unknown Muse rows intentionally have no meters; their vintage is
+        # still load-bearing, even beside a fresher provider's title stamp.
+        if report.notes in {META_MUSE_ALLOWANCE_NOTE, META_MUSE_STALE_NOTE} or (
+            now_ms - fetched_at > META_MUSE_OBSERVATION_TTL_MS
+        ):
+            return f"last known {format_age(max(0.0, now_ms - fetched_at))}"
     if getattr(report, "credential_invalid", False):
         # The provider is named because the panel lists several accounts and
         # the note sits under one block; `/login kimi` is runnable as printed,
@@ -653,7 +688,22 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         # states the condition AND the remedy, so repeating a vaguer version
         # of it in the heading spends the same cells saying less.
         row.append("  ·  usage unavailable", style=dim)
-    binding = binding_limit(report)
+    payable = [limit for limit in report.limits if limit.paid_usable()]
+    if payable:
+        # Eligible credit replaces included shared quota, but only explicit
+        # provider scope can replace a model-family cap.
+        from dataclasses import replace
+
+        remaining_gates = [
+            limit
+            for limit in report.limits
+            if not getattr(limit, "paid_fallback", False)
+            and limit.tier
+            and not any(p.supersedes_tiers for p in payable)
+        ]
+        binding = binding_limit(replace(report, limits=remaining_gates))
+    else:
+        binding = binding_limit(report)
     if binding is not None:
         fraction = binding.amount.fraction() or 0.0
         tint = Style(color=_status_color(binding.effective_status()))
@@ -770,6 +820,32 @@ def build_usage_body(  # noqa: ANN001
     if not reports:
         return UsageBody(lines, frozenset({0}))
 
+    # Usage owns HTTP fetchers as well as these fixed provenance strings.
+    # Import only when painting actual reports: importing the panel at first
+    # paint must not pull httpx/the provider stack onto every app startup.
+    from local_operator.providers.usage import (
+        META_MUSE_ALLOWANCE_NOTE,
+        META_MUSE_OBSERVATION_TTL_MS,
+        META_MUSE_PASSIVE_NOTE,
+        META_MUSE_STALE_NOTE,
+        META_MUSE_USAGE_NOTES,
+    )
+
+    # A panel can remain open past the passive receipt's lifetime. Re-evaluate
+    # on paint too, so its clock never ages a verified 0% into apparently-current
+    # free capacity. Replace locally; do not mutate shared cached report objects.
+    visible_reports = []
+    for report in reports:
+        if report.provider == "meta-muse" and report.limits:
+            if report.notes != META_MUSE_PASSIVE_NOTE:
+                report = replace(report, limits=[], notes=META_MUSE_ALLOWANCE_NOTE)
+            elif now_ms - report.fetched_at > META_MUSE_OBSERVATION_TTL_MS or any(
+                limit.resets_at_ms is not None and limit.resets_at_ms <= now_ms
+                for limit in report.limits
+            ):
+                report = replace(report, limits=[], notes=META_MUSE_STALE_NOTE)
+        visible_reports.append(report)
+    reports = visible_reports
     columns = _measure_columns(reports, width, now_ms)
 
     dim = Style(color=theme_mod.semantic_color("dim"))
@@ -788,6 +864,84 @@ def build_usage_body(  # noqa: ANN001
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
         account_note = _account_status_note(report, now_ms, header_ms)
+        from local_operator.i18n.keys import tui_usage
+        from local_operator.i18n.text import tr
+
+        paid_text = tr("tui.usage")
+        # Reuse the backend's normalized eligibility, not wallet funding alone.
+        paid = [limit for limit in report.limits if limit.paid_usable()]
+        exhausted_plan = any(
+            not getattr(limit, "paid_fallback", False)
+            and getattr(limit, "shared", False)
+            and not limit.tier
+            and limit.amount.fraction() is not None
+            and limit.amount.fraction() >= 1
+            for limit in report.limits
+        )
+        retained_tiers = any(
+            limit.tier and limit.amount.fraction() is not None and limit.amount.fraction() >= 1
+            for limit in report.limits
+        ) and not any(limit.supersedes_tiers for limit in paid)
+        # Paid explanations annotate their meter, never consume the pinned
+        # staleness-note budget. In a short viewport a number must win the tie.
+        paid_notes: dict[str, str] = {}
+        for allowance in report.limits:
+            copy = []
+            if (
+                paid
+                and exhausted_plan
+                and allowance.shared
+                and not allowance.tier
+                and not allowance.paid_fallback
+            ):
+                copy.append(paid_text(tui_usage.paid_continue()))
+            if retained_tiers and allowance.tier:
+                copy.append(paid_text(tui_usage.paid_family_caps()))
+            if allowance.paid_fallback:
+                qualifier = (
+                    paid_text(tui_usage.paid_blocked())
+                    if allowance.available is False
+                    else (
+                        paid_text(tui_usage.paid_eligibility_unknown())
+                        if allowance.available is None
+                        else paid_text(tui_usage.paid_unlimited()) if allowance.unlimited else ""
+                    )
+                )
+                if qualifier:
+                    copy.append(qualifier)
+            paid_notes[allowance.id] = " ".join(copy)
+        muse_note = (
+            report.notes
+            if report.provider == "meta-muse"
+            and isinstance(report.notes, str)
+            and report.notes in META_MUSE_USAGE_NOTES
+            else None
+        )
+        if muse_note:
+            # The title dates the newest provider, not this account. Carry
+            # this receipt's own age at every width and for empty-limit rows;
+            # passive age is useful BEFORE its five-minute lifetime expires.
+            age = format_age(max(0.0, now_ms - report.fetched_at)) if report.fetched_at else ""
+            vintage = f" ({age})" if age else ""
+            if muse_note == META_MUSE_ALLOWANCE_NOTE:
+                muse_note = (
+                    f"Stale sign-in allowance{vintage}; current usage unknown; r won't query Muse"
+                )
+            elif muse_note == META_MUSE_STALE_NOTE:
+                muse_note = (
+                    f"Stale response allowance{vintage}; current usage unknown; r won't query Muse"
+                )
+            elif muse_note == META_MUSE_PASSIVE_NOTE:
+                muse_note = f"Last response allowance{vintage}; r won't query Muse"
+            else:
+                muse_note = "Usage unknown; r won't query Muse; next Muse reply updates it"
+            if account_note.startswith("last known"):
+                account_note = ""  # The provenance row already carries that age.
+            if cell_len(muse_note) + 2 > width:
+                if report.notes == META_MUSE_PASSIVE_NOTE:
+                    muse_note = f"Response{vintage}; r won't query Muse"
+                else:
+                    muse_note = f"Unknown{vintage}; r won't query Muse"
         if account_note:
             # The two-cell indent is part of the budget the note has to fit in.
             account_note = _fit_status_note(account_note, max(1, width - 2))
@@ -804,11 +958,23 @@ def build_usage_body(  # noqa: ANN001
             cuts.add(len(lines))
             notes.add(len(lines) - 1)
         if report.notes:
-            note = Text(f"  {report.notes}", style=dim)
+            # Muse's source/unknown explanation must travel with its meters
+            # just like an age note. Generic endpoint notes remain decoration;
+            # this does not retune another provider or the theme's dim palette.
+            note = Text(
+                f"  {muse_note or report.notes}",
+                style=Style(color=theme_mod.semantic_color("fg")) if muse_note else dim,
+            )
             note.truncate(max(1, width), overflow="ellipsis")
             lines.append(note)
+            if muse_note:
+                cuts.add(len(lines))
+                notes.add(len(lines) - 1)
         if not report.limits:
-            lines.append(Text("  no windows reported", style=dim))
+            # Unknown quota is not evidence that the account has no limits.
+            # The retained Muse qualifier already states the unknown outcome.
+            if not muse_note:
+                lines.append(Text("  no windows reported", style=dim))
             cuts.add(len(lines))
             blocks.append((block_start, len(lines)))
             continue
@@ -817,7 +983,18 @@ def build_usage_body(  # noqa: ANN001
             meter = _limit_row(limit, columns, now_ms, degraded=bool(account_note))
             lines.append(meter)
             detail = getattr(limit, "detail", "")
-            if detail:
+            paid_note = paid_notes.get(limit.id, "")
+            if paid_note:
+                # The existing detail projection drops annotations before any
+                # meter; primary ink meets contrast unlike the decorative ramp.
+                row = Text(
+                    f"{TIER_INDENT}{paid_note}",
+                    style=Style(color=theme_mod.semantic_color("fg")),
+                )
+                row.truncate(max(1, width), overflow="ellipsis")
+                lines.append(row)
+                details.add(len(lines) - 1)
+            if detail and not paid_note:
                 # Indented under its meter and truncated to the row it
                 # ANNOTATES — the meter's own ink, not the card's width. A
                 # balance row's right edge is wherever its number ends, which at
@@ -883,6 +1060,7 @@ class UsagePanel(Static):
         # receiving `UsageDismissed`.
         self._request_generation = 0
         self._clock: float = 0.0
+        self._muse_clock_signature: tuple[tuple[int, int, bool, bool], ...] | None = None
         # Screen size plus the live bottom-dock ceiling used for the last
         # paint. The dock can grow without resizing this overlay, so Textual
         # emits no resize event for the panel itself.
@@ -1843,6 +2021,34 @@ class UsagePanel(Static):
             out.append_text(row)
         self.update(out)
 
+    def _refresh_muse_clock(self) -> None:
+        """Repaint on a Muse age step/expiry, without fetching or repaint churn."""
+        if not self.display:
+            return
+        from local_operator.providers.usage import META_MUSE_OBSERVATION_TTL_MS
+
+        now = self._now()
+        signature = tuple(
+            (
+                report.fetched_at,
+                int(max(0, now - report.fetched_at) // 60_000),
+                now - report.fetched_at > META_MUSE_OBSERVATION_TTL_MS,
+                any(
+                    limit.resets_at_ms is not None and limit.resets_at_ms <= now
+                    for limit in report.limits
+                ),
+            )
+            for report in self._reports
+            if report.provider == "meta-muse"
+        )
+        if signature and signature != self._muse_clock_signature:
+            self._muse_clock_signature = signature
+            self._repaint()
+
     def on_mount(self) -> None:
+        # The wall clock advancing emits no resize/scroll event. Poll only a
+        # cheap signature; actual paint happens on minute steps or TTL/reset
+        # crossings, and hidden/non-Muse panels do no work or network I/O.
+        self.set_interval(1, self._refresh_muse_clock)
         if self.display:
             self._repaint()

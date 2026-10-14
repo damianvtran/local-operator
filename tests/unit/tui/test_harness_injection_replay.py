@@ -24,6 +24,7 @@ from local_operator.compaction.cutpoint import (
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
 from local_operator.tui.app import OperatorApp
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _transcript_text
 
 
@@ -70,6 +71,7 @@ async def test_a_carried_notice_copy_mounts_no_user_bubble() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._project_settled_rows(list(session._history))
         await pilot.pause()
@@ -95,6 +97,7 @@ async def test_a_pasted_notice_is_hidden_on_display_but_kept_in_the_transcript()
     session._history = [pasted]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._project_settled_rows(list(session._history))
         await pilot.pause()
@@ -121,6 +124,7 @@ async def test_a_stored_notice_row_mounts_no_user_bubble() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._project_settled_rows(list(session._history))
         await pilot.pause()
@@ -145,6 +149,7 @@ async def test_a_harness_injected_row_mounts_no_user_bubble() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._project_settled_rows(list(session._history))
         await pilot.pause()
@@ -185,6 +190,7 @@ async def test_a_goal_continuation_row_never_mounts_a_user_bubble() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         # No manual fold: the app's own boot replays ``session.history()``
         # through ``_project_settled_rows`` (the settled-rows path) — calling
         # it again here would fold the same rows twice, which is a fixture
@@ -254,6 +260,7 @@ async def test_the_mcp_unavailable_row_replays_on_the_warning_tier() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         # No manual fold: the app's own boot replays ``settled_rows()``, and
         # calling ``_project_settled_rows`` here as well would fold the same two
         # rows twice (the duplicate is the fixture's, not the product's).
@@ -324,6 +331,7 @@ async def test_an_opt_in_send_notice_replays_as_a_warning_row() -> None:
     ]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         notices = [
             block
@@ -386,6 +394,7 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
     session._history = [row("qa-r2", held=True), row("rev-r6", held=False)]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         notices = [
             block

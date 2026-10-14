@@ -16,6 +16,24 @@ lop exec --status JOB_ID
 lop --resume SESSION_ID
 ```
 
+## Localized help and startup copy — bounded coverage
+
+At source `641a392040bf4056361228cfc3d3ad978fced3e8`,
+[#2310](https://github.com/damianvtran/local-operator/pull/2310)
+(merge `84584151d45757e084349f99f2414e487f186eaa`) extracts exactly **20**
+`cli.exec_help` keys into [English source](../local_operator/i18n/catalogues/en/cli.exec_help.json),
+with a context sidecar and generated per-key Python functions. This is the bounded
+exec/help/startup-copy surface, **not translation of all CLI commands or help**.
+
+Argument-parser construction resolves help language lazily through the read-only
+config reader: config → `LOP_LANG` → OS → `en`, then shipped eligibility. Missing
+namespace/key copy falls back to English source and formatting; unavailable or
+undecodable config uses the default `auto` chain, not a config repair. For example,
+`LOP_LANG=fr lop exec --help` may still show English where that namespace is absent.
+Commands, flags, machine JSON keys, codes and event tokens keep their contracts;
+localized prose must not be parsed as a machine identifier. See [the i18n HOWTO](I18N.md)
+for source versus installed-version coverage, partial locales and release gates.
+
 ## Startup options and precedence
 
 | Option | Contract |
@@ -285,12 +303,25 @@ forgets.
   re-write the row, and a run with no readable scratchpad path records `null`
   members rather than a guess.
 * The guard lives at `cli.main`: a marked process that starts `lop serve`, or
-  engages a runtime, mints sessions through the server/runtime composition root
-  and is not refused there.
+  engages a runtime, is not refused there — **but the DAEMON it becomes drops the
+  markers before it serves** (`cli.serve_command` calls
+  `agent_shell.drop_agent_shell_marker_from_environ`), because a daemon is a
+  HOSTING PLANE, not a command an agent's tool call ran: it mints the sessions
+  for the operator's OWN front ends (the desktop app's backend, the phone relay's
+  child, a TUI server), and those are the operator's chats. Without the strip,
+every session such a daemon creates is stamped `agent-shell` and hidden from
+the sidebar, the phone list and the picker — the 2026-10-13 sidebar regression,
+where an app launched from an agent's shell hid the operator's New Chats. The
+SERVE strip is the only place that also drops the QA escape
+(`LOCAL_OPERATOR_ALLOW_NESTED_SESSION`), and deliberately: a daemon that
+inherited the escape would waive the refusal for the operator's own chats. A
+session the daemon then FRONTS for an agent's `lop exec` (the mobile relay's
+child, a runtime engaging for a marked command) is still stamped, because that
+child is started by the command, not by the daemon's own mint.
 * A session's own front end opening a conversation for its user is deliberately
-  exempt — the TUI restart, `/fork`'s new window and a notification click's
-  terminal all drop the marker before they re-exec
-  (`agent_shell.without_agent_shell_marker`), because those are the user's
+exempt — the TUI restart, `/fork`'s new window and a notification click's
+terminal all drop the marker before they re-exec
+(`agent_shell.without_agent_shell_marker`), because those are the user's
 gestures, not an agent's command. That helper drops BOTH markers: a restarted or
 forked window is a SESSION, so it must not be handed its parent's delegation
 allowance either.

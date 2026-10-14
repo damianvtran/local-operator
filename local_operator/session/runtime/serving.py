@@ -2163,7 +2163,9 @@ class ServingSessionHandle(SessionHandle):
         runs it, and a final fire's re-arm rides ``_hand_wakes_to_successor``
         at the exit. Spooling that window again would mean re-latching
         ``begin_drain``, which ``_abandon_move`` records against: a second
-        retire discards the ``_wake_rearms`` the drain already swallowed.
+        retire re-runs ``retire_wakes_to_inbox``, and the fires the first drain
+        swallowed are already RESERVED in the scheduler's owned view
+        (``WakeScheduler.hold_pending``) — a second retire must not strand them.
         """
         if not getattr(self, "_draining", False):
             return False
@@ -2253,6 +2255,63 @@ class ServingSessionHandle(SessionHandle):
     # THE ORDER IS THE CONTRACT: open the window (publish + heartbeat) BEFORE the
     # announce, exactly as ``process._begin_drain`` announces before it latches. A
     # window opened after the exit was committed would be a queue nobody drains.
+
+    def request_checkpointed_move(
+        self, pair: str, *, turn_id: str = "", boot_build: str = "", phase: str = "resume"
+    ) -> bool:
+        """Ask a BUSY runtime to move at its next committed pair. False: refused.
+
+        The busy-turn sibling of :meth:`begin_update`: that window is opened only
+        from the IDLE decision (``begin_retire``/``may_refresh`` fire on idle), so
+        it cannot carry a turn that is mid-flight. This path deliberately does
+        NOT sample idleness and does NOT cancel the worker — it opens the SAME
+        admission window (new work spools via ``_spool_for_successor``) and
+        latches a checkpoint request on the session, whose record lands at the
+        next turn-pair commit.
+
+        Returns False when the window cannot be opened (already open, empty pair)
+        or the session cannot latch a request; a refusal leaves the runtime and
+        its worker exactly as they were.
+        """
+        if not pair:
+            return False
+        latch = getattr(self._session, "request_checkpoint", None)
+        if not callable(latch):
+            return False
+        if not latch(turn_id=turn_id, boot_build=boot_build, target_build=pair, phase=phase):
+            return False
+        # Open the admission window WITHOUT the idle gate. If the window cannot
+        # open, the request we just latched must not be left half-promised.
+        if not self.begin_update(pair, handler="checkpointed-move"):
+            if self._updating == pair:
+                return True  # already open for this pair: the request stands
+            getattr(self._session, "cancel_checkpoint", lambda: None)()
+            return False
+        return True
+
+    def ready_to_resume(self) -> str:
+        """The checkpoint id a successor may resume from, or "" when there is none.
+
+        Reports only a READABLE record in ``resume`` phase; an unreadable or
+        deferred record yields "" (the refusal to claim continuation), and the
+        successor is expected to report the move deferred rather than continue.
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return ""
+        try:
+            from local_operator.service_handoff import resumable
+            from local_operator.session.transcript import (
+                CHECKPOINT_CUSTOM_TYPE,
+                read_latest_custom,
+            )
+
+            record = read_latest_custom(directory, CHECKPOINT_CUSTOM_TYPE)
+        except Exception:  # noqa: BLE001 — unreadable is not permission to continue
+            return ""
+        if not resumable(record):
+            return ""
+        return str(record.get("turn_id") or "") if record else ""
 
     def begin_update(self, pair: str, handler: str = "stale-build") -> bool:
         """Open the admission window for a move to ``pair``. False: not ours.
@@ -2730,12 +2789,22 @@ class ServingSessionHandle(SessionHandle):
         derived file for processes that have no session; this process has
         the truth in memory. A disposed scheduler reports no wakes so the
         reaper never waits on a schedule that can no longer fire.
+
+        RUNNABLE ROWS ONLY. A held handle (``WakeScheduler.held_schedules``) is
+        owned by this runtime but fired by its SUCCESSOR, so counting its
+        already-due instant here would pin the runtime warm for a delivery this
+        process will never make — the reaper would never reclaim the very runtime
+        that is trying to leave. ``armed_schedules`` is the runnable half of the
+        owned view; a scheduler that predates the split (or a reduced host) has
+        no such property, in which case its ``schedules`` IS its runnable set and
+        reading it is the correct fallback.
         """
         scheduler = getattr(self._session, "wake_scheduler", None)
         if scheduler is None or getattr(scheduler, "disposed", False):
             return None
         try:
-            schedules = scheduler.schedules
+            armed = getattr(scheduler, "armed_schedules", None)
+            schedules = armed if armed is not None else scheduler.schedules
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
@@ -3107,6 +3176,21 @@ class ServingSessionHandle(SessionHandle):
         )
         return isinstance(transcript, Transcript)
 
+    @property
+    def peer_journal_source_supported(self) -> bool:
+        """Whether this runtime serves the COMPLETE peer-source vocabulary.
+
+        The peers' STORED read is served by the relay, not this runtime, so
+        this advertisement gates the runtime RECORD's half of the contract
+        (docs/DESKTOP_API.md "Complete peer-source contract"): an attaching
+        peer viewer declares ``peer_journal_source`` only against a runtime
+        that advertises this string, and the recovery envelope's source facts
+        plus their strict omission for old viewers ride the same negotiation.
+        It is a SEPARATE string from ``journal-order-v1`` because the two are
+        different promises — see ``PEER_JOURNAL_SOURCE_CAPABILITY``.
+        """
+        return self.journal_order_supported
+
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
 
@@ -3264,6 +3348,9 @@ class ServingSessionHandle(SessionHandle):
                 self._schedule_roster_refresh()
             self._refresh_todos()
             if isinstance(event, ModelChangeEvent):
+                # Fallback/recovery is an access edge too: publishing only at
+                # primary selection leaves a signed-out Meta claim on OpenAI.
+                self.publish_model_access()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -4980,8 +5067,42 @@ class ServingSessionHandle(SessionHandle):
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
         from local_operator.model.effort import resolve_effort_in
+        from local_operator.session.model_admission import (
+            native_chat_provider_ids,
+            require_owner_provider,
+        )
 
+        current = self._session.model
+        effective = getattr(self._session, "effective_model", None) or current
+        # A session with no spec yet has NOTHING established: an absent model
+        # cannot affirm a provider, and this handle is the one live-switch
+        # surface with no picker, no catalogue and no config file in front of it
+        # -- any client can send any pair, including on a session that has not
+        # chosen a model yet. Degrade to "nothing established" rather than
+        # raising AttributeError out of the admission: the refusal that belongs
+        # here is the one ``build_model_spec`` raises BELOW (the decision-only
+        # sentence ``test_the_wire_op_refuses_a_decision_only_provider`` pins),
+        # and rehome/peer switches must still be able to land.
+        established = {spec.provider for spec in (current, effective) if spec is not None}
+        require_owner_provider(
+            provider,
+            established=established,
+            native=native_chat_provider_ids(),
+        )
         spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        if provider == "meta-muse":
+            from local_operator.harness.types import ModelSpec
+
+            # Resolve the same selected account BEFORE publishing primary/spec.
+            # This is the existing metadata seam, not an inference or Codex call.
+            resolver = getattr(
+                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+            )
+            if callable(resolver):
+                result = resolver(spec)
+                resolved = await result if inspect.isawaitable(result) else result
+                if isinstance(resolved, ModelSpec):
+                    spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={
@@ -5028,11 +5149,14 @@ class ServingSessionHandle(SessionHandle):
         if store is None:
             return
         try:
-            from local_operator.providers.model_access import usable_providers_here
-            from local_operator.session.frontend_state import model_access_claim
+            from local_operator.providers.model_access import serving_model_access_here
 
-            usable = usable_providers_here(config_dir=self._config_dir)
-            store.refresh_model_access(model_access_claim(_selector(self._session), usable))
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            store.refresh_model_access(
+                serving_model_access_here(
+                    f"{spec.provider}/{spec.model_id}", config_dir=self._config_dir
+                )
+            )
         except Exception:  # noqa: BLE001 — additive state never fails its edge
             logger.debug("model access publication failed", exc_info=True)
 

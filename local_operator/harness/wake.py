@@ -730,6 +730,20 @@ class WakeScheduler:
         #: that fails must not leave the scheduler holding stale schedules.
         self._on_removed = on_removed
         self._schedules: list[WakeSchedule] = []
+        #: Handles whose one-shot successor re-arm is HELD for the next runtime
+        #: instead of being armed here (``held_schedules``/``hold_pending``),
+        #: keyed by handle id so a re-registration of the same fire replaces its
+        #: own entry rather than growing a second row. This is the fix for the
+        #: replacement loss: a held handle stays in ``schedules`` (so every
+        #: creator's cap/allocation/cancel view still sees it occupied) while
+        #: staying OUT of the runnable rows the timer arms over.
+        self._held: dict[str, WakeSchedule] = {}
+        #: Why each held handle is held. ``"drain"`` is the only current value
+        #: (a fire whose occurrence a departing runtime owes its successor) and
+        #: it is deliberately separate from the row itself: the REASON is current
+        #: process state, not a durable property of the schedule, so it must
+        #: never reach a persisted snapshot (see ``held_schedules``).
+        self._held_reasons: dict[str, str] = {}
         self._timer: asyncio.TimerHandle | None = None
         # Tick tasks spawned by the armed timer; kept as a set so dispose()
         # cancels every in-flight pump. A single slot used to let a re-arm
@@ -753,7 +767,120 @@ class WakeScheduler:
 
     @property
     def schedules(self) -> tuple[WakeSchedule, ...]:
-        return tuple(self._schedules)
+        """Every handle this runtime OWNS — runnable rows plus held ones.
+
+        The complete owned view, and it is what every creator reads. A held
+        handle (``held_schedules``) is a schedule this runtime still owns and
+        must keep occupied: its successor one-shot has not been handed over yet,
+        so a create that allocated its id would be silently discarded when that
+        handover lands (the replacement loss). Consumers that ask "which ids are
+        taken?" — the tool's create/cancel/edit, the video check-wake, the
+        desktop owner helpers, the cap count — must therefore read THIS, not the
+        runnable rows.
+
+        Consumers that ask "what can this timer fire?" must read
+        :attr:`armed_schedules` instead, or a held row that is already overdue
+        pins the runtime for a fire that will not happen here.
+        """
+        if not self._held:
+            return tuple(self._schedules)
+        # The HELD row WINS for an id it shares with a runnable one, matching
+        # ``Session._persist_wake_schedules``' retired supersession: after a fire
+        # retires a schedule and reserves its one-shot, the one-shot — not the
+        # pre-fire copy — is what that handle now means, so a persisted snapshot
+        # keeps one row per id and it is the one-shot. (The pump already removes
+        # the fired row, so the two rarely coexist; the rule is what a caller
+        # that overlays a stale live copy needs, and it is stated once, here.)
+        runnable = [row for row in self._schedules if row.id not in self._held]
+        rows = [*runnable, *self._held.values()]
+        rows.sort(key=lambda s: s.created_at)
+        return tuple(rows)
+
+    @property
+    def armed_schedules(self) -> tuple[WakeSchedule, ...]:
+        """The rows the timer may run: the owned view MINUS held handles.
+
+        The other half of the owned/runnable split. ``_arm`` and every warmth /
+        next-due probe read this, so a held overdue row never becomes a timer
+        that loops on a fire this runtime will not deliver.
+        """
+        if not self._held:
+            return tuple(self._schedules)
+        # ``_schedules`` normally excludes held ids already; the filter also
+        # covers the one window where it does not — ``hold_pending`` runs from
+        # the deliver hook, BEFORE the pump removes the fired row it replaces,
+        # and a transient same-id duplicate must not arm.
+        return tuple(row for row in self._schedules if row.id not in self._held)
+
+    @property
+    def held_schedules(self) -> tuple[WakeSchedule, ...]:
+        """The handles whose occurrence is owed to the NEXT runtime.
+
+        A held row is a real one-shot successor an already-fired schedule left
+        behind (``hold_pending``, called from the drain's delivery hook). It is
+        owned by THIS runtime for bookkeeping — so its id stays occupied — but
+        deliberately not armed here: the occurrence it stands for is delivered
+        by whoever runs next, through the existing load/grace path.
+
+        NEVER durable as a kind: what gets persisted is the plain schedule row,
+        so a successor cannot tell a held row from an ordinary overdue one, which
+        is exactly the point (see :meth:`load`).
+        """
+        return tuple(self._held.values())
+
+    def pending_ids(self) -> frozenset[str]:
+        """The owned handles currently held for the successor, by id.
+
+        Ephemeral, scheduling-phase metadata for the list surface: it lets a
+        renderer say "awaiting runtime handover" for a handle the timer will not
+        fire, without inventing a durable ``pending`` field on ``WakeSchedule``.
+        """
+        return frozenset(self._held)
+
+    def hold_pending(self, schedule: WakeSchedule, *, reason: str = "drain") -> bool:
+        """Reserve one handle for the successor's single one-shot, synchronously.
+
+        THE CENTRAL RESERVATION. A fire that RETIRES its schedule (``due.final``)
+        leaves nothing the timer can engage, so the drain queues a one-shot due
+        now for whoever runs next (``Session._queue_wake_rearm``). Before this,
+        that queue lived outside the scheduler, so a create in the still-serving
+        runtime allocated the same id and was silently superseded when the queue
+        was written (the replacement loss). The rule is a PORCELAIN one: the same
+        id may not be live twice, and a held id is still live for allocation.
+
+        CALLED FROM THE DELIVERY HOOK, WHICH RUNS INSIDE ``pump``'s WRITE LOCK —
+        so this must NOT take ``self._write_lock`` (taking it would deadlock
+        against the lock the caller already holds). It only mutates the two maps
+        and re-arms, both of which the single-threaded event loop makes safe here.
+
+        ``schedules`` (the owned view) then reports this handle; ``_arm`` and
+        every warmth probe skip it. ``reason`` is current process state, not a
+        durable field, and is used only for diagnostics.
+
+        Returns False when the scheduler is disposed (nothing to reserve).
+        """
+        if self._disposed:
+            return False
+        # The row is a real ``WakeSchedule``; validate so a malformed one can
+        # never enter the owned view and blow up a later persist or pump.
+        try:
+            row = WakeSchedule.model_validate(schedule.model_dump()).model_copy(deep=True)
+        except Exception:
+            logger.warning("could not hold an invalid wake schedule %r", schedule.id)
+            return False
+        # The fired row is removed from ``_schedules`` by the pump AFTER this hook
+        # returns, so a same-id entry here could momentarily duplicate it. The
+        # owned view de-dupes (see ``schedules``); registering under the id keeps
+        # exactly one held row per handle.
+        self._held[row.id] = row
+        self._held_reasons[row.id] = reason
+        logger.info(
+            "wake %s held for the successor (%s): its fire retired the schedule",
+            row.id,
+            reason,
+        )
+        self._arm()
+        return True
 
     @property
     def disposed(self) -> bool:
@@ -792,6 +919,16 @@ class WakeScheduler:
             adopted.append(copy)
         adopted.sort(key=lambda s: s.created_at)
         self._schedules = adopted
+        # A RELOADED SNAPSHOT CARRIES NO HOLD, by construction: pending is a
+        # current-owner EXECUTION phase (a fire this runtime owes the successor),
+        # never a durable kind of row (see ``held_schedules``). A row this
+        # runtime was holding for a successor that never came is written to disk
+        # as an ordinary row by ``handover_pending``/``_persist_wake_schedules``,
+        # so it arrives here as the active overdue wake it is — which is exactly
+        # how the successor folds it as the one catch-up delivery. Clearing the
+        # maps is therefore the correct load semantics, not a convenience.
+        self._held = {}
+        self._held_reasons = {}
         self._missed = missed
         self._arm()
 
@@ -811,15 +948,45 @@ class WakeScheduler:
         whatever the caller was (see ``on_removed``). Removal is by ID: a caller
         that re-writes a row in place (``patience``'s ``armed_after`` flush) has
         removed nothing and the hook must not fire.
+
+        THE CALLER PASSES THE OWNED VIEW (``schedules``), held handles and all,
+        so this method splits it rather than assigning it wholesale. A held handle
+        the caller still lists stays HELD — a create/cancel in the same runtime
+        must not promote it onto the timer ("an unrelated create must not
+        un-hold it"), and a copied list prepared before the fire landed (the
+        interleaving the design calls out) must not reset the held one-shot back
+        to its stale active row. So a held id keeps the held row's one-shot SHAPE
+        (due-now, no bounds) and takes only the caller's CONTENT (message,
+        notify): an edit rewords it in place, still held, and its occurrence is
+        never repeated or discarded. A held id the caller DROPS was cancelled:
+        the hold goes, and the row is reported to ``on_removed`` so the spool and
+        any queued delivery it left behind are purged like any other cancel.
         """
         async with self._write_lock:
-            copies = [schedule.model_copy(deep=True) for schedule in schedules]
-            copies.sort(key=lambda s: s.created_at)
-            kept_ids = {schedule.id for schedule in copies}
+            incoming = [schedule.model_copy(deep=True) for schedule in schedules]
+            incoming.sort(key=lambda s: s.created_at)
+            kept_ids = {schedule.id for schedule in incoming}
             removed = [s for s in self._schedules if s.id not in kept_ids]
-            self._schedules = copies
+            for held_id in list(self._held):
+                if held_id not in kept_ids:
+                    removed.append(self._held.pop(held_id))
+                    self._held_reasons.pop(held_id, None)
+            # Runnable rows are the incoming ones that are NOT held; each held id
+            # the caller kept is re-affirmed in place (content from the caller,
+            # one-shot shape from the hold), so nothing resets it to a stale
+            # active copy.
+            self._schedules = [row for row in incoming if row.id not in self._held]
+            for row in incoming:
+                held = self._held.get(row.id)
+                if held is not None:
+                    self._held[row.id] = held.model_copy(
+                        update={
+                            "message": row.message,
+                            "notify": row.notify,
+                        }
+                    )
             try:
-                await self._maybe_await(self._persist(list(self._schedules)))
+                await self._maybe_await(self._persist(list(self.schedules)))
             except Exception:
                 logger.warning("wake persist failed", exc_info=True)
             self._arm()
@@ -882,7 +1049,12 @@ class WakeScheduler:
                 kept.sort(key=lambda s: s.created_at)
                 self._schedules = kept
                 try:
-                    await self._maybe_await(self._persist(list(self._schedules)))
+                    # PERSIST THE OWNED VIEW, not the runnable rows: a held
+                    # handle registered during this pump's delivery must reach
+                    # disk in the same breath as the fire that produced it
+                    # (review round 2, MINOR 1), and it must survive the retire
+                    # that emptied its active row.
+                    await self._maybe_await(self._persist(list(self.schedules)))
                 except Exception:
                     # The schedules are already advanced in memory; a failed
                     # persist (disk full, transcript I/O) must not kill the
@@ -894,6 +1066,49 @@ class WakeScheduler:
                 self._notify_change()
             return fired
 
+    async def handover_pending(self) -> int:
+        """Hand this runtime's pending handles to the successor. Strict.
+
+        Takes the EXISTING write lock (the caller is ``process._hand_wakes_to_
+        successor`` at the EXIT, not the delivery hook, so there is no re-entry
+        risk), persists the complete owned view through the session's writer, and
+        releases the holds ONLY once that write landed. Returns how many handles
+        were handed over.
+
+        STRICT WHERE ``update`` IS LENIENT — deliberately. ``update`` swallows a
+        persist failure because it re-arms and keeps serving; a handover failure
+        must NOT claim success, because the rows it could not write exist nowhere
+        else the successor can see (a new runtime loads from the transcript). So
+        a failed append RETAINS the holds and the rows, returns 0, and reports the
+        failure loudly: the caller may retry, and a create in the meantime still
+        sees the ids occupied. Idempotent: a second successful call finds nothing
+        held and returns 0.
+
+        The held flag is dropped only AFTER the write, so a crash between the two
+        leaves the holds in place for a retry rather than orphaning the rows.
+        """
+        async with self._write_lock:
+            if not self._held:
+                return 0
+            handed = len(self._held)
+            try:
+                await self._maybe_await(self._persist(list(self.schedules)))
+            except Exception:
+                # Ownership is RETAINED: the handle stays held, the caller is told
+                # zero, and the loss is loud rather than silent (the alternative —
+                # clearing the hold on a failed write — is the silent drop this
+                # whole path exists to remove).
+                logger.warning(
+                    "could not hand %d pending wake(s) to a successor; ownership retained",
+                    handed,
+                    exc_info=True,
+                )
+                return 0
+            self._held.clear()
+            self._held_reasons.clear()
+            logger.info("wake scheduler: handed %d pending wake(s) to the successor", handed)
+            return handed
+
     def dispose(self) -> None:
         """Cancel the armed timer AND every in-flight tick task. asyncio has
         no ``unref``, so this is the only thing that stops a pending wake
@@ -904,6 +1119,10 @@ class WakeScheduler:
             if not tick.done():
                 tick.cancel()
         self._tick_tasks.clear()
+        # A disposed scheduler holds nothing: the session is gone with it, and a
+        # successor loads the durable rows regardless.
+        self._held.clear()
+        self._held_reasons.clear()
 
     # -- internals ----------------------------------------------------------
 
@@ -923,7 +1142,12 @@ class WakeScheduler:
 
     def _arm(self) -> None:
         self._cancel_timer()
-        if self._disposed or not self._schedules:
+        # RUNNABLE ROWS ONLY: a held handle is not a fire this runtime will make,
+        # so arming for its overdue instant would set a tick that finds nothing
+        # to pump and re-arms forever (a due-now loop) while pinning the runtime
+        # warm for a wake a successor owns.
+        runnable = self.armed_schedules
+        if self._disposed or not runnable:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -939,7 +1163,7 @@ class WakeScheduler:
             return
         self.needs_rearm = False
         now = self._now()
-        next_due = min(schedule.next_due_at for schedule in self._schedules)
+        next_due = min(schedule.next_due_at for schedule in runnable)
         delay_ms = max(0, next_due - now)
         delay_ms = min(delay_ms, MAX_ARM_MS)
         delay_ms = max(delay_ms, MIN_ARM_MS)

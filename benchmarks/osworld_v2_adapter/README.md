@@ -137,6 +137,51 @@ exclude that task or install heavyweight packages for tasks 010/080/103. All 108
 task modules loaded in a fresh isolated subprocess with network and process
 execution denied, inert controller settings, and no setup/evaluate calls.
 
+## Instruction lifecycle: deferred metadata, one post-reset read
+
+OSWorld task modules are not uniformly literal about their instructions: some
+compute the text from profile/setup state, so a static parse can only see a
+helper call or an imported name where the text should be. Two wrong answers
+are available -- refusing the module, or folding a literal skeleton -- and
+both have been ruled out. The static parse now DEFERS the instruction:
+`TaskDescriptor.instruction` is `None` with `instruction_static=False`, and
+nothing is executed (the AST walk is a data decision, never an interpreter).
+Deferral is scoped to exactly this one field: every decision field --,
+including any that references the instruction symbol -- still refuses when
+it cannot resolve, before allocation, as before. The deferred descriptor is
+evidence metadata only; no consumer feeds it to a model.
+
+The authoritative text is read ONCE, after a successful `reset`, through
+upstream's own accessor (`DesktopEnv._task_get(task_config, "instruction")`;
+desktop_env.py:222-231 on the v2.1 pin, :217 on the 2.0 checkout). This is
+deliberately not `env.instruction`: `_set_task_info` caches the mapping value
+BEFORE setup, and `_get_obs` keeps serving that cache, so a profile-dependent
+task's reset frame would carry the stale pre-setup text. The post-setup read
+is what the published hybrid baselines use. The value is stored on the
+provider and served on every observation (the observation builder only uses
+it on sequence 0); the accessor is never called per frame.
+
+A missing, blank or unreadable instruction is a REFUSAL, not a fallback: the
+provider raises `InstructionUnavailable` inside `allocate` (the getter's own
+exception is chained), and the adapter's initial-text gate independently
+refuses any reset observation whose text is absent or blank. Both land before
+the first model request, so an episode that cannot honestly show its task
+fails as an apparatus error with `binary=None` -- never a scored 0, and never
+the static descriptor or the stale cache in the model's context. The task
+import trust boundary is unchanged: task modules still import ONLY in the
+authorized adapter worker after the cleanup plan is durable (see the module
+docstring of `taskfile.py`); deferral is not a sandbox and does not weaken
+that boundary.
+
+Neutral acceptance for this lifecycle (no VM, no model, no network):
+`test_taskfile.py` pins the deferral and the strictness of everything else;
+`test_aws_provider.py` pins the changing mapping value (post-setup text wins
+the stale cache), the single read, and the None/blank/exception refusals;
+`test_fake_end_to_end.py` drives the REAL adapter through the REAL
+`EpisodeRunner` and pins that the full text reaches the first model request
+and that a text-less reset fails before any model call with an unscored
+crash artifact.
+
 ## Build, lock, install
 
 ```sh
@@ -368,13 +413,14 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    no adapter, with an instance left to tear down. Two rules keep the refusal
    honest rather than merely fast:
    * **A value with no channel is refused whether or not it is supplied.**
-     `GITLAB_PRIVATE_TOKEN` is the case: `desktop_env/controllers/gitlab.py:19-23`
-     reads it through `os.getenv` at import, and this build hands the vendor only
+     `GITLAB_PRIVATE_TOKEN` was the case: `desktop_env/controllers/gitlab.py:19-23`
+     reads it through `os.getenv` at import, and this build handed the vendor only
      the env-delivery allowlist plus the provider's own credentials, so supplying
-     it changes nothing. The two GitLab tasks (`task_026`, `task_041`) therefore
-     cannot run on this build at all, and are refused at the seam instead of
-     allocating a guest and failing mid-setup; a build that puts the name on
-     `vendor_bridge.SECRET_ENV_NAMES` can run them.
+     it changed nothing. The name is now ON that allowlist
+     (`vendor_bridge.SECRET_ENV_NAMES`), installed in the worker before the first
+     `desktop_env` import and scrubbed on close, so the two GitLab tasks
+     (`task_026`, `task_041`) run when the operator supplies the token -- the
+     refusal remains for any future name with no channel.
    * **A documented substitute satisfies what it stands in for.** The pinned
      simulator resolves its key through `model_client`'s fallback chain
      (`user_simulator.respond` passes no key when it has none, and the client then

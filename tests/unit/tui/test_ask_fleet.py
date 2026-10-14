@@ -1085,14 +1085,58 @@ async def test_a_second_fleet_gesture_is_dropped_and_the_first_engage_survives(
         assert app._ask_in_flight == set()
 
 
+async def _fleet_card_ready(app, pilot, ask_id, waiting):
+    # Pilot turns do not join the off-thread index read or the title lookup.
+    # A user cannot pick a row before its list is mounted; a direct Picked
+    # message must respect that same affordance. Join ONLY this finite worker,
+    # never the app's periodic/background workers, then await real DOM mounts.
+    workers = [worker for worker in app.workers if worker.group == "ask-fleet"]
+    # A fast completed worker can already have left the manager; the mounted
+    # row below is authoritative in that case, not the worker registry entry.
+    assert len(workers) <= 1, "the fleet load is exclusive"
+    waiting.set()
+    for worker in workers:
+        await worker.wait()
+    listing = app._ask_list
+    assert listing is not None and any(row.ask_id == ask_id for row in listing.rows)
+    await listing._mounted_event.wait()
+    assert listing.is_mounted
+    app.on_ask_queue_list_picked(AskQueueList.Picked(ask_id))
+    assert app._ask_card is not None, "the row's card must mount"
+    await app._ask_card._mounted_event.wait()
+    assert app._ask_card.is_mounted
+
+
+@pytest.mark.parametrize("hold_publication", [False, True])
 async def test_answering_from_the_card_hands_the_user_the_list_in_flight(
-    enabled, isolated_index, monkeypatch
+    enabled, isolated_index, monkeypatch, hold_publication
 ):
     """U5: the card's own keys latch, so it cannot be the feedback surface."""
     hold = asyncio.Event()
     record: dict[str, Any] = {}
+    engaged: list[str] = []
+    returned, release, waiting, closed = (asyncio.Event() for _ in range(4))
+    native_thread, native_close = asyncio.to_thread, _FakeAttachClient.close
+
+    async def held_thread(function, *args, **kwargs):
+        # Hold DELIVERY, after a real filesystem read, not the result itself.
+        # This pins the old early-Picked race without scheduler sleeps or fake rows.
+        result = await native_thread(function, *args, **kwargs)
+        if hold_publication and function is store.index_asks and not returned.is_set():
+            assert any(row.get("ask_id") == "b1" for row in result)
+            returned.set()
+            await release.wait()
+        return result
+
+    def close(client):
+        native_close(client)
+        closed.set()
+
+    monkeypatch.setattr(asyncio, "to_thread", held_thread)
+    monkeypatch.setattr(_FakeAttachClient, "close", close)
 
     async def _fake(config_dir, session_id, work, **kwargs):
+        engaged.append(str(session_id))
         await hold.wait()
         return _FakeAttachClient(record), "detail"
 
@@ -1102,10 +1146,26 @@ async def test_answering_from_the_card_hands_the_user_the_list_in_flight(
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
-        app.on_ask_queue_list_picked(AskQueueList.Picked("b1"))
-        await _settle(pilot, 4)
-        assert app._ask_card is not None, "the row's card must mount"
+        ready = asyncio.create_task(_fleet_card_ready(app, pilot, "b1", waiting))
+        witness = asyncio.create_task(waiting.wait())
+        try:
+            if hold_publication:
+                async with asyncio.timeout(5):
+                    await returned.wait()
+                    await asyncio.wait((ready, witness), return_when=asyncio.FIRST_COMPLETED)
+                    if ready.done():
+                        await ready  # The predecessor must fail its actual card assertion.
+                    assert not ready.done() and app._ask_card is None
+                    assert app._ask_fleet_rows == []
+                    release.set()
+            async with asyncio.timeout(5):
+                await ready
+        finally:
+            release.set()
+            for task in (ready, witness):
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         row = app._ask_fleet_rows[0]
         app._ask_settle_callback(row)({"q1": ["Yes"]})
         await _settle(pilot, 3)
@@ -1113,8 +1173,16 @@ async def test_answering_from_the_card_hands_the_user_the_list_in_flight(
         listing = app.query_one(AskQueueList)
         assert listing.in_flight("b1") is True
         assert IN_FLIGHT_MARK in listing.render().plain
+        app._run_fleet_ask_op(row, "respond", answers={"q1": ["Yes"]})
+        answer_workers = [worker for worker in app.workers if worker.group == "ask-fleet-b1"]
+        assert len(answer_workers) == 1
         hold.set()
-        await _settle(pilot, 8)
+        async with asyncio.timeout(5):
+            await closed.wait()
+            await answer_workers[0].wait()
+        assert app._ask_in_flight == set()
+        assert engaged == ["s-other"]
+        assert record["closed"] is True
         assert record["respond"] == ("b1", {"q1": ["Yes"]}, "terminal")
 
 

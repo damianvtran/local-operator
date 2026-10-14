@@ -1326,6 +1326,21 @@ class _RecoverFailure:
     def initialize(self) -> None:
         return None
 
+    def refresh_identity(self) -> None:
+        # No peer identity is modelled here, so the refresh is a no-op. The
+        # production seam is `ensure_recovered`, and a double standing in for
+        # `BrowserResource` must expose the SAME entry `execute_browser` drives.
+        return None
+
+    async def ensure_recovered(self) -> None:
+        # Mirrors production: refresh (no-op here), then recover only when the
+        # verdict is not already held. A `recovered=True` double must NOT call
+        # `recover`, which is exactly what the D2-1 cases below assert.
+        self.refresh_identity()
+        if self.recovered:
+            return
+        await self.recover()
+
     async def recover(self) -> dict[str, Any]:
         raise self._exc
 

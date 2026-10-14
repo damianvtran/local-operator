@@ -42,6 +42,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     ModelSpec,
     StreamEndEvent,
+    StreamTextDelta,
 )
 from local_operator.session.errors import AudioInputUnsupported
 from local_operator.session.session import AUDIO_OMITTED_NOTICE
@@ -178,8 +179,14 @@ async def test_wav_and_mp3_sail_through_the_chat_wire_gate(tmp_path):
     Without this, a gate that refused everything would look identical to a
     working one from the webm test alone.
     """
+    # Each send's turn answers in prose: a wordless stop on a person-asked
+    # turn is re-asked once (wordless-stop recovery), and this cell indexes
+    # the durable rows the two sends produce.
     stream = ScriptedStream(
-        [[StreamEndEvent(stop_reason="stop")], [StreamEndEvent(stop_reason="stop")]]
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
     )
     session = make_session(tmp_path, stream, model=OPENAI_AUDIO_MODEL)
 
@@ -241,7 +248,10 @@ async def test_the_audio_door_annotates_the_row_and_round_trips_to_the_request(t
     what every subscriber paints, and the ChatRequest is what the provider
     actually receives — the three carriers the annotation contract names.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The send's turn answers in prose: a wordless stop on a person-asked turn
+    # is re-asked once (wordless-stop recovery), which would journal the re-ask
+    # as a second user row beside the recording this cell counts.
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream, model=AUDIO_MODEL)
     events: list[Any] = []
     session.subscribe(events.append)
@@ -286,8 +296,14 @@ async def test_the_daemon_stamp_wins_and_plain_sends_keep_the_client_value(tmp_p
     audio is untouched: its ``input_path`` stays whatever the surface said,
     which is the carriage's contract for text-from-speech sends.
     """
+    # Each send's turn answers in prose: a wordless stop on a person-asked
+    # turn is re-asked once (wordless-stop recovery), which would spend the
+    # second send's scripted turn as the first send's re-ask.
     stream = ScriptedStream(
-        [[StreamEndEvent(stop_reason="stop")], [StreamEndEvent(stop_reason="stop")]]
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
     )
     session = make_session(tmp_path, stream, model=AUDIO_MODEL)
 

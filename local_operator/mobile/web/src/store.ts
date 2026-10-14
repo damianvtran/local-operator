@@ -10,6 +10,9 @@
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { supplementsFromWire } from "./lib/supplement";
+import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
+import { createWireLoader } from "./i18n/wire-cache";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -77,13 +80,32 @@ let sessionsConnected = false;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
-/* The RELAY's resolved language, off the ``config`` stream
-   (``/api/config/events``, wave-5 slice D): the same frame semantics the
-   desktop feed publishes — ``{changed_keys, language}`` — and ``null`` until
-   the first frame lands (or forever, on a daemon without the route: absence,
-   not an error). Also mirrored onto ``<html lang>`` so assistive tech and
-   future catalogues read one value. */
-let language: string | null = null;
+/* Backend preference and actual UI copy language are different facts. Until
+   C bundles own copy, the SPA remains English/LTR under every backend frame.
+   No OS/device/storage guess is allowed to impersonate backend authority. */
+let localeSnapshot: LocaleSnapshot = Object.freeze({
+	backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0,
+});
+export const messageRuntime = createMessageRuntime(() => localeSnapshot, () => publishLocaleSnapshot());
+export const wireCatalogueLoader = createWireLoader({
+	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
+	capabilities: () => capabilities,
+	activate: (namespace, locale, messages) => { messageRuntime.registerWire(namespace, locale, messages); },
+	deactivate: (namespace, locale) => { messageRuntime.unregisterWire(namespace, locale); },
+});
+export function initializeLocaleMetadata(): void {
+	if (typeof document === "object") {
+		document.documentElement.lang = localeSnapshot.uiLocale;
+		document.documentElement.dir = localeSnapshot.direction;
+	}
+}
+function publishLocaleSnapshot(backendLocale = localeSnapshot.backendLocale): void {
+	const uiLocale = messageRuntime.uiLocaleFor(backendLocale);
+	localeSnapshot = Object.freeze({ backendLocale, uiLocale, direction: directionFor(uiLocale), revision: localeSnapshot.revision + 1 });
+	wireCatalogueLoader.invalidateContext();
+	initializeLocaleMetadata();
+	emit(); // one existing notification channel, including same-locale registration
+}
 /* The pins the user has ASKED FOR and the daemon has not answered for yet,
    held as the value that was asked for. An overlay on the server's list, never
    a rewrite of it, and the distinction is the whole point.
@@ -121,6 +143,25 @@ const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore re
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
 const listeners = new Set<() => void>();
+
+/* THE SPA'S OWN ENGLISH COPY, registered before any consumer renders the relay
+   (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
+   owned-copy language an ACTUAL rendered fact rather than a claim: `uiLocaleFor`
+   only returns a non-English UI locale when SOME bundle carries the WHOLE
+   English key set plus the resolved locale, so with English-only copy the SPA
+   stays EN/LTR under every backend frame — `lang`/`dir` describe the copy on
+   screen, not the backend preference (that stays on `useLanguage`). The bundle
+   is generated from the explicit owned namespaces (§ bundled.gen.ts); no wire
+   prose is bundled, so this cannot smuggle a served namespace into the client.
+   Registration runs through the ONE store channel — `registerBundle` ->
+   `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
+   document instead of creating a second locale truth. Placed AFTER the
+   listener set is declared: an init-time registration notifies that set, so
+   registering above it would emit into a `listeners` binding still in its
+   temporal dead zone and abort module evaluation. */
+for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
+	messageRuntime.registerBundle(namespace, "en", { ...messages });
+}
 
 function emit() {
 	for (const l of listeners) l();
@@ -213,7 +254,10 @@ export function useCapabilities(): Capabilities | null {
 }
 
 export function useLanguage(): string | null {
-	return useSyncExternalStore(subscribe, () => language);
+	return useSyncExternalStore(subscribe, () => localeSnapshot.backendLocale);
+}
+export function useLocaleSnapshot(): LocaleSnapshot {
+	return useSyncExternalStore(subscribe, () => localeSnapshot);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -338,6 +382,7 @@ export function retainSessionListStream(): () => void {
 					};
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
+					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = true;
 					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
@@ -387,15 +432,8 @@ function applyConfigFrame(data: string): void {
 			changed_keys?: string[];
 			language?: string;
 		};
-		if (typeof payload.language !== "string" || !payload.language) return;
-		language = payload.language;
-		/* The daemon serves the shell with lang="en"; the resolved language is
-		   the authoritative one from the moment it arrives. Guarded because the
-		   store also runs under vitest's node environment. */
-		if (typeof document !== "undefined") {
-			document.documentElement.lang = payload.language;
-		}
-		emit();
+		if (!isResolvedLocale(payload.language)) return;
+		publishLocaleSnapshot(payload.language);
 	} catch {
 		/* A malformed frame is dropped; the next one repaints. */
 	}

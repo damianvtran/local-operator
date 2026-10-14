@@ -242,7 +242,7 @@ class MeshCredentialBroker:
         self._github_minter = github_minter
         self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
-        self._inflight: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
+        self._inflight: dict[tuple[str, str, bool, str, str, str], asyncio.Future[Any]] = {}
         self._report_refreshed: dict[int, float] = {}
         self._report_blocked: dict[tuple[str, int], float] = {}
         #: ONE lock around each report arm's read-then-stamp (review round 4, R4-n2):
@@ -424,6 +424,22 @@ class MeshCredentialBroker:
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
             )
+        # Durable owner reductions are authority even when a crash leaves the
+        # peer-merged holder projection stale. Provider-wide refusal precedes
+        # native resolution; caller-supplied account metadata is never consulted.
+        from local_operator.network.credentials import consent
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            consent.check_borrow(self.network_id, self.self_device, by, key, root=self.root)
+        except MeshRefusal as exc:
+            return self._refuse(link, key, provider, by, exc.code, str(exc))
+        from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
+
+        if SyncState.load(self.network_id, self.root).mark_for(key) == MARK_LOCAL_ONLY:
+            return self._refuse(
+                link, key, provider, by, "local_only", "local-only access is not borrowed"
+            )
         if not entry.is_holder(by):
             return self._refuse(
                 link,
@@ -489,6 +505,8 @@ class MeshCredentialBroker:
                 "this device did not finish refreshing the credential in time; nothing was lent",
                 retry_after_ms=30_000,
             )
+        except MeshRefusal as exc:
+            return self._refuse(link, key, provider, by, exc.code, str(exc))
         except Exception as exc:  # noqa: BLE001 — a broker bug must answer, not close the link
             return self._refuse(link, key, provider, by, "internal", exc.__class__.__name__)
         if isinstance(outcome, BrokerError):
@@ -502,6 +520,14 @@ class MeshCredentialBroker:
                 retry_after_ms=outcome.retry_after_ms,
             )
         grant: Grant = outcome
+        # Recheck the actual requester after the asynchronous/coalesced result;
+        # a grant observed before withdrawal cannot authorize a later response.
+        try:
+            consent.check_borrow(
+                self.network_id, self.self_device, by, key, grant.identity, self.root
+            )
+        except MeshRefusal as exc:
+            return self._refuse(link, key, provider, by, exc.code, str(exc))
         grant.latency_ms = int((time.monotonic() - started) * 1000)
         self._audit(
             "credential.grant",
@@ -530,7 +556,14 @@ class MeshCredentialBroker:
         different question, and two sessions asking are asking for two different
         stickiness decisions.
         """
-        ckey = (fields["key"], fields["for_session"], bool(fields["force"]))
+        ckey = (
+            fields["key"],
+            fields["for_session"],
+            bool(fields["force"]),
+            fields.get("by", ""),
+            fields.get("model_id", ""),
+            fields.get("holder_scope", ""),
+        )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
         if slot is not None:
@@ -659,7 +692,8 @@ class MeshCredentialBroker:
         refreshed = self._row_stamps(provider).get(int(access.credential_id), 0) > before.get(
             int(access.credential_id), 0
         )
-        return self._mint_grant(
+        return self._mint_checked(
+            by=by,
             key=key,
             provider=provider,
             token=str(access.access_token),
@@ -796,7 +830,8 @@ class MeshCredentialBroker:
                 owner_device_name=self.self_device_name,
                 message=render_repair_notice(self.self_device_name or self.self_device, key),
             )
-        return self._mint_grant(
+        return self._mint_checked(
+            by=by,
             key=key,
             provider=provider,
             token=token,
@@ -808,6 +843,55 @@ class MeshCredentialBroker:
             for_session=for_session,
             identity={},
         )
+
+    def _mint_checked(self, *, by: str, **fields: Any) -> Grant | BrokerError:
+        """Owner-selected identity + current denial, serialized only at mint.
+
+        Refresh runs outside this bounded lock. A revoke that lands while refresh
+        awaits wins here before mint; account constraints use OAuthAccess identity,
+        never a peer's account_ref. The lock order remains consent -> placement.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            with consent.serving_guard(
+                self.network_id,
+                self.self_device,
+                by,
+                str(fields["key"]),
+                fields["identity"],
+                self.root,
+            ):
+                from local_operator.network.credentials.sync import (
+                    MARK_LOCAL_ONLY,
+                    SyncState,
+                )
+
+                if (
+                    SyncState.load(self.network_id, self.root).mark_for(str(fields["key"]))
+                    == MARK_LOCAL_ONLY
+                ):
+                    raise MeshRefusal("local_only", "local-only access is not borrowed")
+                entry = self._entry(str(fields["key"]))
+                if (
+                    entry is None
+                    or entry.owner_device != self.self_device
+                    or not entry.is_holder(by)
+                ):
+                    raise MeshRefusal("not_a_holder", "holder authority changed before mint")
+                return self._mint_grant(**fields)
+
+        except MeshRefusal as exc:
+            # A typed refusal is a normal coalesced outcome, not an unobserved
+            # Future exception (and never a grant containing rejected material).
+            return BrokerError(
+                code=exc.code,
+                message=str(exc),
+                key=str(fields["key"]),
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+            )
 
     def _mint_grant(
         self,
@@ -911,6 +995,30 @@ class MeshCredentialBroker:
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
 
+    def _github_scope_refusal(self, key: str, by: str) -> BrokerError | None:
+        """No forge source supplies a verified read-only account identity today.
+
+        App/config labels, a PAT, gh login and a peer's account_ref cannot prove
+        it. With an account-specific deny, refuse ambiguity BEFORE resolving a
+        source, extracting its key/token, or queueing an upstream mint. Never
+        hold the consent flock while network/subprocess work awaits; current
+        denial is checked again at boundaries and before the grant is emitted.
+        """
+        from local_operator.network.credentials import consent
+        from local_operator.network.types import MeshRefusal
+
+        try:
+            consent.check_borrow(self.network_id, self.self_device, by, key, {}, self.root)
+        except MeshRefusal as exc:
+            return BrokerError(
+                code=exc.code,
+                message=str(exc),
+                key=key,
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+            )
+        return None
+
     async def _resolve_github(
         self,
         *,
@@ -944,6 +1052,9 @@ class MeshCredentialBroker:
                 message="this key is device-scoped; the placement row that asked is not",
                 **common,
             )
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         source = github_app.resolve_source(self.root)
         if source == github_app.SOURCE_APP:
             return await self._serve_github_app(key=key, provider=provider, by=by, common=common)
@@ -962,6 +1073,9 @@ class MeshCredentialBroker:
                 **common,
             )
         if source in (github_app.SOURCE_TOKEN, github_app.SOURCE_GH):
+            scope_refusal = self._github_scope_refusal(key, by)
+            if scope_refusal is not None:
+                return scope_refusal
             try:
                 if source == github_app.SOURCE_TOKEN:
                     token = github_app.read_token_secret(self.root)
@@ -988,6 +1102,11 @@ class MeshCredentialBroker:
                     else github_app.CODE_GH_UNUSABLE
                 )
                 return BrokerError(code=code, message=str(exc), **common)
+            # Extraction already in flight cannot be undone, but a newly
+            # persisted reduction must prevent constructing/emitting its grant.
+            scope_refusal = self._github_scope_refusal(key, by)
+            if scope_refusal is not None:
+                return scope_refusal
             return self._grant_from_owner_token(
                 token=token, key=key, provider=provider, common=common
             )
@@ -1008,6 +1127,9 @@ class MeshCredentialBroker:
         loop through the broker's executor — a stuck GitHub must not stall the
         relay (the same reason the MCP refresh leaves the loop for its lock).
         """
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         try:
             app = github_app.read_app_key(self.root)
         except github_app.GithubAppKeyError as exc:
@@ -1029,6 +1151,13 @@ class MeshCredentialBroker:
                 ),
                 **common,
             )
+        # Recheck after local configuration reads, immediately before external
+        # work. A revoke racing an already-started mint cannot retract that
+        # request; registration still arranges cleanup and final grant() denial
+        # prevents emission. That in-flight limit is not a zero-mint claim.
+        scope_refusal = self._github_scope_refusal(key, by)
+        if scope_refusal is not None:
+            return scope_refusal
         lender = self._lender()
         try:
             minted = await asyncio.get_running_loop().run_in_executor(

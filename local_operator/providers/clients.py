@@ -332,7 +332,10 @@ def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
     if not isinstance(raw_usage, Mapping):
         return None
     value = raw_usage.get("cost")
-    if value is None:
+    # Reject JSON booleans before Usage's float field can erase their type.
+    # Otherwise the pricing guard sees a seemingly legitimate $1/$0 receipt
+    # and cannot recover the fact that the provider never stated money.
+    if value is None or isinstance(value, bool):
         return None
     try:
         cost = float(value)
@@ -1994,6 +1997,35 @@ def _log_once(message: str, *args: object) -> None:
     logger.warning(message, *args)
 
 
+_GOOGLE_CONTINUATION = (
+    "[harness continuation — not an operator message]\n"
+    "Continue the pending turn from the existing conversation and tool results."
+)
+
+
+def _google_user_boundary(turns: list[dict[str, Any]], *, native: bool = False) -> int:
+    """Close a rendered Google request without inventing an operator prompt.
+
+    Google rejects assistant/model prefill, including imported histories after
+    switches and failover. Repair the FINAL wire shape, not session history:
+    empty assistants and invalid tool pairs may already have been filtered out.
+    A tool response is already a Google user turn (OpenRouter translates it),
+    so leave valid pairs and ordinary user prompts byte-for-byte unchanged.
+    The labelled continuation is transport context only; never persist it or
+    let compaction count it as the operator's latest instruction. Return its
+    token estimate so admission includes the extra bytes we actually send.
+    """
+    if turns and turns[-1].get("role") in ("user", "tool"):
+        return 0
+    turn: dict[str, Any] = {"role": "user"}
+    if native:
+        turn["parts"] = [{"text": _GOOGLE_CONTINUATION}]
+    else:
+        turn["content"] = _GOOGLE_CONTINUATION
+    turns.append(turn)
+    return estimate_messages_tokens([Message.user(_GOOGLE_CONTINUATION)])
+
+
 def _without_unrenderable_tool_calls(messages: Sequence[Message]) -> Sequence[Message]:
     """The history as far as any wire may render it: no nameless tool calls.
 
@@ -2800,6 +2832,13 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+        # Aggregator identity alone is not the model family: Google keeps its
+        # final-user requirement through OpenRouter's OpenAI-compatible wire.
+        google_boundary_tokens = 0
+        if request.model.provider == "google" or (
+            request.model.provider == "openrouter" and request.model.model_id.startswith("google/")
+        ):
+            google_boundary_tokens = _google_user_boundary(messages)
         # Admission is finalized AFTER the render, so the placeholders the body
         # just added are counted as the input they are -- the model reads the
         # echo and the provider bills it. ``_effective_max_tokens`` below reads
@@ -2811,7 +2850,9 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens(),
+            extra_native_tokens=(
+                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
+            ),
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -3421,6 +3462,7 @@ class OpenAICompatClient:
         if refusal_parts and stop_reason in ("stop", "length"):
             stop_reason = "refusal"
         error: str | None = None
+        retryable_interruption = False
         if stop_reason == "refusal":
             # Name what actually detected the refusal (design review D2): when
             # the finish reason was an ordinary stop/length and the prose slot
@@ -3439,6 +3481,14 @@ class OpenAICompatClient:
             # the loop journals `error` as the incident, so name the failure,
             # not just the wire field that signalled it.
             error = f"provider reported a mid-stream failure (finish_reason '{finish_reason}')"
+            # Eligible for the loop's bounded interrupted-turn continuation.
+            # WHY this branch is the condition: it fires only for a bare
+            # ``error`` finish -- a refusal took the branch above, a hard
+            # error object raised in ``_compat_stream_error`` before we got
+            # here, and a local envelope violation aborts the session. It is
+            # an ELIGIBILITY, not a causal claim: the stream ended without the
+            # provider saying why, and retryability is unknown from the wire.
+            retryable_interruption = True
         if reasoning_parts:
             calls = []
             valid = True
@@ -3468,7 +3518,21 @@ class OpenAICompatClient:
             provider_payload=provider_payload,
             error=error,
             served_provider=served_provider,
+            retryable_interruption=retryable_interruption,
         )
+
+    def _observe_responses_event(self, payload: dict[str, Any]) -> None:
+        """Dialect hook for safe, non-token provider receipts (default: no-op)."""
+
+    def _observe_responses_headers(self, headers: httpx.Headers) -> None:
+        """Dialect hook for request attribution; never copy all response headers."""
+
+    def _observe_responses_error(self, response: httpx.Response) -> None:
+        """Dialect hook for bounded safe diagnostics before HTTP classification.
+
+        The body has been read, but may reflect credentials or submitted content.
+        Implementations must not retain raw prose or change failover classification.
+        """
 
     async def _stream_responses(
         self,
@@ -3514,7 +3578,10 @@ class OpenAICompatClient:
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
+                self._observe_responses_headers(response.headers)
+                self._observe_responses_error(response)
                 raise_for_status(response)
+            self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -3522,6 +3589,7 @@ class OpenAICompatClient:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
@@ -4487,9 +4555,6 @@ class GoogleClient:
             await self._http.aclose()
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
-        request = bind_native_context(
-            request, self._base_url, "google-content", scope, _estimate_slope(request.model)
-        )
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -4577,6 +4642,15 @@ class GoogleClient:
             if parts or message.role == "user":
                 contents.append({"role": role, "parts": parts or [{"text": ""}]})
 
+        boundary_tokens = _google_user_boundary(contents, native=True)
+        request = bind_native_context(
+            request,
+            self._base_url,
+            "google-content",
+            scope,
+            _estimate_slope(request.model),
+            extra_native_tokens=boundary_tokens,
+        )
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
@@ -5015,6 +5089,12 @@ def client_for_spec(
         or (definition.base_url if definition else None)
         or "http://localhost:11434/v1"
     )
+    if spec.provider == "meta-muse":
+        # Muse is Responses-only; merely setting supports_responses_api does
+        # not select that wire in the general compatible-provider factory.
+        from local_operator.providers.meta_muse_client import MetaMuseClient
+
+        return MetaMuseClient(base_url=base, http_client=http_client, openai_api="responses")
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = openrouter_attribution_headers()

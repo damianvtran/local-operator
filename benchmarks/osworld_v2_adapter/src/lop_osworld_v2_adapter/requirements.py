@@ -549,10 +549,11 @@ def require_supplied(
     build cannot deliver at all is :class:`UndeliverableRequirement` and is
     refused whether or not it was supplied: an episode that proceeds on a value
     the vendor can never read would allocate a guest and die in vendor code, which
-    is the exact defect QA round 1 reproduced on ``GITLAB_PRIVATE_TOKEN``. If you
-    want that family runnable, the change is to put the name on the env-delivery
-    allowlist -- a secret-plumbing change with its own review, deliberately not
-    taken here.
+    is the exact defect QA round 1 reproduced on ``GITLAB_PRIVATE_TOKEN``. That
+    family is runnable NOW that the name is on the env-delivery allowlist
+    (``vendor_bridge.SECRET_ENV_NAMES``); the seam still refuses any FUTURE
+    family whose name has no channel, which is why this check stays derived
+    from the table rather than from a list of known-bad names.
 
     ``task_id`` is the name the RUNNER gave this task (``ResetStartParams``),
     which is the spelling the episode, the manifest and the operator's command

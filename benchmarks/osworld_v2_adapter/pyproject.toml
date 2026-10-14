@@ -58,8 +58,19 @@ dependencies = [
 # paid AWS path needs: the adapter must still import, handshake, and run the
 # fake provider from a wheel installed with ``--no-deps`` in a test venv, and
 # every CI run does exactly that. The paid venv installs ``.[osworld]``.
+# NOTE (2026-10-13): the pin above was 2.0's commit (d578d2d4, release
+# 0808) even after the campaign moved to osworld-v2.1, so the paidenv was
+# built from 2.0 code while the workspace served 2.1 task files. The
+# adapter's own packaging gate then refused the v2.1 tasks inside reset_start,
+# BEFORE any provider was constructed: 082/104/056 import
+# `desktop_env.evaluators.errors` (added upstream after 0808) and 002 imports
+# `icalendar` / `recurring_ical_events` (declared by 2.1's own pyproject), so
+# each raised MissingTaskDependencies at validation time. The commit here is
+# osworld-v2.1's own `osworld_code.base_commit` from the workspace's
+# benchmark_release.json, which is what this extra's contract always was --
+# pinning to the release commit the benchmark manifest names.
 osworld = [
-    "osworld @ git+https://github.com/xlang-ai/OSWorld-V2@d578d2d4e0dc82b43e270fdaa7fa89d9708cd154",
+    "osworld @ git+https://github.com/xlang-ai/OSWorld-V2@325ab352e2ff7410854bf8e3324c391bc60e7526",
 ]
 
 [project.entry-points."local_operator.evaluation_adapters.v1"]

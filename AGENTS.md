@@ -5,6 +5,9 @@ things that are easy to get wrong here and expensive to discover later. For
 what the rewrite set out to do see `docs/REWRITE.md`; for the evidence behind
 each round see `docs/VERIFICATION.md`.
 
+For bounded allocation, costly-evidence preflight and review convergence, read
+`guide://delivery` (packaged at `local_operator/guides/delivery/GUIDE.md`).
+
 ## Environment
 
 ```sh
@@ -1289,6 +1292,11 @@ Before starting a release, every agent does the same things, in this order:
    branch `release-next` with one empty commit and opening a draft PR titled
    `chore(release): claim release window`; its body names the owner's session
    pid from `lop sessions` and an empty checklist of the PRs in the window.
+   Include a `## Public release notes` section following
+   `.github/RELEASE_NOTES_TEMPLATE.md`; until contents are known, explicitly
+   label it “Draft — contents not yet determined”. Keep the ownership/window
+   record outside that public section, and internal gate evidence in separate
+   PR comments. Replace the public draft with the final copy before ready/tagging.
    Only then announce it with `send` to the other live sessions. Once the
    window's bump is decided, the same single commit is amended into the
    version change and retitled `chore(release): bump version to X.Y.Z`
@@ -1347,13 +1355,45 @@ it landed.
    and do not "fix" it by adding an always-run job: the narrow green is the
    design (`scripts/ci_scope.py`, `release_bump`), and the code being released
    was gated on the PR that landed it.
+   **Before cutting the tag, prove the combined target, not just each PR.** In
+   the release owner's clean worktree checked out at the exact bump merge SHA,
+   verify `git rev-parse HEAD` equals that intended target. With Python 3.12 and
+   Node 24 on PATH, run `python scripts/i18n/generate.py --check` followed by
+   `python scripts/i18n/check.py`; both must exit zero without modifying assets.
+   Retain the target SHA, tool versions and actual responses in the release
+   evidence. If the target moves, repeat against the new combined ref. A narrow
+   green version-bump CI run is not this proof; a drift/parity failure needs a
+   reviewed fix, never regeneration in the publisher or an audit/eligibility
+   waiver. `publish.yml` independently repeats these invariants unconditionally
+   on the release tag or dispatched SHA before build/publication, with an event
+   SHA assertion to reject a moved tag. Downstream source-consuming jobs pin
+   `github.sha` directly and verify HEAD before any build/upload, so a tag moved
+   after the gate cannot replace its validated bytes; extension change detection
+   uses that same verified commit. The release tag remains metadata, not a later
+   source resolver. Dispatch remains rehearsal-only.
+
 4. **Tag and publish** from the merge commit of that bump, then install and
-   smoke (mechanics below). The release notes cover **every PR in the
-   window**, grouped in the house style of the existing releases (a headline
-   sentence naming the version's theme, then `## Major` / `## Minor` /
-   `## Fixes` as applicable, then `## Install` and the full-changelog compare
-   link). A window's notes are written from the collected impact lines, not
-   from commit subjects.
+   smoke (mechanics below). **The public-copy contract is
+   [`.github/RELEASE_NOTES_TEMPLATE.md`](.github/RELEASE_NOTES_TEMPLATE.md), not
+   previous release bodies.** Follow it in both the claim/bump PR's
+   `## Public release notes` section and the exact `--notes-file`: a short
+   theme headline, plain-language user impact summary, nonempty New / Fixed /
+   Improved bullets derived from the merged `Release:` lines, install/upgrade
+   guidance, and a compare URL from the previous published tag to this tag.
+   Account for **every PR in the tagged window**, but do not list internal IDs.
+   Say explicitly when a window is internal-only or version-metadata-only;
+   never invent a user-facing feature. Keep companion-app and installed-runtime
+   claims within what actually shipped.
+
+   **Complete the template's prepublish checklist in the release PR before
+   tagging.** Read the public PR section and exact notes file side by side.
+   Prohibit agent/QA/design round narratives, CI counts, reviewer names,
+   candidate/merge SHAs, branch names, residual-red classifications and internal
+   IDs in public copy. Put gate evidence in separate PR comments, not in the
+   public section or notes file. After publishing, read the exact
+   `/repos/damianvtran/local-operator/releases/tags/<this-tag>` response and
+   verify its body equals the approved file. This matters because desktop
+   update cards consume the release body as user-facing copy.
 
    **A macOS job is on the critical path for every platform now.** `pypi-publish`
    declares `keyagent-macos` as a hard dependency: the Developer-ID-signed helper and its
@@ -1398,8 +1438,12 @@ git -C /tmp/lop-release-next push -u origin release-next
 gh pr create --draft --base main --head release-next \
   --title 'chore(release): claim release window' --assignee damianvtran \
   --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
-Window (tick as each merges):
-- [ ] #<n> — <Release: line>'
+Window (tick as each merges; internal ownership record):
+- [ ] #<n> — <Release: line>
+
+## Public release notes
+Draft — contents not yet determined.
+Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
 # ... collect the window, write notes, wait for the last PR in the window to
 #     merge; then, with the bump decided:
 
@@ -1425,10 +1469,12 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 # If main IS the checked-out branch, use this instead:
 #   git -C ~/local-operator merge --ff-only origin/main
 
-# 4. Write the notes from the collected `Release:` lines, then tag + GitHub
-#    Release on the bump's merge commit. --target creates the tag on that
-#    exact SHA; the publish workflow triggers on the release.
-$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
+# 4. Write public notes using .github/RELEASE_NOTES_TEMPLATE.md from the
+#    collected `Release:` lines; match the claim/bump PR's public-notes section
+#    and complete the prepublish checklist there (evidence in separate comments).
+#    Then tag + GitHub Release on the bump's merge commit. --target creates
+#    the tag on that exact SHA; the publish workflow triggers on the release.
+$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
@@ -1537,9 +1583,9 @@ unchanged, advance the clone's own `main` first.
 
 ### Installing over a live fleet
 
-**The install must not run against a busy fleet.** That is the rule; the command
-that carries it out is the host's business. An install replaces site-packages
-inside the shared uv-tool environment **under whatever runtimes are running**,
+**Mutable/in-place installs must not run against a busy fleet.** The command
+that carries this out is the host's business. An in-place install replaces
+site-packages inside a shared environment **under whatever runtimes are running**,
 and a runtime that is mid-turn never checks for a newer build — by design, only
 an idle runtime notices one — so it goes on importing from a tree that is being
 deleted beneath it, dies torn, and writes no exit record. Measured on
@@ -1549,16 +1595,34 @@ eagerly, the unwatched half — the `daemon`-kind sessions, woken by `lop send`
 or a wake, as against the `attach` viewers a frontend is holding open — stayed
 down until they were resumed by hand.
 
-So the step is: **wait until no session reports `busy`, install, then re-engage
+For that mutable route the step is: **wait until no session reports `busy`, install, then re-engage
 whatever the swap displaced** — turns that were in flight when it landed, and
 the sessions no frontend is holding open. A host that has a drain wrapper for
 exactly this may use it, and it is the convenient way to do those three things
 in order; the wrapper is a host-local convenience, not part of the protocol,
 and the release owner owes the behaviour above whether or not one exists.
 
+**Immutable rolling promotion is a separate route.** Prepare and verify a new
+isolated generation, then commit `current` under the existing install-root
+transaction; busy runtimes retain their loaded package/dependency/resource roots
+and move individually only when their existing idle latch admits it. Do not
+weaken fresh-artifact/signature, duplicate-attempt, stale-target, root ownership
+or conditional rollback checks. Automatic generation collection is frozen in
+both PyPI and snapshot update tails: an absent discovery/argv/open-file reference
+is not proof that a runtime will never read a bundled asset later. An unreadable
+fleet census must not veto isolated preparation, and must never license deletion.
+
+Installed/current and actual service-serving builds are different outcomes.
+Daemon-owned work and unsupported old reload capabilities must defer service
+handoff, not trigger forced restarts or a blanket rollback of a committed newer
+pointer. A legacy frontend executing an old updater still needs the reviewed
+capable controller route; downloading a release or hot-editing installed code is
+not an activation proof. Live activation remains separately authorized and
+verified; these source rules do not grant a live install, prune, or forced kill.
+
 Two cautions that hold wherever the install runs:
 
-- **Never force an install past a busy fleet to save time.** Displacing
+- **Never force an in-place install past a busy fleet to save time.** Displacing
 someone's turn is a real cost, and an expired drain budget means waiting and
 running it again, not forcing it.
 - **Verify the build; do not read it off an installer's own summary.** A
@@ -1931,6 +1995,25 @@ marker is written once, at creation, so a run started without the flag cannot be
 promoted later by editing it — start it as a workstream instead — while
 `lop exec --resume <id>` of a workstream does not re-stamp and therefore keeps the
 row listed. `docs/EXEC.md` owns the flag table and the full semantics.
+
+**A DAEMON is a hosting plane, not a chat an agent opened, so `lop serve` drops
+the markers before it serves.** The desktop app's own backend, the phone relay's
+child and a TUI server all mint the operator's sessions through the shared
+composition root — but a long-lived server is not "a command an agent's `bash`
+tool call ran", and when such a shell launched the daemon (the common shape:
+the app inherits the environment of whatever started it) the markers rode along
+in `os.environ`, so every session the daemon created was stamped `agent-shell`
+and hidden. That is the 2026-10-13 sidebar regression: an app launched from an
+agent's shell hid the operator's own New Chats. The fix is at the SERVE entry
+point (`cli.serve_command` calls `agent_shell.drop_agent_shell_marker_from_environ`,
+which reuses `without_agent_shell_marker` for the two names it defines and also
+drops `LOCAL_OPERATOR_ALLOW_NESTED_SESSION`), and it is a PROCESS-level strip
+because a process cannot un-inherit an environment variable any later. SCOPE:
+SERVE ONLY — `lop exec`, `--workstream` and the escape hatch still stamp exactly
+as the paragraphs above say, because those ARE commands an agent's shell ran;
+only the daemon's own MINT (a session it creates for a front end) is exempt. A
+runtime the daemon SPAWNS for an agent's marked command still stamps, because
+that child is started by the command, not by the daemon's mint.
 
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
@@ -3367,6 +3450,14 @@ against a hang rather than a stall, that is the file to read.
   failure that motivated the code, not what the line does. Match that density;
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
+
+## Localized product copy
+
+For message extraction, generated key functions, locale/audit eligibility and
+backend-owned language settings, read [the i18n contributor HOWTO](docs/I18N.md)
+and `guide://i18n` before editing. The contract remains
+[docs/design/i18n.md](docs/design/i18n.md); its rollout plan is not completion.
+Keep technical/model-facing docs English and key rendered product copy.
 
 ## Adding a configuration key
 

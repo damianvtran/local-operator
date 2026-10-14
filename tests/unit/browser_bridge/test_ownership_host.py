@@ -18,7 +18,10 @@ from typing import Any
 import pytest
 
 from local_operator.browser_bridge import resources
-from local_operator.browser_bridge.resources import BrowserResource
+from local_operator.browser_bridge.resources import (
+    BrowserOwnershipError,
+    BrowserResource,
+)
 from local_operator.harness.types import BrowserSurface, ToolContext
 from local_operator.tools import builtin
 
@@ -120,6 +123,7 @@ def bridge_client(monkeypatch: pytest.MonkeyPatch) -> FakeBridgeClient:
 
 def _ui_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """A host with the desktop app reachable and nothing else."""
+    _hosts(monkeypatch, ui=True, bridge=False)
 
     async def ui_reachable(classified: tuple[Any, Any] | None = None) -> bool:
         return True
@@ -140,6 +144,31 @@ def _hosts(monkeypatch: pytest.MonkeyPatch, *, ui: bool, bridge: bool) -> None:
     are separate code paths over the same two questions, so both are supplied:
     a test that set one and not the other would leave the decision half-faked.
     """
+
+    from local_operator.browser_bridge import state as bridge_state
+    from local_operator.ui_browser import state as ui_state
+
+    # A reachable successful transport has a record. Always-unknown fake peer
+    # identity hid the pre-action refresh and could resurrect closed fake tabs.
+    ui_host = (
+        ui_state.UiHostState(pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1)
+        if ui
+        else None
+    )
+    bridge_host = (
+        bridge_state.BridgeState(
+            pid=2,
+            port=52134,
+            session_key="k" * 32,
+            extension_version="1.31.0",
+            proto=1,
+            extension_connected=True,
+        )
+        if bridge
+        else None
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: ui_host)
+    monkeypatch.setattr(bridge_state, "read", lambda root=None: bridge_host)
 
     def reachable(answer: bool) -> Any:
         async def probe(classified: tuple[Any, Any] | None = None) -> bool:
@@ -347,6 +376,416 @@ async def test_a_ui_record_selects_the_ui_client_and_discovery(
     await resumed.recover()
     assert resumed.ownership_mode() is True
     assert [method for method, _ in ui_client.calls] == ["owner_recover"]
+
+
+@pytest.mark.asyncio
+async def test_same_version_ui_instance_change_invalidates_verdict_not_durable_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    from local_operator.ui_browser import state as ui_state
+
+    current = ui_state.UiHostState(
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        proto=1,
+        app_version="0.21.0",
+        instance_id="instance-a",
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: current)
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("ui:100:capability", host="ui")
+    await resource.recover()
+    assert resource.ownership_mode() is True
+    assert resource._peer_identity() == ("0.21.0", 1, "instance-a")
+    durable = resource._load()
+    current = current.model_copy(update={"instance_id": "instance-b"})
+    assert resource.ownership_mode() is None, "same-version restarts must re-probe ownership"
+    assert (
+        resource._load() == durable
+    ), "discovery identity never rewrites durable session ownership"
+    await resource.recover()
+    assert [method for method, _ in ui_client.calls] == ["owner_recover", "owner_recover"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["ordinary-action", "finish"])
+async def test_public_action_and_finish_refresh_recovery_without_manual_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient, operation: str
+) -> None:
+    from local_operator.ui_browser import state as ui_state
+
+    _ui_only(monkeypatch)
+    current = ui_state.UiHostState(
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        app_version="0.21.0",
+        proto=1,
+        instance_id="instance-a",
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: current)
+    context, resource = _context(tmp_path)
+    opened = await builtin.execute_browser(
+        "open", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not opened.is_error
+    assert resource.recovered
+    proof = resource.params()["owner_proof"]
+    ui_client.calls.clear()
+    current = current.model_copy(update={"instance_id": "instance-b"})
+    ui_client.recover_state = "unresolved"
+    if operation == "ordinary-action":
+        result = await builtin.execute_browser("read", {"action": "read"}, None, None, context)
+        assert result.is_error, "ordinary read must learn the new ledger has no adopted tab"
+        assert context.browser is not None and context.browser.surface_id == ""
+        assert [method for method, _ in ui_client.calls] == ["owner_recover"]
+    else:
+        finished = await resource.finish(resource.generation, "completed")
+        assert finished.state == "unresolved"
+        assert [method for method, _ in ui_client.calls] == [
+            "owner_recover"
+        ], "unproven replacement must never receive destructive finish"
+    assert resource.params()["owner_proof"] == proof
+    assert ui_client.calls[0][1]["owner_proof"] == proof
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_discovery_does_not_churn_the_learned_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """A→None→A must NOT invalidate: an unresolvable record is not a new peer.
+
+    `_peer_identity()` returns ``None`` for "cannot tell" (record gone or
+    unreadable). Treating that as a change would clear the learned verdict and
+    force a needless `owner_recover` on every flap. The guard is
+    `peer is not None and peer != self._ownership_peer`.
+    """
+    from local_operator.ui_browser import state as ui_state
+
+    _ui_only(monkeypatch)
+    a = ui_state.UiHostState(
+        pid=2, port=52133, session_key="k" * 32, app_version="0.21.0", proto=1, instance_id="a"
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: a)
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("ui:100:capability", host="ui")
+    await resource.recover()
+    assert resource.ownership_mode() is True
+    ui_client.calls.clear()
+    # The record becomes unreadable: discovery answers None.
+    monkeypatch.setattr(ui_state, "read", lambda root=None: None)
+    assert resource.ownership_mode() is True, "an unknown discovery is not a changed peer"
+    await resource.ensure_recovered()
+    assert ui_client.calls == [], "A→None must not force a re-recovery"
+    # And it comes back: still the learned peer, still no churn.
+    monkeypatch.setattr(ui_state, "read", lambda root=None: a)
+    assert resource.ownership_mode() is True
+    await resource.ensure_recovered()
+    assert ui_client.calls == [], "A→None→A must not churn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["ordinary-action", "finish"])
+async def test_changed_ledger_success_recovery_runs_before_action_and_keeps_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient, operation: str
+) -> None:
+    """CR1 success half: a NEW incarnation that DOES hold our tab is adopted by
+    the automatic recovery, before the ordinary action or the finalizer runs, and
+    the durable proof is unchanged across it.
+
+    The companion test above pins the UNPROVEN replacement; this one pins the
+    proven one, so a fix that only reconciles the failure case cannot pass both.
+    The recovery must be owed by `ensure_recovered` on the public entry/finish
+    path — never a manual `owner_recover` the caller has to remember.
+    """
+    from local_operator.ui_browser import state as ui_state
+
+    _ui_only(monkeypatch)
+    current = ui_state.UiHostState(
+        pid=2,
+        port=52133,
+        session_key="k" * 32,
+        app_version="0.21.0",
+        proto=1,
+        instance_id="instance-a",
+    )
+    monkeypatch.setattr(ui_state, "read", lambda root=None: current)
+    context, resource = _context(tmp_path)
+    opened = await builtin.execute_browser(
+        "open", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert not opened.is_error
+    proof = resource.params()["owner_proof"]
+    ui_client.calls.clear()
+    # A new incarnation of the ledger, still holding the tab (the default
+    # `recover_state="owned"`), so recovery SUCCEEDS.
+    current = current.model_copy(update={"instance_id": "instance-b"})
+    if operation == "ordinary-action":
+        result = await builtin.execute_browser("read", {"action": "read"}, None, None, context)
+        assert not result.is_error, "a proven replacement must be adopted automatically"
+    else:
+        finished = await resource.finish(resource.generation, "completed")
+        assert finished.state == "closed", "a proven replacement may receive the finalizer"
+    # The recovery is owed FIRST and by the public entry — never a manual
+    # `owner_recover` the caller has to remember. For an ordinary read the
+    # action's own verb follows, so this asserts the ORDER, not the count.
+    assert [method for method, _ in ui_client.calls][0] == "owner_recover"
+    assert resource.params()["owner_proof"] == proof
+    assert ui_client.calls[0][1]["owner_proof"] == proof
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_failed_explicit_extension_open_keeps_public_approvals_on_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+    resumed: bool,
+) -> None:
+    """No seeded pin or patched recovery: the public denied navigation must
+    itself save the transport used by all three surface-free approval actions.
+    Reconstruction tests that the intent survives a new context of the same SID.
+    Only the transport is fake; selection, resource, recovery and persistence are
+    production paths. No user/foreign tab is adopted or authority invented.
+    """
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    _hosts(monkeypatch, ui=True, bridge=True)
+    permitted = False
+
+    async def transport(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        bridge_client.calls.append((method, params))
+        if method == "owner_recover":
+            return {"ownership_version": 1, "state": "closed", "tab": ""}
+        if method == "open":
+            assert "tab" not in params
+            if permitted:
+                return {"tab": "bridge:5:permitted-capability", "url": params["url"]}
+            raise BridgeError(
+                ErrorCode.ORIGIN_NOT_ALLOWED,
+                "site not allowed",
+                {
+                    "origin": "https://example.test",
+                    "url": params["url"],
+                },
+            )
+        if method in ("request_access", "await_access", "cancel_access"):
+            answer = "cancelled" if method == "cancel_access" else "allowed"
+            return {"origin": "https://example.test", "state": answer}
+        return {"state": "closed"}
+
+    monkeypatch.setattr(bridge_client, "call", transport)
+    context, resource = _context(tmp_path)
+    denied = await builtin.execute_browser(
+        "deny",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
+    assert denied.is_error
+    assert (denied.details or {}).get("error_code") == "origin_not_allowed"
+    assert context.browser is not None and context.browser.surface_id == ""
+    assert ui_client.calls == [], "explicit extension must also select the ownership lane"
+    proof = resource.params()["owner_proof"]
+    if resumed:
+        context, resource = _context(tmp_path)
+    for action in ("request_access", "await_access", "cancel_access"):
+        result = await builtin.execute_browser(
+            action,
+            {
+                "action": action,
+                "url": "https://example.test",
+                "timeout_s": 1,
+            },
+            None,
+            None,
+            context,
+        )
+        assert not result.is_error, result.text
+        expected = "cancelled" if action == "cancel_access" else "allowed"
+        assert (result.details or {}).get("state") == expected
+        assert context.browser is not None and context.browser.surface_id == ""
+    assert ui_client.calls == []
+    assert [
+        method
+        for method, _ in bridge_client.calls
+        if method
+        in (
+            "request_access",
+            "await_access",
+            "cancel_access",
+        )
+    ] == ["request_access", "await_access", "cancel_access"]
+    assert resource.params()["owner_proof"] == proof
+    assert "pending_access_host" not in resource.record, "cancel discharges routing intent"
+    assert "pending_access_host" not in resource._load(), "cancel also persists the removal"
+
+    # Recreate the intent through another actual denied navigation, not by
+    # seeding a record. A later permitted open must consume the routing marker:
+    # its minted capability now names the host, so stale approval intent cannot
+    # govern a future surface-free flow.
+    denied_again = await builtin.execute_browser(
+        "deny-again",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
+    assert denied_again.is_error
+    assert (denied_again.details or {}).get("error_code") == "origin_not_allowed"
+    assert resource.record.get("pending_access_host") == "bridge"
+    permitted = True
+    opened = await builtin.execute_browser(
+        "permitted-open",
+        {
+            "action": "open",
+            "backend": "extension",
+            "url": "https://example.test",
+        },
+        None,
+        None,
+        context,
+    )
+    assert not opened.is_error, opened.text
+    assert context.browser is not None
+    assert context.browser.surface_id == "bridge:5:permitted-capability"
+    assert "pending_access_host" not in resource.record
+    assert "pending_access_host" not in resource._load()
+    assert resource.params()["owner_proof"] == proof
+    assert ui_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_same_sid_new_lease_registers_via_predecessor_and_fences_the_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """M2 (audit-corrected): SAME durable SID + a NEW valid execution lease.
+
+    The production shape is `SessionFactory` acquiring the lease BEFORE it
+    constructs `Session`, which reconstructs `BrowserResource` over the same
+    directory — so the resource that resumes reads the NEW lease and must
+    register as a legitimate successor, not a foreigner. This builds exactly
+    that at the documented construction boundary (no whole `Session` fixture):
+
+      * run 1 — acquire lease G1, open a tab, finalize (record carries terminal).
+      * run 2 — acquire a NEW lease G2 over the same SID, reconstruct the
+        resource. `initialize()`'s fence compares the SAME new lease, so it does
+        NOT fire; `generation` becomes G2 while G1 survives as
+        `previous_generation`/`bridge_generations`, and `params()` ships both.
+    The proof/allocation are preserved, and the OLD owner is fenced by the lease.
+    """
+    from local_operator.session_lease import acquire_session_lease
+
+    directory = tmp_path / "sessions" / "synthetic-sid"
+    directory.mkdir(parents=True)
+
+    lease1 = acquire_session_lease(directory)
+    first = BrowserResource(directory, "synthetic-sid")
+    first.initialize()
+    assert first.generation == lease1.generation
+    proof = first.params()["owner_proof"]
+    allocation = first.params()["allocation_id"]
+    first.remember("ui:100:capability", host="ui")
+    # Finalize so the record carries a durable obligation the successor inherits.
+    first.record["terminal"] = "completed"
+    first._save()
+    # Run 1 ends. A resume acquires a genuinely NEW lease (in production the
+    # predecessor's claim is either released on a clean exit or proven dead and
+    # recovered); the SID stays the same, which is the whole point.
+    lease1.release()
+    assert not (directory / ".execution-lease").exists()
+
+    lease2 = acquire_session_lease(directory)
+    assert lease2.generation != lease1.generation
+    second = BrowserResource(directory, "synthetic-sid")
+    second.initialize()  # fence compares the SAME new lease: must NOT raise
+    assert second.generation == lease2.generation
+    assert second.previous_generation == lease1.generation
+    assert lease1.generation in second.params()["previous_generations"]
+    assert second.params()["owner_proof"] == proof
+    assert second.params()["allocation_id"] == allocation
+
+    # The successor RECONCILES over the wire, and the request it sends proves it:
+    # current generation G2, predecessor G1 declared, and the SAME proof and
+    # allocation preserved. `second.recover()` is what the ordinary entry calls
+    # (`ensure_recovered`), so this exercises the real reconciliation path rather
+    # than only the record's fields.
+    ui_client.calls.clear()
+    recovered = await second.recover()
+    assert recovered.get("state") == "owned", "the new lease is accepted as a successor"
+    sent = [params for method, params in ui_client.calls if method == "owner_recover"]
+    assert len(sent) == 1
+    assert sent[0]["owner_generation"] == lease2.generation
+    assert sent[0]["previous_generation"] == lease1.generation
+    assert lease1.generation in sent[0]["previous_generations"]
+    assert sent[0]["owner_proof"] == proof
+    assert sent[0]["allocation_id"] == allocation
+
+    # The OLD owner is fenced: its identity came from the old lease, so a
+    # generation check against the live claim now refuses it.
+    with pytest.raises(BrowserOwnershipError):
+        first.assert_current()
+    lease2.release()
+
+
+@pytest.mark.asyncio
+async def test_owner_refused_stale_and_foreign_are_told_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The typed refusal discriminator the GCP neighbours asked for.
+
+    Both a stale-generation refusal and a foreign-proof refusal arrive as
+    `owner_refused`; the additive `data.refusal` key is what lets the session
+    tell them apart WITHOUT reading the message. A peer that predates the key
+    omits it and keeps the prior bare-refusal behaviour.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, ErrorCode
+    from local_operator.browser_bridge.resources import BrowserOwnershipError
+
+    class _Refusing:
+        host = "ui"
+
+        def __init__(self, refusal: str | None) -> None:
+            self.refusal = refusal
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            data = {} if self.refusal is None else {"refusal": self.refusal}
+            raise BridgeError(ErrorCode.OWNER_REFUSED, "browser owner generation is stale", data)
+
+    for refusal, expect in (("stale", "stale"), ("foreign", "different owner")):
+        resource = BrowserResource(tmp_path / refusal, f"session:{refusal}")
+        resource.initialize()
+        monkeypatch.setattr(resource, "client", lambda r=_Refusing(refusal): r)
+        with pytest.raises(BrowserOwnershipError, match=expect):
+            await resource.recover()
+    # An older peer that omits the key keeps the bare refusal (still an error).
+    resource = BrowserResource(tmp_path / "bare", "session:bare")
+    resource.initialize()
+    monkeypatch.setattr(resource, "client", lambda: _Refusing(None))
+    with pytest.raises(BridgeError):
+        await resource.recover()
+    # An UNKNOWN discriminator (a future producer, or a mis-shaped payload) must
+    # NOT be swallowed as "handled": it stays the bare refusal so an unrecognised
+    # value can never silently change which recovery branch runs.
+    resource = BrowserResource(tmp_path / "unknown", "session:unknown")
+    resource.initialize()
+    monkeypatch.setattr(resource, "client", lambda: _Refusing("someday-key"))
+    with pytest.raises(BridgeError):
+        await resource.recover()
 
 
 def test_a_legacy_record_without_a_host_falls_back_to_the_bridge(tmp_path: Path) -> None:

@@ -42,7 +42,10 @@ import logging
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from local_operator.session.frontend_state import FrontendModelAccess
 
 from local_operator.providers.registry import (
     credential_provider_id,
@@ -201,6 +204,66 @@ def usable_providers_here(*, config_dir: Path | None = None) -> set[str] | None:
     try:
         with _own_controller(config_dir) as controller:
             return controller.usable_providers()
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def serving_model_access_here(
+    selector: str, *, config_dir: Path | None = None
+) -> FrontendModelAccess | None:
+    """Classify the serving route without accusing a saved but blocked sign-in.
+
+    Persisted enabled rows are evidence of presence, not working entitlement.
+    No key is returned, refreshed or erased by this status publication.
+    """
+    import sqlite3
+
+    from local_operator.session.frontend_state import model_access_claim
+
+    try:
+        with _own_controller(config_dir) as controller:
+            usable = controller.usable_providers()
+            provider, _, model_id = selector.partition("/")
+            if provider == "meta-muse" and usable is not None:
+                rows = [
+                    row
+                    for row in controller.auth_store.list_credentials(provider)
+                    if row.disabled_cause is None
+                ]
+                if rows and all(
+                    controller.auth_store.is_blocked_for_model(row.id, provider, model_id)
+                    for row in rows
+                ):
+                    usable = set(usable) - {provider}
+            saved = {
+                row.provider
+                for row in controller.auth_store.list_credentials()
+                if row.disabled_cause is None
+            }
+            claim = model_access_claim(selector, usable, saved=saved)
+            if claim is None:
+                return None
+            from local_operator.network.credentials.effective import effective_access
+
+            access = effective_access(provider, root=config_dir, local=provider in (usable or ()))
+            # Preserve the old coarse wire state for older desktop readers. The
+            # additive state names the real reason; new UI must use it rather
+            # than treating holder permission as an authenticated login.
+            effective_state = (
+                "pending"
+                if access.state == "absent" and claim.state == "temporarily_unavailable"
+                else access.state
+            )
+            state = (
+                "ok"
+                if access.usable
+                else claim.state if effective_state == "absent" else "temporarily_unavailable"
+            )
+            return claim.model_copy(
+                update={"state": state, "effective_state": effective_state, **access.context()}
+            )
     except sqlite3.ProgrammingError:
         raise
     except (sqlite3.Error, OSError):

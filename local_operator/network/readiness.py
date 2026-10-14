@@ -769,7 +769,139 @@ def _bounded_observation(row: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any]:
+def selected_model_fact(root: Path, selector: str, *, session_id: str = "") -> dict[str, Any]:
+    """The requested session selector, never silently replaced by a peer default.
+
+    Readiness is read-only: eligible permission remains unverified until native
+    runtime resolution succeeds. This uses the same keyless reading as the UI.
+    """
+    from local_operator.providers.model_access import serving_model_access_here
+
+    claim = serving_model_access_here(selector, config_dir=root)
+    return {
+        "selector": selector,
+        "session_id": session_id,
+        "provider": claim.provider if claim is not None else "",
+        "state": claim.effective_state if claim is not None else "absent",
+        "usable": claim is not None and claim.state == "ok",
+        **(
+            {
+                name: getattr(claim, name)
+                for name in (
+                    "owner_device",
+                    "owner_label",
+                    "observed_at",
+                    "last_grant_at",
+                    "last_grant_expires_at",
+                )
+            }
+            if claim is not None
+            else {}
+        ),
+    }
+
+
+def selected_model_row(
+    member: Any,
+    fact: Mapping[str, Any],
+    *,
+    selector: str,
+    session_id: str,
+    peer_label: str,
+    source: str = SOURCE_PEER,
+) -> dict[str, Any]:
+    """Selected access in the established readiness sentence/remedy register.
+
+    Facts are keyless observations, never authorization to use a cached bearer.
+    The offline CLI uses this SAME builder, but with unknown peer facts rather
+    than inventing an answer from the viewer's local credential store.
+    """
+    provider = _bounded(fact.get("provider") or selector.partition("/")[0], 80)
+    owner = _bounded(fact.get("owner_label") or fact.get("owner_device") or "its owner", 120)
+    state = str(fact.get("state") or "pending")
+    readings = {
+        "local": (f"{peer_label} serves selected {provider} from its own login", ()),
+        "effective_borrow": (
+            f"{peer_label} resolved native {provider} access from {owner}; the "
+            f"next request verifies the owner again",
+            (f"continue on {peer_label}; the owner is resolved automatically on the next request",),
+        ),
+        "eligible_borrow_unverified": (
+            f"{peer_label} may borrow {provider} from {owner}, but native "
+            f"access has not been verified",
+            (
+                f"send the next request on {peer_label} to verify {owner} "
+                f"automatically, then re-check",
+            ),
+        ),
+        "expired": (
+            f"{peer_label}'s last {provider} grant from {owner} expired; "
+            f"borrowing permission is still present",
+            (
+                f"send the next request on {peer_label}; it resolves fresh native "
+                f"access from {owner} automatically",
+            ),
+        ),
+        "pending": (
+            f"selected {provider} access on {peer_label} has not converged or been verified",
+            (
+                f"re-check when {peer_label}'s relay is reachable; the next "
+                f"request verifies access automatically",
+            ),
+        ),
+        "owner_unavailable": (
+            f"{peer_label} cannot verify selected {provider} access because {owner} is unavailable",
+            (
+                f"re-check after {owner} and {peer_label}'s relay are reachable, "
+                f"or choose another model",
+            ),
+        ),
+        "withdrawn": (
+            f"{peer_label}'s access to borrow selected {provider} from {owner} was withdrawn",
+            (
+                f"use another model or sign in to {provider} on {peer_label}; "
+                f"withdrawn permission is not regranted automatically",
+            ),
+        ),
+        "device_bound": (
+            f"selected {provider} requires a sign-in on {peer_label}; its "
+            f"device-bound login cannot be borrowed",
+            (f"sign in to {provider} on {peer_label}, or choose another model",),
+        ),
+        "absent": (
+            f"{peer_label} has no effective access to selected {provider}",
+            (f"sign in to {provider} on {peer_label}, or choose another model",),
+        ),
+    }
+    if state not in readings:
+        state = "pending"
+    detail, remedies = readings[state]
+    row = _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability="selected_model_credential",
+        ok=fact.get("usable") is True and state in {"local", "effective_borrow"},
+        code=state,
+        detail=detail,
+        remedies=remedies,
+        source=source,
+    )
+    row.update(selector=selector, session_id=session_id)
+    # Explicit allowlist: never forward native account payloads or bearer data.
+    row.update(
+        {name: _bounded(fact.get(name) or "", 120) for name in ("owner_device", "owner_label")}
+    )
+    for name in ("observed_at", "last_grant_at", "last_grant_expires_at"):
+        value = fact.get(name)
+        row[name] = (
+            value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        )
+    return row
+
+
+def collect_peer_facts(
+    root: Path, *, home: Path | None = None, selector: str = "", session_id: str = ""
+) -> dict[str, Any]:
     """Everything the viewer needs from THIS device, as facts. Names only."""
     model = default_model_fact(root)
     provider = str(model.get("hosting") or "")
@@ -781,6 +913,9 @@ def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any
             "resolved": model["resolved"],
             "reason": model["reason"],
         },
+        "selected_model_access": (
+            selected_model_fact(root, selector, session_id=session_id) if selector else None
+        ),
         "provider": provider,
         # The provider is the ``provider`` key above; the fact is three-valued
         # (True / False / None = the store could not be read).
@@ -2816,7 +2951,12 @@ def _split_endpoint(endpoint: str) -> tuple[str, int]:
 
 
 def _ask_readiness(
-    server: "RelayServer", link: Any, *, timeout: float = READINESS_OP_TIMEOUT_S
+    server: "RelayServer",
+    link: Any,
+    *,
+    timeout: float = READINESS_OP_TIMEOUT_S,
+    selector: str = "",
+    session_id: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """Ask the peer for its facts. Returns ``(facts, "")`` or ``(None, reason)``."""
     request = {
@@ -2824,6 +2964,8 @@ def _ask_readiness(
         "req": server._next_relay_req(),  # noqa: SLF001
         "locality": "remote",
     }
+    if selector:
+        request.update(selector=selector, session_id=session_id)
     reply = link.request(request, timeout=timeout)
     if reply is None:
         return None, "the readiness request did not arrive before the bound"
@@ -2842,6 +2984,8 @@ def _peer_checks(
     server: "RelayServer",
     viewer: Viewer,
     deadline: float | None,
+    selector: str = "",
+    session_id: str = "",
 ) -> list[dict[str, Any]]:
     """Every readiness row for ONE member: reachability, then capabilities."""
     peer_label = _label(member)
@@ -2849,6 +2993,17 @@ def _peer_checks(
     rows, link = _reachability_rows(
         member, record=record, server=server, deadline=deadline, since=since
     )
+    selected_row: dict[str, Any] | None = None
+    if selector:
+        selected_row = selected_model_row(
+            member,
+            {"state": "owner_unavailable" if link is None else "pending"},
+            selector=selector,
+            session_id=session_id,
+            peer_label=peer_label,
+            source=SOURCE_UNKNOWN,
+        )
+        rows.append(selected_row)
     if link is None:
         # NO LINK, SO NOTHING WAS ASKED — and the build row degrades with the
         # rest: its source is the handshake, and there was no handshake.
@@ -2887,7 +3042,9 @@ def _peer_checks(
     timeout = (
         READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
     )
-    facts, problem = _ask_readiness(server, link, timeout=timeout)
+    facts, problem = _ask_readiness(
+        server, link, timeout=timeout, selector=selector, session_id=session_id
+    )
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
@@ -2895,12 +3052,29 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    selected = facts.get("selected_model_access")
+    if selected_row is not None:
+        selected = (
+            selected
+            if isinstance(selected, Mapping) and selected.get("selector") == selector
+            else {}
+        )
+        row = selected_model_row(
+            member,
+            selected,
+            selector=selector,
+            session_id=session_id,
+            peer_label=peer_label,
+        )
+        selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
     return rows
 
 
-def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
+def compose(
+    server: "RelayServer", *, peer: str = "", selector: str = "", session_id: str = ""
+) -> dict[str, Any]:
     """The ``peer_readiness`` local op's body: the readiness report.
 
     Row order is doctor's (identity → network → membership → per member:
@@ -2959,7 +3133,13 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
                     continue
                 checks.extend(
                     _peer_checks(
-                        member, record=record, server=server, viewer=viewer, deadline=deadline
+                        member,
+                        record=record,
+                        server=server,
+                        viewer=viewer,
+                        deadline=deadline,
+                        selector=selector,
+                        session_id=session_id,
                     )
                 )
     finally:
@@ -3206,8 +3386,12 @@ def make_handler(server: "RelayServer") -> Any:
         # The link is unused: every fact is this device's own, and the handler
         # never sends a request over the link it is serving (the deadlock guard
         # ``PeerLink.request`` states).
-        del link, frame
-        return collect_peer_facts(server.root)
+        del link
+        return collect_peer_facts(
+            server.root,
+            selector=_bounded(frame.get("selector") or "", 240),
+            session_id=_bounded(frame.get("session_id") or "", 80),
+        )
 
     return _handle
 
@@ -3216,7 +3400,12 @@ def local_handler(server: "RelayServer") -> Any:
     """The ``peer_readiness`` local op: compose the report for one or every peer."""
 
     def _handle(frame: dict[str, Any]) -> dict[str, Any]:
-        return compose(server, peer=str(frame.get("peer") or ""))
+        return compose(
+            server,
+            peer=str(frame.get("peer") or ""),
+            selector=_bounded(frame.get("selector") or "", 240),
+            session_id=_bounded(frame.get("session_id") or "", 80),
+        )
 
     return _handle
 

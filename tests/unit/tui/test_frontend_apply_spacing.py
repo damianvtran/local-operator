@@ -30,6 +30,7 @@ from local_operator.session.frontend_state import (
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import status_line as status_line_module
+from tests.unit.tui.conftest import await_session_boot
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -125,6 +126,7 @@ async def test_a_costly_roster_delta_is_spaced_not_painted_next_turn() -> None:
     viewer.push(jobs=[_job("a", latest_details={"progress": "one"})])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)  # records the painted lifecycle
@@ -146,6 +148,7 @@ async def test_a_burst_inside_one_window_costs_one_paint_and_it_paints_the_last_
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -173,6 +176,7 @@ async def _path_taken(**changes: Any) -> str:
     viewer.push(jobs=[_job("a"), _job("b")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -220,6 +224,7 @@ async def test_a_queued_child_being_admitted_is_painted_next_turn() -> None:
     viewer.push(jobs=[_job("a", queued=True)])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -245,6 +250,7 @@ async def test_an_urgent_delta_pulls_a_spaced_paint_forward() -> None:
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -271,6 +277,7 @@ async def test_retiring_the_session_cancels_a_spaced_paint() -> None:
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -295,6 +302,7 @@ async def test_the_live_prompt_backstop_runs_even_when_the_band_is_gated() -> No
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._session = viewer
         band_calls = 0
@@ -327,6 +335,7 @@ async def test_a_session_switch_does_not_space_the_new_sessions_first_paint() ->
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         app._invalidate_pending_frontend_state()
         app._paint_frontend_session(viewer)
@@ -350,6 +359,7 @@ async def test_the_band_is_not_repainted_when_no_collection_moved() -> None:
     viewer.push(jobs=[_job("a")])
     app = await _booted(viewer)
     async with app.run_test(size=(100, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         refreshes = 0
 
@@ -392,6 +402,7 @@ async def test_the_band_shows_the_last_calls_measured_rate() -> None:
     viewer = _Viewer()
     app = await _booted(viewer)
     async with app.run_test(size=(120, 28)) as pilot:
+        await await_session_boot(app)
         await pilot.pause()
         # 240 tokens over 12,345 us = 19,441 tok/s, which the shared formatter
         # spells `19.4k` — the same spelling `/analytics` and `/session` use.

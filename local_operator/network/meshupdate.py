@@ -56,7 +56,6 @@ classification moves off the wire entirely.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -108,6 +107,7 @@ UPDATE_CONTROL_TIMEOUT_S = UPDATE_OP_DEADLINE_S + 30.0
 PUBLISHED_CHECK_TIMEOUT_S = 5.0
 
 #: Where the in-flight marker lives, under the config root.
+# Kept for readers of historical mesh metadata only; mutations use INSTALLROOT.
 UPDATE_LOCK_RELPATH: tuple[str, ...] = ("network", "update.lock")
 
 #: The install shapes the receipt's ``method`` may disclose (RU §3: "``method``
@@ -347,10 +347,15 @@ class _CapturedInstall:
         self.output = ""
 
     def __call__(self, argv: list[str], env: dict[str, str]) -> int:
-        proc = subprocess.run(argv, check=False, env=env, capture_output=True, text=True)
-        if int(proc.returncode) != 0:
-            self.output = _flatten_output(proc.stdout, proc.stderr)
-        return int(proc.returncode)
+        from local_operator.install_transaction import run_installer
+
+        code = run_installer(argv, env=env, on_output=self._remember_output)
+        if code == 0:
+            self.output = ""
+        return code
+
+    def _remember_output(self, output: str) -> None:
+        self.output = _flatten_output(output)
 
 
 def _flatten_output(*chunks: str) -> str:
@@ -551,81 +556,23 @@ def busy_sessions(root: Path) -> tuple[int, str]:
 
 @contextmanager
 def update_lock(root: Path, target: UpdateTarget) -> Iterator[None]:
-    """Hold the member's single update lock for the duration of a PASS.
+    """Mesh admission uses the SAME install root as CLI/TUI, not config root.
 
-    THE PASS, NOT JUST THE INSTALL (agent review round 1, m5): the lock covers
-    install through the tail (sweep + re-engage), so a second origin naming a
-    distinct target during a rotation is refused ``update_in_progress`` rather
-    than installing under a pass whose receipt is about to describe it. Only
-    the receipt's composition and the services-roll hand-off run after release.
-
-    ONE at a time on the member too (RU §4.4): a pid-carrying file lock, taken
-    NON-blockingly so a second distinct target while one is in flight is refused
-    ``update_in_progress`` instead of queued behind a 15-minute install. The
-    file is written before the lock is released, so a reader can name the pid
-    and the target that hold it — a stale holder is superseded by the lock
-    itself (an flock dies with its process), which is why no age bound is
-    needed here where the approvals store's reloadable record needs one.
-
-    The lock is taken BEFORE the busy probe, and the probe runs under it: two
-    concurrent asks must not both observe idle and both install.
-
-    ``fcntl`` IS IMPORTED HERE, NOT AT MODULE SCOPE (agent review round 1,
-    B1/Q1): it is POSIX-only, and a module-level import made the whole SLICE
-    unloadable on Windows — ``_install_slices`` swallows a slice's import failure
-    by design, so the effect would have been silent (``net_update`` quietly
-    refusing as "not implemented" there). On a platform without it this device
-    cannot take the single-update lock at all, which is a refusal BY NAME rather
-    than an install without serialisation.
+    Preparation and service convergence are deliberately outside this short
+    transaction; the common installer owns candidate registration and fresh
+    promotion. A config-profile lock cannot exclude another profile's writer.
     """
+    from local_operator import install_transaction, update
+
     try:
-        import fcntl
-    except ImportError as exc:  # pragma: no cover — exercised by a blocked-import probe
-        raise MeshRefusal(
-            "update_lock_unsupported",
-            "this platform has no advisory file locking (no ``fcntl`` here), so this "
-            "device cannot take the single-update lock; nothing was touched",
-        ) from exc
-    path = root.joinpath(*UPDATE_LOCK_RELPATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(path, "a+", encoding="utf-8")  # noqa: SIM115 — held for the whole install
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            holder = "another update"
-            try:
-                handle.seek(0)
-                payload = json.loads(handle.read() or "{}")
-                pid = str(payload.get("pid") or "")
-                held = str(payload.get("version") or "")
-                if pid:
-                    holder = f"pid {pid}" + (f" moving to {held}" if held else "")
-            except Exception:  # noqa: BLE001 — the holder's name is decoration
-                pass
-            raise MeshRefusal(
-                "update_in_progress",
-                f"an update is already running here ({holder}); retry when it settles",
-            ) from None
-        handle.seek(0)
-        handle.truncate()
-        handle.write(
-            json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "version": target.version,
-                    "started_at": time.time(),
-                }
-            )
-        )
-        handle.flush()
-        yield
-    finally:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        handle.close()
+        with install_transaction.transaction(
+            update.stable_root(), operation=f"mesh admission {target.version}", timeout=0
+        ):
+            yield
+    except install_transaction.LockUnsupported as exc:
+        raise MeshRefusal("update_lock_unsupported", str(exc)) from exc
+    except install_transaction.InstallTransactionError as exc:
+        raise MeshRefusal("update_in_progress", str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1099,90 +1046,99 @@ def _execute_validated(
                 "sessions": {"moved": 0, "kept": max(count, 0)},
                 "updated_at": time.time(),
             }
-        _audit_member(server, link, "update_started", target=target, rollout=rollout)
-        try:
-            method = install_build(target_version, runner=runner)
-        except Exception as exc:  # noqa: BLE001 — the installer's own tail is the receipt
-            tail = " ".join(str(exc).split())
-            if len(tail) > 300:
-                tail = tail[:300].rstrip() + "…"
-            _audit_member(
-                server,
-                link,
-                "update_failed",
-                target=target,
-                rollout=rollout,
-                outcome="failed",
-                cause="internal",
-                detail={"method": install_shape()},
-            )
-            return {
-                "state": "failed",
-                "code": "",
-                "reason": tail or "the install did not finish; nothing was made current",
-                "method": install_shape(),
-                "version": "",
-                "sessions": {"moved": 0, "kept": 0},
-                "updated_at": time.time(),
-            }
-
-        version_now = current_member_version()
-        if version_now != target_version:
-            _audit_member(
-                server,
-                link,
-                "update_failed",
-                target=target,
-                rollout=rollout,
-                outcome="failed",
-                cause="internal",
-                detail={"method": method},
-            )
-            return {
-                "state": "failed",
-                "code": "",
-                "reason": (
-                    f"the install finished but this device still reports "
-                    f"{version_now or 'nothing'}; nothing was advertised"
-                ),
-                "method": method,
-                "version": version_now,
-                "sessions": {"moved": 0, "kept": 0},
-                "updated_at": time.time(),
-            }
+    _audit_member(server, link, "update_started", target=target, rollout=rollout)
+    try:
+        method = install_build(target_version, runner=runner)
+    except Exception as exc:  # noqa: BLE001 — the installer's own tail is the receipt
+        tail = " ".join(str(exc).split())
+        if len(tail) > 300:
+            tail = tail[:300].rstrip() + "…"
         _audit_member(
             server,
             link,
-            "update_completed",
+            "update_failed",
             target=target,
             rollout=rollout,
-            detail={"method": method, "from": current, "version": target_version},
+            outcome="failed",
+            cause="internal",
+            detail={"method": install_shape()},
         )
-        # THE TAIL RUNS UNDER THE SAME LOCK (agent review round 1, m5): the
-        # lock covers the WHOLE pass, so a second origin naming a distinct
-        # target while the sweep/re-engage window is open is refused
-        # ``update_in_progress`` instead of installing under a rotation the
-        # first receipt is about to describe.
-        from local_operator.network import relay
+        return {
+            "state": "failed",
+            "code": "",
+            "reason": tail or "the install did not finish; nothing was made current",
+            "method": install_shape(),
+            "version": "",
+            "sessions": {"moved": 0, "kept": 0},
+            "updated_at": time.time(),
+        }
 
-        remaining = relay.slow_op_remaining_s()
-        # None outside a slow op (direct calls, cells): the nominal budgets
-        # apply. Inside one, the tail is clamped to what the requester is
-        # still listening for, less the reserve for the receipt write —
-        # ``_dispatch_slow`` DROPS a reply that lands after the deadline
-        # (agent review round 1, M2).
-        tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
-        tail_started = time.monotonic()
-        outcomes, sweep_note = refresh_runtimes(root, budget=tail_budget)
-        moved, kept = count_pass_outcomes(outcomes)
-        left = (
-            None
-            if tail_budget is None
-            else max(0.0, tail_budget - (time.monotonic() - tail_started))
+    version_now = current_member_version()
+    # Another registered candidate may complete before or during the unlocked
+    # convergence tail. A newer current does not undo this successful promotion.
+    from local_operator.update import parse_version
+
+    observed = parse_version(version_now)
+    requested = parse_version(target_version)
+    if version_now != target_version and not (observed and requested and observed > requested):
+        _audit_member(
+            server,
+            link,
+            "update_failed",
+            target=target,
+            rollout=rollout,
+            outcome="failed",
+            cause="internal",
+            detail={"method": method},
         )
-        engaged, engage_note = reengage_displaced(root, snapshot, outcomes, budget=left)
+        return {
+            "state": "failed",
+            "code": "",
+            "reason": (
+                f"the install finished but this device still reports "
+                f"{version_now or 'nothing'}; nothing was advertised"
+            ),
+            "method": method,
+            "version": version_now,
+            "sessions": {"moved": 0, "kept": 0},
+            "updated_at": time.time(),
+        }
+    _audit_member(
+        server,
+        link,
+        "update_completed",
+        target=target,
+        rollout=rollout,
+        detail={"method": method, "from": current, "version": target_version},
+    )
+    # Convergence is outside the installation transaction. Reconcile current
+    # AFTER it: the promoted generation and this relay's serving image are not
+    # necessarily what a fresh process will load when the receipt is composed.
+    from local_operator.network import relay
+
+    remaining = relay.slow_op_remaining_s()
+    # None outside a slow op (direct calls, cells): the nominal budgets
+    # apply. Inside one, the tail is clamped to what the requester is
+    # still listening for, less the reserve for the receipt write —
+    # ``_dispatch_slow`` DROPS a reply that lands after the deadline
+    # (agent review round 1, M2).
+    tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
+    tail_started = time.monotonic()
+    outcomes, sweep_note = refresh_runtimes(root, budget=tail_budget)
+    moved, kept = count_pass_outcomes(outcomes)
+    left = (
+        None if tail_budget is None else max(0.0, tail_budget - (time.monotonic() - tail_started))
+    )
+    engaged, engage_note = reengage_displaced(root, snapshot, outcomes, budget=left)
     other = len(outcomes) - moved - kept
+    now_current = current_member_version()
+    serving = origin_target().get("version", "")
     reason = f"this device moved from {current or 'an unknown build'} to {target_version}"
+    if now_current != target_version:
+        reason = (
+            f"this pass promoted {target_version}; current is now "
+            f"{now_current or 'unconfirmed'}; serving relay is {serving or 'unconfirmed'}"
+        )
     if outcomes:
         reason += f"; {moved} session(s) retired for the new build, {kept} kept"
         if other > 0:
@@ -1197,7 +1153,10 @@ def _execute_validated(
         "code": "",
         "reason": reason,
         "method": method,
-        "version": target_version,
+        "version": now_current,
+        "promoted": target_version,
+        "now_current": now_current,
+        "serving": serving,
         "sessions": {"moved": moved, "kept": kept},
         "updated_at": time.time(),
     }

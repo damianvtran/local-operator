@@ -212,6 +212,68 @@ operator's real store, and the SDK makes that unrepresentable by accident:
 Prove inheritance the way the apparatus does: print the resolved store path
 (`local_operator.paths.config_dir()`), not the config that should produce it.
 
+## Localized startup refusals — source-revision capability
+
+At source `641a392040bf4056361228cfc3d3ad978fced3e8`,
+[#2317](https://github.com/damianvtran/local-operator/pull/2317)
+(merge `7c29e7c3f2c0507f21bb3ca566cf6901b110c113`) extracts exactly **four**
+[English `wire.errors.sdk_startup` keys](../local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json):
+`attach_hosting_unconfigured`, `attach_runtime_missing`, `profile_attach_failed`
+and `tool_inventory_mismatch`, with context and generated Python functions.
+This does not translate every SDK validation/refusal or add a typed exception API.
+
+Only these refusal paths lazily resolve language, **after public root isolation**:
+they reuse the manager scoped to the explicit `SessionRoots`, then follow
+config → `LOP_LANG` → OS → `en` and shipped eligibility. Missing namespace/key
+copy uses English source and formatting. Internal `Msg` values are rendering
+inputs; callers still receive a plain, **one-argument `SessionSpecError`** and
+read its human-readable text with `str(error)`. No public `{code, params, text}`
+exception envelope, new exception fields or locale parameter is introduced.
+
+This describes that source revision, not a promise about an older installed SDK.
+The measured 2026-10-13 UTC installed 0.70.10 snapshot predates this slice; verify
+installation contains it before relying on localized SDK refusals. No provider
+request is needed to inspect version/source identity. See [the i18n HOWTO](I18N.md)
+for the distinct source, tag, publication and installation observations.
+
+## Required-tool readiness — wait before you prompt
+
+MCP discovery is asynchronous: servers deferred past the startup gate connect
+on background continuations, so an inventory read right after `open_session`
+can catch a declared tool still arriving — and the first model request
+publishes its tool array once per turn, so a prompt that wins that race is
+answered with "Tool not found". Owning sessions expose a typed, bounded gate
+instead of leaving each caller to hand-roll a manager wait plus an inventory
+read:
+
+```python
+async with sdk.open_session(spec, roots=roots) as session:
+    readiness = await session.wait_for_tools(
+        ["mcp__episode_actions_apply_actions"], timeout_s=30.0
+    )
+    if readiness.status != "ready":
+        raise RuntimeError(
+            f"action tool not reachable: {readiness.missing} ({readiness.status})"
+        )
+```
+
+`status` is `ready` (every name is in the live enforced inventory — already,
+or after one bounded discovery wait), `pending` (still missing while
+discovery is in flight) or `missing` (discovery settled without it, or no
+discovery manager exists). The result also partitions the request into
+`present`/`missing` name tuples and reports whether discovery had settled.
+
+Details that matter: already-reachable names — built-ins included — return
+ready immediately without waiting on unrelated slow servers; a timeout
+reports `pending` and never cancels discovery, so a later fresh call can
+still read ready; failed, misspelled or declaration-excluded names read
+`missing` and never widen the inventory; a manager failure never reads ready;
+caller cancellation propagates and leaves discovery alive. This is
+point-in-time readiness, not a lifetime guarantee against later disconnects.
+Attached viewers cannot wait on another process's discovery, so the API
+lives on `OwningSessionProtocol` only (see
+`local_operator/session/tool_readiness.py`).
+
 ## Scope of this first release, stated plainly
 
 Published **additive-stable** (in-repo; no PyPI split, no semver promise).

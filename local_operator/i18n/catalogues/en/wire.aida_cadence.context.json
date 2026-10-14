@@ -1,0 +1,12 @@
+{
+  "wire.aida_cadence.interval_hours.label": {
+    "role": "Aida settings numeric row label in TUI and connected settings UI",
+    "tone": "concise, neutral",
+    "note": "Whole elapsed hours, not wall-clock hours. Zero keeps the existing daily time. English-only until independently translated and audited; missing namespaces use English fallback. No ICU arguments."
+  },
+  "wire.aida_cadence.interval_hours.help": {
+    "role": "Aida settings row explanation and numeric editor help",
+    "tone": "direct, reassuring without promising delivery during a pause",
+    "note": "1–168 is the inclusive whole-hour bound; 4 is an example, not a default for every user. An owed check-in is preserved on configuration changes. No ICU arguments."
+  }
+}

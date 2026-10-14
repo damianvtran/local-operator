@@ -28,20 +28,23 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
+from local_operator.config_writer import serialized_config_path_write
+from local_operator.hub_sync.identity import Kind, LinkError, LinkIdentity
 from local_operator.hub_sync.segment import norm
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = 1
+SCHEMA = 2
+LEGACY_SCHEMA = 1
 #: Last N pre-apply backups kept per item (A9.3).
 BACKUPS_KEPT = 5
 
-Kind = Literal["agent", "team"]
 RecordedBy = Literal["pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown"]
 
 #: ``recorded_by`` of a record that LINKS an item to a hub id without vouching for
@@ -163,7 +166,32 @@ def fingerprint_team(fields: Mapping[str, Any]) -> str:
     return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
 
 
+def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
+    """Hash every canonical transferable field for preview/CAS/outbound input.
+
+    The original agent ancestry fingerprint intentionally covers only the two
+    text fields and remains compatible with shipped tags. That legacy hash is
+    NOT sufficient to bind a full publication/definition preview: changing a
+    tool/flag/manifest attachment must invalidate its captured snapshot too.
+    Adapters select transferable fields before this function, never runtime
+    transcripts, credentials, or local provenance.
+    """
+    if kind == "skill":
+        from local_operator.hub_sync.skill_document import SkillDocument
+
+        return SkillDocument.from_json(dict(fields)).fingerprint
+    return _sha(
+        json.dumps(
+            dict(fields), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    )
+
+
 def fingerprint_fields(kind: Kind, fields: Mapping[str, Any]) -> str:
+    if kind == "skill":
+        from local_operator.hub_sync.skill_document import SkillDocument
+
+        return SkillDocument.from_json(dict(fields)).fingerprint
     if kind == "team":
         return fingerprint_team(fields)
     return fingerprint_agent(
@@ -172,6 +200,39 @@ def fingerprint_fields(kind: Kind, fields: Mapping[str, Any]) -> str:
 
 
 # -- records ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OutboundReceipt:
+    """The same origin's paired projections, never a substitute inbound baseline.
+
+    A captures the local input; P is the ORIGINAL server-accepted document.
+    Generalization can change P, so input equality is measured against A rather
+    than repeatedly comparing unmodified local bytes with generalized remote.
+    """
+
+    local_fields: Mapping[str, Any]
+    accepted_fields: Mapping[str, Any]
+    input_fingerprint: str
+    remote_revision: str | None
+    operation_id: str | None
+    recorded_at: str = field(default_factory=now_iso)
+
+    def __post_init__(self) -> None:
+        # A captured projection must not share nested metadata/file arrays with
+        # a registry snapshot that another writer can edit during network work.
+        object.__setattr__(self, "local_fields", deepcopy(dict(self.local_fields)))
+        object.__setattr__(self, "accepted_fields", deepcopy(dict(self.accepted_fields)))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "local_fields": deepcopy(dict(self.local_fields)),
+            "accepted_fields": deepcopy(dict(self.accepted_fields)),
+            "input_fingerprint": self.input_fingerprint,
+            "remote_revision": self.remote_revision,
+            "operation_id": self.operation_id,
+            "recorded_at": self.recorded_at,
+        }
 
 
 @dataclass(frozen=True)
@@ -185,6 +246,20 @@ class BaselineRecord:
     recorded_at: str = field(default_factory=now_iso)
     recorded_by: str = "pull"
     schema: int = SCHEMA
+    identity: LinkIdentity | None = None
+    remote_revision: str | None = None
+    lineage: Literal["clean", "unknown", "mixed-lineage"] = "unknown"
+    outbound: OutboundReceipt | None = None
+    #: Managed skill aliases are directory/display names, not their immutable id.
+    #: Keep this outside the transferred skill files and out of the policy digest.
+    local_alias: str | None = None
+    #: Capture legacy defaults once even if source resolution is deferred;
+    #: this is per-artifact migration metadata, not another policy database.
+    legacy_subscribe_hint: bool | None = None
+    scope_known: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -194,9 +269,16 @@ class BaselineRecord:
             "hub_id": self.hub_id,
             "tenant_id": self.tenant_id,
             "fingerprint": self.fingerprint,
-            "fields": dict(self.fields),
+            "fields": deepcopy(dict(self.fields)),
             "recorded_at": self.recorded_at,
             "recorded_by": self.recorded_by,
+            "identity": self.identity.to_json() if self.identity is not None else None,
+            "remote_revision": self.remote_revision,
+            "lineage": self.lineage,
+            "outbound": self.outbound.to_json() if self.outbound is not None else None,
+            "local_alias": self.local_alias,
+            "legacy_subscribe_hint": self.legacy_subscribe_hint,
+            "scope_known": self.scope_known,
         }
 
 
@@ -207,7 +289,7 @@ def _check_id(value: str, label: str) -> str:
 
 
 def baseline_path(config_dir: Path, kind: Kind, local_id: str) -> Path:
-    if kind not in ("agent", "team"):
+    if kind not in ("agent", "team", "skill"):
         raise BaselineError(f"unknown kind {kind!r}")
     return baselines_dir(config_dir) / f"{kind}-{_check_id(local_id, 'local id')}.json"
 
@@ -239,9 +321,55 @@ def _refuse_links(path: Path) -> None:
             raise BaselineError(f"{candidate} is a symlink; refusing to use it")
 
 
+@serialized_config_path_write
 def write_baseline(config_dir: Path, record: BaselineRecord) -> Path:
     path = baseline_path(config_dir, record.kind, record.local_id)
     _refuse_links(path)
+    if record.identity is not None and (
+        record.identity.kind,
+        record.identity.local_id,
+        record.identity.hub_id,
+        record.identity.tenant_id,
+    ) != (record.kind, record.local_id, record.hub_id, record.tenant_id):
+        raise LinkError("origin-conflict", "baseline identity does not match the local origin")
+    current = read_baseline(config_dir, record.kind, record.local_id)
+    if current is not None:
+        # A missing historical API URL is NOT permission to change the known
+        # remote id or organization. Only a genuinely unknown scope may be
+        # selected explicitly during source resolution.
+        if current.hub_id != record.hub_id or (
+            current.scope_known and current.tenant_id != record.tenant_id
+        ):
+            raise LinkError(
+                "origin-conflict", "retain the existing remote identity and known scope"
+            )
+        if current.legacy_subscribe_hint is not None:
+            record = replace(record, legacy_subscribe_hint=current.legacy_subscribe_hint)
+    if current is not None and current.identity is not None:
+        # Existing legacy record helpers update integrated B. They must not
+        # erase immutable origin or the independently accepted outbound A/P
+        # pair, nor turn another publish target into a silent relink.
+        if (record.hub_id, record.tenant_id) != (current.hub_id, current.tenant_id):
+            raise LinkError("origin-conflict", "create a separate source-scoped local copy")
+        if record.identity is not None:
+            current.identity.require_same_origin(record.identity)
+        record = replace(
+            record,
+            identity=record.identity or current.identity,
+            outbound=record.outbound or current.outbound,
+            lineage=current.lineage if record.lineage == "unknown" else record.lineage,
+            local_alias=record.local_alias or current.local_alias,
+        )
+    if type(record.scope_known) is not bool or (
+        record.legacy_subscribe_hint is not None and type(record.legacy_subscribe_hint) is not bool
+    ):
+        raise LinkError("invalid-link-policy", "legacy policy hint must be a boolean")
+    if record.identity is not None and not record.scope_known:
+        raise LinkError("origin-conflict", "an established identity requires an explicit scope")
+    if record.kind == "skill" and record.identity is not None:
+        from local_operator.hub_sync.skill_document import validate_name
+
+        validate_name(record.local_alias)
     _atomic_write(path, record.to_json())
     return path
 
@@ -258,7 +386,7 @@ def read_baseline(config_dir: Path, kind: Kind, local_id: str) -> BaselineRecord
     except (BaselineError, OSError, ValueError) as exc:
         logger.warning("ignoring unreadable hub baseline for %s %s: %s", kind, local_id, exc)
         return None
-    if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
+    if not isinstance(raw, dict) or raw.get("schema") not in (LEGACY_SCHEMA, SCHEMA):
         return None
     fields = raw.get("fields")
     hub_id = raw.get("hub_id")
@@ -267,15 +395,87 @@ def read_baseline(config_dir: Path, kind: Kind, local_id: str) -> BaselineRecord
     if not isinstance(fields, dict) or not isinstance(hub_id, str) or not hub_id:
         return None
     tenant = raw.get("tenant_id")
+    tenant = tenant if isinstance(tenant, str) and tenant else None
+    identity = None
+    outbound = None
+    try:
+        if raw.get("identity") is not None:
+            if not isinstance(raw["identity"], dict):
+                return None
+            identity = LinkIdentity.from_json(raw["identity"])
+            if (identity.kind, identity.local_id, identity.hub_id, identity.tenant_id) != (
+                kind,
+                local_id,
+                hub_id,
+                tenant,
+            ):
+                return None
+        if raw.get("outbound") is not None:
+            value = raw["outbound"]
+            if not isinstance(value, dict):
+                return None
+            for key in ("remote_revision", "operation_id"):
+                if value.get(key) is not None and not isinstance(value[key], str):
+                    return None
+            local, accepted = value.get("local_fields"), value.get("accepted_fields")
+            if not isinstance(local, dict) or not isinstance(accepted, dict):
+                return None
+            if value.get("input_fingerprint") != fingerprint_snapshot(kind, local):
+                return None
+            # Also validate the accepted projection, especially every skill
+            # path/byte. An invalid persisted pair must not become publish input.
+            fingerprint_snapshot(kind, accepted)
+            outbound = OutboundReceipt(
+                local_fields=local,
+                accepted_fields=accepted,
+                input_fingerprint=value["input_fingerprint"],
+                remote_revision=value.get("remote_revision"),
+                operation_id=value.get("operation_id"),
+                recorded_at=str(value.get("recorded_at") or ""),
+            )
+    except (LinkError, ValueError, TypeError):
+        return None
+    if raw.get("remote_revision") is not None and not isinstance(raw["remote_revision"], str):
+        return None
+    hint = raw.get("legacy_subscribe_hint")
+    scope_known = raw.get("scope_known", "tenant_id" in raw)
+    if type(scope_known) is not bool or (hint is not None and type(hint) is not bool):
+        return None
+    if identity is not None and not scope_known:
+        return None
+    local_alias = raw.get("local_alias")
+    if kind == "skill" and identity is not None:
+        from local_operator.hub_sync.skill_document import (
+            SkillValidationError,
+            validate_name,
+        )
+
+        try:
+            validate_name(local_alias)
+        except SkillValidationError:
+            return None
+    elif local_alias is not None and not isinstance(local_alias, str):
+        return None
+    lineage = raw.get("lineage", "unknown")
+    if lineage not in ("clean", "unknown", "mixed-lineage"):
+        return None
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
         hub_id=hub_id,
-        tenant_id=tenant if isinstance(tenant, str) and tenant else None,
+        tenant_id=tenant,
         fingerprint=str(raw.get("fingerprint") or ""),
         fields=fields,
         recorded_at=str(raw.get("recorded_at") or ""),
         recorded_by=str(raw.get("recorded_by") or ""),
+        schema=raw["schema"],
+        identity=identity,
+        remote_revision=raw.get("remote_revision"),
+        lineage=lineage,
+        outbound=outbound,
+        local_alias=local_alias,
+        legacy_subscribe_hint=hint,
+        scope_known=scope_known,
     )
 
 

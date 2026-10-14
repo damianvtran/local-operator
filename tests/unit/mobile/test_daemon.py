@@ -298,7 +298,8 @@ def test_http_gate_and_login_flow() -> None:
     # branch is not the default.
     assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
-    assert sorted(capabilities) == ["features", "stt"]
+    assert sorted(capabilities) == ["features", "i18n", "stt"]
+    assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]
     assert sorted(stt) == ["available", "path", "reason"]

@@ -34,9 +34,11 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "configuration",
         "console",
         "credentials",
+        "delivery",
         "extensions",
         "failover",
         "highlights",
+        "i18n",
         "image-generation",
         "mcp",
         "mobile",
@@ -91,6 +93,11 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set the default provider and model configuration", "configuration"),
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
+        (
+            "allocate bounded engineering delivery and preflight costly evidence "
+            "before converging code review and QA",
+            "delivery",
+        ),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
         ("generate a video from a photo", "video-generation"),

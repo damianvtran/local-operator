@@ -1,0 +1,7 @@
+{
+  "tui.usage.paid.continue": "included quota used; credits will continue",
+  "tui.usage.paid.family_caps": "model-family caps still apply",
+  "tui.usage.paid.blocked": "Spend unavailable",
+  "tui.usage.paid.eligibility_unknown": "Spend eligibility unknown",
+  "tui.usage.paid.unlimited": "Unlimited paid allowance"
+}

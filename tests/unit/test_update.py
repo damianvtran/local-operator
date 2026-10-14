@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -112,6 +114,36 @@ def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
+def _pypi_payload(version: str, files: list[dict[str, object]]) -> dict[str, object]:
+    return {"info": {"version": version}, "urls": files, "releases": {version: files}}
+
+
+def _wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "filename": f"local_operator-{version}-py3-none-any.whl",
+        "packagetype": "bdist_wheel",
+        "yanked": False,
+        "url": f"https://files.pythonhosted.org/packages/local_operator-{version}-py3-none-any.whl",
+        # The installer pins by digest, so a ready entry carries one.
+        "digests": {"sha256": "a" * 64},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _mac_wheel(version: str, **overrides: object) -> dict[str, object]:
+    entry = _wheel(
+        version,
+        filename=f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl",
+        url=(
+            "https://files.pythonhosted.org/packages/"
+            f"local_operator-{version}-py3-none-macosx_11_0_universal2.whl"
+        ),
+    )
+    entry.update(overrides)
+    return entry
+
+
 def _pypi_transport(
     status: int = 200, version: str = "0.28.0", delay: float = 0
 ) -> httpx.MockTransport:
@@ -120,9 +152,21 @@ def _pypi_transport(
             raise httpx.TimeoutException("timed out")
         if status != 200:
             return httpx.Response(status, text="nope")
-        return httpx.Response(status, json={"info": {"version": version}})
+        # A READY release by default: PyPI's document names a version long
+        # before its files land, so a stub without ``urls`` would model the
+        # race, not the normal case every caller below means to exercise.
+        # Both published wheels ride along, so the stub is ready on any host
+        # platform (macOS installs take the universal2 wheel, others the
+        # pure one — see test_check_latest_readiness_is_platform_aware).
+        return httpx.Response(
+            status, json=_pypi_payload(version, [_wheel(version), _mac_wheel(version)])
+        )
 
     return httpx.MockTransport(handler)
+
+
+def _transport_for(payload: dict[str, Any]) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
 
 
 def _client(transport: httpx.MockTransport) -> httpx.Client:
@@ -180,6 +224,178 @@ def test_check_latest_newer_same_older(tmp_path: Path) -> None:
         assert older.latest == "0.26.0"
 
 
+def test_check_latest_not_ready_release_is_not_advertised(tmp_path: Path) -> None:
+    """The 2026-10-12 race: ``info.version`` moved, its files had not.
+
+    Each payload below is a shape PyPI really serves during/after an
+    upload; only the last may be advertised, because only it names an
+    artifact the installer can download.
+    """
+    not_ready = [
+        _pypi_payload("0.28.0", []),
+        _pypi_payload(
+            "0.28.0",
+            [
+                {
+                    "filename": "local_operator-0.28.0.tar.gz",
+                    "packagetype": "sdist",
+                    "yanked": False,
+                    "url": "https://files.pythonhosted.org/packages/local_operator-0.28.0.tar.gz",
+                }
+            ],
+        ),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", yanked=True), _mac_wheel("0.28.0", yanked=True)]),
+        _pypi_payload("0.28.0", [_wheel("0.28.0", url=""), _mac_wheel("0.28.0", url="")]),
+        {"info": {"version": "0.28.0"}},
+    ]
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        for payload in not_ready:
+            result = check_latest(
+                force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+            )
+            assert result.latest is None, payload
+            assert result.behind is False, payload
+        ready = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(
+                _transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0"), _mac_wheel("0.28.0")]))
+            ),
+        )
+        assert ready.latest == "0.28.0"
+        assert ready.behind is True
+        # The not-ready answers above carry the distinction the front ends
+        # print (UX M1): PyPI answered, and this is the version publishing.
+        assert ready.pending_version is None
+
+
+def test_check_latest_readiness_is_platform_aware(tmp_path: Path) -> None:
+    """B1: ready means the wheel THIS host's installer would pin.
+
+    The publish pass uploads the pure and macOS wheels sequentially, so
+    the inter-wheel window is real in both directions: on macOS only the
+    universal2 wheel installs (the signed key agent rides in it), off
+    macOS a macOS-only list offers nothing a Linux/Windows installer can
+    take.
+    """
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        with patch.object(update_mod, "_HOST_IS_MACOS", True):
+            pure_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_only.latest is None
+            assert pure_only.pending_version == "0.28.0"
+            mac_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_mac_wheel("0.28.0")]))),
+            )
+            assert mac_ready.latest == "0.28.0"
+        with patch.object(update_mod, "_HOST_IS_MACOS", False):
+            pure_ready = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(_transport_for(_pypi_payload("0.28.0", [_wheel("0.28.0")]))),
+            )
+            assert pure_ready.latest == "0.28.0"
+            foreign_only = check_latest(
+                force=True,
+                cache_dir=tmp_path,
+                client=_client(
+                    _transport_for(
+                        _pypi_payload(
+                            "0.28.0",
+                            [
+                                _wheel(
+                                    "0.28.0",
+                                    filename="local_operator-0.28.0-py3-none-win_amd64.whl",
+                                    url=(
+                                        "https://files.pythonhosted.org/packages/"
+                                        "local_operator-0.28.0-py3-none-win_amd64.whl"
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ),
+            )
+            # A Windows wheel's tags intersect this host's sys_tags only on
+            # Windows itself; everywhere else there is nothing to install.
+            import sys as _sys
+
+            assert (foreign_only.latest is None) == (_sys.platform != "win32")
+
+
+def test_check_latest_releases_fallback_advertises(tmp_path: Path) -> None:
+    """B4: a document without ``urls`` readies via ``releases[version]``."""
+    payload = {
+        "info": {"version": "0.28.0"},
+        "releases": {"0.28.0": [_wheel("0.28.0"), _mac_wheel("0.28.0")]},
+    }
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True, cache_dir=tmp_path, client=_client(_transport_for(payload))
+        )
+    assert result.latest == "0.28.0"
+    assert result.behind is True
+
+
+def test_answered_not_ready_does_not_fall_back_to_stale_cache(tmp_path: Path) -> None:
+    """B3: an authoritative not-ready read retires the stale ready cache.
+
+    The release was cached ready, then its wheels were yanked: a fresh
+    read that finds nothing downloadable must not resurrect the cached
+    offer, and must drop the cache so a later TTL read cannot either.
+    The outage fallback (test_stale_cache_used_on_failure) is untouched:
+    it is the read that never got an answer which falls back.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(
+            force=True,
+            cache_dir=tmp_path,
+            client=_client(_transport_for(_pypi_payload("0.28.0", []))),
+        )
+    assert result.latest is None
+    assert result.behind is False
+    assert result.pending_version == "0.28.0"
+    assert not cache.exists()
+
+
+def test_cached_ready_version_ignores_unready_entries(tmp_path: Path) -> None:
+    """B2, at the layer QA round 3 proved correct: the diagnostic reader
+    (cached_latest, contract pinned in test_collect.py) still returns a
+    bare pre-gate entry — it is "the last answer known", not a claim —
+    while the ready-only reader a behind claim derives from refuses it.
+    """
+    from local_operator.update import cached_latest, cached_ready_version
+
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    version, _age = cached_latest(cache_dir=tmp_path)
+    assert version == "0.28.0"
+    assert cached_ready_version(cache_dir=tmp_path) is None
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
+        encoding="utf-8",
+    )
+    assert cached_ready_version(cache_dir=tmp_path) == "0.28.0"
+
+
 def test_check_latest_500_and_timeout_are_silent(tmp_path: Path) -> None:
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
         failed = check_latest(
@@ -207,7 +423,12 @@ def test_corrupt_cache_is_missing(tmp_path: Path) -> None:
 def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time() - TTL_S - 10, "payload": {"version": "0.28.0"}}),
+        json.dumps(
+            {
+                "fetched_at": time.time() - TTL_S - 10,
+                "payload": {"version": "0.28.0", "ready": True},
+            }
+        ),
         encoding="utf-8",
     )
     with patch.object(update_mod, "installed_version", return_value="0.27.0"):
@@ -219,7 +440,7 @@ def test_stale_cache_used_on_failure(tmp_path: Path) -> None:
 def test_fresh_cache_skips_get(tmp_path: Path) -> None:
     cache = tmp_path / "pypi-local-operator.json"
     cache.write_text(
-        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0", "ready": True}}),
         encoding="utf-8",
     )
     hits = {"n": 0}
@@ -232,6 +453,31 @@ def test_fresh_cache_skips_get(tmp_path: Path) -> None:
         result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
     assert hits["n"] == 0
     assert result.latest == "0.28.0"
+
+
+def test_unready_cache_entry_does_not_skip_get(tmp_path: Path) -> None:
+    """A pre-gate cache entry names a version but proves no readiness.
+
+    Without this, an install that cached a just-published version minutes
+    before upgrading would keep advertising it for the rest of the TTL
+    even though its files may still not exist.
+    """
+    cache = tmp_path / "pypi-local-operator.json"
+    cache.write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"version": "0.28.0"}}),
+        encoding="utf-8",
+    )
+    hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        return httpx.Response(200, json=_pypi_payload("0.28.0", []))
+
+    with patch.object(update_mod, "installed_version", return_value="0.27.0"):
+        result = check_latest(cache_dir=tmp_path, client=_client(httpx.MockTransport(handler)))
+    assert hits["n"] == 1
+    assert result.latest is None
+    assert result.behind is False
 
 
 def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
@@ -247,6 +493,9 @@ def test_force_bypasses_ttl_and_rewrites(tmp_path: Path) -> None:
     assert result.latest == "0.28.0"
     written = json.loads(cache.read_text(encoding="utf-8"))
     assert written["payload"]["version"] == "0.28.0"
+    # The readiness the fetch proved, so a later cached read may advertise
+    # without re-asking PyPI (see test_unready_cache_entry_does_not_skip_get).
+    assert written["payload"]["ready"] is True
 
 
 class _MetadataDist:
@@ -715,6 +964,23 @@ def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) 
     assert "could not reach PyPI" in capsys.readouterr().err
 
 
+def test_update_command_check_still_publishing(capsys: pytest.CaptureFixture[str]) -> None:
+    """UX M1: an answered-but-not-ready read names publishing, not a fault."""
+    pending = update_mod.VersionCheck(
+        installed="0.27.0", latest=None, behind=False, pending_version="0.28.0"
+    )
+    with (
+        patch.object(update_mod, "check_latest", return_value=pending),
+        patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
+    ):
+        assert update_command(check=True) == 1
+        refresh.assert_not_called()
+    err = capsys.readouterr().err
+    assert "0.28.0" in err
+    assert "still publishing" in err
+    assert "could not reach PyPI" not in err
+
+
 def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> None:
     """Nothing to INSTALL is not nothing to do.
 
@@ -1043,8 +1309,13 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
         "check_latest",
         _check_latest_double("0.2.0", "0.2.0", False),
     )
+    # A generation install now moves its serve daemons through the rolling
+    # reload request (its own no-kill contract), not the legacy restart_services
+    # path. The regression's INTENT is unchanged: the caller that performed the
+    # upgrade must not be refused, and the fleet must be asked to move.
     monkeypatch.setattr(
-        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+        "local_operator.services.reload_serve_daemons",
+        lambda **k: ran.append("ran") or [],
     )
     assert update.update_command() == 0
     assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
@@ -4570,12 +4841,50 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
+def test_perform_upgrade_never_collects_previous_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PyPI tail, like the shared snapshot tail, must never collect A."""
+    collections: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    generation = tmp_path / "owned-generation"
+    generation.mkdir()
+    # Match the real positional-source call, while observing the tail's intent;
+    # this is not installer/publication/signature proof.
+    installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+
+    def install(source: str | Path | None, **kwargs: Any) -> Path:
+        installs.append((source, kwargs))
+        return generation
+
+    monkeypatch.setattr(update_mod, "install_into_generation", install)
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
+    assert (
+        update_mod.perform_upgrade(
+            target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
+        )
+        == "0.70.19"
+    )
+    assert installs == [
+        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+    ]
+    assert collections == [] and notices == []
+
+
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: None)
+    # Automatic collection is frozen: promotion does not retire loaded A roots.
+    # Recording calls (rather than raising in a best-effort prune) detects even
+    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    collections: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
     monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: ())
     monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: [])
     monkeypatch.setattr(
@@ -4598,6 +4907,7 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         )
         == 0
     )
+    assert not collections
     assert [item if isinstance(item, str) else item[0] for item in order] == [
         "services",
         "roll",
@@ -4621,3 +4931,192 @@ def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(
         with patch("local_operator.update.update_command", return_value=0) as cmd:
             assert main() == 0
             assert cmd.call_args.kwargs["roll"] is expected, (argv, cmd.call_args)
+
+
+def test_a_generation_install_refreshes_the_supervised_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generation path no longer short-circuits the supervised repairs.
+
+    A generation install USED to return every unit `pending` here. It now runs the
+    same stage body the mutable path runs, because a supervisor bounce does not
+    kill session runtimes (they are separate child processes).
+    """
+    ran: list[str] = []
+    restored = update_mod.DaemonRefresh(
+        "service daemons", statuses=(update_mod.DaemonStatus("network relay", "refreshed"),)
+    )
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_service_daemons_after_upgrade",
+        lambda **k: ran.append("services") or restored,
+    )
+    monkeypatch.setattr(
+        update_mod, "refresh_mobile_after_upgrade", lambda **k: ran.append("mobile") or None
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_mobile_daemon_refresh",
+        lambda _result: update_mod.DaemonRefresh(
+            "mobile", statuses=(update_mod.DaemonStatus("mobile", "refreshed"),)
+        ),
+    )
+
+    out = update_mod.refresh_daemons_after_upgrade()
+    assert "services" in ran, "the supervised services unit did not run on a generation install"
+    statuses = {status.status for refresh in out for status in getattr(refresh, "statuses", ())}
+    assert "pending" not in statuses, "a generation install still reported a unit pending"
+    assert statuses == {"refreshed", "refreshed"} or statuses == {"refreshed"}
+
+
+def test_a_session_runtime_is_spawned_detached() -> None:
+    """Provenance anchor: a session runtime is spawned DETACHED — the real fact.
+
+    Survival across a supervisor bounce rests on the CHILD's own detachment, NOT
+    on launchd abandoning descendants (round-4 corrected exactly that claim: the
+    generated plists carry no ``AbandonProcessGroup``, so launchd's default would
+    reap a same-group descendant). This asserts the detachment itself — a phone
+    session's spawn calls ``detached_popen_kwargs()``, whose POSIX arm is
+    ``start_new_session=True`` (``setsid``) — so a future edit that drops the
+    detachment is caught here rather than silently making the continuity claim
+    false. The behaviour it implies is exercised by the synthetic group-signal
+    controls below; this cell is the SOURCE fact, not a bounce.
+    """
+    import inspect
+
+    from local_operator import procstate
+    from local_operator.mobile import daemon as daemon_mod
+
+    spawn = inspect.getsource(daemon_mod.MobileDaemon._spawn_session)
+    assert (
+        "detached_popen_kwargs()" in spawn
+    ), "the session spawn stopped detaching; the continuity claim is now false"
+    assert procstate.detached_popen_kwargs() == {"start_new_session": True}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_detached_child_survives_a_supervisor_bounce(tmp_path: Path) -> None:
+    """A DETACHED child (``setsid``) outlives a supervisor bounce.
+
+    WHAT THIS IS: a SYNTHETIC process-group proof. It models the killing
+    semantics the real bounce uses — ``bootout``+``bootstrap``
+    (``launchd.reload_job``) and ``kickstart -k`` (``restart_if_build_moved``) —
+    by signal-killing the supervisor's WHOLE PROCESS GROUP (``killpg`` on the
+    supervisor's pgid), which is the shape that reaches an undetached child. It
+    is NOT an actual launchd bounce and does not exercise ``launchctl``; that is
+    stated plainly rather than implied, and real launchd coverage is a QA item.
+
+    WHAT IT PROVES: with the group signalled, the child that called ``os.setsid()``
+    (its own session — the shape ``process._install_sighup_ignore`` gives a session
+    runtime) keeps working. Liveness is proven by WORK, not ``kill(pid, 0)`` (a
+    zombie still answers that): the heartbeat file must keep GROWING. The paired
+    :func:`test_a_nondetached_child_dies_with_the_supervisor_group` is the negative
+    control that makes this discriminating — without it, this would pass with or
+    without ``setsid``.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert (
+            beat.stat().st_size > grown_at
+        ), "the detached child stopped writing after the supervisor bounce"
+    finally:
+        # REAP THE DETACHED CHILD TOO: it survived the bounce on purpose, so
+        # nothing else will end it. Its own pid is the only handle — it is in its
+        # own session, so the supervisor's group never covered it.
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_nondetached_child_dies_with_the_supervisor_group(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL (synthetic): an UNDETACHED child does NOT survive.
+
+    Same shape as its sibling EXCEPT the child never calls ``os.setsid()``, so it
+    stays in the supervisor's process group. When that group is signal-killed (the
+    ``killpg`` shape of a real bounce), a child that did not detach is reaped —
+    which is exactly why survival rests on the child's OWN ``setsid`` and not on
+    any launchd courtesy. This is what makes the sibling test discriminating.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert beat.stat().st_size == grown_at, (
+            "the undetached child kept writing after a group kill — the control is not "
+            "discriminating, so the sibling test proves nothing"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+def _bounce_group(unit: subprocess.Popen[bytes]) -> None:
+    """Signal-kill the supervisor's WHOLE PROCESS GROUP, as a real bounce does.
+
+    ``unit`` is spawned ``start_new_session=True``, so its pgid IS its pid; this
+    reaches an undetached descendant (the detached one has left the group).
+    """
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(os.getpgid(unit.pid), signal.SIGTERM)
+    with contextlib.suppress(Exception):
+        unit.wait(timeout=10)

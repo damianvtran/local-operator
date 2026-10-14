@@ -41,6 +41,7 @@ import { navigate } from "../router";
 import {
 	applySessionPin,
 	clearSessionPinMark,
+	messageRuntime,
 	publishMarkNotice,
 	retainSessionListStream,
 	useMarkNotice,
@@ -1548,8 +1549,8 @@ export function SessionListScreen() {
 						<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 							<p className="text-body text-ink-muted">
 								{connected
-									? "no sessions running"
-									: "connecting…"}
+									? messageRuntime.t("relay.shell.list.empty")
+									: messageRuntime.t("relay.shell.list.connecting")}
 							</p>
 							<p className="text-body-sm text-ink-dim">
 								start one below, or from the TUI on your machine
@@ -1572,13 +1573,13 @@ export function SessionListScreen() {
 							) : null}
 							{active.length > 0 ? (
 								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Active Sessions</h2>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.active")}</h2>
 									{active.map(renderCard)}
 								</section>
 							) : null}
 							{previous.length > 0 ? (
 								<section>
-									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">Previous Sessions</h2>
+									<h2 className="px-2 py-1 text-meta font-medium text-ink-muted">{messageRuntime.t("relay.shell.list.section.previous")}</h2>
 									{previous.map(renderCard)}
 								</section>
 							) : null}
@@ -1636,7 +1637,7 @@ export function SessionListScreen() {
 				<button
 					type="button"
 					onClick={() => setThemeOpen(true)}
-					aria-label="choose theme"
+					aria-label={messageRuntime.t("relay.shell.list.theme")}
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-control bg-surface text-ink-muted select-none active:bg-elevated"
 				>
 					◐

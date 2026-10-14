@@ -29,6 +29,7 @@ from local_operator.compaction.api import CompactionSettings
 from local_operator.compaction.tokens import estimate_wire_bytes
 from local_operator.harness.types import (
     AbortSignal,
+    CapturedFrame,
     ChatRequest,
     CompactionEndEvent,
     ImageContent,
@@ -63,13 +64,29 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
 
 
 def _frames(count: int, size: int = FRAME_B64) -> list[Message]:
-    """A screenshot-driving history at the measured frame size."""
+    """A screenshot-driving history at the measured frame size.
+
+    Stamped as one stream's captures, like a real screenshot-driving session:
+    the render fallback degrades only SUPERSEDED captures now, so unstamped
+    frames would be protected and the shed could never engage -- the tests
+    that assert the recovery would pass over nothing.
+    """
     out: list[Message] = []
     for index in range(count):
         out.append(
             Message(
                 role="user",
-                content=[TextContent(text=f"shot {index}"), ImageContent(data="A" * size)],
+                content=[
+                    TextContent(text=f"shot {index}"),
+                    ImageContent(
+                        data="A" * size,
+                        captured_frame=CapturedFrame(
+                            stream_id="screen",
+                            revision_id=f"shot-{index}",
+                            producer_scope="test:wire",
+                        ),
+                    ),
+                ],
             )
         )
         out.append(Message.assistant(f"ok {index}"))
@@ -290,7 +307,17 @@ async def test_older_screenshots_are_downscaled_at_the_seam_not_dropped(tmp_path
         messages.append(
             Message(
                 role="user",
-                content=[TextContent(text=f"shot {index}"), ImageContent(data=frame)],
+                content=[
+                    TextContent(text=f"shot {index}"),
+                    ImageContent(
+                        data=frame,
+                        captured_frame=CapturedFrame(
+                            stream_id="screen",
+                            revision_id=f"rev-{index}",
+                            producer_scope="test:seam",
+                        ),
+                    ),
+                ],
             )
         )
         messages.append(Message.assistant(f"ok {index}"))

@@ -630,6 +630,8 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     """
     from types import SimpleNamespace
 
+    from rich.cells import cell_len
+
     from local_operator import settings_io
     from local_operator.config import ConfigManager
     from local_operator.paths import CONFIG_DIR_ENV
@@ -652,12 +654,12 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     # Bare: the report, word for word with the terminal's.
     bare = await handle._slash_result("language", "", SlashResult)
     assert bare.style == "info"
-    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi>; space"
+    assert bare.text == "language: en (English) — /language <auto|en|fr|es|ru|vi|hi>; space"
 
     # Unknown: the option-list refusal, and nothing written.
     refused = await handle._slash_result("language", "xx", SlashResult)
     assert refused.style == "warning"
-    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi"
+    assert refused.text == "unknown language 'xx' — available: auto, en, fr, es, ru, vi, hi"
     assert stored() is None
 
     # The ALIAS routes to the same branch, and the switch writes the key.
@@ -675,5 +677,16 @@ async def test_language_slash_writes_through_the_shared_funnel_and_mirrors_recei
     switched = await handle._slash_result("language", "vi", SlashResult)
     assert switched.text == "language: vi saved — active vi (Vietnamese)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "language: vi (Vietnamese) — /language <auto|en|fr|es|ru|vi>; space"
-    assert len(wide.text) <= 70
+    assert wide.text == "language: vi (Vietnamese) — /language <auto|en|fr|es|ru|vi|hi>; space"
+    assert cell_len(wide.text) <= 70
+
+    # Hindi grows every bare receipt's option list. Exercise every accepted
+    # value through the real shared write funnel, not a formatter-only budget.
+    for value in ("auto", "en", "fr", "es", "ru", "vi", "hi"):
+        switched = await handle._slash_result("language", value, SlashResult)
+        assert switched.style == "info"
+        assert stored() == value
+        report = await handle._slash_result("language", "", SlashResult)
+        assert "<auto|en|fr|es|ru|vi|hi>; space" in report.text
+        assert cell_len(switched.text) <= 70, switched.text
+        assert cell_len(report.text) <= 70, report.text

@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -59,14 +61,39 @@ def _run_rig(
     child_acts: str | None = None,
     challenge_reply: str | None = None,
     ending: str = "finish",
+    max_steps: int | None = None,
+    task_id: str = "task_plain",
+    tasks: dict[str, str] | None = None,
+    provider: dict[str, object] | None = None,
+    ask_first: bool = False,
+    cleanup_hook: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     selector_dir = root / "adapter"
     selector = spawn_helpers.build_spawnable_adapter(
         selector_dir,
         wheel,
-        {"task_plain": fixtures.PLAIN},
-        provider={"provider": "fake", "scripted_score": 1.0},
+        tasks if tasks is not None else {"task_plain": fixtures.PLAIN},
+        provider=provider or {"provider": "fake", "scripted_score": 1.0},
         interpreter=interpreter,
+    )
+    # The session engagement's source pin (blueprint §4): a selector without
+    # ``core_source`` is refused at preflight, so the rig composes one exactly
+    # as a real selector build does -- the pin of the tree that will run the
+    # arm (this checkout, whose local_operator the copied interpreter also
+    # imports through its .pth).
+    from local_operator.evaluation.adapters.api import CoreSourcePin
+    from local_operator.evaluation.source_pin import (
+        compute_core_source_hashes,
+        resolve_core_commit,
+    )
+
+    selector = selector.model_copy(
+        update={
+            "core_source": CoreSourcePin(
+                commit=resolve_core_commit() or "unavailable-test-tree",
+                module_hashes=compute_core_source_hashes(),
+            )
+        }
     )
     selector_path = selector_dir / "selector.json"
     selector_path.write_text(selector.model_dump_json())
@@ -108,10 +135,51 @@ def _run_rig(
         args += ["--child-acts", child_acts]
     if challenge_reply is not None:
         args += ["--challenge-reply", challenge_reply]
-    args += ["--ending", ending]
-    completed = subprocess.run(
-        args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
-    )
+    args += ["--ending", ending, "--task-id", task_id]
+    if max_steps is not None:
+        args += ["--max-steps", str(max_steps)]
+    if ask_first:
+        args += ["--ask-first"]
+    if cleanup_hook is not None:
+        args += ["--cleanup-hook", cleanup_hook]
+    if cleanup_hook == "cancelled":
+        # A permanently failed canonical MUST retain its owner, not return an
+        # outcome. This fixture owns the isolated process lifetime: observe
+        # provisional retention, then perform explicit exact-group teardown.
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=str(REPO),
+            start_new_session=True,
+        )
+        retained = False
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and process.poll() is None:
+                records = list(run_root.rglob("events.jsonl"))
+                if records and '"kind": "provisional"' in records[0].read_text():
+                    retained = True
+                    break
+                time.sleep(0.1)
+            assert retained and process.poll() is None, "failed cleanup must retain its owner"
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate(timeout=10)
+        completed = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    else:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(REPO),
+            check=False,
+            timeout=180,
+        )
     return completed, run_root, log
 
 
@@ -164,13 +232,20 @@ def test_a_whole_episode_runs_offline_and_scores(
     completed, run_root, log = _run_rig(root, adapter_wheel, spawn_interpreter)
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 1
+    # Epochs at ADMISSION (blueprint §3): the wait batch, the challenged
+    # first finish and the accepted re-declared finish -- one apiece.
+    assert outcome["steps"] == 3
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
     assert outcome["rescue_required"] is False
     assert "mcp__episode_actions_apply_actions" in outcome["tool_names"]
 
     kinds = _record_kinds(run_root)
+    assert kinds.count("action_output_epoch") == 3
+    # The request observer's ONE serialized flush (blueprint §2): the real
+    # session tree's request finals land in the record with the two money
+    # figures kept separate, even on this zero-cost rig.
+    assert "requests" in kinds
     for expected in (
         "reset",
         "declaration",
@@ -240,7 +315,10 @@ def test_a_challenged_claim_is_rescued_by_a_corrective_action(
     )
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 2  # the corrective action after the challenge counted
+    # Epochs at admission: wait, challenged finish, corrective wait, accepted
+    # finish -- the corrective action after the challenge counted, and each
+    # finish proposal charged its own.
+    assert outcome["steps"] == 4
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
 
@@ -268,8 +346,9 @@ def test_a_prose_done_claim_is_challenged_and_the_re_declaration_ends_it(
     pre-fix worktree: ``agent_stop``, steps 1, ZERO challenges, two model
     calls) and AFTER it: exactly one challenge -- delivered to the model over
     the real session wire as a harness-injected user row -- and the scripted
-    re-declaration ends the episode ``completed`` with the step count intact
-    (the claim is a decision about the screen, not a step).
+    re-declaration ends the episode ``completed`` -- one wait epoch and one
+    (re-declared tool) finish epoch at admission (blueprint §3; the prose
+    claim itself never reaches the bridge).
     """
 
     from tests.unit.evaluation.adapters.osworld import session_arm_rig
@@ -280,7 +359,10 @@ def test_a_prose_done_claim_is_challenged_and_the_re_declaration_ends_it(
     )
 
     outcome = _outcome(completed)
-    assert outcome["steps"] == 1
+    # The opening wait took one epoch; the re-declared tool finish (answered
+    # to the PROSE challenge) took the second -- the prose claim itself never
+    # reaches the bridge.
+    assert outcome["steps"] == 2
     assert outcome["terminal_reason"] == "finish"
     assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
 
@@ -382,10 +464,11 @@ def test_a_delegated_child_cannot_drive_or_end_the_episode(
     )
 
     outcome = _outcome(completed)
-    # The episode ended because the PARENT finished it: exactly one step (the
-    # parent's wait batch). A child's batch must never count as a step, and a
-    # child's finish must never end the run.
-    assert outcome["steps"] == 1
+    # The episode ended because the PARENT finished it: the parent's epochs
+    # are wait + challenged finish + accepted finish, and the child's refused
+    # calls (rejections before admission) took none of them. A child's batch
+    # must never count as an epoch, and a child's finish must never end the run.
+    assert outcome["steps"] == 3
     assert outcome["terminal_reason"] == "finish"
     kinds = _record_kinds(run_root)
     assert kinds.count("action_batch") == 1
@@ -403,3 +486,179 @@ def test_a_delegated_child_cannot_drive_or_end_the_episode(
         event.get("emit") == "child-refusal-seen" and event.get("episode") is True
         for event in events
     )
+
+
+def test_the_step_budget_stops_before_the_next_root_request(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """Close guest admission AT the budget (blueprint §3), on the real loop.
+
+    The script would request a wait and then a finish; run with ``--max-steps
+    1``, the FIRST admitted batch consumes the only epoch, and the Nth-stop
+    must fire when that batch's result is paired: the loop's own graceful
+    boundary ends the turn, the finish is NEVER requested, and the reached
+    state is still scored (truncated, not failed). Without the sink stop this
+    is exactly the N+1 shape: the model would spend one more request whose
+    only possible answer is the bridge's budget refusal.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(root, adapter_wheel, spawn_interpreter, max_steps=1)
+
+    outcome = _outcome(completed, expect_status="truncated")
+    assert outcome["steps"] == 1
+    assert outcome["terminal_reason"] == "max-steps"
+    # The budget stops the run, not the score: the state reached still scores.
+    assert outcome["score"]["status"] == "scored"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_batch") == 1
+    assert kinds.count("budget_stop") == 1
+    assert "action_finish" not in kinds
+
+    # The proof the stop landed AT the budget: the second episode request the
+    # script would have made (the finish) was never spent.
+    events = _log_events(log)
+    assert len([event for event in events if event.get("episode")]) == 1, events
+
+
+def test_the_budget_stop_fires_after_a_terminal_finish_at_the_nth_epoch(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R3: a terminal finish at epoch N must not spend root request N+1.
+
+    Review round 1 measured the gap on this exact shape: with ``--max-steps
+    1`` the accepted failed finish consumed epoch 1 but the run recorded TWO
+    root turn requests and no ``budget_stop``. The stop now fires on the
+    PAIRED result of the Nth admitted epoch regardless of the terminal
+    ``end_requested``, so the second request is never spent.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="budget-failed-finish", max_steps=1
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 1
+    assert outcome["terminal_reason"] == "finish"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("budget_stop") == 1
+    assert kinds.count("action_finish") == 1
+    # The observer's root-turn count is the discriminator: ONE root request,
+    # not two. (This is the caller's stop boundary, not a claim that root
+    # requests equal official epochs.)
+    requests_row = _record_payloads(run_root, "requests")[0]
+    assert requests_row["purpose_counts"] == {"turn": 1}
+
+
+def test_the_budget_stop_fires_after_the_accepted_challenge_at_the_nth_epoch(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R3: challenged at epoch 1, accepted at epoch 2 == the budget: stop there.
+
+    Pre-fix this shape recorded THREE root turn requests (the accepted finish
+    ended guest admission but not the SDK turn, and no stop was sent); the
+    fix leaves it at two: the opening request and the one post-challenge
+    re-declaration, with the stop closing admission at the accepted epoch.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="budget-done-finish", max_steps=2
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 2
+    assert outcome["terminal_reason"] == "finish"
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_completion_challenged") == 1
+    assert kinds.count("action_finish") == 1
+    assert kinds.count("budget_stop") == 1
+    requests_row = _record_payloads(run_root, "requests")[0]
+    assert requests_row["purpose_counts"] == {"turn": 2}
+
+
+def test_the_ask_receipt_reaches_the_next_actual_request(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R4: the canonical exchange receipt rides the tool result CONTENT.
+
+    The MCP forwarding layer delivers only the reply's content blocks to the
+    next root request, so a receipt kept in the bridge-local ``details`` is
+    dropped at that boundary (measured in review round 1: the answer arrived,
+    the receipt did not). The scripted client LOGS the tool text of the
+    request it sees AFTER the ask, and this test asserts the canonical
+    receipt (ask_id, request digest, accepted, public answer) is present
+    there -- the actual next ChatRequest, not a bridge dictionary.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root,
+        adapter_wheel,
+        spawn_interpreter,
+        task_id="task_simulator",
+        tasks={"task_simulator": fixtures.SIMULATOR},
+        provider={"provider": "fake", "scripted_score": 1.0, "has_user_simulator": True},
+        ask_first=True,
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["terminal_reason"] == "finish"
+    # Epochs: the ask exchange and the terminal finish at admission.
+    assert outcome["steps"] == 2
+
+    rows = _log_events(log)
+    next_request = next((row for row in rows if row.get("emit") == "next-request-tool-text"), None)
+    assert next_request is not None, rows
+    text = "\n".join(next_request["tool_text"])
+    assert "The simulated user answered: simulated user answer" in text
+    assert "ask_user exchange receipt" in text
+    assert '"ask_id": "ask-rig-1"' in text
+    assert '"request_digest":' in text
+    assert '"accepted": true' in text
+    # One exchange row with the canonical receipt in the record.
+    exchange_rows = _record_payloads(run_root, "action_ask_exchange")
+    assert len(exchange_rows) == 1
+    assert exchange_rows[0]["receipt"]["ask_id"] == "ask-rig-1"
+
+
+def test_an_incomplete_owned_join_retains_the_worker_end_to_end(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """R2: a cancelled cleanup hook keeps the release RPCs from ever going out.
+
+    Real SDK + MCP + spawned worker with the reviewer's fault (a public
+    dispose hook raising CancelledError): the owning receipt is honestly
+    incomplete. The owning process must stay alive with no score, terminal
+    seal or destructive cleanup RPC. A managed FRONTEND may return boundedly;
+    this injected in-process rig has no frontend and explicitly tears down
+    its own process only after it measured provisional retention.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, cleanup_hook="cancelled"
+    )
+
+    assert completed.returncode == -signal.SIGKILL
+    assert not list(run_root.rglob("outcome.json")), "no seal over unverified ownership"
+    rows = _log_events(log)
+    assert not any(row.get("emit") == "cleanup-rpc" for row in rows), rows
+    kinds = _record_kinds(run_root)
+    assert "provisional" in kinds
+    assert "end" not in kinds
+    assert "score" not in kinds

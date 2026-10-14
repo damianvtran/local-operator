@@ -8,10 +8,14 @@ command that upgrades whatever they actually have, without being pointed at
 env, which is the opposite audience.
 
 "Latest" is always ``https://pypi.org/pypi/local-operator/json`` →
-``info.version``, compared to ``importlib.metadata.version("local-operator")``.
-That is the same source the splash version row and ``lop --version`` already
-use. A second version channel (git tags, ``lop-update``, a pin file) would
-diverge from what the running process reports.
+``info.version``, compared to ``importlib.metadata.version("local-operator")``
+— but only once that release is DOWNLOADABLE (see
+:func:`_ready_pypi_version`): PyPI names the version before its files finish
+uploading, and advertising that window sends the installer after artifacts
+that do not exist yet. That is the same source the splash version row and
+``lop --version`` already use. A second version channel (git tags,
+``lop-update``, a pin file) would diverge from what the running process
+reports.
 
 WHY THE CACHE
 -------------
@@ -29,6 +33,7 @@ still rewrite the cache so the next splash is free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -38,8 +43,10 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 from importlib.metadata import (
     Distribution,
     PackageNotFoundError,
@@ -48,11 +55,20 @@ from importlib.metadata import (
     version,
 )
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal, Sequence
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    Literal,
+    ParamSpec,
+    Sequence,
+    TypeVar,
+)
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from local_operator import launchd
+from local_operator import install_transaction, launchd
 from local_operator.helpers import retention_label
 
 # Re-exported, not defined here: the CLI parser needs this one int to render
@@ -106,8 +122,9 @@ class InstallKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-class UpdateError(Exception):
-    """Refused or failed upgrade; the message is what the CLI/TUI print."""
+# One error identity lets primitive transaction refusals reach existing CLI/TUI
+# handlers without circular imports or a traceback from an ordinary conflict.
+UpdateError = install_transaction.InstallTransactionError
 
 
 #: Bound the child so a hung ``launchctl kickstart`` cannot stall the
@@ -171,7 +188,7 @@ _UPDATE_REPORT_SCHEMA = "update.report.v1"
 #: failure (already current, absent, unaddressable from here, or deliberately
 #: left stopped); ``failed`` = a repair was attempted and did not complete;
 #: ``unsupervised`` = the mobile daemon runs with no LaunchAgent to bounce.
-DaemonStatusKind = Literal["refreshed", "already", "failed", "unsupervised"]
+DaemonStatusKind = Literal["refreshed", "already", "failed", "unsupervised", "pending"]
 
 #: The line the refresh CHILD prints before it repairs each daemon, and the prefix
 #: the parent drops from a healthy run's output.
@@ -325,6 +342,13 @@ class VersionCheck:
     installed: str
     latest: str | None
     behind: bool
+    #: The version PyPI named whose files are not downloadable YET, when a
+    #: live read proved exactly that. ``latest is None`` alone collapses two
+    #: different facts — "PyPI could not be reached" and "PyPI answered, a
+    #: release is still publishing" — and the front ends' sentences differ
+    #: between them (UX round 1, M1), so the distinction travels here while
+    #: the advertisement rule above keeps treating both as "do not offer".
+    pending_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -586,12 +610,134 @@ def _write_cache(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
-def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
-    """Live ``info.version``, or ``None`` on any transport/HTTP/JSON error.
+def _installer_wheel(entry: Any, version: str) -> bool:
+    """True when one PyPI file entry is a wheel THIS host's installer takes.
 
-    httpx is imported here so ``import local_operator.cli`` (and the splash
-    module) never pay for it. The splash worker already swallows ``None``.
+    The acceptance rule is the installer's own, not a paraphrase of it:
+    :func:`_fresh_publication` — the evidence ``lop update``'s generation
+    install pins its download to — accepts on macOS only the universal2
+    wheel (the one the signed key agent rides in, :func:`_is_macos_universal2_wheel`)
+    and off macOS only a wheel whose parsed tags intersect ``sys_tags()``,
+    in both cases non-yanked, served over https from files.pythonhosted.org
+    with a SHA256 digest to pin. Round 1's any-wheel gate advertised in the
+    inter-wheel window too (pure wheel landed, macOS wheel still uploading:
+    offered on a Mac, refused by the installer). Reusing the same filename
+    predicate on macOS and the same tag test off it is what makes "ready"
+    here mean "the pinned install below would accept this release".
     """
+    if not isinstance(entry, dict) or entry.get("packagetype") != "bdist_wheel":
+        return False
+    if entry.get("yanked"):
+        return False
+    url = entry.get("url")
+    if (
+        not isinstance(url, str)
+        or urlparse(url).scheme != "https"
+        or urlparse(url).hostname != "files.pythonhosted.org"
+    ):
+        return False
+    digests = entry.get("digests")
+    digest = digests.get("sha256", "") if isinstance(digests, dict) else ""
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False
+    if _HOST_IS_MACOS:
+        return _is_macos_universal2_wheel(entry, version)
+    filename = entry.get("filename")
+    if not isinstance(filename, str):
+        return False
+    from packaging.tags import sys_tags
+    from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
+    try:
+        name, wheel_version, _, tags = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        return False
+    return (
+        str(name).replace("-", "_") == DISTRIBUTION_NAME.replace("-", "_")
+        and str(wheel_version) == version
+        and bool(set(sys_tags()).intersection(tags))
+    )
+
+
+def _downloadable_wheel(files: Any, version: str) -> bool:
+    """True when a PyPI file list carries the wheel this host can install.
+
+    WHY THIS IS THE READINESS GATE: PyPI flips ``info.version`` when a
+    release is created, before its files finish uploading (the publish
+    workflow uploads the pure wheel, the macOS wheel and the sdist in one
+    sequential pass). A checker that reads only the version string
+    therefore advertises a release the installer cannot yet download — the
+    operator's 2026-10-12 report, where the update offer appeared and
+    ``lop update`` exited 1 for 0.70.13 minutes after publication. The file
+    list in the SAME JSON document is the earliest signal that can agree
+    with the installer — provided it asks for the wheel the installer
+    would take (:func:`_installer_wheel`), not just any wheel. An sdist
+    alone does not count: this project always publishes wheels, so an
+    sdist-only moment is a release still mid-upload.
+    """
+    if not isinstance(files, list):
+        return False
+    return any(_installer_wheel(entry, version) for entry in files)
+
+
+def _ready_pypi_version(payload: Any) -> str | None:
+    """The payload's version, but only when that release is downloadable.
+
+    ``urls`` is PyPI's file list for the latest release; ``releases`` is the
+    fallback for payloads that omit it. A version with no downloadable wheel
+    yet returns ``None``: "not ready" and "unknown" both mean do not
+    advertise, and the next check re-reads rather than caching a premature
+    verdict. The two stay distinguishable one level down
+    (:func:`_fetch_pypi_read`), where the cache fallback and the front
+    ends' sentences depend on telling them apart.
+    """
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    version_s = info.get("version")
+    if not isinstance(version_s, str) or not version_s.strip():
+        return None
+    version_s = version_s.strip()
+    if not _downloadable_wheel(payload.get("urls"), version_s):
+        releases = payload.get("releases")
+        files = releases.get(version_s) if isinstance(releases, dict) else None
+        if not _downloadable_wheel(files, version_s):
+            return None
+    return version_s
+
+
+def _named_pypi_version(payload: Any) -> str | None:
+    """The version a PyPI document NAMES, ready or not. See VersionCheck."""
+    if not isinstance(payload, dict):
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    version_s = info.get("version")
+    if not isinstance(version_s, str) or not version_s.strip():
+        return None
+    return version_s.strip()
+
+
+@dataclass(frozen=True)
+class _PypiRead:
+    """One live PyPI read, with "answered but not ready" kept distinct.
+
+    ``answered`` is the B3 distinction: a document was read and the gate
+    refused it (files still uploading, or since yanked), which is an
+    authoritative "not this version" — not a transport failure, and it
+    must not fall back to a stale ready cache the way an outage does.
+    """
+
+    version: str | None
+    answered: bool = False
+    named_version: str | None = None
+
+
+def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
+    """One live read: ready version, or an answered-but-not-ready refusal."""
     import httpx
 
     try:
@@ -600,12 +746,26 @@ def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
         else:
             response = client.get(PYPI_JSON_URL, timeout=_FETCH_TIMEOUT_S)
         response.raise_for_status()
-        version_s = response.json()["info"]["version"]
+        payload = response.json()
     except Exception:
-        return None
-    if not isinstance(version_s, str) or not version_s.strip():
-        return None
-    return version_s.strip()
+        return _PypiRead(version=None)
+    named = _named_pypi_version(payload)
+    if named is None:
+        return _PypiRead(version=None)
+    return _PypiRead(version=_ready_pypi_version(payload), answered=True, named_version=named)
+
+
+def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
+    """Live ready ``info.version``, or ``None`` when not ready/unreadable.
+
+    httpx is imported here so ``import local_operator.cli`` (and the splash
+    module) never pay for it. The splash worker already swallows ``None``.
+    "Readiness" is :func:`_ready_pypi_version`: the version alone is not
+    enough, because PyPI publishes it before the release's files land.
+    Callers that must tell "not ready" from "unreachable" (the cache
+    fallback, the front ends' sentences) use :func:`_fetch_pypi_read`.
+    """
+    return _fetch_pypi_read(client=client).version
 
 
 def check_latest(
@@ -622,24 +782,48 @@ def check_latest(
     installed = installed_version()
     path = _cache_path(cache_dir)
     payload, age = _read_cache(path)
+    # Only a cache entry written by a readiness-checked fetch may advertise.
+    # A bare ``version`` (written before the gate existed) proves the string
+    # was seen, not that its files were downloadable, so it must not skip
+    # the network or stand in for a failed fetch — otherwise the race this
+    # gate closes would survive for a whole TTL on upgraded installs.
     cached: str | None = None
-    if payload is not None:
+    if payload is not None and payload.get("ready") is True:
         raw = payload.get("version")
         if isinstance(raw, str) and raw.strip():
             cached = raw.strip()
 
     latest: str | None
+    pending: str | None = None
     if cached is not None and age < TTL_S and not force:
         latest = cached
     else:
-        fetched = _fetch_pypi_version(client=client)
-        if fetched is not None:
-            latest = fetched
-            _write_cache(path, {"version": fetched})
+        read = _fetch_pypi_read(client=client)
+        if read.version is not None:
+            latest = read.version
+            _write_cache(path, {"version": read.version, "ready": True})
+        elif read.answered:
+            # Authoritative refusal (B3): PyPI was read and this release is
+            # not downloadable — still uploading, or yanked since it was
+            # cached. The stale ready entry must not resurrect it, and the
+            # cache is dropped so a later TTL read cannot either; the
+            # stale-on-OUTAGE fallback below is only for reads that never
+            # got an answer, where the cached copy is all anyone knows.
+            latest = None
+            pending = read.named_version
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
         else:
             latest = cached
 
-    return VersionCheck(installed=installed, latest=latest, behind=is_behind(installed, latest))
+    return VersionCheck(
+        installed=installed,
+        latest=latest,
+        behind=is_behind(installed, latest),
+        pending_version=pending,
+    )
 
 
 def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | None]:
@@ -677,6 +861,27 @@ def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | No
     # skew), which is not an age any caller can render. The version is still
     # good, so the value survives and only its staleness is unknown.
     return raw.strip(), (age if age != float("inf") else None)
+
+
+def cached_ready_version(cache_dir: Path | None = None) -> str | None:
+    """The cached version ONLY when a readiness-checked fetch proved it.
+
+    The split from :func:`cached_latest` is deliberate (QA round 3, Q3-1):
+    that reader is a diagnostic — "the last PyPI answer this machine has"
+    — and its contract (legacy entries included) is pinned by
+    ``tests/unit/info/test_collect.py``. A *behind* claim is not a
+    diagnostic, it is the advertisement race's own sentence, so it must
+    derive only from an entry stamped ``ready`` by the gated fetch: a bare
+    pre-gate entry names a version whose wheels may never have existed.
+    Never fetches, never writes, like its sibling.
+    """
+    payload, _age = _read_cache(_cache_path(cache_dir))
+    if payload is None or payload.get("ready") is not True:
+        return None
+    raw = payload.get("version")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
 
 
 def _direct_url_payload() -> dict[str, Any] | None:
@@ -1986,6 +2191,398 @@ def _new_generation_id(token: str, attempt: int = 1) -> str:
     return base if attempt <= 1 else f"{base}-{attempt}"
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _install_mutation(function: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Primitive callers cannot accidentally bypass the shared root boundary."""
+
+    @wraps(function)
+    def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with install_transaction.transaction(stable_root(), operation=function.__name__):
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def _admit_install() -> None:
+    """A census is admission evidence, NOT exclusion of future busy transitions.
+
+    Mutable/in-place installers alone use this admission under the root
+    transaction BEFORE their first write. No force escape hatch: an unreadable
+    namespace refuses just like a busy one. Immutable preparation/promotion owns
+    another tree and retains old roots; it must not call this whole-fleet gate.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+
+    for root in _config_roots():
+        unreachable = _unreachable_namespace(root, RUN_DIRNAME)
+        if unreachable is not None:
+            if unreachable.unreadable:
+                raise UpdateError(
+                    f"cannot prove fleet idle at {root}; retry after the namespace is readable"
+                )
+            continue
+        try:
+            before = _entry_names(root, RUN_DIRNAME)
+            rows = registry.scan(
+                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+            )
+            after = _entry_names(root, RUN_DIRNAME)
+            unreadable, _note = _verdict_from_listing(root / RUN_DIRNAME, before, after, len(rows))
+            if unreadable:
+                raise UpdateError("the session census was incomplete")
+        except Exception as exc:  # noqa: BLE001 — inability to prove idle refuses
+            raise UpdateError(
+                f"cannot prove fleet idle at {root}: {exc}; retry after it settles"
+            ) from exc
+        if any(state != "stale" and bool(record.busy) for record, state in rows):
+            raise UpdateError(
+                f"sessions are busy at {root}; wait until idle and retry (no force install)"
+            )
+
+
+@dataclass(frozen=True)
+class PublicationEvidence:
+    target: str
+    mode: str
+    artifact: str
+    url: str
+    digest: str
+    fresh_until: float
+
+
+_PUBLICATION_FRESH_S = 15.0
+
+
+def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
+    """Positive bounded evidence, obtained outside the mutation transaction.
+
+    The installer is pinned to the returned artifact URL AND SHA256, not just a
+    version/name. Refreshing before promotion must still describe those bytes.
+    Background cache fallback intentionally remains unchanged and is not proof.
+    """
+    if mode == "source":
+        return None
+    if not target:
+        raise UpdateError("cannot promote an unversioned PyPI candidate; retry lop update")
+    if mode == "latest":
+        latest = _fetch_pypi_version()
+        if latest != target:
+            raise UpdateError(
+                f"fresh PyPI latest is {latest or 'unconfirmed'}, not {target}; retry lop update"
+            )
+    document, complaint = _pypi_release_document(target)
+    if (
+        document is None
+        or not isinstance(document.get("info"), dict)
+        or document["info"].get("version") != target
+    ):
+        raise UpdateError(
+            f"cannot freshly confirm published {target}: {complaint or 'version disagrees'}; "
+            "retry lop update"
+        )
+    files = document.get("urls")
+    if not isinstance(files, list):
+        raise UpdateError(f"PyPI serves no artifacts for {target}; nothing was promoted")
+    from packaging.tags import sys_tags
+    from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
+    compatible = set(sys_tags())
+    artifact = _macos_universal2_wheel(document, target) if _HOST_IS_MACOS else ""
+    for item in files:
+        if not isinstance(item, dict) or item.get("yanked"):
+            continue
+        filename = item.get("filename", "")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            continue
+        if _HOST_IS_MACOS:
+            if filename != artifact:
+                continue
+        else:
+            try:
+                name, wheel_version, _, tags = parse_wheel_filename(filename)
+            except InvalidWheelFilename:
+                continue
+            if (
+                str(name) != DISTRIBUTION_NAME
+                or str(wheel_version) != target
+                or not compatible.intersection(tags)
+            ):
+                continue
+        url = item.get("url", "")
+        digest = (
+            item.get("digests", {}).get("sha256", "")
+            if isinstance(item.get("digests"), dict)
+            else ""
+        )
+        if (
+            not isinstance(url, str)
+            or urlparse(url).scheme != "https"
+            or urlparse(url).hostname != "files.pythonhosted.org"
+        ):
+            continue
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        return PublicationEvidence(
+            target, mode, filename, url, digest, time.monotonic() + _PUBLICATION_FRESH_S
+        )
+    raise UpdateError(
+        f"PyPI serves no compatible non-yanked, hash-identified wheel for {target}; "
+        "nothing was promoted"
+    )
+
+
+_ARTIFACT_MAX_BYTES = 128 * 1024 * 1024
+_ARTIFACT_DOWNLOAD_S = 30.0
+
+
+def _candidate_artifact(generation: Path, built: PublicationEvidence) -> Path:
+    return generation / "artifact" / built.artifact
+
+
+def _download_candidate_artifact(generation: Path, built: PublicationEvidence) -> Path:
+    """Stage verified bytes before uv, which does NOT enforce URL hash fragments.
+
+    An actual uv tool probe accepted an all-zero #sha256 and wrote empty
+    archive_info; neither the fragment nor PEP 610 can attest content integrity.
+    Own the download instead: bounded time/size, no redirect, and SHA256 before
+    a local wheel is offered to uv. This runs outside the root transaction.
+    """
+    import httpx
+
+    destination = _candidate_artifact(generation, built)
+    destination.parent.mkdir()
+    staging = destination.with_name(destination.name + ".tmp")
+    deadline = time.monotonic() + _ARTIFACT_DOWNLOAD_S
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with httpx.stream(
+            "GET", built.url, timeout=_FETCH_TIMEOUT_S, follow_redirects=False
+        ) as response:
+            response.raise_for_status()
+            with staging.open("xb") as output:
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if time.monotonic() > deadline or total > _ARTIFACT_MAX_BYTES:
+                        raise UpdateError(
+                            "artifact download exceeded its time/size bound; nothing was installed"
+                        )
+                    output.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest() != built.digest:
+            raise UpdateError(
+                "downloaded artifact SHA256 disagrees with publication; nothing was installed"
+            )
+        staging.rename(destination)
+        return destination
+    except (OSError, httpx.HTTPError) as exc:
+        raise UpdateError(f"candidate artifact download failed: {exc}; retry lop update") from exc
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _verify_candidate_origin(generation: Path, built: PublicationEvidence) -> None:
+    """Rehash owned artifact and require uv's origin to name that exact file."""
+    artifact = _candidate_artifact(generation, built)
+    try:
+        digest = hashlib.sha256()
+        with artifact.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        candidate = _distribution_at(_generation_install_root(generation))
+        origin = json.loads(candidate.read_text("direct_url.json") or "{}") if candidate else {}
+    except (ValueError, OSError) as exc:
+        raise UpdateError("candidate artifact origin is unreadable; nothing was promoted") from exc
+    if (
+        not isinstance(origin, dict)
+        or origin.get("url") != artifact.resolve().as_uri()
+        or digest.hexdigest() != built.digest
+    ):
+        raise UpdateError(
+            "candidate artifact origin/digest disagrees with publication proof; "
+            "nothing was promoted"
+        )
+
+
+def _reuse_exact_current(built: PublicationEvidence | None) -> Path | None:
+    """An identical exact artifact can return current without another build.
+
+    Version alone is insufficient (same-version source snapshots differ). Reuse
+    only a finished owned generation whose retained wheel/origin and applicable
+    signature positively match fresh target evidence, then fence fresh current.
+    Failed identity proof means build normally, never a speculative no-op.
+    """
+    if built is None or built.mode != "exact":
+        return None
+    current = current_generation()
+    if current is None or generation_version(current) != built.target:
+        return None
+    if (current / install_transaction.ATTEMPT_NAME).exists() or not (
+        _generation_install_root(current) / ".lop-source"
+    ).is_file():
+        return None
+    try:
+        _verify_candidate_origin(current, built)
+        _verify_signed_candidate(current, built.mode)
+    except UpdateError:
+        return None
+    with install_transaction.transaction(stable_root(), operation="reuse exact artifact"):
+        # Reuse changes no imported tree: busy runtimes keep their own immutable
+        # roots. Fresh artifact/current fencing, not fleet idleness, admits this.
+        if (
+            current_generation() == current
+            and generation_version(current) == built.target
+            and time.monotonic() < built.fresh_until
+            and not (current / install_transaction.ATTEMPT_NAME).exists()
+        ):
+            return current
+    return None
+
+
+def _verify_signed_candidate(generation: Path, mode: str) -> None:
+    if mode == "source" or not _HOST_IS_MACOS:
+        return
+    import subprocess
+
+    from local_operator.operator.macos.keyagent import KeyagentError, verify_bundle
+
+    site = _site_packages(_generation_install_root(generation))
+    if site is None:
+        raise UpdateError("candidate has no site-packages; nothing was promoted")
+    try:
+        verify_bundle(site / "local_operator" / "operator" / "macos" / "lop-keyagent.app")
+    except (KeyagentError, OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(
+            f"candidate signed key agent verification failed: {exc}; nothing was promoted"
+        ) from exc
+
+
+@contextmanager
+def _promotion_transaction(
+    generation: Path, target: str, mode: str, built: PublicationEvidence | None
+) -> Iterator[None]:
+    """Refresh outside lock; an expired wait releases before fetching again.
+
+    Three bounded attempts prevent a permanently contended root from turning a
+    freshness requirement into an unbounded loop. Signature verification uses
+    the existing bounded verifier and never executes the candidate helper.
+    """
+    _verify_signed_candidate(generation, mode)
+    if built is not None:
+        _verify_candidate_origin(generation, built)
+    for _attempt in range(3):
+        evidence = _fresh_publication(target, mode)
+        if built is not None and (
+            evidence is None
+            or (evidence.artifact, evidence.url, evidence.digest)
+            != (built.artifact, built.url, built.digest)
+        ):
+            raise UpdateError(
+                "published candidate artifact changed while building; retry lop update"
+            )
+        with install_transaction.transaction(stable_root(), operation="promote candidate") as held:
+            if evidence is not None and time.monotonic() >= evidence.fresh_until:
+                continue
+            held.validate(stable_root())
+            yield
+            return
+    raise UpdateError(
+        "publication evidence expired waiting for install root; retry when it settles"
+    )
+
+
+def generation_version_from_root(root: Path) -> str:
+    found = _distribution_at(root)
+    return found.version if found is not None else ""
+
+
+def _register_candidate(
+    token: str, target: str, mode: str, source_identity: str = ""
+) -> tuple[Path, str, str]:
+    with install_transaction.transaction(stable_root(), operation="register candidate"):
+        # Preparation owns a distinct generation and cannot rewrite a runtime's
+        # imports. An unreadable/busy fleet therefore does not block registration;
+        # duplicate-attempt and current-root identity checks remain authoritative.
+        baseline = str(current_generation() or "")
+        for candidate in generations_dir().iterdir() if generations_dir().is_dir() else ():
+            record = install_transaction.read_record(candidate / install_transaction.ATTEMPT_NAME)
+            if (
+                record
+                and record.get("target") == target
+                and (
+                    (
+                        mode == "source"
+                        and record.get("mode") == "source"
+                        and record.get("source_identity") in (None, source_identity)
+                    )
+                    or (mode != "source" and record.get("mode") != "source")
+                )
+                and install_transaction.attempt_alive(record) is not False
+            ):
+                raise UpdateError(
+                    f"another candidate for {target or token} is building; retry when it settles"
+                )
+        generation = _reserve_generation(token)
+        nonce = install_transaction.register_attempt(
+            generation, target=target, mode=mode, baseline=baseline, source_identity=source_identity
+        )
+        return generation, nonce, baseline
+
+
+def _check_promotion(
+    generation: Path, nonce: str, baseline: str, target: str, mode: str, note: str
+) -> None:
+    # A pointer commit affects future starts, never the immutable trees held by
+    # existing runtimes. Keep all ownership/fresh-current/stale-candidate fences
+    # below; the mutable installer alone needs the whole-fleet idle admission.
+    if generation.parent.resolve() != generations_dir().resolve() or generation.is_symlink():
+        raise UpdateError("candidate does not belong to this install root; nothing was promoted")
+    candidate_version = generation_version(generation)
+    if target and candidate_version != target:
+        raise UpdateError(
+            f"candidate version is {candidate_version or 'unknown'}, not {target}; "
+            "nothing was promoted"
+        )
+    current = current_generation()
+    fresh_version = generation_version(current)
+    current_version = parse_version(fresh_version)
+    target_version = parse_version(target)
+    changed = str(current or "") != baseline
+    if changed and (
+        current_version is None or target_version is None or current_version == target_version
+    ):
+        raise UpdateError(
+            "current changed to an equal-version or unorderable build; "
+            "retry against the fresh install"
+        )
+    if current_version and target_version and current_version > target_version:
+        if DOWNGRADE_NOTE not in note or str(current or "") != baseline:
+            raise UpdateError(
+                f"current is already {fresh_version}; refusing stale candidate {target}; "
+                "retry lop update"
+            )
+    if mode == "source" and str(current or "") != baseline:
+        raise UpdateError(
+            "current changed while the snapshot built; retry against the fresh install"
+        )
+    # Check ownership without retiring it yet: a refused flip must still know
+    # which candidate its cleanup owns. Retirement follows the successful swap.
+    record = install_transaction.read_record(generation / install_transaction.ATTEMPT_NAME)
+    if (
+        record is None
+        or record.get("nonce") != nonce
+        or record.get("pid") != os.getpid()
+        or record.get("candidate") != str(generation.resolve())
+        or record.get("root") != str(install_transaction.canonical_root(stable_root()))
+    ):
+        raise UpdateError("candidate ownership changed; nothing was promoted")
+
+
+@_install_mutation
 def _reserve_generation(token: str) -> Path:
     """Create this generation's directory exclusively, and return it.
 
@@ -2008,6 +2605,25 @@ def _reserve_generation(token: str) -> Path:
             raise UpdateError(f"could not create {candidate}: {exc}") from exc
         return candidate
     raise UpdateError("too many generations share one timestamp")
+
+
+def _discard_candidate(generation: Path, nonce: str) -> None:
+    """Failure/cancellation may remove only this attempt, never fresh current."""
+    try:
+        with install_transaction.transaction(stable_root(), operation="discard candidate"):
+            if current_generation() == generation.resolve():
+                return
+            record = install_transaction.read_record(generation / install_transaction.ATTEMPT_NAME)
+            if record and record.get("ever_exposed"):
+                # Current/rollback absence cannot prove a runtime never saw B.
+                return
+            if record and record.get("nonce") == nonce and record.get("pid") == os.getpid():
+                install_transaction.finish_attempt(generation, nonce)
+                _remove_tree(generation)
+    except (OSError, UpdateError):
+        # A failed cleanup retains an owned record for crash-safe later prune,
+        # and must not replace the refusal/cancellation that reached this path.
+        logger.debug("candidate cleanup could not finish", exc_info=True)
 
 
 def _generation_env(generation: Path) -> dict[str, str]:
@@ -2056,6 +2672,21 @@ def _remove_tree(path: Path) -> bool:
     The return value exists for the same reason: a caller that PRINTS a removal
     has to know whether one happened.
     """
+    if path.parent.resolve() == generations_dir().resolve():
+        try:
+            with install_transaction.transaction(stable_root(), operation="remove generation"):
+                if path.resolve() == current_generation() or install_transaction.attempt_protected(
+                    path
+                ):
+                    return False
+                return _remove_tree_unlocked(path)
+        except UpdateError:
+            return False
+    return _remove_tree_unlocked(path)
+
+
+def _remove_tree_unlocked(path: Path) -> bool:
+    """The existing removal mechanics; install-owned callers are fenced above."""
     try:
         present = path.exists() or path.is_symlink()
     except (OSError, RuntimeError):
@@ -2150,6 +2781,7 @@ def _remove_tree(path: Path) -> bool:
     return True
 
 
+@_install_mutation
 def flip_pointer(generation: Path) -> None:
     """Point ``current`` at ``generation``, atomically.
 
@@ -2272,6 +2904,7 @@ def daemon_image() -> Path | None:
     return path if path.is_file() else None
 
 
+@_install_mutation
 def ensure_daemon_image(generation: Path | None = None) -> Path | None:
     """Write the stable interpreter shim supervised units name, or ``None``.
 
@@ -2640,6 +3273,7 @@ def _link_generation_bin(generation: Path) -> None:
             _atomic_symlink(generation / interpreter_dir / name, script)
 
 
+@_install_mutation
 def write_stable_launchers(generation: Path) -> tuple[list[Path], list[Path]]:
     """Make ``~/.local/bin`` name the pointer for every console script.
 
@@ -2713,9 +3347,7 @@ def _console_script_names(install_root: Path) -> tuple[str, ...]:
 
 def _run_installer_env(argv: list[str], env: dict[str, str]) -> int:
     """Run one installer argv with ``env``, returning its exit status."""
-    import subprocess
-
-    return int(subprocess.run(argv, check=False, env=env).returncode)
+    return install_transaction.run_installer(argv, env=env)
 
 
 def install_into_generation(
@@ -2727,6 +3359,7 @@ def install_into_generation(
     ref: str = "",
     origin: str = PYPI_SOURCE_TOKEN,
     note: str = "",
+    target_mode: Literal["latest", "exact", "source"] = "exact",
 ) -> Path:
     """Install ONE build into its own generation and point ``current`` at it.
 
@@ -2780,7 +3413,29 @@ def install_into_generation(
         # whole built venv, and leaves nothing behind to show for it.
         raise UpdateError(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
-    generation = _reserve_generation(token)
+    mode = "source" if source is not None else target_mode
+    built = _fresh_publication(version, mode)
+    reused = _reuse_exact_current(built)
+    if reused is not None:
+        return reused
+    generation, nonce, baseline = _register_candidate(
+        token, version, mode, commit or (str(source) if source is not None else "")
+    )
+    # The public immutable primitive is shared by default CLI, snapshot, mesh
+    # and the verified controller. Tie recovery to THIS candidate, not a latest
+    # timestamp that could belong to a concurrent newer operation.
+    try:
+        operation = install_transaction.start_operation(
+            stable_root(),
+            baseline=baseline,
+            target=version,
+            route=mode,
+        )
+        operation.advance("preparing", candidate=str(generation))
+        install_transaction.link_operation(operation, generation)
+    except install_transaction.InstallTransactionError as exc:
+        _discard_candidate(generation, nonce)
+        raise UpdateError(f"could not persist update recovery: {exc}") from exc
     # The pin and --refresh-package are PyPI-index defences, so they ride the
     # PyPI shape only: a source install resolves the tree it was handed.
     argv = installer_argv(InstallKind.UV_TOOL, version=version if source is None else "")
@@ -2789,80 +3444,107 @@ def install_into_generation(
         # resolve the project under ``dir`` and read its name from the tree.
         argv = [*argv[:-1], "--from", str(source), argv[-1]]
     try:
+        if built is not None:
+            artifact = _download_candidate_artifact(generation, built)
+            argv = [*argv[:-1], "--from", str(artifact), DISTRIBUTION_NAME]
         code = (runner or _run_installer_env)(argv, _generation_env(generation))
     except OSError as exc:
         # A missing ``uv``, an unwritable generations dir: the caller gets one
         # refusal sentence, not a traceback out of a spawn it did not make.
-        _remove_tree(generation)
+        operation.advance("failed", failure=type(exc).__name__)
+        _discard_candidate(generation, nonce)
         raise UpdateError(f"could not run uv: {exc}") from exc
-    try:
-        if code != 0:
-            raise UpdateError(f"installer exited {code}")
-        if version:
-            # THE TREE MUST AGREE WITH THE ANNOUNCED VERSION BEFORE ANYTHING CAN
-            # SEE IT (2026-09-26). The version the caller resolved (a fresh
-            # PyPI check, or a snapshot's pyproject) and the version the
-            # installer actually put in the tree are two independent reads, and
-            # uv's side can answer from cached index metadata: measured that
-            # day, the check fetched 0.63.3 2.5 minutes after publication while
-            # ``uv tool install`` resolved 0.63.2, and the run ended exit 0
-            # with ``current`` on a 0.63.2 tree whose marker claimed a 0.63.3
-            # build. The dist-info is the one place the two claims meet, so a
-            # tree that disagrees is refused HERE — before the marker and the
-            # flip — and the handler below removes it.
-            found = _distribution_at(_generation_install_root(generation))
-            found_version = found.version if found is not None else "no local-operator distribution"
-            if found_version != version:
-                # This raise lands in the failure handler below, which removes
-                # the tree: the marker is never written and the flip never
-                # happens, so nothing was made current and ``current`` still
-                # names the previous build.
-                raise UpdateError(
-                    f"refusing to make it current: the built tree carries "
-                    f"{found_version}, not the {version} this update resolved — "
-                    "nothing was made current"
-                )
-        write_source_marker(
-            _generation_install_root(generation),
-            version=version,
-            commit=commit,
-            ref=ref,
-            origin=origin,
-            note=note,
-        )
-        # The flip is INSIDE this handler so a refusal from the stable root
-        # (``EACCES``, ``ENOSPC``) arrives as the one sentence the callers print
-        # instead of a bare ``OSError``, and so a built tree nobody can reach is
-        # not left behind (review round 1, R-9). Safe to remove on failure:
-        # ``flip_pointer`` either renamed the pointer or raised before it did,
-        # never both.
-        try:
-            flip_pointer(generation)
-        except OSError as exc:
-            raise UpdateError(f"could not point current at {generation.name}: {exc}") from exc
-    except BaseException:
-        # Nothing has been flipped, so this tree is nobody's but ours. A
-        # ``kill -9`` cannot reach here — which is exactly what
-        # ``prune_generations``' marker-age rule is for.
-        _remove_tree(generation)
+    except BaseException as exc:
+        operation.advance("failed", failure=type(exc).__name__)
+        _discard_candidate(generation, nonce)
         raise
-    _written, not_written = write_stable_launchers(generation)
-    if not_written:
-        # A WARNING here, not a refusal: this machine's ``~/.local/bin/lop`` already
-        # points THROUGH ``current`` (an earlier install wrote it), so it feeds off
-        # the new generation the moment the flip lands and the install is complete
-        # either way. The MIGRATION is the path where a missing launcher leaves the
-        # machine split, and that one refuses and rolls back.
-        logger.warning(
-            "could not write %s; that launcher still names the previous layout",
-            ", ".join(str(path) for path in not_written),
-        )
-    # ``generation`` explicitly, for the same reason the migration passes it: the
-    # process running this may be a LEGACY uv-tool install (``lop update`` from a
-    # tree that predates the layout), so the this-process gate is False on the
-    # very run that creates the layout (review round 1, R-2).
-    ensure_daemon_image(generation)
-    return generation
+    operation.advance("prepared", candidate=str(generation))
+    try:
+        with _promotion_transaction(generation, version, mode, built):
+            try:
+                if code != 0:
+                    raise UpdateError(f"installer exited {code}")
+                if version:
+                    # THE TREE MUST AGREE WITH THE ANNOUNCED VERSION BEFORE ANYTHING CAN
+                    # SEE IT (2026-09-26). The version the caller resolved (a fresh
+                    # PyPI check, or a snapshot's pyproject) and the version the
+                    # installer actually put in the tree are two independent reads, and
+                    # uv's side can answer from cached index metadata: measured that
+                    # day, the check fetched 0.63.3 2.5 minutes after publication while
+                    # ``uv tool install`` resolved 0.63.2, and the run ended exit 0
+                    # with ``current`` on a 0.63.2 tree whose marker claimed a 0.63.3
+                    # build. The dist-info is the one place the two claims meet, so a
+                    # tree that disagrees is refused HERE — before the marker and the
+                    # flip — and the handler below removes it.
+                    found = _distribution_at(_generation_install_root(generation))
+                    found_version = (
+                        found.version if found is not None else "no local-operator distribution"
+                    )
+                    if found_version != version:
+                        # This raise lands in the failure handler below, which removes
+                        # the tree: the marker is never written and the flip never
+                        # happens, so nothing was made current and ``current`` still
+                        # names the previous build.
+                        raise UpdateError(
+                            f"refusing to make it current: the built tree carries "
+                            f"{found_version}, not the {version} this update resolved — "
+                            "nothing was made current"
+                        )
+                _check_promotion(generation, nonce, baseline, version, mode, note)
+                write_source_marker(
+                    _generation_install_root(generation),
+                    version=version,
+                    commit=commit,
+                    ref=ref,
+                    origin=origin,
+                    note=note,
+                )
+                # EXPOSURE BEGINS AT THE SWAP, NOT BEFORE IT (manager decision, this
+                # commit). ``preserve_publication`` starts the retention boundary, and
+                # the boundary is real only once a runtime can observe B — which is the
+                # instant ``flip_pointer`` RETURNS. Marking before the call over-retained
+                # a candidate a failed flip never exposed: the base contract (and its
+                # test) is that a flip that raises before the swap discards its own tree
+                # and leaves the previous generation alone. ``flip_pointer``'s atomic
+                # ``os.rename`` either swapped the pointer or raised before it did (its
+                # post-rename staged-unlink errors are swallowed), so a successful return
+                # IS the proof. A failure AFTER this point retains for the independent
+                # reason ``_discard_candidate`` checks first: the pointer now names B.
+                try:
+                    flip_pointer(generation)
+                except OSError as exc:
+                    raise UpdateError(
+                        f"could not point current at {generation.name}: {exc}"
+                    ) from exc
+                install_transaction.preserve_publication(generation, nonce)
+            except BaseException:
+                # A pointer operation could expose B before a later refusal or
+                # rollback. Only the owned discard guard may reclaim a candidate
+                # that never reached publication; unknown/exposed roots stay.
+                _discard_candidate(generation, nonce)
+                raise
+            operation.advance("promoted", current=str(generation))
+            install_transaction.finish_attempt(generation, nonce)
+            _written, not_written = write_stable_launchers(generation)
+            if not_written:
+                # A WARNING here, not a refusal: this machine's ``~/.local/bin/lop`` already
+                # points THROUGH ``current`` (an earlier install wrote it), so it feeds off
+                # the new generation the moment the flip lands and the install is complete
+                # either way. The MIGRATION is the path where a missing launcher leaves the
+                # machine split, and that one refuses and rolls back.
+                logger.warning(
+                    "could not write %s; that launcher still names the previous layout",
+                    ", ".join(str(path) for path in not_written),
+                )
+            # ``generation`` explicitly, for the same reason the migration passes it: the
+            # process running this may be a LEGACY uv-tool install (``lop update`` from a
+            # tree that predates the layout), so the this-process gate is False on the
+            # very run that creates the layout (review round 1, R-2).
+            ensure_daemon_image(generation)
+            return generation
+    except BaseException:
+        _discard_candidate(generation, nonce)
+        raise
 
 
 def clone_into_generation(
@@ -2898,75 +3580,92 @@ def clone_into_generation(
     if not origin.is_dir():
         raise UpdateError(f"nothing to clone: {origin} is not a directory")
     token = f"migrate-{source_ref(origin)[:12] or 'legacy'}"
-    generation = _reserve_generation(token)
+    generation, nonce, baseline = _register_candidate(
+        token, generation_version_from_root(origin), "source", str(origin.resolve())
+    )
     try:
-        shutil.copytree(origin, _generation_install_root(generation), symlinks=True)
-    except (OSError, shutil.Error) as exc:
-        _remove_tree(generation)
-        raise UpdateError(f"could not copy {origin} into {generation.name}: {exc}") from exc
-    install_root = _generation_install_root(generation)
-    if not (install_root / ".lop-source").is_file():
-        found = _distribution_at(install_root)
-        write_source_marker(
-            install_root,
-            version=found.version if found is not None else "",
-            origin=SNAPSHOT_SOURCE_TOKEN,
-        )
-    # The copied scripts still name the tree this was copied FROM (see
-    # ``_rebind_scripts``), so they are re-pointed at the copy before anything
-    # executes them — and before the pointer flip below, which is what makes
-    # ``~/.local/bin/lop`` mean the generation afterwards.
-    #
-    # A PARTIAL REWRITE FAILS THE MIGRATION. This is a one-time step whose entire
-    # promise is that the copy runs from the copy, so flipping the pointer with a
-    # console script still naming the legacy venv would print success and hand
-    # the operator exactly the symptom R-1 exists to remove (review round 2,
-    # R2-4). Nothing has been flipped or linked yet, so the copy is removed and
-    # the machine is left as it was.
-    _rewritten, unrepointed = _rebind_scripts(install_root, origin)
-    if unrepointed:
-        _remove_tree(generation)
-        raise UpdateError(
-            "could not re-point "
-            + ", ".join(sorted(path.name for path in unrepointed))
-            + f" in {install_root}; the migration was abandoned before the pointer moved, "
-            "so this machine is unchanged"
-        )
-    # No installer ran, so this tree has no ``bin`` of its own: lay one down
-    # before anything points through it (see ``_link_generation_bin``).
-    _link_generation_bin(generation)
-    shim_was_absent = not daemon_image_path().exists()
-    # Captured BEFORE the flip, because after it the pointer names our generation
-    # whether or not this run created it (review round 6, R6-1).
-    previous = current_generation()
-    flip_pointer(generation)
-    _written, not_written = write_stable_launchers(generation)
-    if not_written:
-        # THE MIGRATION REFUSES AND ROLLS BACK, because a migration that cannot
-        # write ``~/.local/bin/lop`` has adopted nothing: `lop` on PATH still runs
-        # the legacy tree while the shim planted a moment later would have the
-        # supervised units on the new layout. Half a layout is harder to reason
-        # about than none (design review round 1, D1).
+        try:
+            shutil.copytree(origin, _generation_install_root(generation), symlinks=True)
+        except (OSError, shutil.Error) as exc:
+            _remove_tree(generation)
+            raise UpdateError(f"could not copy {origin} into {generation.name}: {exc}") from exc
+        install_root = _generation_install_root(generation)
+        if not (install_root / ".lop-source").is_file():
+            found = _distribution_at(install_root)
+            write_source_marker(
+                install_root,
+                version=found.version if found is not None else "",
+                origin=SNAPSHOT_SOURCE_TOKEN,
+            )
+        # The copied scripts still name the tree this was copied FROM (see
+        # ``_rebind_scripts``), so they are re-pointed at the copy before anything
+        # executes them — and before the pointer flip below, which is what makes
+        # ``~/.local/bin/lop`` mean the generation afterwards.
         #
-        # The undo is told nothing about what this run wrote: what it needs to know is
-        # what RESOLVES through the pointer, and it asks the filesystem for that (see
-        # ``_pointer_consumers`` — review round 2, Q-R2-3).
-        undone = _undo_migration(generation, remove_shim=shim_was_absent, previous=previous)
-        raise UpdateError(
-            "could not write "
-            + ", ".join(str(path) for path in not_written)
-            + "\n`lop` on your PATH would still run the old install, so the migration was "
-            "rolled back: "
-            + ", ".join(undone.parts)
-            + (", so this machine is as it was." if undone.complete else ".")
-        )
-    # ``generation`` explicitly: this process is the LEGACY tree, so the
-    # this-process gate in :func:`ensure_daemon_image` cannot see the layout
-    # that now exists.
-    ensure_daemon_image(generation)
-    return generation
+        # A PARTIAL REWRITE FAILS THE MIGRATION. This is a one-time step whose entire
+        # promise is that the copy runs from the copy, so flipping the pointer with a
+        # console script still naming the legacy venv would print success and hand
+        # the operator exactly the symptom R-1 exists to remove (review round 2,
+        # R2-4). Nothing has been flipped or linked yet, so the copy is removed and
+        # the machine is left as it was.
+        _rewritten, unrepointed = _rebind_scripts(install_root, origin)
+        if unrepointed:
+            _remove_tree(generation)
+            raise UpdateError(
+                "could not re-point "
+                + ", ".join(sorted(path.name for path in unrepointed))
+                + f" in {install_root}; the migration was abandoned before the pointer moved, "
+                "so this machine is unchanged"
+            )
+        # No installer ran, so this tree has no ``bin`` of its own: lay one down
+        # before anything points through it (see ``_link_generation_bin``).
+        _link_generation_bin(generation)
+        with install_transaction.transaction(stable_root(), operation="adopt migration"):
+            shim_was_absent = not daemon_image_path().exists()
+            # Captured BEFORE the flip, because after it the pointer names our generation
+            # whether or not this run created it (review round 6, R6-1).
+            _check_promotion(
+                generation,
+                nonce,
+                baseline,
+                generation_version(generation),
+                "source",
+                DOWNGRADE_NOTE,
+            )
+            previous = current_generation()
+            flip_pointer(generation)
+            _written, not_written = write_stable_launchers(generation)
+            if not_written:
+                # THE MIGRATION REFUSES AND ROLLS BACK, because a migration that cannot
+                # write ``~/.local/bin/lop`` has adopted nothing: `lop` on PATH still runs
+                # the legacy tree while the shim planted a moment later would have the
+                # supervised units on the new layout. Half a layout is harder to reason
+                # about than none (design review round 1, D1).
+                #
+                # The undo is told nothing about what this run wrote: what it needs to know is
+                # what RESOLVES through the pointer, and it asks the filesystem for that (see
+                # ``_pointer_consumers`` — review round 2, Q-R2-3).
+                undone = _undo_migration(generation, remove_shim=shim_was_absent, previous=previous)
+                raise UpdateError(
+                    "could not write "
+                    + ", ".join(str(path) for path in not_written)
+                    + "\n`lop` on your PATH would still run the old install, so the migration was "
+                    "rolled back: "
+                    + ", ".join(undone.parts)
+                    + (", so this machine is as it was." if undone.complete else ".")
+                )
+            # ``generation`` explicitly: this process is the LEGACY tree, so the
+            # this-process gate in :func:`ensure_daemon_image` cannot see the layout
+            # that now exists.
+            install_transaction.finish_attempt(generation, nonce)
+            ensure_daemon_image(generation)
+            return generation
+    except BaseException:
+        _discard_candidate(generation, nonce)
+        raise
 
 
+@_install_mutation
 def _sweep_staging_links(moment: float) -> list[Path]:
     """Remove ``current.tmp-*`` leaves an interrupted flip left in the stable root.
 
@@ -3191,6 +3890,33 @@ def _config_roots() -> tuple[Path, ...]:
     if _real(ambient) == _real(default):
         return (ambient,)
     return (ambient, default)
+
+
+def live_records_by_root() -> dict[Path, list[tuple[Any, Path]]]:
+    """Per install root, the live records that name it, with their config root.
+
+    THE READER THE CAPACITY CONTROLLER'S COHORTS NEED, factored beside
+    :func:`referenced_install_roots` rather than reimplemented so the two cannot
+    disagree about which namespaces count. ``prune_generations`` wants the FLAT SET
+    of named roots; the controller wants them GROUPED, because it asks ONE cohort
+    — the sessions on ONE root — to checkpoint, and never the whole fleet. Keys are
+    resolved roots (``_real``) so they compare equal to a listed generation name.
+    """
+    grouped: dict[Path, list[tuple[Any, Path]]] = {}
+    for config_root in _config_roots():
+        records, _gaps = _records_under(config_root)
+        for record, value in records:
+            # THE SAME NORMALISATION THE PRUNE MAKES (``prune_generations`` does
+            # ``Path(root).parent.parent``): a record names the VENV
+            # (``<gen>/tools/local-operator``) and the generation is two levels up,
+            # so the two readers must agree about which generation a record names or
+            # the controller would ask the wrong cohort to move.
+            try:
+                generation = _real(Path(value).parent.parent)
+            except OSError:  # pragma: no cover — an unresolvable reference names nothing
+                continue
+            grouped.setdefault(generation, []).append((record, config_root))
+    return grouped
 
 
 @dataclass(frozen=True)
@@ -3904,6 +4630,7 @@ class UndoOutcome:
     complete: bool
 
 
+@_install_mutation
 def _undo_migration(
     generation: Path, *, remove_shim: bool, previous: Path | None = None
 ) -> UndoOutcome:
@@ -3968,6 +4695,13 @@ def _undo_migration(
     keep_copy = False
     target = current_generation()
     names_our_copy = target is not None and _real(target) == _real(generation)
+    if target is not None and not names_our_copy:
+        # A late rollback owns its refused copy, not another writer's pointer,
+        # launchers or daemon shim. Leave all shared state untouched.
+        return UndoOutcome(parts=("the pointer left naming another generation",), complete=False)
+    record = install_transaction.read_record(generation / install_transaction.ATTEMPT_NAME)
+    if record and record.get("pid") == os.getpid() and isinstance(record.get("nonce"), str):
+        install_transaction.finish_attempt(generation, record["nonce"])
     consumers = _pointer_consumers()
 
     # The path the pointer was actually put back to, or ``None``. Held separately
@@ -4164,14 +4898,25 @@ def _running_generation() -> Path | None:
     return _real(root.parent.parent)
 
 
+@_install_mutation
 def prune_generations(
     *,
     keep: int = DEFAULT_KEEP_GENERATIONS,
     referenced: Iterable[str | Path] | ReferencedTrees = (),
     now: float | None = None,
     actor: str = "",
+    dry_run: bool = False,
 ) -> PrunePlan:
     """Delete the generations nothing can still be importing from.
+
+    ``dry_run`` DECIDES WITHOUT DELETING, and it is the same predicate rather than
+    a second one. The capacity controller must ask "what is provably
+    unreferenced?" without acting, and a parallel read-only implementation of the
+    safety rules is exactly how the two would drift and the weaker one would end up
+    doing the deleting. With ``dry_run`` set a candidate that WOULD be removed is
+    recorded as a removal in the returned plan and its tree is left alone; no
+    attestation is written, because there is no act to name (the same reason a kept
+    candidate is never attested).
 
     RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
     pointer's target, when a live or persisted record names its install root,
@@ -4280,7 +5025,12 @@ def prune_generations(
         )
     if current is not None:
         wanted.add(_real(current))
-    _sweep_staging_links(moment)
+    # THE STAGING SWEEP IS A MUTATION, so a dry run must not perform it: the
+    # caller asked what WOULD be reclaimed, and removing an aged staging link /
+    # alias here would be a real tree change on a decision-only path. The normal
+    # path is unchanged.
+    if not dry_run:
+        _sweep_staging_links(moment)
     named_by_a_record: set[Path] = set()
     for root in referenced:
         try:
@@ -4341,6 +5091,9 @@ def prune_generations(
     index: list[tuple[Any, Path]] | None = None
     for path in entries:
         resolved = _real(path)
+        if install_transaction.attempt_protected(path):
+            decisions.append(PruneDecision(path, False, "a live or unconfirmed install attempt"))
+            continue
         if current is not None and resolved == _real(current):
             decisions.append(PruneDecision(path, False, "the pointer's target"))
             continue
@@ -4376,6 +5129,13 @@ def prune_generations(
             continue
         if index is None:
             index = _record_index()
+        # DRY RUN STOPS HERE: the decision is made, the tree is not touched, and
+        # no attestation is written — a marker for a tree that survives would be a
+        # false attribution, the same argument the keep paths above make.
+        if dry_run:
+            removed.append(path)
+            decisions.append(PruneDecision(path, True, removal_reason))
+            continue
         # ATTEST BEFORE THE TREE GOES. This is the one place in the harness that
         # deletes an install out from under runtimes that are importing from it,
         # and until this call existed the deletion was silent: the runtimes died
@@ -4419,7 +5179,13 @@ def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
     if not generations_dir().is_dir():
         print("no install generations on this machine — nothing to prune")
         return 0
-    plan = prune_generations(keep=keep, referenced=referenced_install_roots(), actor=ACTOR_PRUNE)
+    try:
+        plan = prune_generations(
+            keep=keep, referenced=referenced_install_roots(), actor=ACTOR_PRUNE
+        )
+    except UpdateError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     for line in prune_lines(plan):
         print(line)
     return 0
@@ -5244,7 +6010,38 @@ def install_status_command() -> int:
     failures rather than as the one fact they are — this machine has not adopted
     the layout — and the command that fixes it was not named.
     """
-    print(_field("stable root:", str(stable_root())))
+    observation = install_transaction.status(stable_root())
+    print(_field("stable root:", observation["root"]))
+    owners = observation["os_owners"]
+    lock_state = (
+        "unknown (OS inspection unavailable)"
+        if owners is None
+        else ("held by OS pid " + ", ".join(str(pid) for pid in owners) if owners else "not held")
+    )
+    print(_field("install transaction:", lock_state))
+    metadata = observation["metadata"]
+    if metadata:
+        identity = observation["metadata_alive"]
+        label = (
+            "live identity"
+            if identity is True
+            else "stale identity" if identity is False else "unconfirmed identity"
+        )
+        print(
+            _field(
+                "last lock record:",
+                f"pid {metadata.get('pid', '?')}, {label}, "
+                f"{metadata.get('operation', 'unknown operation')} "
+                "(metadata, not lock ownership)",
+            )
+        )
+        print(
+            _field(
+                "recorded birth:",
+                f"{metadata.get('birth_scheme') or 'unknown'}:"
+                f"{metadata.get('birth_token') or 'unknown'}",
+            )
+        )
     pointer = pointer_path()
     generation = current_generation()
     if generation is None:
@@ -5300,6 +6097,18 @@ def install_status_command() -> int:
     for path in generations:
         marker = "  <- current" if generation is not None and path.name == generation.name else ""
         print(f"  {path.name}{marker}")
+        attempt = install_transaction.read_record(path / install_transaction.ATTEMPT_NAME)
+        if attempt:
+            alive = install_transaction.attempt_alive(attempt)
+            identity = "live" if alive is True else "dead" if alive is False else "unconfirmed"
+            print(
+                f"    candidate {attempt.get('mode', '?')} {attempt.get('target', '?')}: "
+                f"writer pid {attempt.get('pid', '?')} ({identity} identity, not lock ownership)"
+            )
+            print(
+                f"    writer birth: {attempt.get('birth_scheme') or 'unknown'}:"
+                f"{attempt.get('birth_token') or 'unknown'}"
+            )
     for held in referenced_install_roots():
         # Indented under the list deliberately: the label column above is for
         # this command's own fields, and a record-named tree is a property of one
@@ -5468,13 +6277,41 @@ def git_snapshot_notice() -> str:
 
 
 def _run_installer(argv: list[str], *, executable: str | None = None) -> int:
-    import subprocess
-
     # stderr/stdout pass through: the installer is what the user is watching.
     # ``executable`` is what makes a labelled argv[0] runnable at all — without
     # it POSIX would try to exec the label itself (see ``installer_invocation``).
-    completed = subprocess.run(argv, check=False, executable=executable)
-    return int(completed.returncode)
+    return install_transaction.run_installer(argv, executable=executable)
+
+
+def _note_capacity_after_promotion(promoted: Path) -> None:
+    """Record capacity pressure on the promoted candidate's own operation, or nothing.
+
+    THE ONLY AUTOMATIC ACTION THIS TAIL TAKES TOWARD DISK, and it is a RECORD, not
+    a deletion: it measures count and free space, and crossing a threshold writes
+    the durable ``handoff.capacity`` sub-map (``note_capacity``) so a controller
+    that can consult the fleet has the request. The candidate's own operation is the
+    right record — ``operation_for_generation`` ties recovery to THIS candidate, not
+    to a latest timestamp a concurrent newer operation could own.
+
+    Silent when the candidate has no operation (an in-place platform that never
+    started one) and silent when there is no pressure: a note that fired on every
+    ordinary install would be noise, and only the crossing is actionable.
+    """
+    from local_operator import capacity_recovery, install_transaction
+
+    measurement = capacity_recovery.measure_capacity(root=stable_root())
+    if not measurement.over:
+        return
+    operation = install_transaction.operation_for_generation(Path(promoted))
+    if operation is None:
+        return
+    install_transaction.note_capacity(
+        stable_root(),
+        operation.identifier,
+        state="requested",
+        threshold=measurement.threshold,
+        cohort=(),
+    )
 
 
 def perform_upgrade(
@@ -5488,6 +6325,7 @@ def perform_upgrade(
     commit: str = "",
     ref: str = "",
     on_prune: Callable[["PrunePlan"], None] | None = None,
+    on_promoted: Callable[[Path], None] | None = None,
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
@@ -5549,28 +6387,29 @@ def perform_upgrade(
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
-        install_into_generation(source, version=target, commit=commit, ref=ref)
-        # Retention, not tidiness: a generation is a whole venv, so a machine
-        # that never pruned would grow by one per release. The policy is
-        # structural (see ``prune_generations``) and best-effort — the upgrade
-        # has already succeeded, and a caller that cannot read the record
-        # directory must not be told otherwise.
+        promoted = install_into_generation(
+            source, version=target, commit=commit, ref=ref, target_mode="latest"
+        )
+        if on_promoted is not None:
+            on_promoted(promoted)
+        # Rolling promotion must retain EVERY previous runtime/resource tree.
+        # Discovery/argv/open-file absence is not a lifetime-pin proof: an old
+        # process may load an asset later with no handle open now. Automatic GC
+        # stays frozen, including on unreadable census, rather than weakening
+        # install admission or assuming that a successful pointer swap retires A.
+        # Explicit maintenance keeps its own guarded policy; this tail never
+        # invokes it or the historical on_prune observer.
+        #
+        # WHAT THE TAIL DOES DO ABOUT CAPACITY: measure and RECORD, never delete.
+        # Crossing a threshold writes the durable capacity request on this
+        # candidate's own operation, so a later controller (which CAN see the
+        # fleet) has the pressure on the record. Recording here is best-effort: a
+        # machine whose sandbox denies the write must not be told the upgrade
+        # failed, and nothing observable has been reclaimed by this step.
         try:
-            plan = prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
-        except Exception:  # noqa: BLE001 — pruning never fails an upgrade
-            logger.debug("generation prune failed", exc_info=True)
-        else:
-            # THE CALLER SAYS IT, not this function: the CLI has already printed
-            # ``installed``/``current install:`` by the time it can, so the
-            # removal lands where it belongs — after the lines that explain it —
-            # instead of as a bare timestamped record above them. ``on_prune`` is
-            # how the two front ends share the sentence (design review D4); with
-            # no caller listening, the log file is still the record.
-            if on_prune is not None:
-                on_prune(plan)
-            else:
-                for line in prune_notice_lines(plan):
-                    logger.info("%s", line)
+            _note_capacity_after_promotion(promoted)
+        except Exception:  # noqa: BLE001 — a capacity note never fails an install
+            logger.warning("could not record capacity pressure", exc_info=True)
         return target
     argv, image = installer_invocation(
         detected,
@@ -5590,37 +6429,41 @@ def perform_upgrade(
         # that did not happen — the one shape of evidence worse than no evidence.
         code = run(argv)
     else:
-        # THE IN-PLACE INSTALL IS THE ONE HAZARD THIS FUNCTION STILL COMMITS, and
-        # now it says so before it does it. pip and pipx have no generation layout
-        # to install into, so the site-packages tree under the running fleet is
-        # rewritten where it stands (see this function's docstring): the runtimes
-        # importing from it die mid-turn and cannot record anything themselves,
-        # which is why a measured install over a busy fleet took every session on
-        # the machine down with no exit record (AGENTS.md, "Installing over a live
-        # fleet", 2026-09-15 19:23). The attestation is staged immediately before
-        # the installer runs, for the same reason the control ladder stages its own
-        # marker before a signal: after the fact, the party that could say what
-        # happened is the party that was killed.
-        attested = note_doomed_runtimes(
-            Path(prefix) if prefix is not None else Path(sys.prefix),
-            mechanism=MECHANISM_IN_PLACE_INSTALL,
-            actor=ACTOR_UPGRADE,
-        )
-        # AN ATTESTATION FOR AN ACT THAT DID NOT COMPLETE IS A FALSE NAME, and this
-        # marker outlives the attempt: it is keyed to the live RUN, so it would
-        # narrate any later death of these runtimes as this install's doing (review
-        # round 1, MINOR 2). Both failure shapes withdraw, because in both the
-        # caller reports a failed upgrade and the evidence has to agree with the
-        # report the operator read; the residual gap this leaves — an aborted
-        # install can still have rewritten part of the tree — is stated in
-        # ``withdraw_involuntary_stops``.
-        try:
-            code = _run_installer(argv, executable=image)
-        except BaseException:
-            withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
-            raise
-        if code != 0:
-            withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
+        # Mutable legacy installers cannot prepare beside current; retain the
+        # transaction across their whole write and refuse busy admission first.
+        with install_transaction.transaction(stable_root(), operation="legacy in-place upgrade"):
+            _admit_install()
+            # THE IN-PLACE INSTALL IS THE ONE HAZARD THIS FUNCTION STILL COMMITS, and
+            # now it says so before it does it. pip and pipx have no generation layout
+            # to install into, so the site-packages tree under the running fleet is
+            # rewritten where it stands (see this function's docstring): the runtimes
+            # importing from it die mid-turn and cannot record anything themselves,
+            # which is why a measured install over a busy fleet took every session on
+            # the machine down with no exit record (AGENTS.md, "Installing over a live
+            # fleet", 2026-09-15 19:23). The attestation is staged immediately before
+            # the installer runs, for the same reason the control ladder stages its own
+            # marker before a signal: after the fact, the party that could say what
+            # happened is the party that was killed.
+            attested = note_doomed_runtimes(
+                Path(prefix) if prefix is not None else Path(sys.prefix),
+                mechanism=MECHANISM_IN_PLACE_INSTALL,
+                actor=ACTOR_UPGRADE,
+            )
+            # AN ATTESTATION FOR AN ACT THAT DID NOT COMPLETE IS A FALSE NAME, and this
+            # marker outlives the attempt: it is keyed to the live RUN, so it would
+            # narrate any later death of these runtimes as this install's doing (review
+            # round 1, MINOR 2). Both failure shapes withdraw, because in both the
+            # caller reports a failed upgrade and the evidence has to agree with the
+            # report the operator read; the residual gap this leaves — an aborted
+            # install can still have rewritten part of the tree — is stated in
+            # ``withdraw_involuntary_stops``.
+            try:
+                code = _run_installer(argv, executable=image)
+            except BaseException:
+                withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
+                raise
+            if code != 0:
+                withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
     if code != 0:
         raise UpdateError(f"installer exited {code}")
 
@@ -6184,6 +7027,59 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     as its own notice with a token, before relaunching; both halves keep their
     standalone bounds, so that composition is unchanged by this stage.
     """
+
+    # IMMUTABLE-ONLY SUCCESS IS STILL SUCCESS (2026-10-14, central-path wiring).
+    # A generation install USED to short-circuit here, returning every supervised
+    # unit `pending`. The caution rested on a fear a bounce disturbs owned
+    # wake/monitor/browser/mobile/mesh work; the fact that retires it is that
+    # SESSION RUNTIMES DETACH THEMSELVES — they are spawned with
+    # ``start_new_session=True`` (``setsid``) and SIGHUP ignored, so a bounce of
+    # the SUPERVISOR does not terminate them and they keep serving from their
+    # immutable roots. NOTE WHAT THIS DOES AND DOES NOT REST ON: it is the CHILD's
+    # own detachment, NOT any launchd courtesy. The generated plists carry NO
+    # ``AbandonProcessGroup`` (grep the renderers), so launchd's default reaps a
+    # same-process-group descendant when the job is booted out — a child that did
+    # NOT setsid would be killed by the ``bootout``+``bootstrap`` bounce
+    # (``launchd.reload_job``) or the ``kickstart -k`` (``restart_if_build_moved``)
+    # this enables. RESIDUAL: any supervised unit whose child is not detached (see
+    # ``tunnels/service.py``) loses that child on a bounce; the tunnel is
+    # deliberately not detached because its cloudflared connector is the unit's
+    # OWN child (its gateway dies with it, so it must go down with it), so it is
+    # EXCLUDED from this continuity claim rather than a counterexample to it. The
+    # per-unit repairs below already ran on the mutable path; the only thing that
+    # stopped them on a generation install was that branch, so the two paths now
+    # share this ONE body.
+    #
+    # CONTINUITY PER UNIT — disposition NAMED, and the bounded half tested (the
+    # per-unit reconnect/in-flight rigs are a QA residual where noted):
+    # browser bridge — on a replaced wire the backend returns EXTENSION_DISCONNECTED
+    # + REPLACED_PHASE, the extension RECONNECTS, and an in-flight command is
+    # DROPPED for the model to retry (no replay; a non-idempotent retry can
+    # duplicate — a residual);
+    # tunnel — the tunnel unit MANAGES its connector: on restart the old cloudflared
+    # is killed by the unit's own teardown (``tunnels/service.py``'s finally
+    # terminates+KILLs with a 5s bound) and a new one dials with the SAME token, so
+    # no orphan and no duplicate. Its connector is deliberately NOT detached.
+    # wakes supervisor — wake MOMENTS are persisted, so a restart defers them
+    # (they fire after it returns);
+    # network relay — on an epoch change ``_rehandshake_network`` sends net_bye +
+    # close("epoch_stale") and the client RE-DIALS on backoff; queued slow ops are
+    # CANCELLED (``_slow_pool.shutdown(cancel_futures=True)``) and a running slow-op
+    # effect is DROPPED (not persisted), so this is at-least-once — a client-side
+    # duplicate on retry is possible, bounded by the caller, NOT exactly-once.
+    # The relay's worker-cancel/re-dial cycle is an UNEXERCISED QA residual here
+    # (its rig — N concurrent slow ops on one link — was not built to a bounded
+    # standard in this slice); the browser bridge's replaced-phase retry copy IS
+    # tested (tests/unit/browser_bridge/test_backend.py), which is the one
+    # representative path this slice proves at the model-facing boundary.
+    #
+    # The relay's reload fence is NOT applied here, reported rather than faked:
+    # ``RelayServer.begin_reload/reload_blocker`` are methods of the RUNNING relay
+    # object, and the restart runs in this repair CHILD, a different process with no
+    # signal or control op reaching that admission gate. An IPC fence is out of
+    # this slice; the relay restart is unchanged from the mutable path
+    # (at-least-once for a handshake in flight, recovered by re-dial), and the fence
+    # stays available to any IN-PROCESS caller.
     deadline = time.monotonic() + _STAGE_DEADLINE_S
     results: dict[str, DaemonRefresh] = {}
 
@@ -6988,7 +7884,16 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
 
     before = _live_serve_records()
     try:
-        refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
+        if _is_generation_install():
+            from local_operator.services import reload_serve_daemons
+
+            refreshes = (
+                reload_serve_daemons(rolling=True)
+                if wait_s is None
+                else reload_serve_daemons(wait_s=wait_s, rolling=True)
+            )
+        else:
+            refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
             f"warning: the installed services could not be moved onto the new build: {exc}; "
@@ -7020,7 +7925,116 @@ def _run_services_tail(*, services: bool) -> StageReport:
     return StageReport(daemons=_collect_daemon_statuses(refreshes))
 
 
-def _emit_update_report(*, install_version: str, target: str, stage: StageReport | None) -> None:
+def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any]:
+    """Loaded/serving/pending are measurements, never aliases for current."""
+    from local_operator import services
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    current = current_generation()
+    image = _generation_install_root(current) if current is not None else None
+    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
+    measured = True
+    for root in _config_roots():
+        try:
+            before = _entry_names(root, "run")
+            rows = registry.scan(
+                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+            )
+            after = _entry_names(root, "run")
+            unreadable, _note = _verdict_from_listing(root / "run", before, after, len(rows))
+            measured = measured and not unreadable
+            for record, state in rows:
+                if state == "stale":
+                    continue
+                pinned = getattr(record, "install_root", "")
+                if state != "live" or not pinned or image is None:
+                    counts["unknown"] += 1
+                elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
+                    counts["unknown"] += 1
+                elif Path(pinned).resolve() != image.resolve():
+                    counts["known_old_busy" if record.busy else "known_old_idle"] += 1
+        except Exception:  # noqa: BLE001 — unknown never becomes []/zero
+            measured = False
+    serving: list[dict[str, Any]] = []
+    serving_measured = True
+    try:
+        from local_operator.server import registry as serve_registry
+        from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
+
+        serving_rows = []
+        for root in _config_roots():
+            before = _entry_names(root, SERVE_RUN_DIRNAME)
+            rows = serve_registry.scan(root, reap=False)
+            after = _entry_names(root, SERVE_RUN_DIRNAME)
+            unreadable, _note = _verdict_from_listing(
+                root / SERVE_RUN_DIRNAME, before, after, len(rows)
+            )
+            serving_measured = serving_measured and not unreadable
+            serving_rows.extend((record, state) for record, state in rows if state != "stale")
+        if not serving_rows:
+            # Empty discovery does not prove no pre-protocol API is serving.
+            serving_measured = False
+        for record, state in serving_rows:
+            reading = services.probe_address(record)
+            healthy = state == "live" and reading.verdict == services.SERVING and not reading.detail
+            matches = (
+                healthy and image is not None and Path(record.prefix).resolve() == image.resolve()
+            )
+            serving.append(
+                {
+                    "pid": record.pid,
+                    "instance": record.instance_id,
+                    "serving_version": record.version if healthy else "",
+                    "loaded_root": record.prefix if healthy else "",
+                    "state": "current" if matches else "pending",
+                    "reason": (
+                        "" if matches else reading.detail or "old serving build or unproved handoff"
+                    ),
+                }
+            )
+    except Exception:  # noqa: BLE001 — failed inventory is explicit
+        serving_measured = False
+    pending = [
+        {
+            "name": item.name,
+            "state": "pending",
+            "reason": "unit presence/serving identity and rolling continuity are unproved",
+        }
+        for item in stage.daemons
+        if item.status == "pending"
+    ]
+    return {
+        "contract": "rolling-no-kill-v1",
+        "mode": "rolling-immutable",
+        "promoted": {
+            "generation": str(promoted or ""),
+            "version": generation_version(promoted),
+        },
+        "now_current": {
+            "generation": str(current or ""),
+            "version": generation_version(current),
+        },
+        "core_installed": promoted is not None and generation_version(promoted) != "",
+        # Unsupported supervisor units / old12 FIRST activation are not an
+        # empty authoritative census. Never announce overall COMPLETE.
+        "central_services_complete": False,
+        "serving_measured": serving_measured,
+        "services": serving + pending,
+        "runtimes": {
+            "measured": measured,
+            **{key: value if measured else None for key, value in counts.items()},
+        },
+    }
+
+
+def _emit_update_report(
+    *,
+    install_version: str,
+    target: str,
+    stage: StageReport | None,
+    promoted_generation: Path | None = None,
+) -> None:
     """Emit the ONE machine-readable line at exit — additive to the sentences.
 
     THE LINE IS A CONTRACT (2026-09-30 design): the desktop app parses it to
@@ -7045,6 +8059,7 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
             "version": target if status.status in ("refreshed", "already") else "",
         }
         for status in report.daemons
+        if status.status != "pending"
     ]
     payload = {
         "update_report": {
@@ -7064,6 +8079,23 @@ def _emit_update_report(*, install_version: str, target: str, stage: StageReport
             "daemons": daemons,
         }
     }
+    if _is_generation_install() or promoted_generation is not None:
+        # Keep the legacy FOUR-status vocabulary. New callers require the rolling
+        # contract; empty legacy rows cannot prove central-services completion.
+        rolling = _rolling_receipt(promoted_generation, report)
+        payload["update_report"]["rolling"] = rolling
+        if promoted_generation is not None:
+            operation = install_transaction.operation_for_generation(promoted_generation)
+            if operation is not None:
+                # Receipt persistence belongs to the promoted candidate's intent,
+                # even when newer current C now serves. Pending is recoverable,
+                # never an invented all-central complete verdict.
+                operation.advance(
+                    "partial",
+                    current=rolling["now_current"]["generation"],
+                    receipts=rolling["services"],
+                )
+                payload["update_report"]["operation_id"] = operation.identifier
     print(json.dumps(payload, separators=(",", ":")), flush=True)
 
 
@@ -7100,14 +8132,14 @@ def _generation_upgrade(
     roll: bool = True,
     before_version: str = "",
     via: str = "snapshot",
+    promoted_generation: Path | None = None,
 ) -> int:
-    """The tail every successful install shares: report, prune, refresh, succeed.
+    """The tail successful installs share: report, retain roots, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
-    ``installed`` line and then runs the same tail. The prune notice comes from
-    :func:`prune_notice_lines`, the one renderer both front ends use, and it prints
-    AFTER ``current install:`` — the removal reported where it belongs rather than
-    as a bare record above the lines that explain it (design review D4).
+    ``installed`` line and then runs the same tail. Automatic collection is frozen
+    on BOTH paths: committing B does not retire the package/dependency/resource
+    roots that still-running A processes may read later.
 
     ``services=False`` (``lop update --no-services``) stops after the supervised
     daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
@@ -7124,13 +8156,16 @@ def _generation_upgrade(
     between the services tail and the report line.
     """
     _print_current_generation()
-    for line in prune_notice_lines(
-        prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
-    ):
-        print(line)
+    # Match perform_upgrade's no-collection tail. A snapshot/controller caller
+    # must not silently reintroduce deletion after immutable promotion succeeds.
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
-    _emit_update_report(install_version=install_version, target=target, stage=stage)
+    _emit_update_report(
+        install_version=install_version,
+        target=target,
+        stage=stage,
+        promoted_generation=promoted_generation,
+    )
     return total
 
 
@@ -7433,7 +8468,18 @@ def update_command(
 
     result = check_latest(force=True)
     if result.latest is None:
-        print("could not reach PyPI to learn the latest version", file=sys.stderr)
+        if result.pending_version is not None:
+            # PyPI answered; the release exists and is still publishing.
+            # Naming a connection fault here would send the reader to debug
+            # a healthy network (UX round 1, M1) — coherent with the desktop
+            # app's sentence for the same state.
+            print(
+                f"PyPI has named {result.pending_version} but its files are still "
+                "publishing, so there is no update to install yet — try again in a few minutes",
+                file=sys.stderr,
+            )
+        else:
+            print("could not reach PyPI to learn the latest version", file=sys.stderr)
         return 1
 
     if check:
@@ -7477,11 +8523,13 @@ def update_command(
     print(f"local-operator {result.installed} (latest is {result.latest})")
     print(f"upgrading via {installer_label(kind)}…")
     pruned: list[str] = []
+    promoted: list[Path] = []
     try:
         installed = perform_upgrade(
             target=result.latest,
             kind=kind,
             on_prune=lambda plan: pruned.extend(prune_notice_lines(plan)),
+            on_promoted=promoted.append,
         )
     except UpdateError as exc:
         print(str(exc), file=sys.stderr)
@@ -7499,5 +8547,10 @@ def update_command(
         print(line)
     stage = _run_services_tail(services=services)
     _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
-    _emit_update_report(install_version=installed, target=result.latest, stage=stage)
+    _emit_update_report(
+        install_version=installed,
+        target=result.latest,
+        stage=stage,
+        promoted_generation=promoted[0] if promoted else None,
+    )
     return 0

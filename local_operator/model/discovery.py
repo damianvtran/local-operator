@@ -278,6 +278,9 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: ``input_modalities`` is read for images, not audio, so ``openai``'s stamp
 #: does not move).
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
+    # Native Muse detail facts were omitted by its v1 writer; only this
+    # transport needs a refetch, not every provider's healthy cached listing.
+    "meta-muse": 2,
     "anthropic": 2,
     # Version 1 could normalize malformed nonempty /models data to []. The
     # original payload is gone, so it cannot safely authorize an empty native
@@ -468,6 +471,11 @@ class DiscoveredModel:
     #: by ``shift+tab``, so seeding it would strand the band on a level the
     #: cycle can never return to.
     reasoning_default_effort: str | None = None
+    #: Native facts are optional: unknown detail is not a fabricated capability.
+    family: str | None = None
+    release_date: str | None = None
+    modalities: dict[str, list[str]] | None = None
+    variants: dict[str, dict[str, object]] | None = None
     #: The time-of-use schedule NAME the row's prices are quoted at
     #: (``ModelInfo.time_of_use``), inherited from the registry twin this row was
     #: merged with and never stated by a listing — no provider publishes its
@@ -1221,8 +1229,90 @@ def _fetch_openai_oauth(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     return rows
 
 
+def _row_from_meta_muse_entry(entry: Mapping[str, object]) -> DiscoveredModel | None:
+    """Project the ACTUAL authenticated metadata['muse-code'] dialect.
+
+    Observed 2026-10-12 on /muse-code/models with a device-minted subscription
+    key. Full is offered only through this listing, never a marketing alias.
+    Contributor routes are not silently enrolled: they have separate terms
+    and stay out of this subscription-only integration.
+    """
+    model_id = _first_str(entry.get("id"))
+    if not model_id.startswith("muse-") or model_id.endswith("-contributor"):
+        return None
+    metadata = _mapping(_mapping(entry.get("metadata")).get("muse-code"))
+    if metadata.get("is_hidden") is not False:
+        return None
+    modalities = _mapping(metadata.get("modalities"))
+    output = modalities.get("output")
+    if not isinstance(output, list) or "text" not in output:
+        return None
+    row = _row_from_openai_entry(entry, "meta-muse")
+    if row is None:
+        return None
+    limits = _mapping(metadata.get("limit"))
+    variants = _mapping(metadata.get("variants"))
+    efforts = tuple(
+        level for level in ("minimal", "low", "medium", "high", "xhigh", "max") if level in variants
+    )
+    inputs = modalities.get("input")
+    return dataclasses.replace(
+        row,
+        name=_first_str(metadata.get("name"), entry.get("name"))
+        or model_id.removeprefix("muse-").replace("-", " ").title(),
+        family=_first_str(metadata.get("family")) or None,
+        release_date=_first_str(metadata.get("release_date")) or None,
+        modalities={
+            key: [item for item in value if isinstance(item, str)]
+            for key, value in modalities.items()
+            if key in ("input", "output") and isinstance(value, list)
+        },
+        variants={level: dict(_mapping(variants[level])) for level in efforts},
+        context_window=_positive_int(limits.get("context")),
+        max_tokens=_positive_int(limits.get("output")),
+        supports_images=isinstance(inputs, list) and "image" in inputs,
+        supports_tools=_stated_bool(metadata.get("tool_call")),
+        reasoning=_stated_bool(metadata.get("reasoning")),
+        reasoning_efforts=efforts,
+        authoritative_fields=(
+            "context_window",
+            "max_tokens",
+            "supports_images",
+            "supports_tools",
+            "reasoning",
+            "reasoning_efforts",
+        ),
+    )
+
+
 def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
-    """The provider's model catalogue, including ChatGPT's OAuth-only route."""
+    """The provider's model catalogue, including subscription-only routes."""
+    if ctx.provider_id == "meta-muse":
+        if not ctx.api_key or not ctx.is_oauth:
+            # Never ask a public/PAYG catalogue and call it plan availability.
+            return None
+        body = _get_json(
+            ctx,
+            f"{ctx.base_url.removesuffix('/v1')}/muse-code/models",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {ctx.api_key}",
+                "x-api-version": "1.0.0",
+            },
+            params={},
+        )
+        if body is None:
+            return None
+        entries = _entry_list(body, "data", "models")
+        if entries is None:
+            return None
+        rows = [row for entry in entries if (row := _row_from_meta_muse_entry(entry)) is not None]
+        # All-junk is an outage, not an authoritative empty subscription.
+        recognized = any(
+            isinstance(_mapping(entry.get("metadata")).get("muse-code"), Mapping)
+            for entry in entries
+        )
+        return rows if rows or not entries or recognized else None
     if _serves_account_scoped_catalogue(
         ctx.provider_id,
         is_oauth=ctx.is_oauth,
@@ -1911,6 +2001,20 @@ def _rows_from_payload(
             DiscoveredModel(
                 id=model_id,
                 name=_first_str(entry.get("name")),
+                family=_first_str(entry.get("family")) or None,
+                release_date=_first_str(entry.get("release_date")) or None,
+                modalities={
+                    key: [item for item in value if isinstance(item, str)]
+                    for key, value in _mapping(entry.get("modalities")).items()
+                    if key in ("input", "output") and isinstance(value, list)
+                }
+                or None,
+                variants={
+                    level: dict(_mapping(value))
+                    for level, value in _mapping(entry.get("variants")).items()
+                    if level in ("minimal", "low", "medium", "high", "xhigh", "max")
+                }
+                or None,
                 authoritative_fields=tuple(
                     field
                     for field in (entry.get("authoritative_fields") or [])
@@ -1923,6 +2027,12 @@ def _rows_from_payload(
                         "cache_read_price",
                         "cache_write_price",
                         "supports_prompt_cache",
+                        "supports_images",
+                        "supports_audio_input",
+                        "supports_tools",
+                        "reasoning",
+                        "reasoning_efforts",
+                        "reasoning_default_effort",
                     }
                 ),
                 context_window=_positive_int(entry.get("context_window")),
@@ -2002,12 +2112,15 @@ def _listing_replaces_static(
     inventory. Preserve other providers' established union/account semantics.
     An unavailable or invalid payload never gets deletion authority.
     """
-    return rows is not None and (provider_id == "deepseek" or (account_scoped and bool(rows)))
+    return rows is not None and (
+        provider_id in ("deepseek", "meta-muse") or (account_scoped and bool(rows))
+    )
 
 
 def cached_available_models(
     provider_id: str,
     *,
+    account_id: str | None = None,
     cache_dir: Path | None = None,
     base_url: str | None = None,
     values: Mapping[str, Any] | None = None,
@@ -2036,7 +2149,13 @@ def cached_available_models(
         return merge_models(rows, None), "static"
 
     storage_id = credential_provider_id(definition.id)
-    key = _cache_key(storage_id)
+    # First paint stays network/credential-value free. The caller supplies ONLY
+    # the selected account's metadata scope; never sweep another account's files.
+    key = _cache_key(
+        storage_id,
+        account_scoped=bool(storage_id == "meta-muse" and account_id),
+        account_id=account_id,
+    )
     if definition.local_setup:
         from local_operator.providers.local import endpoint_cache_key, resolve_base_url
 
@@ -2239,6 +2358,11 @@ def _available_models(
     timeout: float,
     want_id: str | None = None,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
+    if provider_id == "meta-muse" and api_key and not account_id:
+        # Email-only sign-ins are valid. Callers normally pass normalized
+        # email as scope; a direct caller still gets key-isolated cache, never
+        # a shared plan catalogue. Only a digest reaches a cache filename.
+        account_id = "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
     definition = get_provider_definition(provider_id)
     transport = _TRANSPORTS.get(definition.id) if definition is not None else None
     if definition is None or transport is None:
@@ -2309,7 +2433,9 @@ def _available_models(
         is_oauth=is_oauth,
         api_key=api_key,
         account_id=account_id,
-    )
+    ) or bool(definition.id == "meta-muse" and is_oauth and api_key and account_id)
+    # Muse cache isolation is independent of Codex transport dispatch. Adding
+    # it to OPENAI_OAUTH_PROVIDERS would send Meta keys to ChatGPT instead.
     key = _cache_key(
         storage_id,
         account_scoped=account_scoped,
@@ -2337,13 +2463,36 @@ def _available_models(
         mapped = _rows_from_payload(document, capture)
         return mapped is not None and not _lists_id(mapped, want_id)
 
+    def refetch_if(document: Mapping[str, object], age_s: float) -> bool:
+        """``lacks_want_id`` plus Muse's fresh-on-open, decided in the READER.
+
+        A caller that SHORTENS the hard TTL is asking for an answer fresher than
+        any reuse window can promise — discovery's own documented meaning for
+        ``ttl_s`` ("a caller that wants a fresher answer NOW (the model picker)
+        passes a shorter ``ttl_s``", see :func:`available_models`). For Muse
+        that request is honoured literally: the authenticated listing is the
+        only place a newly eligible id can appear, and the picker-open refresh
+        is the documented behaviour (``docs/META_MUSE.md``, "Catalogue freshness
+        and existing conversations").
+
+        It lives HERE rather than as a ``ttl_s`` override in the catalogue
+        controller, whose ``PICKER_TTL_S`` stays the single statement of picker
+        freshness and whose TTL must reach every provider untouched
+        (``test_the_picker_ttl_is_the_only_ttl_override``). Everything below
+        still bounds it: the cross-process fetch lease, the failure backoff and
+        the stale-cache fallback.
+        """
+        return lacks_want_id(document, age_s) or (
+            provider_id == "meta-muse" and ttl_s < DEFAULT_TTL_S
+        )
+
     listing = read_listing(
         key,
         fetch,
         soft_ttl_s=soft_ttl_s,
         ttl_s=ttl_s,
         cache_dir=cache_dir,
-        refetch_if=lacks_want_id,
+        refetch_if=refetch_if,
         revalidate=revalidate,
     )
     payload = listing.payload

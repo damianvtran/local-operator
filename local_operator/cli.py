@@ -59,6 +59,7 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_exec_help as _eh
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
@@ -144,7 +145,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version
+
+    # argparse help exits before startup owns config repair or locale activation.
+    # Explicit rendering keeps this extraction independent of the global wire
+    # renderer; an EN-only namespace must not un-ship audited locales.
+    help_locale = resolve_help_locale()
 
     # Create parent parser with common arguments
     parent_parser = argparse.ArgumentParser(add_help=False)
@@ -1793,6 +1800,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "newer versions; the refresh flags take precedence."
         ),
     )
+    # The isolated verified controller has UNKNOWN/PIP kind. These explicit
+    # destination arguments authorize ONLY its canonical immutable protocol;
+    # ordinary update/install-kind guards are not widened or overridden.
+    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail"):
+        update_parser.add_argument(f"--controller-{name}", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -1997,7 +2009,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="?",
         default=None,
-        help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
+        help=_eh.command().envelope(locale=help_locale)["text"],
     )
     # A SECOND positional must PARSE rather than die inside argparse. Without
     # this, `lop exec "Some Title" "do the work"` — the shape an agent reaches
@@ -2010,50 +2022,41 @@ def build_cli_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("extra", nargs="*", default=[], help=argparse.SUPPRESS)
     from local_operator.exec_startup import add_startup_arguments
 
-    add_startup_arguments(exec_parser)
+    add_startup_arguments(exec_parser, help_locale=help_locale)
     exec_parser.add_argument(
         "--status",
         metavar="JOB_ID",
-        help="Read a durable background-job status as JSON; does not start a session",
+        help=_eh.status().envelope(locale=help_locale)["text"],
     )
     # --- Additive exec flags (rewrite) ------------------------------------
     exec_parser.add_argument(
         "--background",
         action="store_true",
-        help="Detach the task: spawn a background worker with a log file and exit immediately",
+        help=_eh.background().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help="Emit one JSON line per agent event instead of the final text",
+        help=_eh.json().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--agent-id",
         type=str,
         dest="agent_id",
-        help="ID of the agent to use for this execution (alternative to --agent by name)",
+        help=_eh.agent_id().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--control",
         action="store_true",
-        help=(
-            "Route approvals and questions to an attached supervisor (may wait). "
-            "Without this flag non-TTY approvals deny; discovery and live attachment "
-            "are available either way. --yolo remains an explicit approval override."
-        ),
+        help=(_eh.control().envelope(locale=help_locale)["text"]),
     )
     exec_parser.add_argument(
         "--supervisor-fd",
         type=int,
         dest="supervisor_fd",
         default=None,
-        help=(
-            "Write this run's operator capability to this inherited descriptor so the "
-            "supervisor holding the other end can APPROVE the cards this run parks "
-            "(stage E). Requires --control; refused with --background. Descriptor "
-            "numbers only — the value never touches argv, the environment or a file."
-        ),
+        help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
@@ -2398,9 +2401,14 @@ def credential_delete_command(args: argparse.Namespace) -> int:
 
 def config_create_command() -> int:
     """Create a new configuration file."""
+    from local_operator.config_writer import config_write_lock
+
     base_dir = config_dir()
-    config_manager = ConfigManager(base_dir)
-    config_manager._write_config(vars(config_manager.config))
+    # Read and create under the same config-root lock as settings/policy writes;
+    # a creation command must not flush a snapshot captured before their edit.
+    with config_write_lock(base_dir):
+        config_manager = ConfigManager(base_dir)
+        config_manager._write_config(vars(config_manager.config))
     # Print the path that was actually written, not a hardcoded
     # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
     # config_open_command below already reports the resolved path — naming a
@@ -9788,6 +9796,35 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     if not _serve_bind_is_loopback_only(host):
         return _refuse_non_loopback_bind(host, port)
 
+    # A DAEMON IS A HOSTING PLANE, NOT A CHAT AN AGENT OPENED. This process is
+    # about to become the ``lop serve`` daemon the operator's front ends (the
+    # desktop app's backend, the phone relay's child, the TUI server) talk to,
+    # and IT mints the sessions for the operator's OWN conversations through the
+    # shared composition root. The ``bash`` tool stamps every command an agent
+    # runs with the agent-shell markers, and when such a shell started this
+    # daemon those markers ride along in ``os.environ`` — which is what made
+    # :func:`local_operator.agent_shell.agent_shell_opened_run` true at
+    # session-build time, stamping the operator's New Chat sessions
+    # ``origin.json = {"origin": "agent-shell"}`` and hiding them from the
+    # desktop sidebar, the phone list and the ``/resume`` picker.
+    #
+    # The markers describe the COMMAND THAT STARTED THIS PROCESS; a long-lived
+    # server is not that command, and the sessions it creates are the operator's
+    # gestures, so the claim must not survive into them. Drawn here, at the SERVE
+    # entry point, because a process cannot un-inherit an environment variable
+    # any later — the daemon's own ``dict(os.environ)`` spawns (the mobile relay
+    # and the runtime launcher) would carry the markers on.
+    #
+    # SERVE ONLY. ``lop exec``, ``--workstream`` and the QA escape hatch stamp
+    # exactly as before: those ARE commands an agent's shell ran, and the whole
+    # point of the guard and its stamp is to keep their sessions out of the
+    # operator's list. See :func:`agent_shell.drop_agent_shell_marker_from_environ`
+    # for why all THREE names go (the escape hatch included) and why the removal
+    # is in place rather than a returned copy.
+    from local_operator.agent_shell import drop_agent_shell_marker_from_environ
+
+    drop_agent_shell_marker_from_environ()
+
     try:
         import uvicorn
     except ImportError:
@@ -9892,6 +9929,17 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # Retain the Server object so a ready-successor handoff can pause/resume
+        # ACCEPTORS on it without a kill: the listener socket lives in this frame
+        # and the handoff runs in the lifespan's loop, so app.state is the one
+        # channel that reaches both. The owner holds a DUP of the listener, so
+        # nothing here can close the bound socket the way a forced restart would.
+        from local_operator import service_handoff
+
+        server = uvicorn.Server(config)
+        asgi_app.state.listener_owner = service_handoff.ListenerOwner(
+            asgi_app, servers=[], listener=listener
+        )
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -9899,7 +9947,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         # those windows are exactly where a traceback would otherwise reach the
         # operator instead of a plain exit.
         try:
-            uvicorn.Server(config).run(sockets=[listener])
+            server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
     else:
@@ -14801,6 +14849,24 @@ def main() -> int:
                 return invalid
             return mcp_command(args)
         elif args.subcommand == "update":
+            is_controller = (
+                getattr(args, "controller_root", None) is not None
+                or getattr(args, "controller_tail", None) is not None
+            )
+            if is_controller:
+                from local_operator.update_bootstrap import (
+                    BootstrapError,
+                    controller,
+                    controller_tail,
+                )
+
+                try:
+                    if getattr(args, "controller_root", None) is not None:
+                        return controller(args)
+                    return controller_tail(args)
+                except (BootstrapError, OSError, ValueError) as exc:
+                    print(f"rolling update: {exc}", file=sys.stderr)
+                    return 1
             # Lazy: ``update`` imports httpx. ``import local_operator.cli``
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command

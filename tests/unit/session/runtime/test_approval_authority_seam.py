@@ -2755,8 +2755,15 @@ async def test_a_parked_card_refused_twice_tells_the_pane_once(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: Path) -> None:
+async def test_the_routed_report_speaks_for_the_connection_that_asks(
+    tmp_path: Path, no_anchor: None
+) -> None:
     """Who the report is FOR, driven through the runtime (agent R3-1 = U10 = Q6).
+
+    ``no_anchor`` pins the host fact the unproved branch's sentence turns on
+    (``operator_authority_unusable()`` reads the machine's real anchor file): without it
+    this cell goes red on any host that has run ``lop operator init``, for a reason that
+    says nothing about the code.
 
     The first version of this asked the seam's own predicate about a frame the
     seam built, so it read a proof off a frame that had none and answered a
@@ -3198,9 +3205,12 @@ async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_type
 
 @pytest.mark.asyncio
 async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
     """The sentence half of the capability restoration (revision 2, §3).
+
+    ``no_anchor`` for the same reason as the routed-report cell above: the ``bare``
+    runtime's sentence depends on whether THIS machine has an installed anchor.
 
     ``_connection_may_loosen`` decides which remedy a report may name, and under
     revision 1 it answered from the spawn capability alone — so a pane attached

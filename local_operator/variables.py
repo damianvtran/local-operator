@@ -66,6 +66,7 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     is_registerable_component,
+    scrub_known_json_string_values,
     scrub_secrets_with_hits,
     scrub_values,
     shape_report,
@@ -553,10 +554,16 @@ class VariableStore:
         behaviour it has — ``tools/builtin._redact_tool_text`` reads that view as
         the ESCALATED case, and says why in place.
         """
-        scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
+        values = self.redaction_values()
+        scrubbed, hits = scrub_secrets_with_hits(text, values)
+        if hits:
+            self._register_shape_hits(hits)
+        # The original shape judgement must run FIRST: a short known value can
+        # occur inside an unknown credential, and pre-masking it would break the
+        # shape that contains the rest. Decode only the surviving published copy.
+        scrubbed = scrub_known_json_string_values(scrubbed, self.redaction_values())
         if not hits:
             return scrubbed, ShapeReport()
-        self._register_shape_hits(hits)
         # Containment takes EVERY hit (above, unconditionally); the REPORT takes
         # only the complete ones as nameable labels, plus the exposure flag that
         # separates "masked whole" from "part of it is in the model's context".
