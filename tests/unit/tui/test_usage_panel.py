@@ -2749,12 +2749,12 @@ def test_muse_source_survives_compaction_with_its_meters(stale) -> None:
     rows, _ = panel._window_rows(body, 4)
     text = "\n".join(row.plain for row in rows)
     if stale:
-        assert "Usage unknown" in text and "stale response" in text
+        assert "Unknown (2h ago)" in text and "r won't query Muse" in text
         assert "31%" not in text and "12%" not in text
     else:
-        assert "Response snapshot" in text and "r won't query Muse" in text
+        assert "Response (just now)" in text and "r won't query Muse" in text
         assert "31%" in text and "12%" in text
-        source = next(row for row in body.lines if "Response snapshot" in row.plain)
+        source = next(row for row in body.lines if "Response (just now)" in row.plain)
         assert source.style == Style(color=theme_mod.semantic_color("fg"))
 
 
@@ -2767,7 +2767,7 @@ def test_unknown_muse_explanation_survives_compaction_without_inventing_numbers(
     panel._offset = 0
     rows, _ = panel._window_rows(body, 2)
     text = "\n".join(row.plain for row in rows)
-    assert "No allowance observation recorded." in text
+    assert "Unknown; r won't query Muse" in text
     assert "%" not in text
     assert body.notes
     assert rows[1].style == Style(color=theme_mod.semantic_color("fg"))

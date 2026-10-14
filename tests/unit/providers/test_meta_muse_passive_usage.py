@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import httpx
@@ -98,6 +99,14 @@ async def test_serving_dispatch_persists_sanitized_receipt_and_refresh_reads_it(
         "weekly": {"used_percent": 72, "resets_at": 1_800_100_000},
         "opaque_secret": "must-not-be-saved",
     }
+    writer_threads = []
+    write_receipt = store.record_muse_usage
+
+    def observe_writer(*args):
+        writer_threads.append(threading.get_ident())
+        return write_receipt(*args)
+
+    monkeypatch.setattr(store, "record_muse_usage", observe_writer)
     if broken_cache:
 
         def broken_write(*_):
@@ -129,6 +138,7 @@ async def test_serving_dispatch_persists_sanitized_receipt_and_refresh_reads_it(
             assert "secret-bearing" not in caplog.text
             assert "Muse allowance receipt could not be retained" in caplog.text
             return
+        assert writer_threads and all(t != threading.get_ident() for t in writer_threads)
         assert data["subscription_observation"]["source"] == "responses"
         assert "must-not-be-saved" not in json.dumps(data)
         assert "subscription_observation" not in store.get_credential(other.id).data
@@ -163,6 +173,11 @@ def test_read_only_snapshot_projects_receipts_even_without_usage_cache(tmp_path,
         assert len(snapshot.reports) == 1
         assert bool(snapshot.reports[0].limits) is fresh
         assert snapshot.reports[0].identity is None
+        assert snapshot.reports[0].notes is not None
+        if fresh:
+            assert snapshot.reports[0].notes == META_MUSE_PASSIVE_NOTE
+        else:
+            assert "refresh does not query Muse" in snapshot.reports[0].notes
         assert not (tmp_path / "absent.db").exists()
     finally:
         metadata.close()

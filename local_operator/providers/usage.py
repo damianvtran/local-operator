@@ -2486,10 +2486,14 @@ async def fetch_usage(
 # These are local, fixed provenance statements, not arbitrary upstream notes.
 # Public usage serialization may safely retain ONLY these strings for Muse;
 # other providers' notes can contain untrusted endpoint/error vocabulary.
-META_MUSE_ALLOWANCE_NOTE = "Stale sign-in allowance; current usage unknown."
+META_MUSE_ALLOWANCE_NOTE = (
+    "Stale sign-in allowance; current usage unknown; refresh does not query Muse."
+)
 META_MUSE_PASSIVE_NOTE = "Last response allowance; refresh does not query Muse."
-META_MUSE_STALE_NOTE = "Stale response allowance; current usage unknown."
-META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded."
+META_MUSE_STALE_NOTE = (
+    "Stale response allowance; current usage unknown; refresh does not query Muse."
+)
+META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded; refresh does not query Muse."
 META_MUSE_USAGE_NOTES = frozenset(
     {
         META_MUSE_ALLOWANCE_NOTE,

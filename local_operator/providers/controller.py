@@ -1076,7 +1076,16 @@ class ProviderController:
     @staticmethod
     def _without_identity(report: UsageReport) -> UsageReport:
         """A copy of ``report`` with the account identity removed for the wire."""
-        return dataclasses.replace(report, identity=None, notes=None)
+        from local_operator.providers.usage import META_MUSE_USAGE_NOTES
+
+        # Fixed Muse provenance is safe and distinguishes unknown quota from
+        # an unlimited account. Never retain arbitrary provider/error notes.
+        notes = (
+            report.notes
+            if report.provider == "meta-muse" and report.notes in META_MUSE_USAGE_NOTES
+            else None
+        )
+        return dataclasses.replace(report, identity=None, notes=notes)
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
@@ -1437,6 +1446,11 @@ class ProviderController:
         Synchronous and cheap (one indexed SQLite read), safe to call from an
         interval callback.
         """
+        if provider == "meta-muse":
+            # Every read projects local receipt metadata. There is nothing for
+            # a prefetch worker to warm, even when the receipt itself is stale:
+            # it must wait for ordinary inference, not purchase a quota probe.
+            return 0
         cache = self._usage_cache_store()
         if cache is None:
             return None

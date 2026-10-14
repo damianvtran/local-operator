@@ -4414,7 +4414,12 @@ async def stream_with_failover(
                         meta = (event.provider_payload or {}).get("meta_muse")
                         if access is not None and callable(record_usage) and isinstance(meta, dict):
                             try:
-                                record_usage(access, meta.get("subscription_usage"))
+                                # AuthStore serializes its cross-thread SQLite
+                                # handle. A contended metadata writer must not
+                                # block delivery of every other async stream.
+                                await asyncio.to_thread(
+                                    record_usage, access, meta.get("subscription_usage")
+                                )
                             except Exception:
                                 # A quota-cache write must never replay a served
                                 # inference. No exception text: it can carry SQL
