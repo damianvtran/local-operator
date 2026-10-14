@@ -4970,26 +4970,29 @@ def test_a_generation_install_refreshes_the_supervised_units(
     assert statuses == {"refreshed", "refreshed"} or statuses == {"refreshed"}
 
 
-def test_daemon_children_are_launchd_children_that_survive_a_bounce() -> None:
-    """Provenance anchor for the continuity claim: the supervisor's children survive.
+def test_a_session_runtime_is_spawned_detached() -> None:
+    """Provenance anchor: a session runtime is spawned DETACHED — the real fact.
 
-    This is the source fact the wiring above rests on — quoted, not re-derived: a
-    launchd job does not reap its job's children on restart, and this repo's systemd
-    unit states the parity deliberately (``KillMode=process``). A busy session
-    runtime is spawned detached with SIGHUP ignored, so it is such a child.
+    Survival across a supervisor bounce rests on the CHILD's own detachment, NOT
+    on launchd abandoning descendants (round-4 corrected exactly that claim: the
+    generated plists carry no ``AbandonProcessGroup``, so launchd's default would
+    reap a same-group descendant). This asserts the detachment itself — a phone
+    session's spawn calls ``detached_popen_kwargs()``, whose POSIX arm is
+    ``start_new_session=True`` (``setsid``) — so a future edit that drops the
+    detachment is caught here rather than silently making the continuity claim
+    false. The behaviour it implies is exercised by the synthetic group-signal
+    controls below; this cell is the SOURCE fact, not a bounce.
     """
     import inspect
 
-    from local_operator import supervisors
+    from local_operator import procstate
+    from local_operator.mobile import daemon as daemon_mod
 
-    source = inspect.getsource(supervisors.render_systemd_unit)
-    assert "KillMode=process" in source
-    assert "children survive it" in source, "the macOS-parity claim moved; re-verify it"
-
-    from local_operator.session.runtime import process as process_mod
-
-    spawn = inspect.getsource(process_mod._install_sighup_ignore)
-    assert "start_new_session=True" in spawn and "SIGHUP" in spawn
+    spawn = inspect.getsource(daemon_mod.MobileDaemon._spawn_session)
+    assert (
+        "detached_popen_kwargs()" in spawn
+    ), "the session spawn stopped detaching; the continuity claim is now false"
+    assert procstate.detached_popen_kwargs() == {"start_new_session": True}
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
