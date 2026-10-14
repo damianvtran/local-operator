@@ -767,6 +767,9 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # OPTIONAL like `/effort`: bare `/theme` answers with the active theme,
         # and the space opens the ramp list with live preview.
         "theme": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/theme`: bare `/language` answers with the active
+        # language, and the space opens the value list.
+        "language": ArgumentMode.OPTIONAL,
         "approvals": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/approvals`: bare `/mcp` lists the servers, and the
         # space opens the login/logout/reauth subcommand list.

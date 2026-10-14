@@ -80,6 +80,16 @@ class _UntypedStub:
         return lambda *args, **kwargs: None
 
 
+async def _allow_quiet() -> None:
+    """A quiet-end door that allows — the value a real session binds.
+
+    ``build_no_reply_tool`` only checks PRESENCE, and every call the benchmark
+    makes is a builder call, so the body is never run; it stays async to match
+    the field's declared type.
+    """
+    return None
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -118,6 +128,20 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # a surface no user has (the exact defect this module's docstring
         # records for the project registry and the patience class).
         withdraw_ask=lambda *args, **kwargs: {"ok": True},
+        # The code-requests tool's createIf gate reads the session's own
+        # DIRECTORY (its derived index lives beside the transcript) — context
+        # DATA rather than a machine probe, so the stub simply carries one;
+        # the tool is never called by a measurement. Without it the measured
+        # surface is one tool lighter than a real session's, the same defect
+        # the project registry above records.
+        session_dir=f"{cwd}/.stub-session",
+        # The quiet-end door (docs/design/quiet-turns.md §4): the newest
+        # createIf gate, carried as a bare callable rather than a Protocol —
+        # a real session binds it, so leaving it unbound here would measure a
+        # surface one tool short of every session's (``no_reply``), the same
+        # defect the project registry above records. The stub is never
+        # awaited: the builder only checks presence.
+        quiet_end=_allow_quiet,
     )
 
 
@@ -218,13 +242,35 @@ def _forced_image_backend() -> Iterator[None]:
         availability.image_provider_reachable = saved
 
 
+@contextmanager
+def _forced_video_backend() -> Iterator[None]:
+    """Make ``build_generate_video_tool``/``build_video_status_tool`` say yes.
+
+    The fourth machine-probing leg (browser, console, image, now video): the
+    video pair exists only where a provider credential is reachable, so on a
+    CI runner they would vanish from the measured surface and the drift tests
+    would disagree about what "the default surface" is. Patched in the
+    ``video_tool`` module's namespace — the attribute its builders resolve at
+    call time (the dual-module-copy hazard the browser leg documents).
+    """
+    from local_operator.tools import video_tool
+
+    saved = video_tool.video_provider_reachable
+    video_tool.video_provider_reachable = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        video_tool.video_provider_reachable = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
     DETERMINISTIC across hosts: the count must not depend on whether the
-    machine running the benchmark happens to have cmux, the desktop app, or an
-    image provider credential. See :func:`_forced_browser_backend`,
-    :func:`_forced_console_backend` and :func:`_forced_image_backend`. Callers
+    machine running the benchmark happens to have cmux, the desktop app, an
+    image provider credential, or a video provider credential. See
+    :func:`_forced_browser_backend`, :func:`_forced_console_backend`,
+    :func:`_forced_image_backend` and :func:`_forced_video_backend`. Callers
     that report a measurement should also report ``len()`` of this, so a drop
     below the full surface is visible rather than silent.
     """
@@ -232,6 +278,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_browser_backend(),
         _forced_console_backend(),
         _forced_image_backend(),
+        _forced_video_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

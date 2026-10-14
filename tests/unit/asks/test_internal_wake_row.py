@@ -124,22 +124,61 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
     "local_operator/session/session.py": {
         "_aida_reconcile_now": "full-list writer (Aida's cadence reconcile)",
         "_apply": "full-list writer (the ask deadline row's arm/retire)",
+        "_catchup_notify_from_live_rows": (
+            "an engine reader: the catch-up delivery's notify intent, re-read "
+            "from the live rows at take time; it renders nothing"
+        ),
         "_flush_patience_armed_after": "full-list writer (patience's armed-after patch)",
+        "_queue_wake_rearm": (
+            "the drain's successor reservation: it probes ``hold_pending``, which "
+            "registers the owed one-shot in the owned list"
+        ),
         "_rebuild_wake_index_entry": "full-list writer (the index the supervisor reads)",
         "arm_ask_wake": "full-list writer (the ask deadline row)",
         "cancel_pending_patience": "full-list writer (patience's cancel)",
-        "hand_wakes_to_successor": "full-list writer (the placement handoff)",
+        "hand_wakes_to_successor": (
+            "full-list writer (the placement handoff): probes ``handover_pending``, "
+            "which persists the owned list"
+        ),
         "retire_ask_wake": "full-list writer (the ask deadline row)",
     },
     "local_operator/tools/builtin.py": {
+        "_pending_wake_ids": (
+            "the listing surface's phase probe: reads only the pending ids from "
+            "the owned list, never renders a row"
+        ),
         "_wake_cancel": "the wake tool's mutation",
         "_wake_create": "the wake tool's mutation",
         "_wake_edit": "the wake tool's mutation",
         "_wake_list": "a HUMAN surface — subtracts via ``scheduled_rows``",
         "execute_patience": "the patience engine's own door",
     },
+    "local_operator/session/frontend_state.py": {
+        "_wake_state": "a HUMAN surface — subtracts via ``scheduled_rows``",
+    },
     "local_operator/tui/widgets/wake_panel.py": {
         "sync": "a HUMAN surface — subtracts via ``scheduled_rows``",
+    },
+    "local_operator/tui/app.py": {
+        "_cmd_fork": (
+            "the switch guard's presence probe: a non-empty owned list means the "
+            "session has wakes worth a notice; nothing is rendered from the rows"
+        ),
+        "_mark_own_wakes_dormant": (
+            "a MUTATION path: records the owning session so its wakes go dormant "
+            "on a stop; the row content is not rendered"
+        ),
+    },
+    "local_operator/video/jobs.py": {
+        "ensure": (
+            "a MUTATION path: arms/ensures the one video check-wake row for a "
+            "pending record (full-list writer — filtering would drop rows this "
+            "writer does not own)"
+        ),
+        "cancel": (
+            "a MUTATION path: cancels the video check-wake row (full-list "
+            "writer; same raw-list need as ``ensure``)"
+        ),
     },
     "local_operator/wakes/patience.py": {
         "arm_patience": "the patience engine",
@@ -161,8 +200,34 @@ _HUMAN_SURFACES = (
 )
 
 
+#: The spells that read or mutate a wake scheduler's OWNED list. Beyond the
+#: plain ``schedules`` attribute these name the owned/runnable views and the
+#: reservation methods that operate on them — a reader the guard must still see
+#: when the path reaches the list through a probed capability rather than an
+#: attribute (review round 2, Q-2: the successor handover moved to
+#: ``getattr(scheduler, "handover_pending", ...)`` and an attribute-only scan
+#: called that path uncovered).
+_OWNED_LIST_ATTRS = frozenset(
+    {
+        "schedules",
+        "armed_schedules",
+        "held_schedules",
+        "hold_pending",
+        "handover_pending",
+        "pending_ids",
+    }
+)
+
+
 def _schedules_readers() -> dict[str, dict[str, str]]:
-    """``module -> {function: base spelling}`` for every ``X.schedules`` read.
+    """``module -> {function: base spelling}`` for every wake-list read.
+
+    Two spellings count as a read, because the subsystem uses both: a direct
+    attribute access (``scheduler.schedules``, ``self._wake.armed_schedules``)
+    and a probed capability (``getattr(scheduler, "handover_pending", None)``).
+    The probe spelling is how a path reaches the list when it cannot import the
+    scheduler it was given, and missing it is a real hole — the successor
+    handover reads the owned list that way (review round 2, Q-2).
 
     Filtered to the base names that denote a WAKE scheduler (the word ``wake``,
     ``scheduler`` or ``sched`` in the spelling), because ``.schedules`` is also
@@ -180,13 +245,35 @@ def _schedules_readers() -> dict[str, dict[str, str]]:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for inner in ast.walk(node):
-                if not isinstance(inner, ast.Attribute) or inner.attr != "schedules":
+                base = _owned_list_read(inner)
+                if base is None:
                     continue
-                base = ast.unparse(inner.value)
                 if not any(token in base.lower() for token in ("wake", "scheduler", "sched")):
                     continue
                 found.setdefault(module, {})[node.name] = base
     return found
+
+
+def _owned_list_read(node: ast.AST) -> str | None:
+    """The base expression if ``node`` reads a wake scheduler's owned list, else None.
+
+    Recognises the two spellings the subsystem uses (see :func:`_schedules_readers`)
+    and returns the base so the caller can apply the wake-scheduler token filter,
+    keeping that decision in ONE place.
+    """
+    if isinstance(node, ast.Attribute) and node.attr in _OWNED_LIST_ATTRS:
+        return ast.unparse(node.value)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+        and node.args[1].value in _OWNED_LIST_ATTRS
+    ):
+        return ast.unparse(node.args[0])
+    return None
 
 
 def test_every_scheduler_reader_is_classified():

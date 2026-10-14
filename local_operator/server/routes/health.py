@@ -79,6 +79,8 @@ async def health_check(request: Request) -> CRUDResponse[HealthCheckResponse]:
     from local_operator.update import install_kind, installed_version
 
     version = installed_version() or importlib.metadata.version("local-operator")
+    from local_operator.server.reload import rolling_contract
+
     result = HealthCheckResponse(
         version=version,
         # `getattr` with a default rather than a direct read: a test harness
@@ -97,6 +99,8 @@ async def health_check(request: Request) -> CRUDResponse[HealthCheckResponse]:
         pid=os.getpid(),
         prefix=sys.prefix,
         install_kind=install_kind().value,
+        # Fresh serving-process capability, not copied from discovery metadata.
+        rolling_reload_contract=rolling_contract(request.app),
     )
 
     return CRUDResponse(status=200, message="ok", result=result)

@@ -1,12 +1,13 @@
 /**
- * Image generation on the phone — the detection set and the ONE
+ * Media generation on the phone — the detection set and the ONE
  * entry→view-model adapter for the progress card.
  *
- * The programme wires agent-driven image generation end to end
- * (provider → harness tool `generate_image` → every surface). This module is
- * the phone's whole share of the contract, and it exists as a module rather
- * than inline in the card because the LIVE DETAIL FIELDS ARE FROZEN HERE:
- * every `generate_image` update carries the canonical bag — `stage`,
+ * The programme wires agent-driven media generation end to end
+ * (provider → harness tool `generate_image`/`generate_video` → every surface).
+ * This module is the phone's whole share of the contract, and it exists as a
+ * module rather than inline in the card because the LIVE DETAIL FIELDS ARE
+ * FROZEN HERE:
+ * every media-generation update carries the canonical bag — `stage`,
  * `queue_position`, `progress_fraction`, `log_lines`, `error`, `error_type` —
  * every key present, `None` when no provider supplied a value (the harness
  * lane's freeze, 2026-10-09). Everything that reads one of those names lives
@@ -29,21 +30,35 @@
  * fabricated number. Numbers that ARE carried are never rounded, clamped or
  * extrapolated into a claim the feed did not make.
  */
-import type { TranscriptEntry, TranscriptImageRef } from "../types";
+import type { TranscriptEntry, TranscriptImageRef, TranscriptVideoRef } from "../types";
 
 /**
  * The detection set — the ONE exported detection point per surface.
  *
- * ONE tool since the harness lane froze it: `generate_image`, whose
+ * TWO tools since the surfaces programme (ruling R1): `generate_image`, whose
  * image-to-image case is a `source_image_path` argument on the SAME call —
- * there is no separate `generate_altered_image`. If the harness ever adds a
- * second image-generation call, its name is added HERE and nowhere else:
- * the transcript branch and this module's tests both read this constant.
- * Keys are lowercase; lookups normalise, mirroring `tool-row.tsx`'s own
- * `DIFF_FIRST_TOOLS` lookup beside it.
+ * there is no separate `generate_altered_image` — and `generate_video`, whose
+ * live lifecycle and wire fields are the same frozen six, so sharing the set
+ * means the card's live body, settle absorption and failure body follow with
+ * zero edits. If the harness ever adds a third call, its name is added HERE
+ * and nowhere else: the transcript branch and this module's tests both read
+ * this constant. Keys are lowercase; lookups normalise, mirroring
+ * `tool-row.tsx`'s own `DIFF_FIRST_TOOLS` lookup beside it.
  */
 export const IMAGE_GEN_TOOLS: ReadonlySet<string> = new Set([
 	"generate_image",
+	"generate_video",
+]);
+
+/**
+ * The video member of the detection set, kept as its own constant so the ONE
+ * EXCLUSION gate (the card's cancel control) has a named reader and a future
+ * rename edits one line. A SUBSET of `IMAGE_GEN_TOOLS` — pinned by a test,
+ * because a rename that edited one and not the other would silently re-arm
+ * the control for video.
+ */
+export const VIDEO_GEN_TOOLS: ReadonlySet<string> = new Set([
+	"generate_video",
 ]);
 
 /**
@@ -66,9 +81,28 @@ export type ImageGenCardState =
 	| "cancelled"
 	| "finished";
 
+/**
+ * Which media noun the card's words wear, and whether the turn-interrupt
+ * control applies at all. Video joined the same card family (surfaces
+ * programme, R1) but is cancelled post-turn via `jobs op='cancel'` — never by
+ * a turn interrupt — so its card withholds the cancel control (contract
+ * §4.2; the frozen §5.4 relay row).
+ */
+export type ImageGenMaterial = "image" | "video";
+
 /** Everything the card's body renders, and nothing else. */
 export interface ImageGenView {
 	state: ImageGenCardState;
+	/**
+	 * Whether the call had actually started generating when the current
+	 * presentation began — the desktop's F3 fact, mirrored so a call that
+	 * never generated never grows a generating tile or bar. `running` implies
+	 * true; a `cancelling` hold keeps it only when the state the hold
+	 * replaced was running (a press on the queued card holds without
+	 * conjuring a body the card never showed). False everywhere else — no
+	 * settled state renders a body.
+	 */
+	generating: boolean;
 	/** The canonical `queue_position`, when the feed carries an integer. */
 	queuePosition: number | null;
 	/** The canonical `progress_fraction` (0..1), when the feed carries one. */
@@ -92,6 +126,18 @@ export interface ImageGenView {
 	errorType: string;
 	/** Finished artifact refs, in the entry's image index space. */
 	images: TranscriptImageRef[];
+	/** Video artifact refs — the parallel family, its own index space. The
+	    card's player mounts one per ref in the done body; bytes come from the
+	    Range-capable attachment route (see AttachmentVideo). */
+	videos: TranscriptVideoRef[];
+	/**
+	 * The ONE material fact, read from the entry's own tool name: which noun
+	 * the done line wears (`video ready` vs `image ready`) and whether the
+	 * cancel control is withheld. `image` is the default for anything not in
+	 * `VIDEO_GEN_TOOLS` — the pre-video reading, and the honest one for any
+	 * member the exclusion was never written for.
+	 */
+	material: ImageGenMaterial;
 }
 
 /**
@@ -224,15 +270,37 @@ export function imageGenView(
 			break;
 	}
 
+	/* THE GENERATING FACT (the desktop's F3 rule, mirrored — `view.generating`
+	   there): whether the call had started generating when the current live
+	   presentation began, so a call that never generated never grows a
+	   generating tile or bar. It is tracked as "where the call stood before
+	   any cancelling word", because every cancelling transition erases that
+	   answer from `state`: `running` has generated by definition; `queued`
+	   (the reduced state — announced, or a provider-side queue this surface
+	   renders reduced) has not; the wire's own `cancelling` keeps whatever
+	   the row's word last said (the frame that carries it no longer carries
+	   the stage it replaced); and a press keeps the state it replaced, so a
+	   hold can never conjure a body the press's own card did not show. */
+	let generating = state === "running";
+
 	/* The live stage word refines only the live view (see above). */
 	if (state === "queued" || state === "running") {
-		if (stage === STAGE_QUEUED) state = "queued";
-		else if (stage === STAGE_IN_PROGRESS) state = "running";
-		else if (stage === STAGE_CANCELLING) state = "cancelling";
+		if (stage === STAGE_QUEUED) {
+			state = "queued";
+			generating = false;
+		} else if (stage === STAGE_IN_PROGRESS) {
+			state = "running";
+			generating = true;
+		} else if (stage === STAGE_CANCELLING) {
+			/* The wire's own hold: `generating` keeps the row's word. */
+			state = "cancelling";
+		}
 	}
 
 	/* A pending cancel outranks every not-yet-settled state, and never a
-	   settle: the press is a request, the settle is the result. */
+	   settle: the press is a request, the settle is the result. `generating`
+	   is deliberately untouched — the hold keeps the body of the state the
+	   press replaced (see above). */
 	if (
 		cancelRequested &&
 		(state === "queued" || state === "running" || state === "cancelling")
@@ -256,8 +324,9 @@ export function imageGenView(
 	   provider reports one — the harness lane deliberately never synthesizes
 	   one — and out-of-range values are NOT clamped: clamping 42 into a full
 	   bar would state 100% off a value that never meant a fraction, so
-	   anything outside 0..1 renders the indeterminate bar instead — the
-	   reduced state, honestly. */
+	   anything outside 0..1 renders the reduced state instead — no bar at
+	   all (the fraction-less bar was removed with the desktop's D2 mirror;
+	   the card reduces to the tile alone), honestly. */
 	const rawProgress = details.progress_fraction;
 	const progress =
 		typeof rawProgress === "number" &&
@@ -282,6 +351,17 @@ export function imageGenView(
 	   absent (absence renders the reduced state). */
 	const error = typeof entry.error === "string" ? entry.error : "";
 
+	/* The material fact: whether the entry's tool is the video member of the
+	   detection set. Read from the entry's own tool name — the same field the
+	   transcript branch gates on — with the same normalisation as that lookup
+	   (lowercase; surrounding space is tolerated nowhere on this path, so a
+	   padded name never reaches the card at all). */
+	const toolName =
+		typeof entry.tool_name === "string" ? entry.tool_name.toLowerCase() : "";
+	const material: ImageGenMaterial = VIDEO_GEN_TOOLS.has(toolName)
+		? "video"
+		: "image";
+
 	/* Artifact refs. The frozen attachment contract indexes them like a user
 	   turn's images and serves their bytes from the same phone image route,
 	   so this reads the SAME `images` field the transcript's user case
@@ -297,5 +377,30 @@ export function imageGenView(
 			)
 		: [];
 
-	return { state, queuePosition, progress, logs, error, errorType, images };
+	/* Video artifact refs — the parallel family, own index space, read with
+	   the same tolerance as `images`. They are what the card's player mounts
+	   in the done body; their bytes come from the Range-capable attachment
+	   route rather than the image route. */
+	const rawVideos = entry.videos;
+	const videos = Array.isArray(rawVideos)
+		? rawVideos.filter(
+				(ref): ref is TranscriptVideoRef =>
+					ref != null &&
+					typeof ref.index === "number" &&
+					typeof ref.mime_type === "string",
+			)
+		: [];
+
+	return {
+		state,
+		generating,
+		queuePosition,
+		progress,
+		logs,
+		error,
+		errorType,
+		images,
+		videos,
+		material,
+	};
 }

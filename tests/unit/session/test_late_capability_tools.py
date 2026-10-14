@@ -298,12 +298,21 @@ async def test_installing_ask_does_not_resurrect_a_pruned_capability(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_every_session_gated_tool_is_in_the_merge_set(tmp_path) -> None:
+async def test_every_session_gated_tool_is_in_the_merge_set(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The drift guard. A builder gated on a field only a session can fill is
     invisible unless the merge names it, and the failure is silent: the tool
     simply never appears in any request. Derived from the two contexts rather
     than listed, so a NEW session-gated tool fails here instead of shipping
-    unadvertised."""
+    unadvertised. The video pair carries a SECOND gate (a provider credential)
+    a bare CI host cannot satisfy, so the probe is stubbed reachable: the pair
+    must then diff session-side only (``jobs`` exists there and not in the
+    factory's warm context), which is exactly what the equality asserts."""
+    from local_operator.tools import video_tool
+
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+
     stream = RecordingStream()
     session = make_session(tmp_path, stream)
     session.set_ask_handler(answer_nothing)
@@ -327,8 +336,30 @@ def test_the_merge_set_names_only_real_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_no_reply_reaches_a_session_the_constructor_itself_built(tmp_path) -> None:
+    """The round-1 blocker's regression pin (B1/Q1).
+
+    ``no_reply`` is createIf-gated on ``ToolContext.quiet_end`` — a field only
+    the session's own per-turn context carries — so the constructor's
+    capability merge is the mechanism that must mount it. The gate is invisible
+    when a test hand-splices the inventory: every test of that slice did, and
+    the one shape a real ``lop`` builds never held the tool (QA measured a live
+    ``create_session`` inventory without it, so the feature did nothing live).
+    No manual ``refresh_tools`` here, on purpose.
+    """
+    stream = RecordingStream()
+    session = make_session(tmp_path, stream)
+    try:
+        assert "no_reply" in {tool.name for tool in session._tools}
+        # The door must be bound too, or the mounted tool could only refuse.
+        assert callable(session._build_tool_context().quiet_end)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_late_installed_ask_is_described_in_the_prompt_not_just_advertised(
-    tmp_path,
+    tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The blocker, and the half the array tests could not see.
 
@@ -338,6 +369,13 @@ async def test_a_late_installed_ask_is_described_in_the_prompt_not_just_advertis
     it was never told about, and the field evidence is unambiguous: 104 ask
     calls in 1056 local transcripts, 0 of 880 rendered inventories naming it.
     """
+    from local_operator.tools import video_tool
+
+    # The video pair is credential-gated as well as session-gated; satisfy the
+    # credential so it is IN the merge set's contribution this test asserts on
+    # (a bare CI host has no provider key and the pair never appears).
+    monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+
     stream = RecordingStream()
     session = make_prompt_session(tmp_path, stream)
     session.set_ask_handler(answer_nothing)
@@ -418,7 +456,15 @@ async def test_uninstalling_the_handler_takes_ask_out_of_the_prompt_too(tmp_path
     # ``ask``'s absence below is a fact about the inventory rather than about a
     # parser that found none.
     assert {"task", "wait", "jobs", "wake", "hub"} <= set(described)
-    assert set(described) == {tool.name for tool in stream.requests[-1].tools if not tool.hidden}
+    # The equality spans both halves of a deferral-era inventory: the request
+    # carries the non-deferred schemas (hidden entries excepted), while the
+    # session's DEFERRED tools are NAMED on the inventory's schema-on-demand
+    # line with their schemas withheld from the array (``no_reply`` is such a
+    # tool — tools/deferral.py). Comparing against the array alone went red the
+    # moment a deferred tool joined the merge set, which is exactly what this
+    # assertion should have predicted.
+    advertised = {tool.name for tool in stream.requests[-1].tools if not tool.hidden}
+    assert set(described) == advertised | set(session.deferred_tool_names())
     assert "ask" not in described
     assert "ask" not in stream.advertised()
     await session.dispose()

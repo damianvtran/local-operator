@@ -1242,7 +1242,17 @@ class EpisodeRunner:
                 redact_public_reply,
             )
 
-            public_reply = redact_public_reply(decision.public_reply, self._redactions)
+            public_reply = redact_public_reply(
+                decision.public_reply,
+                self._redactions,
+                # Re-decoding must read these bytes exactly as the decoder that
+                # accepted them did. ``decision.channel_arguments`` is that
+                # fact, kept beside the bytes for precisely this boundary:
+                # without it a wrapped reply ACCEPTED on the channel refuses
+                # here, outside every rejection handler, and seals the episode
+                # failed/unscored as an adapter error.
+                channel_arguments=decision.channel_arguments,
+            )
             decision = decision.model_copy(update={"public_reply": public_reply})
             response_artifact = self._publish(
                 public_reply.encode("utf-8"), media_type="application/json"

@@ -45,6 +45,9 @@ ACTIONS = (
     "doctor",
     # Peer readiness (readiness.py): the install question `doctor` does not ask.
     "ready",
+    # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md §8.2):
+    # ask one peer to move to this device's build.
+    "update",
     "identity",
     "uninstall",
     # The inviter's half of the pairing human step (mesh-transport-identity §5.3).
@@ -1439,6 +1442,27 @@ def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
     }
     assert all(row["ok"] is False and row["code"] == "not_asked" for row in caps)
     assert payload["ok"] is False and payload["code"] == "unhealthy"
+
+    # F1: offline readiness retains the selected session, without inferring
+    # peer access from a viewer/default model or an unasked holder row.
+    net_cli._cmd_ready(
+        Namespace(
+            json=True, peer="cloud-node-1", model="openai/gpt-6.1-sol", session="same-session"
+        )
+    )
+    selected_payload = json.loads(capsys.readouterr().out)
+    selected = next(
+        row
+        for row in selected_payload["checks"]
+        if row.get("capability") == "selected_model_credential"
+    )
+    assert selected["selector"] == "openai/gpt-6.1-sol"
+    assert selected["session_id"] == "same-session"
+    assert selected["device_name"] == "cloud-node-1"
+    assert selected["ok"] is False and selected["source"] == "unknown"
+    assert selected["code"] == "pending" and selected["remedies"]
+    assert "selected openai access" in selected["detail"]
+    assert selected["last_grant_expires_at"] is None
 
     # The name filter reaches this path too: a peer that is not named is absent
     # from the rows rather than reported on under a filter that was ignored.

@@ -526,7 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return ledger
 
     # --- 1. headline: default config, both strategies -------------------
-    print("\n\n== 1. HEADLINE: shipped defaults (trigger 600k, n=20, floor 200k) ==")
+    print("\n\n== 1. HEADLINE: 600k trigger (the former default), n=20, floor 200k ==")
     for strategy in ("snapcompact", "context-full"):
         print(f"\n-- strategy: {strategy} --")
         off = run(f"off/{strategy}", Config(advisor_enabled=False, strategy=strategy))

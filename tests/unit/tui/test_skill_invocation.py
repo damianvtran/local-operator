@@ -42,7 +42,13 @@ from .test_slash_echo import _user_rows
 
 @pytest.fixture
 def skill_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A skills root wired in as the ONLY root, via the documented env var."""
+    """A fixture skills root wired in via the documented env var.
+
+    It is not the only root: the packaged builtin catalog is part of every
+    install's vocabulary (``skills/api.py`` appends its root last), so the
+    full match set is the fixture's skills PLUS the catalog — assertions scope
+    to the fixture's own names rather than a fixed total.
+    """
     root = tmp_path / "skills"
     for name, description, body, hide in [
         ("research", "Investigate a question.", "Read primary sources.", False),
@@ -813,7 +819,14 @@ class TestInlineShellVariablesAreNotInvocations:
             await pilot.pause()
             editor = await self._draft(app, pilot, "$")
             assert editor.picker.is_open(), "a leading `$` stopped browsing the catalogue"
-            assert len(editor.picker._matches) == 5
+            # The packaged builtin catalog is part of every install's vocabulary
+            # (skills/api.py appends its root last), so the full match set is the
+            # fixture's 5 skills PLUS the catalog. Scope the count to the
+            # fixture's own names — the vocabulary this case is about — rather
+            # than pinning a number that moves with the catalog.
+            fixture_names = {path.name for path in shell_lookalike_skills.iterdir()}
+            matches = [name for name, _ in editor.picker._matches]
+            assert {name for name in matches if name in fixture_names} == fixture_names
 
     @pytest.mark.asyncio
     async def test_enter_on_a_fuzzy_cousin_also_sends_the_prose(
@@ -870,7 +883,11 @@ class TestInlineShellVariablesAreNotInvocations:
             editor = await self._draft(app, pilot, "fix this $re")
             assert editor.picker.is_open()
             assert editor.picker.mode is PickerMode.SKILL
-            assert [name for name, _ in editor.picker._matches] == ["research"]
+            # `re` also reaches `responding-to-review` from the packaged builtin
+            # catalog now; the fixture's own vocabulary must still match exactly.
+            fixture_names = {path.name for path in shell_lookalike_skills.iterdir()}
+            matches = [name for name, _ in editor.picker._matches]
+            assert [name for name in matches if name in fixture_names] == ["research"]
 
     @pytest.mark.asyncio
     async def test_a_leading_token_keeps_fuzzy_matching(self, shell_lookalike_skills) -> None:

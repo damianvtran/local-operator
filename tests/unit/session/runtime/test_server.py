@@ -219,6 +219,9 @@ class FakeHandle:
             "known": job is not None,
         }
 
+    async def job_cancel(self, job_id):  # noqa: ANN001, ANN202
+        return await self._record("job_cancel", job_id)
+
     async def new_conversation(self):  # noqa: ANN202
         return await self._record("new_conversation")
 
@@ -712,6 +715,83 @@ async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -
 
 
 @pytest.mark.asyncio
+async def test_a_rehome_frame_reaches_the_optional_capability_with_all_three_fields() -> None:
+    """``rehome_if_current`` dispatch: three fields, and a probe for the method.
+
+    The op is new in this build, so unlike ``set_model`` there is no older
+    two-argument shape to degrade to — but the HANDLE is duck-typed across
+    several owners (the serving session, a TUI-hosted one, a long tail of test
+    doubles), so the arm getattr-probes and answers a sentence rather than an
+    AttributeError. Both halves are pinned here: the fields reach an owner that
+    has the method, and an owner without it is refused in words the caller can
+    read as "this session cannot be re-homed".
+    """
+
+    class RehomeHandle(FakeHandle):
+        async def rehome_if_current(self, expected, provider, model_id):  # noqa: ANN001, ANN202
+            return await self._record("rehome_if_current", expected, provider, model_id)
+
+    handle = RehomeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "rehome_if_current",
+                    "req": 24,
+                    "expected": "radient/auto",
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert (await _until(reader, "ack", 24))["detail"] == "rehome_if_current ok"
+        assert handle.calls[-1][0:2] == (
+            "rehome_if_current",
+            ("radient/auto", "deepseek", "deepseek-flash"),
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+    class NoRehomeHandle(FakeHandle):
+        rehome_if_current = None  # type: ignore[assignment]
+
+    runtime = RuntimeServer(NoRehomeHandle(), kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "rehome_if_current",
+                    "req": 25,
+                    "expected": "radient/auto",
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        frame = await _until(reader, "error", 25)
+        assert "cannot be re-homed" in frame["message"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_peer_message_to_an_unengaged_session_is_refused() -> None:
     """THE NEW RULE, receive side: a runtime whose record says ``started=False``
     (a fresh ``/new`` in the composer) refuses a ``peer_message`` op.
@@ -794,6 +874,70 @@ async def test_peer_message_on_handle_without_capability_errors_cleanly() -> Non
         await writer.drain()
         err = await _until(reader, "error", 12)
         assert "cannot receive peer messages" in err["message"]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class NoJobCancelHandle(FakeHandle):
+    """An owner runtime that predates the job rail's control op.
+
+    The dispatch probes the capability with getattr, so a handle that simply
+    lacks the method must surface the clear refusal rather than an
+    AttributeError — the same optional-capability contract ``NoPeerHandle``
+    documents.
+    """
+
+    job_cancel = None  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_dispatches_its_job_id_to_the_optional_capability() -> None:
+    """The post-turn job rail's control (video programme §2.2, contract §4.1).
+
+    The frame carries the job's own id and nothing else; the handle's receipt
+    travels as the ack's detail. That the cut lands on
+    ``AsyncJobManager.cancel`` — the SAME engine call ``jobs op='cancel'``
+    makes — is pinned at the serving seam (``test_serving``); here the wire
+    contract is.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "job_cancel", "req": 31, "job_id": "job-abc123"}).encode() + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 31)
+        assert ack["detail"] == "job_cancel ok"
+        assert handle.calls[-1] == ("job_cancel", ("job-abc123",), {})
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_on_a_handle_without_capability_errors_cleanly() -> None:
+    """Optional, getattr-probed, no ``PROTOCOL_VERSION`` bump."""
+    handle = NoJobCancelHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "job_cancel", "req": 32, "job_id": "job-1"}).encode() + b"\n"
+        )
+        await writer.drain()
+        err = await _until(reader, "error", 32)
+        assert "cannot cancel background jobs" in err["message"]
     finally:
         if writer is not None:
             writer.close()
@@ -6524,3 +6668,153 @@ async def test_only_a_local_attach_attends_the_greeting() -> None:
         await local.detach()
         await remote.detach()
         runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retired_delivery", ["pending", "scheduled"])
+@pytest.mark.parametrize("replacement_epoch", [False, True])
+async def test_frontend_cutover_retires_old_delivery_but_keeps_active_suffix(
+    monkeypatch: pytest.MonkeyPatch, retired_delivery: str, replacement_epoch: bool
+) -> None:
+    """Real store/socket/client: old queued AND buffered edges retire separately.
+
+    The replacement join captures its actual native snapshot before publishing
+    an active suffix. Clearing pending after that join would lose that suffix;
+    checking generation only at the producer would admit the scheduled old edge.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    registered = asyncio.Event()
+    release = asyncio.Event()
+    retired_seen = asyncio.Event()
+    active_pending = asyncio.Event()
+    old_released = asyncio.Event()
+    synced = asyncio.Event()
+    updated = asyncio.Event()
+    syncs: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    failures: list[str] = []
+    delayed: list[tuple[Any, ...]] = []
+
+    class Handle(FakeHandle):
+        old_unbinds = 0
+        active_unbinds = 0
+
+        async def subscribe_frontend(self, on_update: Any, **kwargs: Any) -> FrontendSubscription:
+            sub = self._frontend.subscribe(on_update)
+            self.old_store = self._frontend
+            registered.set()
+            await release.wait()
+
+            def unbind() -> None:
+                self.old_unbinds += 1
+                sub.unsubscribe()
+                old_released.set()
+
+            return FrontendSubscription(sync=sub.sync, unsubscribe=unbind)
+
+        async def subscribe_frontend_nowait(self, callback: Any) -> FrontendSubscription:
+            sub = self._frontend.subscribe_threadsafe(callback)
+            # This is a REAL active-generation delta produced after the atomic
+            # join's capture but delivered while frontend_ready is still false.
+            self._frontend.mutate(conversation_title="active-after-snapshot")
+            await active_pending.wait()
+
+            def unbind() -> None:
+                self.active_unbinds += 1
+                sub.unsubscribe()
+
+            return FrontendSubscription(sync=sub.sync, unsubscribe=unbind)
+
+    handle = Handle()
+    native_bind = handle.subscribe_frontend
+
+    async def keyword_bind(on_update: Any, **kwargs: Any) -> FrontendSubscription:
+        # Pin the base's keyword contract, not only the positional call the
+        # runtime usually makes; a renamed override otherwise passes execution
+        # while violating substitutability at the whole-tree type gate.
+        return await native_bind(on_update=on_update, **kwargs)
+
+    monkeypatch.setattr(handle, "subscribe_frontend", keyword_bind)
+    runtime = RuntimeServer(handle, kind="tui")
+    original_delivery = runtime._relay_frontend_to_on_loop
+
+    def observe_delivery(*args: Any) -> None:
+        conn, data = args[:2]
+        title = data.get("changes", {}).get("conversation_title")
+        if title == "retired-edge" and retired_delivery == "scheduled":
+            delayed.append(args)
+            retired_seen.set()
+            return
+        original_delivery(*args)
+        if conn.frontend_pending:
+            if title == "retired-edge":
+                retired_seen.set()
+            elif title == "active-after-snapshot":
+                active_pending.set()
+
+    async def choose_handoff(task: asyncio.Task[Any]) -> None:
+        await registered.wait()
+        handle._frontend.mutate(conversation_title="retired-edge")
+        await retired_seen.wait()
+        if replacement_epoch:
+            # A new real store starts its own epoch/sequence domain. Never
+            # manufacture an update sequence or compare epochs by magnitude.
+            handle._frontend = FrontendStateStore(
+                FrontendSessionState(session_id="s1", epoch="replacement-owner")
+            )
+        return None
+
+    monkeypatch.setattr(runtime, "_relay_frontend_to_on_loop", observe_delivery)
+    monkeypatch.setattr(runtime, "_bind_with_grace", choose_handoff)
+
+    def on_sync(data: dict[str, Any]) -> None:
+        syncs.append(data)
+        synced.set()
+
+    def on_update(data: dict[str, Any]) -> None:
+        updates.append(data)
+        if len(updates) == 2:
+            updated.set()
+
+    client = AttachClient(
+        lambda _: None,
+        failures.append,
+        frontend_state=True,
+        on_frontend_sync=on_sync,
+        on_frontend_update=on_update,
+    )
+    await runtime.start_in_process()
+    try:
+        await client.connect(runtime.record, "s1")
+        await asyncio.wait_for(synced.wait(), 5)
+        # Consume the genuinely queued old callback only AFTER the replacement
+        # snapshot reached the real client; production delivery must reject it.
+        for args in delayed:
+            original_delivery(*args)
+        release.set()
+        await asyncio.wait_for(old_released.wait(), 5)
+        handle._frontend.mutate(conversation_title="active-next")
+        await asyncio.wait_for(updated.wait(), 5)
+        assert not failures, failures
+        assert [d["epoch"] for d in updates] == [syncs[0]["epoch"]] * 2
+        q = syncs[0]["sequence"]
+        assert [d["sequence"] for d in updates] == [q + 1, q + 2]
+        assert [d["changes"]["conversation_title"] for d in updates] == [
+            "active-after-snapshot",
+            "active-next",
+        ]
+        assert handle.old_unbinds == 1
+        assert len(handle._frontend._subscribers) == 1
+        assert not runtime._abandoned_binds
+    finally:
+        release.set()
+        await client.detach()
+        await runtime.aclose()
+    assert handle.active_unbinds == 1
+    assert not handle.old_store._subscribers
+    assert not handle._frontend._subscribers

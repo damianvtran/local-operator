@@ -150,6 +150,33 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
         "reasoning-echo",
         (REASONING_ECHO_MARKERS,),
     ),
+    # An HTTP 402 is an out-of-credits (billing) refusal, named BEFORE
+    # "rate-limit" because the two share words: the harness used to render a 402
+    # as "rate limit or quota exceeded (HTTP 402): insufficient credits", and the
+    # rate-limit rule's bare "quota" marker claimed it, so a signed-in user with a
+    # zero balance was told to back off and retry. The later `billing` rule could
+    # never see it.
+    #
+    # ONE marker, the status token, and that narrowness is the point (agent
+    # review round 1, R1-1): "(HTTP 402)" is written by ``ProviderError.__str__``
+    # for this status alone and is not ordinary provider prose, whereas the
+    # WORDINGS that describe the same failure ("out of credits", "insufficient
+    # credits") are carried by other failures too — "insufficient credits to
+    # refresh" is a rejected bearer, "out of credits? retry in 5s" is a throttle
+    # — and at THIS position they outranked the auth and rate-limit rules that
+    # own those failures. Past those rules, the later `billing` rule still claims
+    # a label-less relayed body through its own markers (`credit` covers both
+    # wordings). Never a bare "402" either: that occurs in token counts ("used
+    # 402000 tokens").
+    #
+    # Both the current label ("out of credits (HTTP 402): ...") and the legacy
+    # rendering ("rate limit or quota exceeded (HTTP 402): ...") carry the
+    # token, so a transcript written by an older runtime classifies like a fresh
+    # one.
+    (
+        "billing",
+        ("http 402",),
+    ),
     (
         "rate-limit",
         (
@@ -708,7 +735,7 @@ def involuntary_kill_detail(
 
 
 def render_signal_receipt_detail(
-    *, signal_name: str = "", at: object = None, count: int = 1
+    *, signal_name: str = "", at: object = None, count: int = 1, spawn_chain: object = None
 ) -> str:
     """The parenthetical a runtime's OWN signal receipt gives a ``runtime-shutdown`` reason.
 
@@ -720,7 +747,10 @@ def render_signal_receipt_detail(
     one fact that matters to a reader — NOBODY ASKED FOR THIS STOP. It never
     names a party, it leads with :data:`KILL_UNATTRIBUTED` so a marked death and
     an unmarked one are not read as one sentence, and it opens as an aside (see
-    :func:`_render_cut_off_detail`) as ONE parenthetical, never nested.
+    :func:`_render_cut_off_detail`) as ONE parenthetical — never nested in its
+    no-clause shape, which is what the pinned single-pair test covers; the
+    spawn-chain clause below is the one shape that adds a second pair (its own
+    bundle + pid group) and only when it renders.
 
     "NOBODY ASKED FOR A STOP" RATHER THAN "NO STOP WAS STAGED" (design round 1,
     D1). "Staged" is this feature's own verb for writing the marker file, and it
@@ -738,6 +768,26 @@ def render_signal_receipt_detail(
     ONE COUNT, JOINED THE SAME WAY AS THE REST: "received 3 times, last at …"
     rather than a comma-appended second clause, which read as a continuation of
     "nobody asked for a stop" (design round 1, D5).
+
+    THE SPAWN-CHAIN CLAUSE (2026-10-09; reworked in remediation round 1). ``spawn_chain``
+    is the receipt's snapshot of the lineage the runtime was born into, each
+    member carrying TWO readings (see :mod:`local_operator.macos_disclaim`):
+    liveness as recorded at spawn (``alive_at_spawn``) and liveness at signal
+    arrival (``alive_now``). When — and only when — a member that is an
+    app-bundle main executable (``.app/Contents/MacOS/…``) was RECORDED ALIVE
+    and reads GONE at arrival, the sentence names the bundle and its pid: the
+    app at the root of this runtime's descent was running when the runtime
+    started and was no longer running when the signal arrived. The gate is the
+    point (design round 1, D1): reading a member that was already gone at
+    spawn, or one whose probe could not be made, renders nothing — the clause
+    means "this runtime outlived the app", never "the app explains this
+    death", and it states its two observations without upgrading either to
+    "force-quit" or to a sender. The bundle NAME is rendered, never the
+    recorded command line (D3: the line is long, unstable and persisted), the
+    root is named by DESCENT rather than as a spawner (D2), and the clause
+    precedes the closing "nobody asked for a stop" so that conclusion stays
+    final (D4). Old receipts without the field, and signals whose chain has no
+    gate-satisfying app ancestor, render exactly as before.
     """
     name = signal_name or "a termination signal"
     times = f" {count} times, last" if count > 1 else ""
@@ -745,9 +795,65 @@ def render_signal_receipt_detail(
     if isinstance(at, (int, float)) and not isinstance(at, bool) and at:
         when = " at " + time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(at)))
     return (
-        f" ({KILL_UNATTRIBUTED}, {name} received{times}{when} from an unidentified sender;"
-        " nobody asked for a stop)"
+        f" ({KILL_UNATTRIBUTED}, {name} received{times}{when} from an unidentified sender"
+        f"{_spawn_chain_clause(spawn_chain)}; nobody asked for a stop)"
     )
+
+
+#: The one marker that makes a recorded command an app-bundle main executable.
+#: The clause only names entries that have it, and the NAME is cut at the
+#: ``.app`` adjacent to it — the bundle the named pid actually belongs to.
+_APP_MAIN_EXEC_MARKER = ".app/Contents/MacOS/"
+
+
+def _spawn_chain_clause(spawn_chain: object) -> str:
+    """The outlived-app aside for a receipt that recorded a spawn chain, or "".
+
+    Strict on every axis, because the clause is persisted and this is the one
+    place it is composed: a list of dicts; a member RECORDED alive at spawn
+    (``alive_at_spawn`` is exactly ``True``) and GONE at arrival (``alive_now``
+    is exactly ``False``) — a probe that could not be made is ``None`` on one
+    side or the other, a member already gone when the chain was recorded fails
+    the first read, and none of them render; a positive pid; and a recorded
+    command that names an app-bundle main executable. Outermost first — the
+    app at the ROOT of the chain is the interesting one — and nothing is said
+    when none matches.
+
+    The rendered identity is the BUNDLE name plus pid (design round 1, D3),
+    never the recorded command line: that line is long, unstable, can carry
+    helper flags or secrets, and the full path already lives on the pid-keyed
+    boot record. The sentence claims exactly the two measured readings and
+    nothing more, and says so in its own last words — "(when it exited is not
+    recorded)" (design round 2, D6): the gate compares liveness at the
+    runtime's START with liveness at the signal, so an app that quit a second
+    ago and one that quit a week ago render the same, and without the caveat a
+    reader of a long-lived runtime's transcript (the clause is its NORMAL state
+    once runtimes outlive the app) could take the app's exit for the
+    explanation of an unrelated later SIGTERM.
+    """
+    if not isinstance(spawn_chain, list):
+        return ""
+    for entry in reversed(spawn_chain):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("alive_at_spawn") is not True or entry.get("alive_now") is not False:
+            continue
+        pid = entry.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        argv0 = str(entry.get("argv0") or "")
+        cut = argv0.find(_APP_MAIN_EXEC_MARKER)
+        if cut == -1:
+            continue
+        stem = argv0[:cut].rsplit("/", 1)[-1]
+        if not stem:
+            continue
+        return (
+            f"; the app this runtime descends from ({stem}.app, pid {pid})"
+            " was running when the runtime started and was no longer running"
+            " when the signal arrived (when it exited is not recorded)"
+        )
+    return ""
 
 
 def is_cut_off_cause(cause: str) -> bool:

@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "tracked": true,
+  "total_micro": 1536000,
+  "knowledge": "partial",
+  "by_basis": {
+    "billed": 53000,
+    "subscription_api_equivalent": 53000,
+    "estimated": 10000,
+    "not_tracked_micro": 1420000,
+    "not_tracked_calls": 1
+  },
+  "rows": [
+    {
+      "channel": "inference",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "label": "anthropic/claude-sonnet-5-5",
+      "units": 12.0,
+      "unit": "calls",
+      "amount_micro": 900000,
+      "knowledge": "exact",
+      "basis": [
+        "not_tracked"
+      ],
+      "price_versions": []
+    },
+    {
+      "channel": "image",
+      "provider": "openai-sub",
+      "model": "gpt-image-2",
+      "label": "",
+      "units": 1.0,
+      "unit": "images",
+      "amount_micro": 53000,
+      "knowledge": "exact",
+      "basis": [
+        "subscription_api_equivalent"
+      ],
+      "price_versions": [
+        "OpenAI image-generation pricing (gpt-image-2, 1024x1024 medium, 2026-10-09)"
+      ]
+    },
+    {
+      "channel": "image",
+      "provider": "radient",
+      "model": "gpt-image-2",
+      "label": "",
+      "units": 3.0,
+      "unit": "images",
+      "amount_micro": 53000,
+      "knowledge": "partial",
+      "basis": [
+        "billed",
+        "not_tracked"
+      ],
+      "price_versions": [
+        "Radient GET /tools/media/status cost_usd"
+      ]
+    },
+    {
+      "channel": "search",
+      "provider": "tavily",
+      "model": "",
+      "label": "",
+      "units": 1.0,
+      "unit": "searches",
+      "amount_micro": 8000,
+      "knowledge": "exact",
+      "basis": [
+        "estimated"
+      ],
+      "price_versions": [
+        "client-search-table-2026-09"
+      ]
+    },
+    {
+      "channel": "read",
+      "provider": "deepseek:read",
+      "model": "",
+      "label": "",
+      "units": 1.0,
+      "unit": "reads",
+      "amount_micro": 2000,
+      "knowledge": "exact",
+      "basis": [
+        "estimated"
+      ],
+      "price_versions": [
+        "client-search-table-2026-09"
+      ]
+    }
+  ],
+  "children": {
+    "total_micro": 520000,
+    "knowledge": "exact"
+  },
+  "breakdown": {
+    "by_agent": [
+      {
+        "id": "parent",
+        "label": "Parent agent",
+        "amount_micro": 1016000,
+        "knowledge": "partial",
+        "unstated_records": 1,
+        "bases": [
+          "billed",
+          "estimated",
+          "not_tracked",
+          "subscription_api_equivalent"
+        ]
+      },
+      {
+        "id": "subagents",
+        "label": "Subagents",
+        "amount_micro": 520000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "billed",
+          "not_tracked"
+        ]
+      }
+    ],
+    "by_source": [
+      {
+        "id": "inference",
+        "label": "Inference",
+        "amount_micro": 1400000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "not_tracked"
+        ]
+      },
+      {
+        "id": "image",
+        "label": "Image",
+        "amount_micro": 126000,
+        "knowledge": "partial",
+        "unstated_records": 1,
+        "bases": [
+          "billed",
+          "subscription_api_equivalent"
+        ]
+      },
+      {
+        "id": "search",
+        "label": "Search",
+        "amount_micro": 8000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "estimated"
+        ]
+      },
+      {
+        "id": "read",
+        "label": "Read",
+        "amount_micro": 2000,
+        "knowledge": "exact",
+        "unstated_records": 0,
+        "bases": [
+          "estimated"
+        ]
+      }
+    ]
+  },
+  "vocabulary": {
+    "channels": {
+      "inference": {
+        "label": "Inference"
+      },
+      "image": {
+        "label": "Image"
+      },
+      "search": {
+        "label": "Search"
+      },
+      "read": {
+        "label": "Read"
+      }
+    },
+    "bases": {
+      "billed": {
+        "label": "billed",
+        "source_class": "paygo",
+        "marker": "billed"
+      },
+      "subscription_api_equivalent": {
+        "label": "API-equivalent",
+        "source_class": "subscription",
+        "marker": "API-equivalent \u00b7 subscription",
+        "note": "You're on a subscription, so API-equivalent amounts are list-price equivalents \u2014 not what you are charged."
+      },
+      "estimated": {
+        "label": "estimated",
+        "source_class": "paygo",
+        "marker": "estimated"
+      },
+      "not_tracked": {
+        "label": "not tracked",
+        "source_class": "unknown",
+        "marker": "not tracked"
+      }
+    }
+  }
+}

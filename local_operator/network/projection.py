@@ -77,11 +77,24 @@ from local_operator.session.placement import (
     read_stamp,
 )
 from local_operator.session.runtime.types import (
+    JOURNAL_ORDER_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
+    PEER_JOURNAL_SOURCE_CAPABILITY,
+    PEER_JOURNAL_SOURCE_FLAG,
     SessionRecord,
 )
+from local_operator.supplements.contract import SUPPLEMENTS_CAPABILITY
 
 logger = logging.getLogger(__name__)
+
+#: THIS BUILD'S SIDE OF THE COMPLETE-CONTRACT GATE: the receiver vocabulary —
+#: the desktop DTOs and the strict omission every marshal path owes an old
+#: viewer — carries the peer-source field family (docs/DESKTOP_API.md "Complete
+#: peer-source contract"). A constant rather than a runtime probe because "does
+#: this build know the family" is a BUILD question: a build without the reader
+#: does not ship this declaration either. The dynamic half remains the OWNER's
+#: advertised capability string, checked per dial below.
+PEER_SOURCE_RECEIVER_SUPPORTED = True
 
 # ---------------------------------------------------------------------------
 # The local op vocabulary this module drives (declared in network/types.py)
@@ -175,6 +188,24 @@ def _peer_age(value: Any) -> float:
     return AGE_UNKNOWN_S if age <= 0 else age
 
 
+def _peer_last_user(value: Any) -> float | None:
+    """``last_user_at`` from a peer: a positive number, or NO claim (``None``).
+
+    NUMBER-OR-ABSENT is the sidebar lane's contract for this key (the desktop
+    sidebar's RUNNING order reads it, falling back to ``created_at`` then
+    catalogue order), and this is its parse at the mesh boundary: the value is
+    read through the same ``peer_number`` every numeric peer claim goes through,
+    so bools (``float(True)`` is the ``1.0``-into-1970 hazard this field's
+    siblings were cleaned of), ``NaN``, infinities, negatives, containers and
+    unreadable spellings all land where an absent key lands, while the
+    numeric-string spelling a mixed fleet can still send is accepted. A claimed
+    zero is no claim too — the refusal the renderer applies (``last_user_at <=
+    0`` is "no claim", never 1970) — and nothing is ever minted here.
+    """
+    number = peer_number(value, default=0.0)
+    return number if number > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # The peer catalogue seam (the transport's network/catalog.py implements it)
 # ---------------------------------------------------------------------------
@@ -231,6 +262,14 @@ class PeerRow:
     #: refusals, and the create-reply seed spelled the same claim ``0.0``, so
     #: the two readers disagreed about one claim (QA round 1 on #2044).
     started: float = 0.0
+    #: When the person last sent this session a message, as an epoch — the
+    #: desktop sidebar's RUNNING-order clock (``session/last_user.py`` is the
+    #: origin's reading of it; ``mtime``/``created_at``'s unit). ``None`` is NO
+    #: claim: absent, null, a bool, garbage, a negative or a claimed zero all
+    #: land here (``_peer_last_user``/``peer_number``), and the consumer's
+    #: fallback chain — ``created_at``, then catalogue order — runs on. Never
+    #: minted here.
+    last_user_at: float | None = None
     age_s: float = 0.0
     reachable: bool = True
     placement: SessionPlacement = field(default_factory=local_placement)
@@ -316,6 +355,7 @@ class PeerRow:
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=peer_number(data.get("started"), default=0.0),
+            last_user_at=_peer_last_user(data.get("last_user_at")),
             age_s=_peer_age(data.get("age_s")),
             reachable=bool(data.get("reachable", True)),
             placement=SessionPlacement.from_json(data.get("placement")),
@@ -343,6 +383,7 @@ class PeerRow:
             "detached": self.detached,
             "capabilities": list(self.capabilities),
             "started": self.started,
+            "last_user_at": self.last_user_at,
             "age_s": self.age_s,
             "locality": "remote",
             "peer": self.peer_block,
@@ -996,7 +1037,33 @@ class RemoteOwner:
         from local_operator.network import relay
 
         bound = relay.engage_client_bound_s()
-        detail = _relay_call(
+        # OFF THE LOOP, and not optional. ``_relay_call`` is a blocking socket
+        # round trip bounded by ``bound`` (85 s), and this coroutine runs on the
+        # daemon's one event loop, which serves every HTTP route — local sessions
+        # included. Called inline it froze all of them for the whole wake: a fake
+        # relay answering after 2.0 s stalled the loop 2.17 s (measured), and the
+        # desktop lease-warm loop re-fires this for a visible remote pane, so a
+        # slow peer wake could arm it repeatedly. ``locate`` and
+        # ``peer_stored_history_page`` are already handed to ``asyncio.to_thread``
+        # by their callers; this was the one blocking call made from inside an
+        # ``async def`` here (``connect`` uses asyncio streams). The default
+        # executor is safe: the thread does one socket round trip, holds no lock
+        # and no shared state, and the socket's own timeout bounds its lifetime —
+        # a cancelled awaiter abandons the thread but never strands it past
+        # ``bound``. The pool is capped (min(32, cpu + 4) workers), so a burst of
+        # that many CONCURRENT wakes would queue other ``to_thread`` users for the
+        # wake's duration — still strictly better than the inline call, which
+        # froze every route for one wake; one wake per distinct remote session
+        # (the lease-warm loop is single-flight per pane) keeps real bursts far
+        # under the cap. Shutdown trade-off: the default executor is joined when
+        # the loop closes or the interpreter exits, so a wake still in flight at
+        # daemon exit can hold a clean stop for up to ``bound`` — no worse than
+        # the inline call, which blocked for the same time. The 2.0 s -> 2.17 s
+        # stall figure comes from the remote-session audit's own harness (a fake
+        # relay answering after 2.0 s; reproduced in the PR that introduced this
+        # line, #2136). No timeout or contract change.
+        detail = await asyncio.to_thread(
+            _relay_call,
             self._root,
             OP_PEER_ENGAGE,
             # AN ENGAGE-SHAPED BUDGET, never the control socket's 5 s default: a
@@ -1125,6 +1192,12 @@ class RemoteSessionClient(AttachClient):
         super().__init__(on_projection, on_disconnected, locality="remote", **kwargs)
         self._facts = facts
         self._stream_id = ""
+        #: Whether THIS dial declared the complete peer-source contract (set in
+        #: ``connect`` from the same gate that writes the auth fields). The
+        #: facade reads it to decide whether owner order wakes may seed its
+        #: retained domain — a viewer that declared nothing can never vouch,
+        #: and a local client with no such property reads False.
+        self.peer_journal_source_declared = False
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Open a forwarded stream to the owner and consume its welcome.
@@ -1191,6 +1264,36 @@ class RemoteSessionClient(AttachClient):
         auth: dict[str, Any] = {}
         if self._events:
             auth["events"] = True
+            # THE COMPLETE CONTRACT GATES THE WHOLE PEER ORDER DECLARATION, and
+            # that is a correction rather than a widening: this dial used to
+            # declare ``journal_order`` against any runtime advertising
+            # ``journal-order-v1``, which asks a peer runtime for the LOCAL
+            # order vocabulary without the complete peer contract behind it —
+            # a partial request whose facts a peer viewer has no negotiated
+            # path to settle. Both keys ride together, and only when the OWNER
+            # advertises BOTH strings; otherwise NEITHER is declared and the
+            # attach carries no new peer order request at all.
+            declared = (
+                PEER_SOURCE_RECEIVER_SUPPORTED
+                and JOURNAL_ORDER_CAPABILITY in capabilities
+                and PEER_JOURNAL_SOURCE_CAPABILITY in capabilities
+            )
+            if declared:
+                auth["journal_order"] = True
+                # LITERAL, not ``PEER_JOURNAL_SOURCE_FLAG``: the allowlist
+                # guard scans these declarations as SYNTAX, and a computed key
+                # is invisible to it — a declaration written that way could
+                # ship inert and the guard would never say so
+                # (test_dial_allowlist). The literal is pinned to the constant
+                # by the vocabulary test.
+                auth["peer_journal_source"] = True
+            # THE ATTACHMENT'S OWN HALF OF THE GATE, exposed viewer-locally for
+            # the facade's retention: the flag says THIS dial actually declared
+            # the complete contract, re-derived on every connect (a redial to a
+            # successor with different capabilities re-answers the question
+            # rather than inheriting the last verdict) and False whenever the
+            # gate fails, which is the fail-closed direction.
+            self.peer_journal_source_declared = declared
         if self._frontend_state:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in capabilities:
@@ -1206,6 +1309,15 @@ class RemoteSessionClient(AttachClient):
                 auth["display_history_entry_times"] = True
         if self._slash_consumers is not None:
             auth["slash_consumers"] = list(self._slash_consumers)
+        # The remote dial's half of the ``supplements-v1`` gate, mirrored here
+        # for the same reason ``_input_mode_supported`` is (see the comment on
+        # that assignment above): this connect does not delegate to
+        # ``AttachClient.connect``, so an omission would silently mean "this
+        # viewer cannot render supplements" for every mesh session. The relay
+        # forwards the field (``network.dial.AUTH_FIELDS``) and the peer's
+        # runtime ANDs it with its own capability, exactly as on a local dial.
+        if self._supplements and SUPPLEMENTS_CAPABILITY in capabilities:
+            auth["supplements"] = True
         if self._surface == "desktop":
             auth["surface"] = "desktop"
         writer.write(json.dumps({"key": self._facts.control_key, "client": "cli"}).encode() + b"\n")
@@ -1275,6 +1387,10 @@ def peer_stored_history_page(
     session_id: str,
     before_id: str | None = None,
     limit: int = 100,
+    open_frame: bool = False,
+    journal_order: bool = False,
+    order_ids: list[str] | None = None,
+    peer_journal_source: bool = False,
 ) -> dict[str, Any] | None:
     """One page of a PEER's stored journal, or ``None`` when it cannot be served.
 
@@ -1294,6 +1410,15 @@ def peer_stored_history_page(
     page did not arrive, and the peer's refusal sentence is not a sentence about
     this device's history.
 
+    ``open_frame`` ASKS FOR THE OPEN-FRAME PAGE of ``DESKTOP_API.md`` §"The open
+    frame" — the turn-aligned, paint-only page, built by the OWNER's read once
+    its facts half lands. The ask is the KEY'S PRESENCE, carried
+    only when true: a caller that did not ask sends today's frame byte-for-byte,
+    so an owner older than the flag reads its familiar request unchanged. The
+    reply's optional run facts (``runs``, ``runs_state``, ``head_cut``) are
+    passed through UNCHANGED when the owner produced them — and are absent
+    otherwise, which is the only shape any owner produces today.
+
     BLOCKING — it dials this device's relay's control socket. Callers on a loop
     must hand it to ``asyncio.to_thread``.
     """
@@ -1310,18 +1435,158 @@ def peer_stored_history_page(
         session_id=session_id,
         before_id=before_id or None,
         limit=int(limit),
+        # THE ASK IS THE KEY'S PRESENCE (``validate_open_frame`` in
+        # ``network/relay.py`` owns the spelling on both halves): a caller that
+        # did not ask sends today's frame, byte-for-byte.
+        **({"open_frame": True} if open_frame else {}),
+        **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+        # THE COMPLETE DECLARATION RIDES ONLY WHEN ASKED FOR: absent, this
+        # relay forwards today's bytes to the owner exactly as it always has.
+        **({PEER_JOURNAL_SOURCE_FLAG: True} if peer_journal_source else {}),
     )
     if not reply or reply.get("refused"):
         return None
     entries = reply.get("entries")
     if not isinstance(entries, list):
         return None
-    return {
+    page: dict[str, Any] = {
         "entries": entries,
         "has_more": bool(reply.get("has_more")),
         "cursor_missing": bool(reply.get("cursor_missing")),
         "has_newer": reply.get("has_newer"),
     }
+    # THE OPTIONAL RUN FACTS: passed through UNCHANGED when the owner produced
+    # them, and absent otherwise (``runs``/``runs_state``/``head_cut`` of
+    # DESKTOP_API.md §"The open frame"). Absent keeps the answer's key set — and
+    # every byte — exactly today's; PRESENT means present, so an empty ``runs``
+    # list or ``head_cut: false`` is carried verbatim rather than dropped by a
+    # truthiness test.
+    for key in ("runs", "runs_state", "head_cut"):
+        if key in reply:
+            page[key] = reply[key]
+    if journal_order:
+        # TWO NEGOTIATIONS, EACH WITH ITS OWN WHOLE ANSWER.
+        #
+        # COMPLETE (the request declared ``peer_journal_source``): the owner's
+        # own state rides through — ``ready`` / ``building`` / ``unavailable``
+        # — but ONLY behind the per-response ACK. A reply without
+        # ``peer_journal_source: true`` is not a complete result: an owner
+        # relay that did not negotiate the contract answers its familiar page,
+        # and surfacing that as source facts would be exactly the manufacture
+        # this contract forbids. Under the complete gate a ``building`` answer
+        # is settleable (the availability lane is the wake), so it is carried
+        # honestly rather than degraded.
+        #
+        # LEGACY (no declaration): ``unsupported``, byte-identically to before
+        # this change. The installed UI sends ``journal_order`` without the new
+        # declaration, and its peer pages must not activate ordering that has
+        # no negotiated wake behind it.
+        if peer_journal_source and reply.get(PEER_JOURNAL_SOURCE_FLAG) is True:
+            for key in (
+                "journal_order_state",
+                "journal_generation",
+                "journal_ordinals",
+                "journal_missing_ids",
+                "reconcile",
+                PEER_JOURNAL_SOURCE_FLAG,
+            ):
+                if key in reply:
+                    page[key] = reply[key]
+            page.setdefault("journal_order_state", "unsupported")
+        else:
+            page["journal_order_state"] = "unsupported"
+    return page
+
+
+def peer_source_read(
+    root: Path | None,
+    *,
+    device_id: str,
+    session_id: str,
+    purpose: str,
+    order_ids: list[str] | None = None,
+    expected_generation: str | None = None,
+) -> dict[str, Any] | None:
+    """One typed source purpose (``metadata``/``payload``) on the stored hop.
+
+    THE COMPLETE DECLARATION IS SENT AND THE OWNER'S ACK IS REQUIRED. A reply
+    without ``peer_journal_source: true`` is not a complete result — an older
+    owner relay answers its familiar page, and a capable owner's relay degrades
+    honestly to ``unsupported`` — so this returns ``None`` for it and the
+    caller states ``unsupported`` rather than surfacing a page as source
+    facts. The owner's own answer is already page-shaped (the frozen four-key
+    envelope plus source facts), so a successful reply is passed through whole.
+
+    ``availability`` never rides this door; the bridge's coalesced wait is
+    :func:`peer_source_availability`.
+
+    BLOCKING — dials this device's relay control socket. Callers on a loop hand
+    it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # The SAME read-sized bound every stored read pays: the owner's
+        # purposes answer off its resident index or its deferred lane, never a
+        # spawn, and a client that gave up first would report no answer about
+        # a relay still working.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        source_read=purpose,
+        **{PEER_JOURNAL_SOURCE_FLAG: True},
+        # THE PURPOSE CARRIES THE PAGE OPT-IN BESIDE ITS IDS, end to end: the
+        # relay's stored-hop forward keeps ``order_ids`` beside a truthy
+        # ``journal_order`` (its own shape rule), and a purpose whose ids are
+        # dropped at that seam answers a factless "ready" that nothing names —
+        # the silently-degraded read QA round 1 (Q1) reproduced through the
+        # product's own door. The ids ARE the lookup; the opt-in is how they
+        # travel.
+        **({"journal_order": True, "order_ids": order_ids} if order_ids else {}),
+        **({"expected_journal_generation": expected_generation} if expected_generation else {}),
+    )
+    if not reply or reply.get("refused"):
+        return None
+    if reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
+        return None
+    return reply
+
+
+def peer_source_availability(root: Path | None, *, device_id: str, session_id: str) -> str:
+    """One bounded availability wait through the owner's deferred lane.
+
+    Returns one of the contract's three signals — ``ready`` / ``unavailable``
+    / ``unsupported`` — and NEVER a generation or a row: availability is a
+    wake decision, and the authoritative read is what mints a domain. A missing
+    relay or expired hop reads as ``unavailable``. A refusal has no authorized
+    source contract and returns ``unsupported`` like an absent ACK, so a revoked
+    grant cannot establish a supported failed wave on the awaiting bridge.
+
+    BLOCKING — dials this device's relay control socket. Callers on a loop hand
+    it to ``asyncio.to_thread``.
+    """
+    from local_operator.network import relay
+
+    reply = _relay_call(
+        root,
+        OP_PEER_HISTORY,
+        # OUTLASTS THE OWNER'S OWN WAIT (``SOURCE_AVAILABILITY_WAIT_S``) BY THE
+        # SAME CLIENT MARGIN EVERY READ PAYS: the owner answers at its bound,
+        # and a client that gave up first would report no answer about a relay
+        # that answered.
+        timeout=relay.session_history_client_bound_s(),
+        peer=device_id,
+        session_id=session_id,
+        source_read="availability",
+        **{PEER_JOURNAL_SOURCE_FLAG: True},
+    )
+    if not reply:
+        return "unavailable"
+    if reply.get("refused") or reply.get(PEER_JOURNAL_SOURCE_FLAG) is not True:
+        return "unsupported"
+    return "ready" if reply.get("source_available") is True else "unavailable"
 
 
 def _relay_call(root: Path | None, op: str, **fields: Any) -> dict[str, Any] | None:

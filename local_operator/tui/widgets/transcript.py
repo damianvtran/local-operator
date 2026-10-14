@@ -32,6 +32,7 @@ import os
 import time
 import unicodedata
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import (
     Any,
     Callable,
@@ -40,6 +41,7 @@ from typing import (
     Iterator,
     Literal,
     Mapping,
+    NamedTuple,
     Protocol,
     Sequence,
     cast,
@@ -64,12 +66,23 @@ from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
+from local_operator.i18n.format import format_number
+from local_operator.i18n.keys import tui_transcript
+from local_operator.i18n.text import active_locale, tr
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
     composer_may_take_focus,
     focus_is_claimed,
     return_focus_to_composer,
+)
+from local_operator.tui.quiet_groups import (
+    QuietGroup,
+    QuietGroupRecord,
+    group_splitter_of,
+    quiet_family_of,
+    quiet_group_of_segment,
+    quiet_group_stretches,
 )
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
@@ -1349,13 +1362,18 @@ class ExpandableActionBlock(TranscriptBlock):
 #: the spool the message is out of reach, and the row saying otherwise for that
 #: brief window is why the press has to answer with the truth rather than
 #: silence.
-QUEUED_ROW_TEXT = "· queued for the next runtime \u2014 esc takes it back"
+#: Resolved through the i18n runtime (T3, RFC §3.1): the marker strings are the
+#: en catalogue's ``tui.transcript.queued.*`` values — the leading middle dot and
+#: every word — so a wave moves them like every other extracted area.
+_t = tr("tui.transcript")
+
+QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
 #: The same state WITHOUT the offer, for every queued message but the newest.
 #: Only the newest is recallable (``app._withdraw_queued_prompt`` lifts one at a
 #: time, the sibling steer channel's rule), so a second marked row advertising
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
-QUEUED_ROW_TEXT_OLDER = "· queued for the next runtime"
+QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
 
 
 class UserBlock(TranscriptBlock):
@@ -1671,8 +1689,10 @@ class UserBlock(TranscriptBlock):
             # saying the bytes were actually attached and sent, which is the one
             # thing the marker cannot tell them and the whole reason a paste
             # that silently attached nothing went unnoticed for so long.
-            plural = "s" if self._attachments != 1 else ""
-            rows.append(f"↑ {self._attachments} image{plural} attached")
+            # ICU plural from the catalogue (T3): en renders '1 image' /
+            # '3 images' byte for byte; a wave changes the categories, not
+            # this call site.
+            rows.append(_t(tui_transcript.attach_receipt(count=self._attachments)))
             self._receipt_rows.add(len(rows) - 1)
         if self._queued:
             # MARKED, and not only stated below it: measured, this row was
@@ -2506,8 +2526,8 @@ class WakeBlock(ExpandableActionBlock):
                 if stripped.startswith("- "):
                     ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
             count = len(ids)
-            label = f"{count} missed wake{'s' if count != 1 else ''}"
-            headline = f"catch-up — {label}"
+            label = _t(tui_transcript.catchup_missed(count=count))
+            headline = _t(tui_transcript.catchup_headline(label=label))
             if ids:
                 # The same label treatment the single-delivery fold applies
                 # (UX review round 2, U5 / QA Q3): this branch composes its
@@ -2889,7 +2909,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         model = _sanitize_sender_field(self._sender.get("model_label"))
         bits: list[str] = []
         if pid:
-            bits.append(f"pid {pid}")
+            bits.append(_t(tui_transcript.sender_pid(pid=pid)))
 
         def _compose(parts: list[str]) -> str:
             if name:
@@ -2898,10 +2918,12 @@ class PeerMessageBlock(ExpandableActionBlock):
             if parts:
                 return " · ".join(parts)
             # Nothing identifying at all. The one case that still needs prose,
-            # because a bare `·`-joined empty list says nothing — and it shares
-            # the wording `_summary` falls back to, and `harness/comms.py`
-            # before it, so the three do not drift.
-            return "another session"
+            # because a bare `·`-joined empty list says nothing — and it
+            # resolves the SAME catalogue key `_summary` falls back to (and
+            # `harness/comms.py`'s vocabulary before it), so the three do not
+            # drift: review round 1 (R1) found this sibling still a raw
+            # literal, invisible to a sink-only ratchet.
+            return _t(tui_transcript.sender_unknown())
 
         header = _compose(bits)
         if not model:
@@ -2946,7 +2968,11 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the two spellings identical so a reader meeting one in a
             # transcript and one in a tool result does not think they are
             # different states.
-            identity = f"pid {pid}" if pid else "another session"
+            identity = (
+                _t(tui_transcript.sender_pid(pid=pid))
+                if pid
+                else _t(tui_transcript.sender_unknown())
+            )
         # The SNIPPET is stripped of control sequences and Cf; the body is not.
         #
         # `text()` and the expansion must stay byte-verbatim or `/copy` stops
@@ -3178,7 +3204,13 @@ class PeerMessageBlock(ExpandableActionBlock):
             row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
-        row.append(summary, style=dim)
+        # The identity/attention/preview run takes the META ink (`muted`), not
+        # the separator `dim`: measured on the card's own grounds, `dim` sits
+        # at 4.18:1 collapsed / 3.97:1 expanded — under the normal-text floor
+        # for the 13px preview — while `muted` clears it (7.53:1 expanded) and
+        # is the ramp step the receipt header already speaks (design D2, round
+        # 1: use the existing metadata role, no palette change).
+        row.append(summary, style=muted)
         if slot:
             used = cell_len(row.plain)
             pad = max(1, width - used - cell_len(slot))
@@ -3297,6 +3329,1257 @@ class PeerMessageBlock(ExpandableActionBlock):
     def spans_multiple_rows(self) -> bool:
         """Exact: the card already tracks its own height, collapsed or not."""
         return self._row_count > 1
+
+
+class HubMessageBlock(PeerMessageBlock):
+    """An incoming parent/child message using the existing receipt ledger seat.
+
+    Keeping a distinct subtype preserves source/direction and historical reply
+    intent without pretending that a parent is a peer or an operator question.
+    The inherited copy/render infrastructure keeps the complete body selectable.
+    """
+
+    tool_name = "hub"
+
+    def __init__(self, body: str, details: dict[str, object], *, fold_width: int = 0) -> None:
+        self.hub_details = details
+        sender = details.get("sender")
+        super().__init__(body, sender if isinstance(sender, dict) else {}, fold_width=fold_width)
+
+    def restate_receipt(self, body: str, details: dict[str, object]) -> bool:
+        """Adopt richer replay facts without replacing the reader's open row.
+
+        The entry ID owns the receipt; body/sender/reply corrections are not a
+        second delivery. Rebuild the inherited cached preview only when facts
+        change, retaining expansion and source-anchor identity in place.
+        """
+        if self._text == body and self.hub_details == details:
+            return False
+        self._text = body
+        self.hub_details = details
+        sender = details.get("sender")
+        self._sender = sender if isinstance(sender, dict) else {}
+        self._snippet = " ".join(_sanitize_line(body[:_SNIPPET_SOURCE_MAX_CHARS]).split())
+        self._refresh_row()
+        return True
+
+    def _sender_name(self) -> tuple[str, bool]:
+        label = _sanitize_sender_field(self.hub_details.get("label"))
+        job = _sanitize_sender_field(self.hub_details.get("job_id"))
+        if label or job:
+            return label or job, False
+        name, quoted = super()._sender_name()
+        if name:
+            return name, quoted
+        direction = self.hub_details.get("direction")
+        return (
+            "Parent"
+            if direction == "to_child"
+            else "Subagent" if direction == "to_parent" else "Hub"
+        ), False
+
+    def _intent(self) -> str:
+        return " · ".join(
+            word
+            for flag, word in (
+                (
+                    self.hub_details.get("expects_reply") is True,
+                    _t(tui_transcript.hub_reply_requested()),
+                ),
+                (self.hub_details.get("steer") is True, _t(tui_transcript.hub_steered())),
+            )
+            if flag
+        )
+
+    def _summary(self) -> tuple[str, str]:
+        identity, snippet = super()._summary()
+        intent = self._intent()
+        return (
+            " · ".join(
+                part for part in (_t(tui_transcript.hub_from(identity=identity)), intent) if part
+            ),
+            snippet,
+        )
+
+    def _header(self, width: int | None = None) -> str:
+        # Direction and job are advisory display facts, never chronology or a
+        # fabricated parent ID. Reply-requested cannot assert a pending reply.
+        parts = [super()._header(width), self._intent()]
+        for key in ("direction", "job_id"):
+            value = _sanitize_sender_field(self.hub_details.get(key))
+            if value:
+                parts.append(value)
+        return " · ".join(part for part in parts if part)
+
+
+class QuietGroupBlock(ExpandableActionBlock):
+    """One bar over a run of consecutive delivery receipts (design
+    ``docs/design/quiet-turns.md`` §5, slice S5).
+
+    WHERE IT SITS. The transcript draws one card per receipt; a run of >= 2
+    receipts with nothing visible between them (tool rows may sit inside) is
+    folded under this bar instead, and the member rows are hidden while it is
+    collapsed — the shape the relay web's disclosure landed with (S4), so a
+    dozen peer messages stop being a dozen cards. Opening it reveals the
+    members IN PLACE, exactly as they paint at top level; the members are
+    ordinary sibling blocks in this container, not children of this widget,
+    and "folding" is their ``display`` being switched off (see
+    :meth:`adopt_members`). That is also why the bar's own expansion authors
+    no extra rows: its content is the same one line either way, and the
+    geometry change a reader sees comes from the members appearing below it.
+
+    THE FACTS. ``group`` is the client-derived :class:`QuietGroup` (family,
+    count, senders, actions, failed — see ``tui/quiet_groups.py``, where the
+    definition and its cross-client parity fixture live). The bar states the
+    family word and the count, design §5's copy; ``partial`` is the head-cut
+    verdict — the span's first loaded row is its own top edge and older rows
+    may belong to it — stated as the trailing ``+`` the whole fleet uses
+    ("at least N"; the count is a minimum). This surface states no span
+    clause: no per-entry time reaches its rows (see the quiet_groups module
+    doc), so the clause is absent rather than fabricated.
+
+    THE LATCH. A closed group's facts freeze because later appends land
+    outside its boundary; an OPEN tail group grows through
+    :meth:`restate_group` while its one line, and the reader's expansion
+    state, are untouched (the jitter rule the ``qg:`` key documents).
+
+    The collapsed bar is app chrome from end to end — it carries no message
+    text of its own — so every row of it is :meth:`copy_row_is_chrome`; a
+    drag over the bar hands back nothing, and the members' own rows carry
+    their own copy behaviour when open.
+    """
+
+    EXPANDED_CLASS = "quiet-group-expanded"
+
+    def __init__(self, group: QuietGroup, *, partial: bool = False, fold_width: int = 0) -> None:
+        super().__init__()
+        #: The derived facts. Replaced wholesale by :meth:`restate_group` as
+        #: the open tail grows; a closed group's is never touched again.
+        self.group = group
+        #: Whether the count is a minimum (see the class docstring). Carried
+        #: BESIDE the group because the verdict is the caller's, not something
+        #: the facts can re-derive — this surface's times are always unknown,
+        #: so ``first_ts is None`` cannot tell head-cut from no-times.
+        self.partial = partial
+        #: The run's member blocks, in order (adopted at formation; grown by
+        #: :meth:`admit_member`). See the class docstring for why they stay
+        #: siblings.
+        self._members: list[TranscriptBlock] = []
+        self._expanded = False
+        self._hovered = False
+        self._focused = False
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+        #: The name column's word for this bar. An INSTANCE attribute (the
+        #: family is per-group), which is why it is set here rather than as a
+        #: class constant like the single-kind receipts'.
+        self.tool_name = group.family
+        # Before the first row build (see `UserBlock.__init__`).
+        self.set_fold_hint(fold_width)
+        self._refresh_row()
+        self.finalize()
+
+    # -- the fold's own lifecycle ---------------------------------------------
+
+    def restate_group(self, group: QuietGroup) -> None:
+        """Re-state the facts after the open tail grew.
+
+        The count is the only thing that moves on the bar; the family can only
+        widen (to ``mixed``), and the reader's expansion state is not touched —
+        the append must not re-collapse a group the reader opened (design §5:
+        "single-line bar, no geometry change").
+        """
+        self.group = group
+        self._refresh_row()
+
+    def admit_member(self, block: TranscriptBlock) -> None:
+        """Fold one more row into the group (an open tail's append)."""
+        self._members.append(block)
+        if not self._expanded:
+            block.display = False
+
+    def adopt_members(self, members: Sequence[TranscriptBlock]) -> None:
+        """Take the run's member blocks and fold them away.
+
+        Called once at formation (by the tracker or the replay fold); the bar
+        starts collapsed, so every member is hidden here. ``display`` rather
+        than ``remove``: a member stays mounted and retained — the fold is a
+        visibility switch, so expanding is exact and cheap, and the
+        transcript's own bookkeeping (`_blocks`, the shared name column, the
+        copy machinery) keeps holding the rows it always did.
+        """
+        self._members = list(members)
+        self._sync_member_visibility()
+
+    def _sync_member_visibility(self) -> None:
+        """Members follow the bar's expansion state, in both directions."""
+        for member in self._members:
+            member.display = self._expanded
+
+    def _after_toggle(self) -> None:
+        """The base's toggle seam: the members ARE this row's expansion."""
+        self._sync_member_visibility()
+
+    # -- builders (the ledger contract, shared with the other receipt rows) --
+
+    def can_expand(self) -> bool:
+        """Always: the collapsed line stands for the receipts behind it."""
+        return True
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the row at the new width — or at a new shared column.
+
+        Same guard as the tool card and the sibling receipts: the width this
+        row is laid out at and the ledger's shared column (see
+        :meth:`ExpandableActionBlock._layout_moved`).
+        """
+        size = getattr(event, "size", None)
+        if size is not None and not self._layout_moved(size.width):
+            return
+        self._refresh_row()
+
+    def copy_gutter(self, index: int) -> int:
+        """The icon field on the summary row, as built.
+
+        The same count the sibling receipts use — a bar sits between tool
+        rows, so a gutter measured against a different spine would eat the
+        first character of its name when copied.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
+
+    def copy_row_is_chrome(self, index: int) -> bool:
+        """Every row of the bar is the app's own furniture (see the class
+        docstring): the family word and the count are the app talking, and
+        the members' content lives on their own blocks."""
+        return True
+
+    def refresh_row(self, width: int | None = None) -> None:
+        """Repaint at the current width — the ledger's shared column moved."""
+        self._refresh_row(width)
+
+    def _refresh_row(self, width: int | None = None) -> None:
+        """Rebuild the bar at its own width (the `WakeBlock` ladder)."""
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH, row_body_width
+
+        if width is not None and width > 0 and width == self._built_width:
+            return
+        width = self.fit_width(width)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        self._built_name_col = self._name_col(row_body_width(width))
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            self.set_content(content, layout=moved)
+        finally:
+            self._finalized = was_finalized
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells (read from the view)."""
+        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
+
+        parent = self.parent
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
+            return parent.tool_name_col
+        return NAME_COL
+
+    def _summary_ink(self) -> str:
+        """A receipt's band: the same dim the wake and monitor rows use."""
+        return "dim"
+
+    @staticmethod
+    def _count_label(count: int) -> str:
+        # Existing EN frames used raw decimal counts and must stay byte-stable.
+        # Other locales follow the shared formatter, not that compatibility pin.
+        locale = active_locale()
+        return str(count) if locale == "en" else format_number(count, locale)
+
+    def _summary_text(self) -> str:
+        """The bar's one sentence: ``messages · 12`` (``12+`` when cut).
+
+        The design's copy table leads with the family word (``Peer messages``)
+        and the name column already states it — ``peer`` reads straight into
+        ``messages · 12`` — so the phrase is not repeated on the row. The
+        count carries the shared minimum marker when the head is cut.
+        """
+        count = self._count_label(self.group.count) + ("+" if self.partial else "")
+        parts = [_t(tui_transcript.group_messages(count=count))]
+        # ICU selects the locale's noun form with the number, but the count label
+        # stays the existing raw decimal text; formatting that selector would add
+        # thousands separators and change already-reviewed English frame bytes.
+        if self.group.mixed_actions:
+            parts.append(
+                _t(
+                    tui_transcript.group_actions(
+                        count=self.group.actions, label=self._count_label(self.group.actions)
+                    )
+                )
+            )
+        if self.group.reply_requested:
+            parts.append(
+                _t(
+                    tui_transcript.group_reply_requested(
+                        count=self.group.reply_requested,
+                        label=self._count_label(self.group.reply_requested),
+                    )
+                )
+            )
+        if self.group.steered:
+            parts.append(
+                _t(
+                    tui_transcript.group_steered(
+                        count=self.group.steered, label=self._count_label(self.group.steered)
+                    )
+                )
+            )
+        return " · ".join(parts)
+
+    def _build_row(self, width: int) -> Text:
+        """The single summary row — the one-row guarantee lives here."""
+        from local_operator.tui.glyphs import display_name, tool_icon
+        from local_operator.tui.widgets.tool_card import (
+            _SUMMARY_FLOOR,
+            COLLAPSE_HINT,
+            EXPAND_HINT,
+            row_body_width,
+            row_indent,
+            truncate_cells,
+        )
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        indent = row_indent(width)
+        width = row_body_width(width)
+
+        icon = tool_icon(self.tool_name)
+        label = display_name(self.tool_name)
+        name_budget = width - 4  # icon, its space, name's trailing space, 1 cell of summary
+        summary = self._summary_text()
+        if name_budget < 2:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
+            row.append(icon + " ", style=dim)
+            return row
+
+        name_col = min(self._name_col(width), name_budget)
+        name = truncate_cells(label, name_col)
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
+
+        slot = ""
+        remaining = max(0, width - prefix_cells)
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
+                slot = offer
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        budget = max(0, remaining - slot_cells)
+        summary = truncate_cells(summary, budget)
+
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
+        row.append(icon + " ", style=dim)
+        row.append(name + " ", style=muted)
+        row.append(summary, style=dim)
+        if slot:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - cell_len(slot))
+            row.append(" " * pad, style=dim)
+            row.append(slot, style=dim)
+        return row
+
+    def _build_content(self, width: int) -> Text:
+        """The bar itself: the same one row, expanded or not (see the
+        class docstring — the expansion is the members' reveal)."""
+        return self._build_row(width)
+
+    def settled_rows(self) -> int:
+        """Rows settled now: always one — the bar does not grow."""
+        return self._row_count if self._finalized else 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Never: the bar's own rendered height is pinned at one row."""
+        return False
+
+
+#: The predecessor families an owned auxiliary chain may pass through: the
+#: tool/hub rows a picture is the output of, plus the chain's own interior
+#: rows. A human (``other``) or assistant predecessor ends the chain however
+#: its coordinates line up (review round 8, R8-1/Q-R9-A1).
+_IMAGE_INTERIOR_FAMILIES = frozenset({"tool", "hub", "inside"})
+
+
+def _source_owner_of(block: TranscriptBlock) -> tuple[str, int] | None:
+    """The source coordinate a row's OWN provenance names, or ``None``.
+
+    Read from the projection anchor every projected row carries
+    (``navigation_anchor_id`` plus the part the source itself assigned), so
+    "the same owner" is a fact about the SOURCE — never a guess from a row's
+    text, its type, or its neighbours' types (review round 7, R6-1/Q-R8-1).
+    A row with no anchor returns ``None``, which breaks any ownership chain:
+    live rows the projection has not stamped cannot claim a neighbour's owner.
+    """
+    anchor = str(getattr(block, "navigation_anchor_id", "") or "")
+    if not anchor:
+        return None
+    part = getattr(block, "navigation_anchor_part", None)
+    if not isinstance(part, int):
+        return None
+    return (anchor, part)
+
+
+def quiet_group_record_of(
+    block: TranscriptBlock,
+    *,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
+) -> QuietGroupRecord:
+    """Map ONE mounted block onto the group derivation's record vocabulary.
+
+    The TUI half of the mapping ``tui/quiet_groups.py`` documents; the
+    derivation itself never sees a widget. Two parameters describe the row
+    BEFORE this one in source order, and only one rule reads them:
+
+    - an :class:`ImageBlock` is ``inside`` on either of two POSITIVE facts:
+      the row before it is a tool or hub row — it is that call's or that
+      receipt's output, so it folds WITH it — or its own source coordinate
+      continues the SAME owner's part chain (``prev_owner`` is the anchor id
+      plus the previous part: body 0, then the pictures at 1, 2, 3 ...).
+      Without the owner arm a receipt carrying several pictures kept only the
+      first one: the first picture read as interior and the second, whose
+      predecessor was now interior, read as a splitter — splitting the very
+      run it belonged to (review round 7, R6-1/Q-R8-1). Everything else keeps
+      the conservative reading: a picture a reader must be able to see stays
+      visible, a different owner's picture is never absorbed into an earlier
+      run, and a row that breaks the chain (a human or final boundary, a row
+      with no coordinate) ends it.
+
+    Everything else classifies by type; the id rides ``navigation_anchor_id``
+    (set for every projected row) with an object-identity fallback for live
+    rows, and nothing renders it — it exists so the derivation's ``key`` and
+    ``row_ids`` are as stable as the contract asks.
+    """
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.image_block import ImageBlock
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    anchor = getattr(block, "navigation_anchor_id", "") or ""
+    part = getattr(block, "navigation_anchor_part", 0)
+    record_id = f"{anchor}:{part}" if anchor else f"b{id(block):x}"
+    if isinstance(block, HubMessageBlock):
+        label, _ = block._sender_name()
+        reply = block.hub_details.get("expects_reply")
+        steer = block.hub_details.get("steer")
+        return QuietGroupRecord(
+            kind="hub",
+            id=record_id,
+            sender={"conversation_name": label},
+            expects_reply=reply if isinstance(reply, bool) else None,
+            steer=steer if isinstance(steer, bool) else None,
+        )
+    if isinstance(block, PeerMessageBlock):
+        return QuietGroupRecord(kind="peer", id=record_id, sender=block._sender)
+    if isinstance(block, MonitorDeltaBlock):
+        return QuietGroupRecord(kind="monitor", id=record_id)
+    if isinstance(block, AskResponseBlock):
+        # An ask receipt is a QUESTION to the reader — the row they come back
+        # to answer ("what did I tell it, and when?") — so it is a boundary,
+        # never a group member a collapse could hide. It sits HERE, before the
+        # ``WakeBlock`` check, because it is a ``WakeBlock`` by inheritance
+        # (the shared ledger contract) and not by meaning; the relay port's
+        # splitter switch names ``ask_response``/``ask_timeout`` the same way.
+        return QuietGroupRecord(kind="ask", id=record_id)
+    if isinstance(block, WakeBlock):
+        return QuietGroupRecord(kind="wake", id=record_id)
+    if isinstance(block, ToolCard):
+        state = block.state
+        tool_state = "failed" if state == "error" else state
+        return QuietGroupRecord(
+            kind="tool", id=record_id, tool_name=block.tool_name, tool_state=tool_state
+        )
+    if isinstance(block, AssistantBlock):
+        text = block.text()
+        if not text.strip():
+            # BELT (S5 remediation): an assistant row whose visible text has
+            # not landed is a BOUNDARY, never a foldable interior row — the
+            # live path may still deliver prose into it, and a group may never
+            # hide a row that can become an answer. The derivation tolerates
+            # an empty ``assistant`` row as interior because such a row paints
+            # nothing a reader would miss; that reading is only safe once the
+            # row has settled, which a mounted block cannot promise, so this
+            # surface classifies the unresolved row as unknown instead — the
+            # derivation's default makes that a splitter. Visible prose keeps
+            # its own kind and splits by the definition's own text rule.
+            return QuietGroupRecord(kind="other", id=record_id)
+        return QuietGroupRecord(kind="assistant", id=record_id, text=text)
+    if isinstance(block, ImageBlock):
+        # THE DECISION TABLE for a picture's fold role (review round 8,
+        # R8-1/Q-R9-A1). Written out as cases instead of an OR chain: an OR
+        # let the legacy adjacency arm answer questions that known source
+        # facts had already settled, so a picture behind a hub row read as
+        # interior even when its owner differed or its part skipped one, and
+        # a human's or an answer's OWN photo could seed an interior chain.
+        #
+        #   1. BOTH coordinates known: the source decides. Interior only
+        #      behind an allowed predecessor family (tool / hub / inside) with
+        #      the SAME owner and the NEXT part. A known contradiction — a
+        #      different owner, or a gap in the chain — splits even behind a
+        #      tool or hub row.
+        #   2. Otherwise (one or both coordinates unknown): the legacy
+        #      adjacency contract, conservatively - a picture behind a tool
+        #      or hub row is that row's output. This can never override case
+        #      1, because case 1 is exactly the both-known shape.
+        # Human (``other``) and assistant predecessors end the chain in both
+        # cases: their own pictures stay visible, and an answer never carries
+        # an aux chain. Nothing here reads text, ids or bodies — only the
+        # two coordinates the projection stamped.
+        owner = _source_owner_of(block)
+        if owner is not None and prev_owner is not None:
+            same_owner = owner[0] == prev_owner[0]
+            next_part = owner[1] == prev_owner[1] + 1
+            interior = prev_kind in _IMAGE_INTERIOR_FAMILIES and same_owner and next_part
+        else:
+            interior = prev_kind in ("tool", "hub")
+        kind = "inside" if interior else "image"
+        return QuietGroupRecord(kind=kind, id=record_id)
+    return QuietGroupRecord(kind="other", id=record_id)
+
+
+def _records_of_blocks(blocks: Sequence[TranscriptBlock]) -> list[QuietGroupRecord]:
+    """Derive the fold records from the blocks ON HAND, in order.
+
+    The tracker reads a record once per append and freezes it
+    (``note_append``); this re-derives a span whose rows may have changed
+    since — a live assistant row whose text landed after its mount, a tool
+    row that has since settled or failed — so a formation or a restate reads
+    the CURRENT truth instead of the append-time snapshot.
+
+    Two things chain from the span's first block: the previous row's KIND and
+    its source-owner coordinate. The kind is faithful because a span never
+    begins with the one context-sensitive row: an image classified ``inside``
+    implies the tool row it belongs to is in the span too (a tool row never
+    splits), so the chain cannot disagree with the stream's own reading of
+    the first block. The owner coordinate is what lets a CONTIGUOUS chain of
+    one owner's parts (body 0, pictures 1, 2, 3 ...) stay interior throughout
+    — the same walk the live tracker, the offscreen replay and the ordered
+    reconciliation all perform, so all three agree by construction.
+    """
+    records: list[QuietGroupRecord] = []
+    prev_kind: str | None = None
+    prev_owner: tuple[str, int] | None = None
+    for block in blocks:
+        record = quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=prev_owner)
+        prev_kind = record.kind
+        prev_owner = _source_owner_of(block)
+        records.append(record)
+    return records
+
+
+def _last_splitter_index(records: Sequence[QuietGroupRecord]) -> int:
+    """The last index whose record is a splitter, or -1 when there is none."""
+    last = -1
+    for index, record in enumerate(records):
+        if group_splitter_of(record):
+            last = index
+    return last
+
+
+class PlannedQuietGroup(NamedTuple):
+    """One planned fold: the record span, its derived facts, and whether the
+    span's head is cut (the caller's verdict, stated as the ``+``)."""
+
+    span: tuple[int, int]
+    group: QuietGroup
+    span_head_loaded: bool
+
+
+def _quiet_fold_boundary(
+    block: TranscriptBlock,
+    *,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
+) -> bool:
+    """Whether ``block`` is a boundary a span may fold against.
+
+    A splitter is; another group's BAR is not: the bar stands for rows that are
+    still on screen (its hidden members), so a span touching it is the
+    continuation of a folded group — folding it would put two bars over one
+    logical run (the drain seam the round-1 review named). The module's
+    whole-span refusal, applied across a seam. ``prev_kind`` is the fold's
+    context for a context-dependent row only (an image beside the run).
+    """
+    if isinstance(block, QuietGroupBlock):
+        return False
+    return group_splitter_of(
+        quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=prev_owner)
+    )
+
+
+def quiet_group_plan(
+    blocks: Sequence[TranscriptBlock],
+    *,
+    prev_block: TranscriptBlock | None = None,
+    next_block: TranscriptBlock | None = None,
+    head_cut: bool = False,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
+) -> list[PlannedQuietGroup]:
+    """The quiet groups a run of blocks contains, as plans to fold.
+
+    ``prev_block``/``next_block`` are the run's neighbours in the transcript
+    (None at the view's edge), and they decide the edge spans:
+
+    - a span that starts at the run's top is bounded when ``prev_block`` is a
+      splitter; when there is no block above AND the caller reports
+      ``head_cut`` (older rows exist beyond the loaded window), the span is
+      folded WITH the minimum marker — "at least N" — which is the head-cut
+      rule; a head notice above (``QUIET_GROUP_HEAD_CUT``) states the same
+      minimum; and when a non-splitter sits above, the span is a fragment of
+      a run that continues outside this one and is refused (rows keep their
+      cards).
+    - a span that ends at the run's bottom is OPEN (the tail, may grow) when
+      nothing follows; it is closed when ``next_block`` is a splitter, and
+      refused when a non-splitter follows (a fragment again).
+
+    Interior spans are bounded by construction (``quiet_group_stretches``
+    splits on splitters). Transient rows (the working line, reasoning) are
+    skipped entirely — they are invisible to spacing and take no part in
+    boundaries, the same exemption ``_anchor_before`` makes — and the spans
+    this returns are indices into the ORIGINAL ``blocks`` list (transients
+    included), so a caller slicing members by a span gets the members.
+
+    Both edge checks feed the boundary predicate the SAME ownership context
+    the record walk uses (review round 8, R8-2/Q-R9-A2; round 9,
+    Q-R10-1). The bottom edge derives it on the spot: the last KEPT row's
+    kind and source owner. The top edge needs both fields from its caller —
+    ``prev_kind`` is the FAMILY of the kept row ABOVE ``prev_block`` (the row
+    whose chain decides whether ``prev_block`` itself is interior) and
+    ``prev_owner`` that row's source owner; the page fold derives the pair
+    from the loaded prefix (:meth:`TranscriptView._quiet_edge_context`).
+    Owner-only context is not enough: the decision table gates the interior
+    reading on the predecessor family, so a pair missing the family would
+    read every owned picture edge as a splitter and freeze a fragment.
+    """
+    origin: list[int] = []
+    kept: list[TranscriptBlock] = []
+    for index, block in enumerate(blocks):
+        if getattr(block, "SPACING_TRANSIENT", False):
+            continue
+        origin.append(index)
+        kept.append(block)
+    records = _records_of_blocks(kept)
+    plan: list[PlannedQuietGroup] = []
+    for span_from, span_to in quiet_group_stretches(records):
+        span_head_loaded = True
+        if span_from == 0:
+            if prev_block is not None:
+                if not _quiet_fold_boundary(prev_block, prev_kind=prev_kind, prev_owner=prev_owner):
+                    continue  # fragment: the span continues into rows on hand
+                if getattr(prev_block, "QUIET_GROUP_HEAD_CUT", False):
+                    span_head_loaded = False  # the same "at least N" marker
+            elif head_cut:
+                span_head_loaded = False  # the "at least N" marker
+        open_below = True
+        if span_to == len(records) - 1:
+            if next_block is not None:
+                if not _quiet_fold_boundary(
+                    next_block,
+                    prev_kind=records[-1].kind,
+                    prev_owner=_source_owner_of(kept[-1]) if kept else None,
+                ):
+                    continue  # fragment: the span continues into rows below
+                open_below = False
+        else:
+            open_below = False
+        group = quiet_group_of_segment(
+            records,
+            (span_from, span_to),
+            span_head_loaded=span_head_loaded,
+            open=open_below,
+        )
+        if group is not None:
+            plan.append(
+                PlannedQuietGroup((origin[span_from], origin[span_to]), group, span_head_loaded)
+            )
+    return plan
+
+
+def fold_quiet_group_list(
+    blocks: Sequence[TranscriptBlock],
+    *,
+    prev_block: TranscriptBlock | None = None,
+    next_block: TranscriptBlock | None = None,
+    head_cut: bool = False,
+    fold_width: int = 0,
+    prev_kind: str | None = None,
+    prev_owner: tuple[str, int] | None = None,
+) -> list[TranscriptBlock]:
+    """Fold a run of NOT-YET-MOUNTED blocks: the list form of the fold.
+
+    Used where the run is built off-screen and mounted later (a backward
+    history page is collected, then inserted above the viewport): each
+    planned group's bar is spliced in before its members and the members'
+    ``display`` is switched off up front, so the mount paints the folded
+    state directly. Mounted appends take no list form at all — they stream
+    through :class:`QuietGroupTracker`, which sees each row at the moment it
+    lands; both readers call the one ``quiet_group_plan``, so the definition
+    is not restated per seam.
+    """
+    run = list(blocks)
+    plan = quiet_group_plan(
+        run,
+        prev_block=prev_block,
+        next_block=next_block,
+        head_cut=head_cut,
+        prev_kind=prev_kind,
+        prev_owner=prev_owner,
+    )
+    for planned in reversed(plan):
+        members = run[planned.span[0] : planned.span[1] + 1]
+        bar = QuietGroupBlock(
+            planned.group, partial=not planned.span_head_loaded, fold_width=fold_width
+        )
+        run.insert(planned.span[0], bar)
+        bar.adopt_members(members)
+    return run
+
+
+@dataclass
+class _QuietTrailingSpan:
+    """The trailing stretch of the transcript since the last splitter: the
+    rows a future receipt would join (a group in the making).
+
+    Only the BLOCKS are held. The records a formation or a restate judges by
+    are re-derived from them (:func:`_records_of_blocks`) — the append-time
+    snapshot goes stale the moment a member row changes (S5 remediation), so
+    keeping a second copy would invite reading the wrong one.
+    """
+
+    blocks: list[TranscriptBlock]
+
+
+class QuietGroupTracker:
+    """The incremental quiet-group fold over a live transcript (design §5, S5).
+
+    One of these lives on each :class:`TranscriptView` and is fed every
+    mounted append (``note_append``); it watches the render stream, so it can
+    act at the exact moment a run becomes a group — the second receipt —
+    instead of re-deriving per render the way a pure client does.
+
+    The state is exactly two things: the OPEN group (a bar whose facts still
+    grow as receipts arrive) and the trailing stretch since the last
+    splitter (a group in the making, whose rows are still ordinary cards).
+    A splitter clears both — that is the latch: a closed group's facts can
+    never move again because no later append reaches its records. Receipts
+    and tool rows extend the open group or the trailing stretch; anything
+    else (a user row, a notice, visible prose) clears them, which is the
+    boundary vocabulary ``tui/quiet_groups.py`` owns.
+
+    THE LIVE RE-READ (S5 remediation): facts are derived from the blocks ON
+    HAND at formation and at every restate, never from the append-time
+    records — the stream snapshots once per append, and a row can change
+    after its mount (an assistant row whose text lands, a tool row that
+    settles or fails). A member that re-reads as a splitter would mean the
+    bar hides a row the reader must see; the restate then DISSOLVES the bar
+    (unfolds its members, removes it) rather than keep hiding — the safe
+    direction every refusal in this module takes. A member that only settles
+    or fails AFTER the bar closed does not move its facts; the latch holds.
+
+    A resync exists for the join between the incremental stream and a
+    clear: ``reset`` calls it, re-deriving the state from the transcript's
+    own tail. Replay and page appends need no call — replay streams through
+    ``note_append`` like any other append, and a collected page is folded in
+    one plan BEFORE it mounts, so no seam re-derives after the fact. The
+    resync reads the trailing stretch back
+    — a bar means the open group is the one on screen, a lone trigger means
+    the stretch is a candidate — and never creates a bar itself: an unbarred
+    stretch with two or more triggers is left alone (it is either already
+    folded or was refused as a fragment, and folding it here would state a
+    count over rows whose boundary the tracker cannot vouch for).
+    """
+
+    def __init__(self, view: TranscriptView) -> None:
+        self._view = view
+        self._open: QuietGroupBlock | None = None
+        self._trailing: _QuietTrailingSpan | None = None
+        self._last_record: QuietGroupRecord | None = None
+        #: The source-owner coordinate of the last source row this fold saw,
+        #: carried beside the record so the ownership arm of
+        #: ``quiet_group_record_of`` keeps working across separate appends
+        #: (a receipt, then its pictures one row at a time). Cleared wherever
+        #: ``_last_record`` is re-derived from the actual tail.
+        self._last_owner: tuple[str, int] | None = None
+        #: The transcript's head-cut verdict (the caller's; see `resync`).
+        self._head_cut = False
+
+    # -- feeding -------------------------------------------------------------
+
+    def note_append(self, block: TranscriptBlock) -> None:
+        """One mounted append, in order."""
+        if getattr(block, "SPACING_TRANSIENT", False):
+            return
+        if isinstance(block, QuietGroupBlock):
+            # Bars are inserted by this fold, never appended through the mount
+            # seam; reaching here means a caller mounted one by hand and the
+            # safe reading is to leave it alone.
+            return
+        prev_kind = self._last_record.kind if self._last_record is not None else None
+        record = quiet_group_record_of(block, prev_kind=prev_kind, prev_owner=self._last_owner)
+        self._last_record = record
+        self._last_owner = _source_owner_of(block)
+        if quiet_family_of(record) is not None:
+            self._receipt(block)
+        elif not group_splitter_of(record):
+            self._inside(block)
+        else:
+            self._close()
+
+    def _receipt(self, block: TranscriptBlock) -> None:
+        bar = self._live_bar()
+        if bar is not None:
+            bar.admit_member(block)
+            self._restate(bar)
+            return
+        trailing = self._live_trailing()
+        if trailing is not None:
+            index = self._view_index(trailing.blocks[0])
+            if index is None:
+                self._trailing = None
+                return
+            if not self._span_head_bounded(index):
+                # The span's top edge is not a boundary: rows above are ON
+                # HAND and in-span, so a bar would state a count over a
+                # fragment of something larger. The module refuses the same
+                # sub-span; here the rows degrade to their ordinary cards,
+                # which is the safe direction. Keep accumulating so a later
+                # attempt is judged on the same span.
+                trailing.blocks.append(block)
+                return
+            partial = self._span_head_partial(index)
+            blocks = [*trailing.blocks, block]
+            # LIVE RE-READ (S5 remediation): judge the span by the blocks on
+            # hand, not the append-time records — a row that changed after
+            # its mount (a writer that settled, an assistant row whose text
+            # landed) must count as it is now.
+            records = _records_of_blocks(blocks)
+            last_splitter = _last_splitter_index(records)
+            if last_splitter >= 0:
+                # A member re-read as a splitter: the span is not a run a bar
+                # can state (belt breach — the mount order and the empty-
+                # assistant boundary are supposed to make this unreachable).
+                # Keep accumulating from the stretch after the splitter;
+                # never fold across a row the reader must see.
+                self._reseed_trailing(blocks, last_splitter)
+                return
+            group = quiet_group_of_segment(
+                records, (0, len(records) - 1), span_head_loaded=not partial, open=True
+            )
+            if group is not None:
+                self._form(blocks, group, partial)
+                return
+            # Fewer than two triggers so far: this is not a group yet — keep
+            # the span growing (the second receipt is what makes it one).
+            trailing.blocks.append(block)
+            return
+        self._trailing = _QuietTrailingSpan(blocks=[block])
+
+    def _inside(self, block: TranscriptBlock) -> None:
+        bar = self._live_bar()
+        if bar is not None:
+            bar.admit_member(block)
+            self._restate(bar)
+            return
+        # Score every internal append through the SAME scanner. A third actual
+        # tool can complete a mixed span after its sole receipt arrived; waiting
+        # for another receipt would leave that span permanently fragmented.
+        # The planner still refuses tool-only spans, so this adds no unrelated
+        # tool-only condensation and keeps the quiet >=2-receipt contract.
+        self._receipt(block)
+
+    def restate_member(self, block: TranscriptBlock) -> None:
+        """A richer same-ID receipt corrects existing facts, not the span's order.
+
+        The existing scanner re-reads the bar, retaining its disclosure and its
+        original open/closed boundary. No replay append or second tracker is
+        allowed to masquerade as a new delivery.
+        """
+        for candidate in self._view.blocks():
+            if isinstance(candidate, QuietGroupBlock) and block in candidate._members:
+                self._restate(candidate, open=candidate.group.open)
+                return
+
+    def reconcile_source_change(self, changed: TranscriptBlock) -> None:
+        """An ORDERED source change (a replaced row) re-plans its stretch.
+
+        ``TranscriptView.replace_block`` swaps a row at its own index: the new
+        row is the same source position with new provenance, not a tail
+        append. Feeding it through ``note_append`` advanced the fold as if it
+        arrived last, so a boundary the OLD row caused (a human splitter that
+        split a run) could never be undone; and ``reset``/``resync`` -- which
+        re-derive the trailing state but deliberately never form a missing
+        bar -- cannot form the run either. This entry point is the missing
+        third operation, built from the SAME parts the incremental fold uses:
+        from the rows actually on hand it resolves the affected maximal
+        source stretch with the existing boundary vocabulary, re-plans it
+        with ``quiet_group_of_segment``, forms through the same ``_form``
+        seam, restores reader-open intent by overlapping source-member
+        identities, and resyncs the tracker to the ACTUAL tail so the next
+        real append joins the right state. Only bars whose members intersect
+        the changed stretch move; untouched bars and their frozen arithmetic
+        are left alone, and descriptive correction stays ``restate_member``'s
+        job (review round 4, R4-1/Q-R5-2).
+        """
+        # THE ORDERED SOURCE WALK. Bars are view objects, not source records:
+        # their members stay mounted as siblings (the fold is a visibility
+        # switch), so the view's own order IS source order once bars are
+        # skipped. Expanding members AND then meeting the same physical rows
+        # again listed every member twice and left a synthetic bar standing as
+        # the "row above" the span, which refused the affected stretch and let
+        # the old bars survive the repair (review round 5, R1). Each source row
+        # is taken ONCE, by identity, with the bar that owns it recorded for the
+        # touched-bar reconciliation.
+        owner_of: dict[TranscriptBlock, QuietGroupBlock] = {}
+        for bar in self._view.blocks():
+            if isinstance(bar, QuietGroupBlock):
+                for member in bar._members:
+                    owner_of[member] = bar
+        source: list[TranscriptBlock] = []
+        owners: list[QuietGroupBlock | None] = []
+        for block in self._view.blocks():
+            if getattr(block, "SPACING_TRANSIENT", False):
+                continue
+            if isinstance(block, QuietGroupBlock):
+                continue
+            source.append(block)
+            owners.append(owner_of.get(block))
+        try:
+            position = source.index(changed)
+        except ValueError:
+            # The row is not on hand (already removed): nothing to re-plan.
+            self._reconnect_tail()
+            return
+        records = _records_of_blocks(source)
+        # The affected maximal stretch: the segment between the nearest real
+        # splitters around the changed row, by the one boundary vocabulary
+        # the incremental fold already speaks.
+        start = 0
+        for index in range(position - 1, -1, -1):
+            if group_splitter_of(records[index]):
+                start = index + 1
+                break
+        end = len(source)
+        for index in range(position + 1, len(source)):
+            if group_splitter_of(records[index]):
+                end = index
+                break
+        span = source[start:end]
+        span_records = records[start:end]
+        if _last_splitter_index(span_records) >= 0:
+            # A member re-reads as a splitter (belt breach): never fold
+            # across a row the reader must see; re-derive from the tail.
+            self._reconnect_tail()
+            return
+        # Bounds are decided in SOURCE space, with the SAME vocabulary the walk
+        # used: the row above the span is a real source row (or the window
+        # edge), never a synthetic bar. The physical helper reads the bar
+        # whenever the span sits under an old one, which is precisely the
+        # refusal that let the stale bars stand (review round 5, R1).
+        if start == 0:
+            partial = self._head_cut
+        else:
+            previous = source[start - 1]
+            if not group_splitter_of(records[start - 1]) and not getattr(
+                previous, "QUIET_GROUP_HEAD_CUT", False
+            ):
+                # On-hand source rows above the span that the boundary
+                # vocabulary does not call a boundary: a fragment, refused as
+                # the incremental fold refuses it.
+                self._reconnect_tail()
+                return
+            partial = bool(getattr(previous, "QUIET_GROUP_HEAD_CUT", False))
+        touched: list[QuietGroupBlock] = []
+        for owner in owners[start:end]:
+            if owner is not None and owner not in touched:
+                touched.append(owner)
+        # The reader's open intent travels on overlapping STABLE identities:
+        # the member block objects persist across the re-plan (visibility is
+        # the fold's switch, never a remount), and the bar's own flag is
+        # carried forward below.
+        reader_open = any(bar._expanded for bar in touched)
+        for bar in touched:
+            for member in bar._members:
+                member.display = True
+            self._view.remove_block(bar)
+        group = quiet_group_of_segment(
+            span_records,
+            (0, len(span_records) - 1),
+            span_head_loaded=not partial,
+            open=end >= len(source),
+        )
+        if group is not None:
+            self._form(span, group, partial)
+            bar = self._open
+            if bar is not None and reader_open and not bar._expanded:
+                bar.toggle_expanded()
+        # Reconnect to the ACTUAL tail, formed or refused, touched or not:
+        # `_last_record` becomes the true last source row and an untouched live
+        # TAIL bar stays the open group, so a later append extends it instead of
+        # dying at a synthetic boundary (review round 5, R1: clearing the global
+        # open state left the untouched tail frozen at action0 while the control
+        # grew to action1).
+        self._reconnect_tail()
+
+    def _reconnect_tail(self) -> None:
+        """Re-attach the tracker to the ACTUAL view tail after a replan.
+
+        `resync` is the wrong tool for this job: it reads a tail BAR as a
+        record of its own — so every later real append then reads as a fresh
+        splitter — and it starts from a cleared state that drops the live tail
+        registration outright. This only READS the tail back: the stretch after
+        the last real splitter, the open bar when the stretch is one that is
+        still growing, and `_last_record` from the last actual source row.
+        Nothing is formed here (missing historical bars are the planner's job
+        in `reconcile_source_change`), and closed historical bars stay latched.
+        """
+        self._open = None
+        self._trailing = None
+        self._last_record = None
+        blocks = [
+            block for block in self._view.blocks() if not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        bars = [block for block in blocks if isinstance(block, QuietGroupBlock)]
+        source = [block for block in blocks if not isinstance(block, QuietGroupBlock)]
+        records = _records_of_blocks(source)
+        if records:
+            self._last_record = records[-1]
+        self._last_owner = _source_owner_of(source[-1]) if source else None
+        last_splitter = _last_splitter_index(records)
+        stretch = source[last_splitter + 1 :]
+        stretch_records = records[last_splitter + 1 :]
+        if not stretch:
+            return
+        bar = next((candidate for candidate in bars if stretch[0] in candidate._members), None)
+        if bar is not None and bar.group.open:
+            # The tail IS this bar and it is still growing.
+            self._open = bar
+            return
+        triggers = [record for record in stretch_records if quiet_family_of(record) is not None]
+        if len(triggers) == 1:
+            self._trailing = _QuietTrailingSpan(blocks=stretch)
+
+    def _close(self) -> None:
+        """A splitter landed: the latch. Facts from here on are frozen.
+
+        The open bar is restated CLOSED first — it was formed with
+        ``open=True`` and would otherwise keep claiming the tail after the run
+        ended — and the state is cleared AFTER that restate: the closing
+        splitter is the newest row, so nothing may join a stretch from before
+        it, and a dissolve's re-seated trailing span goes with the clear. A
+        member that only settles or fails from here on does not move the
+        bar's facts — no append reaches a closed group again.
+        """
+        bar = self._live_bar()
+        if bar is not None:
+            self._restate(bar, open=False)
+        self._open = None
+        self._trailing = None
+
+    # -- formation -----------------------------------------------------------
+
+    def _form(
+        self,
+        blocks: list[TranscriptBlock],
+        group: QuietGroup,
+        partial: bool,
+    ) -> None:
+        index = self._view_index(blocks[0])
+        if index is None:
+            # Cannot happen for a block the tracker just watched append; if
+            # it ever could, no bar is better than one that cannot be placed.
+            self._trailing = None
+            return
+        bar = QuietGroupBlock(
+            group,
+            partial=partial,
+            fold_width=self._view.scrollable_content_region.width,
+        )
+        self._view.insert_blocks(index, [bar])
+        bar.adopt_members(blocks)
+        self._open = bar
+        self._trailing = None
+
+    def _restate(self, bar: QuietGroupBlock, *, open: bool = True) -> None:
+        """Re-state a bar's facts from its live member blocks.
+
+        LIVE RE-READ (S5 remediation): the records are re-derived from the
+        blocks on hand rather than read back from the append-time snapshots,
+        so a member whose row changed after its mount — a tool row that has
+        since settled or failed, an assistant row whose text landed — states
+        what is true NOW. Only the open span restates during its life; the
+        close restate (``open=False``) is the final one before the latch
+        freezes the facts.
+        """
+        records = _records_of_blocks(list(bar._members))
+        last_splitter = _last_splitter_index(records)
+        if last_splitter >= 0:
+            # A member re-reads as a splitter: the bar would hide a row a
+            # reader must see. Dissolve — the safe direction every refusal in
+            # this module takes.
+            self._dissolve(bar, last_splitter)
+            return
+        group = quiet_group_of_segment(
+            records, (0, len(records) - 1), span_head_loaded=not bar.partial, open=open
+        )
+        if group is not None:
+            bar.restate_group(group)
+
+    def _dissolve(self, bar: QuietGroupBlock, last_splitter: int) -> None:
+        """Unfold a bar whose span no longer holds, and re-seat the state.
+
+        The belt-for-belt path: a member re-read as a splitter means the bar
+        is hiding a row the definition says must stay visible, so the fold
+        gives way to the rows — every member is shown again, the bar is
+        removed, and the stretch after the splitter keeps accumulating
+        (:meth:`_reseed_trailing`). Unreachable while the mount order and the
+        empty-assistant boundary hold; kept as the honest fallback for what
+        the fold must never do.
+        """
+        members = list(bar._members)
+        for member in members:
+            member.display = True
+        self._view.remove_block(bar)
+        self._open = None
+        self._reseed_trailing(members, last_splitter)
+
+    def _reseed_trailing(self, blocks: list[TranscriptBlock], last_splitter: int) -> None:
+        """Re-seat the trailing span at the stretch after the last splitter.
+
+        The "keep accumulating so a later attempt is judged on the same span"
+        rule the fragment refusal uses, applied when a re-read finds a
+        splitter inside a span: the rows before it can never fold with the
+        rows after, so the suffix becomes the span a future receipt joins.
+        """
+        suffix = blocks[last_splitter + 1 :]
+        self._trailing = _QuietTrailingSpan(blocks=suffix) if suffix else None
+
+    # -- liveness ------------------------------------------------------------
+
+    def _live_bar(self) -> QuietGroupBlock | None:
+        bar = self._open
+        if bar is None:
+            return None
+        if bar not in self._view.blocks():
+            self._open = None  # the view was cleared or rebuilt under us
+            return None
+        return bar
+
+    def _live_trailing(self) -> _QuietTrailingSpan | None:
+        trailing = self._trailing
+        if trailing is None:
+            return None
+        if trailing.blocks[0] not in self._view.blocks():
+            self._trailing = None
+            return None
+        return trailing
+
+    def _span_head_partial(self, first_index: int) -> bool:
+        """Whether a span whose first row sits at ``first_index`` must state a
+        MINIMUM (its top edge is a window edge, not a boundary)."""
+        if first_index == 0:
+            return self._head_cut
+        previous = self._view._quiet_neighbour(first_index - 1, -1)
+        return previous is not None and bool(getattr(previous, "QUIET_GROUP_HEAD_CUT", False))
+
+    def _span_head_bounded(self, first_index: int) -> bool:
+        """Whether the row above a span is a real boundary (or a window edge
+        the minimum marker can carry), as opposed to an on-hand in-span row
+        that makes the span a fragment. False ⇒ refuse to fold.
+
+        The same pair rule as the shared planner's top edge (review round 9,
+        Q-R10-1): the boundary predicate reads the row above with its FAMILY
+        and its coordinate, derived from the source walk — a call that hands
+        it neither is owner-blind here too.
+        """
+        if first_index == 0:
+            return True  # the window edge; partial-ness is `_span_head_partial`
+        previous_index = self._view._quiet_neighbour_index(first_index - 1, -1)
+        if previous_index is None:
+            return True  # the window edge by exhaustion
+        previous = self._view._blocks[previous_index]
+        if getattr(previous, "QUIET_GROUP_HEAD_CUT", False):
+            return True
+        above = self._view._quiet_neighbour_index(previous_index - 1, -1)
+        prev_kind, prev_owner = self._view._quiet_edge_context(above)
+        return _quiet_fold_boundary(previous, prev_kind=prev_kind, prev_owner=prev_owner)
+
+    def _view_index(self, block: TranscriptBlock) -> int | None:
+        for index, candidate in enumerate(self._view._blocks):
+            if candidate is block:
+                return index
+        return None
+
+    # -- resync --------------------------------------------------------------
+
+    def resync(self, *, head_cut: bool) -> None:
+        """Re-derive the tracker state from the transcript's own tail.
+
+        Called on a clear (there is nothing on hand); a rebuilt view with a
+        windowed head passes the caller's ``head_cut`` verdict.
+        """
+        self._open = None
+        self._trailing = None
+        self._last_record = None
+        self._head_cut = bool(head_cut)
+        blocks = [
+            block for block in self._view.blocks() if not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        records = _records_of_blocks(blocks)
+        # The trailing stretch: everything after the last splitter.
+        last_splitter = _last_splitter_index(records)
+        stretch = blocks[last_splitter + 1 :]
+        stretch_records = records[last_splitter + 1 :]
+        if stretch_records:
+            self._last_record = stretch_records[-1]
+        self._last_owner = _source_owner_of(stretch[-1]) if stretch else None
+        if stretch and isinstance(stretch[0], QuietGroupBlock):
+            # The tail already carries a bar: adopt it as the open group, its
+            # facts as they stand (the bar authored them; growth re-states).
+            self._open = stretch[0]
+            return
+        triggers = [record for record in stretch_records if quiet_family_of(record) is not None]
+        if len(triggers) == 1:
+            self._trailing = _QuietTrailingSpan(blocks=stretch)
+
+    def reset(self) -> None:
+        """After a clear: nothing on hand, nothing to fold."""
+        self.resync(head_cut=False)
+
+    def set_head_cut(self, cut: bool) -> None:
+        """The window's head verdict (see ``TranscriptView.set_quiet_head_cut``).
+
+        Consumed only where a span's top edge sits at index zero; anywhere
+        else the on-hand neighbour above the span decides (
+        ``_span_head_bounded``)."""
+        self._head_cut = bool(cut)
 
 
 class AskResponseBlock(WakeBlock):
@@ -3451,9 +4734,13 @@ class AskResponseBlock(WakeBlock):
                 # removes the ambiguity without putting the value anywhere near
                 # the frame.
                 keys = ", ".join(chosen) if chosen else ""
-                shown = f"{keys} (key name)" if keys else "not provided"
+                shown = (
+                    _t(tui_transcript.ask_key_name(keys=keys))
+                    if keys
+                    else _t(tui_transcript.ask_not_provided())
+                )
             else:
-                shown = ", ".join(chosen) if chosen else "not answered"
+                shown = ", ".join(chosen) if chosen else _t(tui_transcript.ask_not_answered())
             lines.append(("A: ", shown, fg))
         if not lines:
             # No structured Q&A (a timeout, or a row from a runtime that sent
@@ -4333,9 +5620,18 @@ class TranscriptView(ScrollableContainer):
         #: :meth:`insert_blocks` for why a single late restore is not enough.
         #: ``None`` when no insert is settling.
         self._insert_anchor: tuple[TranscriptBlock, float] | None = None
+        #: ``(anchor_id, part, offset)`` for a saved position whose block has no
+        #: geometry yet — see :meth:`arm_navigation_anchor`. Applied by
+        #: :meth:`arrange`, i.e. before the compositor places the rows.
+        self._pending_anchor: tuple[str, int, int] | None = None
         #: Set by :meth:`hold_tail_through_layout` while a caller is landing a
         #: follower on the tail across several layout passes.
         self._hold_tail_placement = False
+        #: The incremental quiet-group fold over this transcript's appended
+        #: blocks (design docs/design/quiet-turns.md §5, slice S5). Per VIEW
+        #: because a conversation's own rows are the state the fold reads — a
+        #: parked view keeps its own tail, and :meth:`clear_blocks` resets it.
+        self._quiet_groups = QuietGroupTracker(self)
 
     def on_mount(self) -> None:
         """Give the system vertical scrollbar an open-hand hover cursor.
@@ -4515,7 +5811,14 @@ class TranscriptView(ScrollableContainer):
         # batch that grows the extent leaves the viewport measurably far from
         # the new end, so asking afterwards reports "scrolled up" for a reader
         # who never moved.
-        was_at_tail = self._tail_anchor.following or self.is_near_bottom()
+        # A QUEUED POSITION IS NOT A FOLLOWER. `is_near_bottom()` is true of an
+        # unmeasured parked view (0 >= 0), so a saved-position reveal was carried
+        # to the tail by this landing and then walked back to the anchor — the
+        # tail frame QA round 2 measured at 146 ms (Q8). The reader asked for
+        # their saved position, not for the end of the conversation.
+        was_at_tail = self._tail_anchor.following or (
+            self._pending_anchor is None and self.is_near_bottom()
+        )
         release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
         # A batch arrives as ONE ledger change, so it gets one resync rather than
@@ -4630,6 +5933,15 @@ class TranscriptView(ScrollableContainer):
             if on_settled is not None:
                 on_settled()
             return
+        # A pending batch holds blocks with no place in the container yet, and
+        # a positional mount needs its `before` widget already mounted, so the
+        # batch flushes first — the same rule `append_block` applies for the
+        # pinned tail, for the same reason. Reached mid-replay when the
+        # quiet-group fold inserts a bar over a run the batch is still
+        # holding (design §5, S5); a no-op for every ordinary page insert.
+        if self._pending_mounts is not None:
+            pending, self._pending_mounts = self._pending_mounts, []
+            self._mount_batch(pending)
         index = max(0, min(index, len(self._blocks)))
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
         # A fixed prefix (the older-history notice or delegation header) does
@@ -4826,6 +6138,7 @@ class TranscriptView(ScrollableContainer):
                 # Held for the bulk mount at the end of the batch. The gap
                 # settle and the empty-state re-measure go with it.
                 self._pending_mounts.append(block)
+                self.note_quiet_append(block)
                 return
             # This one has to go BEFORE a specific widget, which may itself
             # still be held. Flush, then mount positionally as usual.
@@ -4841,6 +6154,10 @@ class TranscriptView(ScrollableContainer):
         # class and nothing repaints.
         self.call_after_refresh(self._settle_gap, block)
         self._remeasure_empty_state()
+        # The quiet-group fold watches this stream (design §5, S5): every
+        # mounted append is offered to it, so a run of receipts is folded at
+        # the moment it becomes one (see `note_quiet_append`).
+        self.note_quiet_append(block)
 
     def _widen_name_col(self, block: TranscriptBlock) -> None:
         """Admit ONE new row to the shared name column.
@@ -5246,25 +6563,25 @@ class TranscriptView(ScrollableContainer):
     def hold_tail_through_layout(self, hold: bool) -> None:
         """Land a following reader on the tail BEFORE placement, while ``hold``.
 
-        For the viewport-first resume (``OperatorApp._render_resumed_history``):
-        from the first projection to the settle of the page that completes the
-        window, every layout pass keeps a follower on the newest row in the same
-        frame the extent moves, so neither the first paint nor the backfill
-        paints a frame off the tail. See :meth:`arrange`.
+        For a resume render, which holds this across the whole render
+        (``OperatorApp._hold_tail_through_resume_render``): every layout pass
+        keeps a follower on the newest row in the same frame the extent moves, so
+        neither the first paint nor the mounts the fill adds afterwards paint a
+        frame off the tail. See :meth:`arrange`.
         """
         self._hold_tail_placement = hold
 
     def reserve_name_col(self, names: Iterable[str]) -> None:
         """Hold the name column at least as wide as ``names`` need, before they mount.
 
-        For a caller that paints part of a window now and mounts the rest a
-        frame later — the viewport-first resume (``OperatorApp.
-        _backfill_resume_window``). The column is derived from the rows ON
-        SCREEN, so without this a longer tool name in the later page widens it
-        after the first paint and every ledger row in the viewport shifts
-        sideways: a reflow the reader sees as motion, on a frame that was
-        otherwise final. Reserving the width the finished window will have
-        makes the first paint already carry it.
+        KEPT although no caller does this today: its one user was the
+        viewport-first resume, removed in favour of projecting the whole window at
+        once, and this is the widget-level half of any future split (the field
+        sits at 0 and costs nothing until someone arms it — F5, review round 1).
+        The column is derived from the rows ON SCREEN, so without this a longer
+        tool name in a later page widens it after the first paint and every
+        ledger row in the viewport shifts sideways: a reflow the reader sees as
+        motion, on a frame that was otherwise final.
 
         The same clamp as the derivation, and a FLOOR rather than an override,
         so rows that genuinely need more still widen it.
@@ -5446,6 +6763,47 @@ class TranscriptView(ScrollableContainer):
             self._apply_gap(self._anchor_before(offset), following)
             return
 
+    def replace_block(self, old: TranscriptBlock, new: TranscriptBlock) -> bool:
+        """Swap one mounted block for its successor AT THE SAME POSITION.
+
+        The provenance-upgrade seam (review round 3, R3-2): a row a later,
+        richer replay teaches the page was a hub delivery is the SAME delivery,
+        not a second one, so the receipt takes the old row's seat instead of
+        mounting beside it. Position IS source order here — the new block
+        returns to ``old``'s index — and the quiet-group fold is offered the
+        newcomer exactly as an append would offer it, so a receipt landing
+        between receipts can still join the run.
+
+        Returns whether the swap happened; ``False`` means ``old`` was not
+        mounted, and the caller decides what to do about that.
+        """
+        if old not in self._blocks:
+            return False
+        index = self._blocks.index(old)
+        self.remove_block(old)
+        next_block = self._blocks[index] if index < len(self._blocks) else None
+        self._apply_gap(self._anchor_before(index), new)
+        self._blocks.insert(index, new)
+        if hasattr(new, "tool_name"):
+            self._widen_name_col(new)
+        # A held batch mounts in append order; this block belongs BEFORE some
+        # of the held rows in general (the seat may sit mid-transcript), and
+        # the mount seam has no positional-hold arm — so flush and mount it
+        # against its real neighbour, the same shape `append_block` uses for a
+        # block that has to go before a specific widget.
+        if self._pending_mounts is not None:
+            pending, self._pending_mounts = self._pending_mounts, []
+            self._mount_batch(pending)
+        self.mount(new, before=next_block if next_block in self._blocks else None)
+        self.call_after_refresh(self._settle_gap, new)
+        self._remeasure_empty_state()
+        # An ordered source change, not an append (review round 4, R4-1):
+        # the fold re-plans the affected stretch instead of being offered the
+        # newcomer as a tail row, which could never undo a boundary the old
+        # row caused.
+        self._quiet_groups.reconcile_source_change(new)
+        return True
+
     def blocks(self) -> list[TranscriptBlock]:
         """Blocks in append order (live and finalized)."""
         return list(self._blocks)
@@ -5473,6 +6831,147 @@ class TranscriptView(ScrollableContainer):
         """
         return self._tail
 
+    # -- the quiet-group fold (design §5, slice S5) --------------------------
+
+    def note_quiet_append(self, block: TranscriptBlock) -> None:
+        """Feed one mounted append to the quiet-group fold.
+
+        Called from :meth:`append_block` for every block this view mounts, so
+        every path that grows a transcript is folded — live events, replay
+        passes, forwarded pages — except the collected-page seam, which folds
+        its own off-screen run (see :meth:`fold_quiet_group_page`). Transient
+        rows (the working line, the reasoning tail) are skipped by the tracker
+        itself: they appear and vanish within a turn and must neither split a
+        group nor anchor one.
+        """
+        self._quiet_groups.note_append(block)
+
+    def restate_quiet_member(self, block: TranscriptBlock) -> None:
+        """Refresh corrected receipt facts without appending a second member."""
+        self._quiet_groups.restate_member(block)
+
+    def note_quiet_source_part(self, block: TranscriptBlock) -> None:
+        """Tell the fold about a source row INSERTED at its original seat.
+
+        Seating a row mid-transcript (`_insert_after`) is an ORDERED SOURCE
+        change, not a tail append: `insert_blocks` alone leaves the row out of
+        its owner bar's membership, so a collapsed bar hides the receipt while
+        its picture stays on screen (review round 6, R6-1 / QA Q-R7-1). The row
+        is re-planned through the same reconciliation the replacement path
+        uses, which keeps the seat, the open/latch state and the original owner.
+        """
+        self._quiet_groups.reconcile_source_change(block)
+
+    def set_quiet_head_cut(self, cut: bool) -> None:
+        """State whether this view's head may continue beyond its first row.
+
+        The caller's verdict for a windowed view (a resume whose older rows
+        are deferred): a span beginning at index zero then states a MINIMUM
+        ("at least N") instead of an exact count. The app sets it once per
+        projection pass — already to the pass's own post-pass verdict (see
+        ``OperatorApp._quiet_head_cut_for``) — and ``reset`` clears it with
+        the view.
+        """
+        self._quiet_groups.set_head_cut(cut)
+
+    def fold_quiet_group_page(
+        self,
+        blocks: Sequence[TranscriptBlock],
+        at_index: int,
+        *,
+        head_cut: bool = False,
+    ) -> list[TranscriptBlock]:
+        """Fold a not-yet-mounted page about to be inserted at ``at_index``.
+
+        A backward page is built off-screen (the ``_block_sink`` seam) and
+        inserted positionally, so its fold has to happen BEFORE the mount:
+        this returns the page's list with each whole group's bar spliced in
+        front of its members, and hands the members to the bar (their
+        ``display`` is switched off there, which the mount then honours). The
+        returned list is what the caller mounts — nothing else is touched.
+        """
+        prev_index = self._quiet_neighbour_index(at_index - 1, -1)
+        prev_block = self._blocks[prev_index] if prev_index is not None else None
+        above = self._quiet_neighbour_index(prev_index - 1, -1) if prev_index is not None else None
+        # The complete pair for the kept row ABOVE the page's top edge: its
+        # family decides whether the edge row itself continues a run, and the
+        # decision table needs the family AND the coordinate (Q-R10-1).
+        prev_kind, prev_owner = self._quiet_edge_context(above)
+        return fold_quiet_group_list(
+            blocks,
+            prev_block=prev_block,
+            prev_kind=prev_kind,
+            prev_owner=prev_owner,
+            next_block=self._quiet_neighbour(at_index, +1),
+            head_cut=head_cut,
+            fold_width=self.scrollable_content_region.width,
+        )
+
+    def _quiet_edge_context(self, index: int | None) -> tuple[str | None, tuple[str, int] | None]:
+        """The (family, owner) a boundary predicate needs for the row at
+        ``index`` — derived in SOURCE context, through the one record walk.
+
+        Callers hand the pair to :func:`_quiet_fold_boundary` for the row
+        BELOW ``index``: with both coordinates known the predicate gates the
+        interior reading on the predecessor FAMILY as well as its owner, and
+        a picture predecessor is interior only if the chain behind it says so
+        (review round 9, Q-R10-1). ``inside`` is never guessed from matching
+        ownership alone: the walk back over pictures — the only
+        context-sensitive kind — stops at the nearest non-transient row whose
+        own kind is context-free and derives the slice from there, so the
+        slice's first record is faithful and the chain flows forward
+        unchanged. Unknown edges (the window top, nothing but pictures above,
+        a view-owned bar) return unknowns and leave the predicate's
+        conservative reading in charge.
+        """
+        from local_operator.tui.widgets.image_block import ImageBlock
+
+        if index is None:
+            return None, None
+        start = index
+        while start >= 0:
+            block = self._blocks[start]
+            if getattr(block, "SPACING_TRANSIENT", False) or isinstance(block, ImageBlock):
+                start -= 1
+                continue
+            break
+        if start < 0 or isinstance(self._blocks[start], QuietGroupBlock):
+            return None, None
+        slice_blocks = [
+            block
+            for block in self._blocks[start : index + 1]
+            if not getattr(block, "SPACING_TRANSIENT", False)
+        ]
+        records = _records_of_blocks(slice_blocks)
+        if not records:
+            return None, None
+        return records[-1].kind, _source_owner_of(slice_blocks[-1])
+
+    def _quiet_neighbour_index(self, index: int, step: int) -> int | None:
+        """The index of the nearest non-transient block at or after ``index``,
+        walking in ``step``'s direction, or ``None`` past the end.
+
+        Split out from :meth:`_quiet_neighbour` because a boundary check has
+        to look at TWO neighbours at once — the edge row and the row above it,
+        whose source owner is the chain context that decides whether the edge
+        row continues a run (review round 8, R8-2).
+        """
+        candidate = index
+        while 0 <= candidate < len(self._blocks):
+            if not self._blocks[candidate].SPACING_TRANSIENT:
+                return candidate
+            candidate += step
+        return None
+
+    def _quiet_neighbour(self, index: int, step: int) -> TranscriptBlock | None:
+        """The nearest non-transient block at or after ``index``, walking in
+        ``step``'s direction — the boundary a fold reads across a run's edge.
+        Transients are invisible to spacing (:meth:`_anchor_before`), so they
+        are invisible to a span's boundary too.
+        """
+        found = self._quiet_neighbour_index(index, step)
+        return self._blocks[found] if found is not None else None
+
     def clear_blocks(self) -> None:
         """Remove every block (the ``/clear`` command)."""
         for block in self._blocks:
@@ -5489,6 +6988,11 @@ class TranscriptView(ScrollableContainer):
         # mounted again.
         self._resync_name_col()
         self._tail = None
+        # The quiet-group fold's tail state is derived from the blocks, so it
+        # goes with them: a bar (or a trailing receipt) the tracker still
+        # remembered would fold the next append onto widgets that no longer
+        # exist.
+        self._quiet_groups.reset()
         # An insert settling into the transcript that just went away has no
         # reader to hold. `_reanchor_insert` would notice the anchor is
         # unparented and drop it anyway, but clearing at the source keeps the
@@ -5537,8 +7041,102 @@ class TranscriptView(ScrollableContainer):
         for block in self._blocks:
             block.set_navigation_visible(visible)
 
-    def restore_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> bool:
-        """Restore the same message, not a stale screen-row offset after resize."""
+    def arm_navigation_anchor(self, anchor_id: str, part: int, offset: int) -> None:
+        """Queue a saved position to be taken in the pass that gives it geometry.
+
+        WHY THIS IS NOT :meth:`restore_navigation_anchor`. That call places the
+        viewport with arithmetic over ``block.region``, and a block that has
+        never been laid out has a ZERO region — the arithmetic degenerates to a
+        clamp at scroll 0, the top of the conversation, which is both the wrong
+        end and a frame the reader sees (QA round 2, Q8). Nor is
+        ``_size_updated`` the place for it: that runs after the reflow has
+        already placed the rows, so the offset it corrects has been painted.
+
+        ``arrange`` is the seam instead — the same one the insertion anchor uses
+        — because the compositor reads ``scroll_offset`` immediately after it
+        returns. A caller that knows it is revealing rows with no geometry yet (a
+        ``display_only`` source, whose prepare skips the layout wait) arms the
+        position here, and the reveal's first frame is already at it.
+
+        The tail anchor is released here as well as parked: a queued position and
+        a follower are two answers to the same question, and a pending anchor
+        that left ``following`` armed would be dragged back to the tail by the
+        next extent change (measured before this released it: the reveal landed
+        at the saved position and then walked to the end).
+        """
+        self._pending_anchor = (anchor_id, part, offset)
+        self._hold_tail_placement = False
+        self._tail_anchor.release()
+
+    def _place_pending_anchor(self, result: DockArrangeResult) -> None:
+        """Take the queued position, or keep it for the next pass.
+
+        Bounded by the FRESH content extent (``result.total_region``), exactly as
+        the insertion anchor below is: ``max_scroll_y`` is stale until
+        ``_size_updated`` runs, so clamping to it would refuse a destination the
+        reader is entitled to.
+        """
+        pending = self._pending_anchor
+        if pending is None:
+            return
+        anchor_id, part, offset = pending
+        block = next(
+            (
+                candidate
+                for candidate in self._blocks
+                if candidate.navigation_anchor_id == anchor_id
+                and candidate.navigation_anchor_part == part
+            ),
+            None,
+        )
+        if block is None:
+            block = next(
+                (
+                    candidate
+                    for candidate in self._blocks
+                    if candidate.navigation_anchor_id == anchor_id
+                ),
+                None,
+            )
+        if block is None:
+            self._pending_anchor = None
+            return
+        placement = next((entry for entry in result.placements if entry.widget is block), None)
+        height = placement.region.height if placement is not None else block.region.height
+        if height <= 0:
+            # Not this pass: the block is in the container but has not been given
+            # rows yet. Keeping it is not a wait for a frame — `arrange` runs
+            # before placement, so the next pass carries it — and a queued
+            # position must survive a pass that cannot honour it rather than
+            # being silently dropped.
+            return
+        self._pending_anchor = None
+        y = (placement.region.y if placement is not None else block.region.y) + min(
+            offset, max(0, height - 1)
+        )
+        target = min(max(0.0, float(y)), max(0, result.total_region.bottom - self.size.height))
+        if abs(target - self.scroll_y) >= 0.5:
+            self.set_reactive(Widget.scroll_y, target)
+            self.set_reactive(cast(Reactive[float], Widget.scroll_target_y), target)
+            self.vertical_scrollbar.set_reactive(ScrollBar.position, target)
+
+    def restore_navigation_anchor(
+        self, anchor_id: str, part: int, offset: int, *, only_when_measured: bool = False
+    ) -> bool:
+        """Restore the same message, not a stale screen-row offset after resize.
+
+        ``only_when_measured`` makes the call REFUSE rather than guess, and the
+        commit is the caller that needs it. An unmeasured block's region is a
+        zero ``Region``, so the arithmetic below degenerates to
+        ``scroll_y - content_region.y``: a clamp to the TOP of the conversation.
+        For a view being revealed that is a frame at the wrong end — the reader
+        of a mid-conversation source sees the first message, and
+        ``restore_revealed_anchor`` then walks the viewport forward onto the
+        anchor, which is two painted states with the wrong one first. The caller
+        that knows its geometry is not final yet (``display_only`` first visits
+        skip the prepare-time layout) asks for the refusal and leaves the
+        placement to the net.
+        """
         anchor = next(
             (
                 block
@@ -5553,6 +7151,8 @@ class TranscriptView(ScrollableContainer):
             )
         if anchor is None:
             return False
+        if only_when_measured and anchor.region.height <= 0:
+            return False
         self._tail_anchor.release()
         y = (
             self.scroll_y
@@ -5564,6 +7164,11 @@ class TranscriptView(ScrollableContainer):
             # Disabled means no user input, not no restoration: staged views
             # are non-interactive while their canonical anchor is laid out.
             self.scroll_to(y=max(0, y), animate=False, immediate=True, force=True)
+        # Placed on measured geometry means the queued position has been
+        # superseded by the same position: leaving it armed would place it again
+        # on the next arrange — harmless while the two agree, wrong the moment
+        # the reader moves on.
+        self._pending_anchor = None
         return True
 
     def follow_tail(self) -> None:
@@ -5678,6 +7283,14 @@ class TranscriptView(ScrollableContainer):
         a frame later and, under a burst of deltas, land permanently one flush
         short of the tail.
         """
+        if self.max_scroll_y <= 0:
+            # NO MEASURED EXTENT, NO TAIL. `scroll_to(y=0)` here is the TOP of the
+            # conversation, and a queued call arrives before a batch has authored
+            # any heights — which is how a reveal painted the top of the
+            # transcript for a frame (QA round 2, Q8, state-104ms). There is
+            # nothing to land on yet; an armed follower is landed by
+            # `_size_updated`, the one place the extent is documented as fresh.
+            return
         with self._tail_anchor.programmatic_scroll():
             self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True, force=True)
 
@@ -5693,6 +7306,11 @@ class TranscriptView(ScrollableContainer):
         estimate is needed.
         """
         result = super().arrange(size, optimal)
+        if self._pending_anchor is not None:
+            # FIRST, and before the follower's own branch below: a queued saved
+            # position is a destination the reader chose, while both other
+            # branches here move the viewport to the END of the content.
+            self._place_pending_anchor(result)
         if (
             self._hold_tail_placement
             and self._tail_anchor.following

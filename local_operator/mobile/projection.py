@@ -33,6 +33,11 @@ from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
+from local_operator.harness.hub_receipts import (
+    hub_receipt_fields,
+    hub_receipt_marker,
+    hub_receipt_stamped,
+)
 
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
@@ -65,6 +70,9 @@ from local_operator.harness.rows import (
     is_ask_gate_divert_details,
     is_harness_chrome,
     is_harness_notice_row,
+    is_quiet_turn_call,
+    is_quiet_turn_name,
+    is_quiet_turn_result,
     is_settle_only_ask,
     output_limit_call_receipt,
     sessions_row_summary,
@@ -97,6 +105,7 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    SupplementProgressEvent,
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -480,8 +489,10 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
     store rather than in ``data``. ``daemon._image_bytes`` walks the same
     pair — the index is the whole contract between producer and consumer, so
     both sides change together or not at all. Artifacts of other kinds do NOT
-    count: no player endpoint exists for them yet, and counting one would
-    shift every later index onto the wrong bytes.
+    count HERE: a video artifact rides its own parallel family
+    (``_video_refs_for_content`` / ``daemon._attachment_bytes(kind="video")``)
+    with its own index space, and counting one here would shift every later
+    image index onto the wrong bytes.
     """
     content = getattr(message, "content", None)
     return _image_refs_for_content(content if isinstance(content, list) else None)
@@ -508,6 +519,48 @@ def _image_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
         elif isinstance(block, AttachmentContent) and block.kind == "image":
             refs.append({"index": image_index, "mime_type": block.content_type or "image/png"})
             image_index += 1
+    return refs
+
+
+def _video_refs(message: AgentMessage) -> list[dict[str, Any]]:
+    """Video artifact references on a transcript message — the parallel
+    family to :func:`_image_refs`, never folded into it.
+
+    The row carries only ``{index, mime_type, duration_s?}``; the bytes come
+    from the Range-capable attachment route
+    (``/api/sessions/{pid}/attachment?entry=<id>&i=<index>&kind=video``),
+    which phone Safari needs because it will not play a <video> served as a
+    full-body 200.
+    """
+    content = getattr(message, "content", None)
+    return _video_refs_for_content(content if isinstance(content, list) else None)
+
+
+def _video_refs_for_content(content: list[Any] | None) -> list[dict[str, Any]]:
+    """The video family's walk — ``daemon._attachment_bytes(kind="video")``
+    was built to resolve exactly this walk, one index space per family.
+
+    Only store-backed ``AttachmentContent`` blocks of kind ``video`` count:
+    the vocabulary has no inline video block, a video artifact carries a
+    digest rather than bytes, and the entry id plus this index is the
+    entire reference. ``duration_s`` rides when the artifact carried one —
+    the player does not need it, but the ref is the row's whole account of
+    the artifact and a later surface may.
+    """
+    if not content:
+        return []
+    refs: list[dict[str, Any]] = []
+    video_index = 0
+    for block in content:
+        if isinstance(block, AttachmentContent) and block.kind == "video":
+            ref: dict[str, Any] = {
+                "index": video_index,
+                "mime_type": block.content_type or "video/mp4",
+            }
+            if block.duration_s is not None:
+                ref["duration_s"] = block.duration_s
+            refs.append(ref)
+            video_index += 1
     return refs
 
 
@@ -719,6 +772,7 @@ def _frame_skips_measurement(projection: SessionProjection) -> bool:
         total += _wire_charge(entry.error) + _wire_charge(entry.tool_name)
         total += _wire_charge(entry.tool_call_id) + _wire_charge(entry.intent)
         total += sum(_wire_charge(str(ref)) for ref in entry.images)
+        total += sum(_wire_charge(str(ref)) for ref in entry.videos)
         for value in entry.details.values():
             total += _wire_charge(str(value))
         if total > budget:
@@ -1312,9 +1366,9 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
                 # is what leaked raw XML onto the attach seed.
-                body = str(message.details.get("body") or "").strip()
-                direction = message.details.get("direction")
-                if body:
+                body, facts = hub_receipt_fields(message.details)
+                direction = facts.get("direction")
+                if body.strip():
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
@@ -1322,6 +1376,7 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                                 "parent_message" if direction == "to_child" else "subagent_message"
                             ),
                             text=body,
+                            details=facts,
                         )
                     )
                 continue
@@ -1511,11 +1566,48 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
             continue
         if message.role == "user":
-            parent_message = extract_parent_message(message.text)
+            marker = hub_receipt_marker(message)
+            if marker is not None:
+                # Positive producer provenance: the typed facts ride the row
+                # itself (``comms.py``), so the receipt classification no longer
+                # re-parses the model envelope. ``text`` stays the envelope for
+                # the facts record; the body comes from the marker.
+                body, facts = hub_receipt_fields({**marker, "text": message.text})
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind=(
+                            "subagent_message"
+                            if facts.get("direction") == "to_parent"
+                            else "parent_message"
+                        ),
+                        text=body,
+                        details=facts,
+                        # The row's own attachments ride the receipt the same
+                        # way they ride an unmarked prompt row: references
+                        # with their ORIGINAL message id and index, resolved
+                        # lazily by the client. Classifying the row as a
+                        # receipt must never drop media the row carries
+                        # (review round 3, R3-3) — the unmarked-image control
+                        # beside it already does exactly this.
+                        images=_image_refs(message),
+                    )
+                )
+                continue
+            # A modern producer's stamp that FAILED validation must not be
+            # re-guessed from the row's envelope: this legacy parse is
+            # compatibility for rows the modern producer never stamped, and a
+            # malformed stamp is still a claim on the row (review round 3,
+            # R3-1 acceptance). Stamped-but-invalid rows stay human; an
+            # id-correlated typed fact would vouch for the row in its own
+            # entry and is handled above.
+            parent_message = (
+                None if hub_receipt_stamped(message) else extract_parent_message(message.text)
+            )
             if parent_message is not None:
-                # A persisted hub steer: model-facing XML around the parent's
-                # own words. The phone shows the body the parent authored,
-                # never the envelope.
+                # Legacy rows written before the marker existed: model-facing
+                # XML around the parent's own words. The phone shows the body
+                # the parent authored, never the envelope.
                 entries.append(
                     TranscriptEntry(id=message.id, kind="parent_message", text=parent_message.body)
                 )
@@ -1583,6 +1675,17 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 user_run = bool(
                     message_bang and message.tool_calls[0] is call and call.name == "bash"
                 )
+                if is_quiet_turn_call(call):
+                    # THE QUIET PAIR (design docs/design/quiet-turns.md §5, S1):
+                    # the call's row never paints on the phone. No correlation
+                    # entry either — the result-pairing loop below reads
+                    # `tool_rows.get(...)` and tolerates a missing row (the
+                    # same tolerance the hidden `send` below documents), so
+                    # the pair's result settles into nothing on every page.
+                    # NOT a `HIDDEN_TOOL_NAMES` entry: the pair must stay in
+                    # the journal and the display pages; only the folds skip
+                    # it, and only at paint.
+                    continue
                 if hide_cross_session and call.name == SEND_TOOL_NAME:
                     # `display.hide_cross_session`: no row and no correlation
                     # entry. The result-pairing loop below reads
@@ -1697,12 +1800,18 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 )
                 # Output-artifact media rides the row as REFERENCES (index +
                 # mime), the same lazy contract user attachments use: bytes
-                # are fetched from the image endpoint on demand, never re-sent
-                # per projection repaint. Set only when non-empty, so a result
-                # with no media leaves the row shape unchanged.
+                # are fetched from the attachment endpoints on demand, never
+                # re-sent per projection repaint. Set only when non-empty, so
+                # a result with no media leaves the row shape unchanged. The
+                # video family rides beside the images on its own index
+                # (``_video_refs_for_content``); each walk is its own
+                # endpoint's contract.
                 refs = _image_refs(message)
                 if refs:
                     entry.images = refs
+                video_refs = _video_refs(message)
+                if video_refs:
+                    entry.videos = video_refs
                 # The expansion flag is set on the CALL and must survive the
                 # result settling the row.
                 if entry.details.get("user_run"):
@@ -2178,6 +2287,15 @@ class ProjectionFold:
                 # (the settle-marker half of the mixed-build fallback).
                 self._drop_tool_row(event.tool_call_id)
                 return
+            if is_quiet_turn_result(event.result):
+                # THE QUIET RESULT SETTLES NOTHING (design §5, S1): the marker
+                # is the quiet end's own fact, read off the result at the same
+                # seam the divert check above reads it. `_tool_row`'s name gate
+                # refuses the mint; this drop is the marker-read half, so a row
+                # this fold already holds for the call is retired rather than
+                # settled — the pair's end can only ever paint nothing.
+                self._drop_tool_row(event.tool_call_id)
+                return
             row = self._tool_row(event.tool_call_id, event.tool_name, settle=True)
             if row is None:
                 # `display.hide_cross_session`: an end for a row that was never
@@ -2239,11 +2357,18 @@ class ProjectionFold:
             # ``_image_refs_for_content``), so a phone watching live shows
             # a generated image the moment the call settles — and after a
             # reconnect the replayed row shows the identical references.
+            # The video family rides beside it on its own index, which is
+            # what the card's player fetches through the attachment route.
             refs = _image_refs_for_content(
                 result.content if isinstance(result.content, list) else None
             )
             if refs:
                 row.images = refs
+            video_refs = _video_refs_for_content(
+                result.content if isinstance(result.content, list) else None
+            )
+            if video_refs:
+                row.videos = video_refs
             row.details = self._tool_details(
                 self._tool_args.pop(event.tool_call_id, {}), result.text, result.details
             )
@@ -2331,6 +2456,28 @@ class ProjectionFold:
             p.model_label = f"{event.provider}/{event.model_id}"
             if event.effort:
                 p.effort = event.effort
+        elif isinstance(event, SupplementProgressEvent):
+            # Turn supplements (memo §3.1 row 18; P5's sibling map). The beat is
+            # SELF-REPLACING by construction (§2.7), so this is a keep-newest fold
+            # per anchor: a lower version than the one held is a replay or an
+            # out-of-order delivery and never overwrites state the reader already
+            # saw. The value is the beat's own fields (the live shape); the durable
+            # row, which carries the same keys plus the generator's detail lines,
+            # is what ``durable.py`` fills from the journal on a cold open.
+            held = p.supplements.get(event.anchor)
+            if held is None or event.version >= int(held.get("version") or 0):
+                p.supplements[event.anchor] = {
+                    "anchor": event.anchor,
+                    "job": event.job,
+                    "version": event.version,
+                    "state": event.state,
+                    "stage": event.stage,
+                    "elapsed_s": event.elapsed_s,
+                    "files": list(event.files),
+                    "components": list(event.components),
+                    "error": event.error,
+                    "error_type": event.error_type,
+                }
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),
         # and ``extra="allow"`` on AgentEvent means matching must stay
@@ -2448,13 +2595,38 @@ class ProjectionFold:
                 ):
                     entry = candidate
                     break
-        parent_message = extract_parent_message(text)
+        marker = hub_receipt_marker(message)
+        marker_body: str | None = None
+        marker_facts: dict[str, Any] | None = None
+        if marker is not None:
+            marker_body, marker_facts = hub_receipt_fields({**marker, "text": text})
+        # Stamped-but-INVALID markers stay human, for the durable fold's
+        # reason (review round 3, R3-1 acceptance): the legacy envelope parse
+        # below only ever runs for rows the modern producer never touched.
+        # A VALID marker keeps this branch exactly as it was — only the
+        # malformed case is withheld from the body guess.
+        parent_message = (
+            None
+            if marker is None and hub_receipt_stamped(message)
+            else extract_parent_message(text)
+        )
         if entry is not None:
             # Adopt the persisted identity either way: the row was keyed by the
             # command id (or a synthetic one), and the message id is what later
             # history folds and the web client's list reconciliation agree on.
             entry.id = message.id
-            if parent_message is not None:
+            if marker_body is not None and marker_facts is not None:
+                # The echo captured the envelope verbatim; the marker carries
+                # the typed provenance, so the reconciled row matches what the
+                # durable fold will render for it later — body AND facts.
+                entry.kind = (
+                    "subagent_message"
+                    if marker_facts.get("direction") == "to_parent"
+                    else "parent_message"
+                )
+                entry.text = marker_body
+                entry.details = marker_facts
+            elif parent_message is not None:
                 # The echo captured the model-facing envelope verbatim. Rewrite
                 # it in place to the parent's own words so the reconciled row
                 # matches what the durable folds will render for it later.
@@ -2463,9 +2635,33 @@ class ProjectionFold:
             if refs and not entry.images:
                 entry.images = refs
             return False
-        if parent_message is not None:
+        if marker_body is not None and marker_facts is not None:
             # A hub steer delivered mid-turn announces itself as a user
-            # MessageStartEvent whose text is the model-facing envelope. The
+            # MessageStartEvent; the marker is the positive provenance the
+            # producer wrote, so the live fold and its later history page agree
+            # about kind, body and facts without either re-reading the XML.
+            self._append(
+                TranscriptEntry(
+                    id=message.id,
+                    kind=(
+                        "subagent_message"
+                        if marker_facts.get("direction") == "to_parent"
+                        else "parent_message"
+                    ),
+                    text=marker_body,
+                    details=marker_facts,
+                    final=True,
+                    # Same rule as the durable fold above and the echoed row
+                    # beside it: the receipt keeps the source's image refs
+                    # (original id/index) rather than dropping them on
+                    # reclassification (review round 3, R3-3).
+                    images=refs,
+                )
+            )
+            return True
+        if parent_message is not None:
+            # Legacy rows written before the marker existed: a hub steer
+            # delivered mid-turn whose text is the model-facing envelope. The
             # phone renders the parent's own words, never the XML — the same
             # rule the durable folds apply, so a live delivery and its later
             # history page agree about the row.
@@ -3340,6 +3536,7 @@ class ProjectionFold:
         context_window: int | None,
         context_is_estimate: bool | None,
         usage: dict[str, int],
+        spend_channels: dict[str, Any] | None,
     ) -> None:
         """Adopt the store's spend/context block EXACTLY, then bump.
 
@@ -3368,6 +3565,14 @@ class ProjectionFold:
         p.context_window = context_window
         p.context_is_estimate = context_is_estimate
         p.usage = usage
+        # The published per-channel object (PR-2): assigned UNCONDITIONALLY on
+        # the same rule as every field above — ``None`` is a READING ("this
+        # runtime publishes no channel ledger"), never "skip this update", and
+        # a skip here would keep a stale breakdown alive after a republish that
+        # withdrew it. The caller hands the copy it owns
+        # (``spend_channels_copy``), so the fold keeps that object and a
+        # repaint never re-copies it.
+        p.spend_channels = spend_channels
         self._bump()
 
     # -- internals ----------------------------------------------------------
@@ -3440,6 +3645,14 @@ class ProjectionFold:
         entry_id = self._tool_rows.get(tool_call_id)
         row = self._find(entry_id) if entry_id else None
         if row is None:
+            if is_quiet_turn_name(tool_name):
+                # THE QUIET PAIR (design §5, S1): no row is ever minted for
+                # the quiet tool. One refusal here, before any
+                # `TranscriptEntry` exists, covers compose, start, update and
+                # end together — the same one-place rule the `send` refusal
+                # beside it documents, and the reason no arm below needs its
+                # own check.
+                return None
             if cross_session_hidden() and tool_name == SEND_TOOL_NAME:
                 return None
             if is_settle_only_ask(tool_name, queued_engine=self._queued_engine) and not settle:

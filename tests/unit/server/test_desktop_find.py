@@ -14,6 +14,7 @@ answers the empty ready rather than a 404.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
@@ -143,11 +144,20 @@ async def test_find_returns_ranked_hits_oldest_first(harness: _Harness) -> None:
             Message.user("unrelated chatter"),
         ],
     )
-    response = await _find(harness, session_id, q="deploy")
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
-    assert result["query"] == "deploy"
-    assert result["state"] == "ready"
+    # A cold index may outlive the route's 200 ms first-paint budget even for
+    # this small journal. Follow only the documented building -> ready path;
+    # errors must fail immediately, and a ready-but-wrong answer is never retried.
+    # The existing index tests use 30 s as a deadlock guard, not a latency promise.
+    async with asyncio.timeout(30):
+        while True:
+            response = await _find(harness, session_id, q="deploy")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert result["query"] == "deploy"
+            if result["state"] != "building":
+                break
+            assert result["partial"] is True, result
+    assert result["state"] == "ready", result
     assert result["partial"] is False
     assert result["truncated"] is False
     assert [hit["role"] for hit in result["hits"]] == ["user", "agent"]

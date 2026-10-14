@@ -78,18 +78,6 @@ carries a pin marker, and the pinned-child rules below are gated on that marker
 alone. Parent sessions and inherit-children never carry it, and their routing
 is unchanged.
 
-Who can create a pin: the operator (a role's `effort` profile pin, or the
-`subagents.models` tiers) and, only under `subagents.model_choice: model` and
-only in the top-level session, the delegating model — by passing `effort` on
-`task`, or by writing a role pin with `agent` create/update. A subagent is
-never offered the picker and is refused if it passes a tier to `task` or tries
-to write a tier pin, whatever the key says, so a subagent's own children are
-never pinned by a model-chosen tier: they inherit the model that subagent is
-running on (an unpinned child of a pinned child inherits the pinned child's
-model, not the root session's). A stored role pin is a different thing: it still
-applies at any depth, however it was written, and a subagent's `effort='inherit'`
-on `agent` update can still clear one.
-
 - **Same-family first, always.** Candidates are ordered pin-preserving →
   same-vendor → cross-vendor, and that ordering is shared with the quota
   preflight (`_first_available_fallback`), so the cascade walk and the
@@ -234,6 +222,25 @@ failing model's id.
 A target is either a legacy `provider/model` string or a mapping with
 `provider`, `model`, and optional `effort`. The mapping form is what lets a
 chain re-list the *current* model at a different effort as a real route.
+An omitted effort carries/clamps the primary's choice under the existing routing
+rules. Explicit `effort: auto` instead clears that inherited override and uses
+the **target's own default**: `radient/auto` sends its router's `auto`, while a
+direct provider uses its default level or omits effort if it has none. This is a
+chain reset, not another fixed depth on the effort ladder. For example:
+
+```yaml
+fallbackChains:
+  default:
+    - provider: radient
+      model: auto
+      effort: auto
+```
+
+To author this mapping, use `lop config edit retry.fallbackChains '<JSON>'` or
+edit `config.yml`; the settings page preserves existing effort labels but its
+selector input does not create them. The agent `setting` tool refuses cascade
+writes because it cannot carry the editor's original snapshot.
+
 An entry without an effort that names the primary is skipped, so a shared
 `default` chain can safely contain models you also select as primary. When the
 primary effort is known, quota preflight and the stream also skip an explicitly

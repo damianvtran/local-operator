@@ -12,7 +12,9 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import (
+    CapturedFrame,
     CustomMessage,
+    ImageContent,
     Message,
     TextContent,
     ToolCall,
@@ -99,6 +101,59 @@ def test_the_stt_transcript_type_matches_the_sidecar_writer():
     from local_operator.stt.sidecar import STT_TRANSCRIPT_CUSTOM_TYPE as writer
 
     assert STT_TRANSCRIPT_CUSTOM_TYPE == writer == "stt_transcript_v1"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
+    """A busy-turn checkpoint is durable WITH the batch it describes.
+
+    The whole point of the checkpoint argument is that there is never a
+    committed batch without a checkpoint, so the row count before and after is
+    exactly one write; the cold reader sees the record on disk.
+    """
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        read_latest_custom,
+    )
+
+    assistant = Message.assistant("did the thing")
+    tool_result = Message.user("tool result")
+    checkpoint = {
+        "session_id": "s",
+        "turn_id": "t",
+        "committed_message_ids": [assistant.id, tool_result.id],
+        "completed_effects": [{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+        "pending_effect": {},
+        "phase": "resume",
+    }
+    rows = await transcript.append_messages([assistant, tool_result], checkpoint=checkpoint)
+    # Two message rows plus exactly one checkpoint row, one atomic write.
+    assert len(rows) == 3 and rows[-1].payload["custom_type"] == CHECKPOINT_CUSTOM_TYPE
+    assert len(transcript.path.read_text().splitlines()) == 3
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    # ``read_latest_custom`` is ``dict | None`` (it answers None when no row of
+    # that type exists). The old form relied on a bare subscript that pyright
+    # rejects; the assert pins non-None so the reads below narrow.
+    assert on_disk is not None
+    assert on_disk["committed_message_ids"] == [assistant.id, tool_result.id]
+    assert on_disk["phase"] == "resume"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_only_write_is_allowed_and_is_bookkeeping(transcript):
+    from local_operator.session.transcript import (
+        CHECKPOINT_CUSTOM_TYPE,
+        is_bookkeeping_entry,
+        read_latest_custom,
+    )
+
+    rows = await transcript.append_messages(
+        [], checkpoint={"session_id": "s", "turn_id": "t", "phase": "deferred"}
+    )
+    assert len(rows) == 1 and is_bookkeeping_entry(rows[0])
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    assert on_disk is not None, "the bookkeeping row must be durable on disk"
+    assert on_disk["phase"] == "deferred"
 
 
 @pytest.mark.asyncio
@@ -1023,6 +1078,149 @@ async def test_latest_custom_backward_scan(transcript):
     await transcript.append_custom("other", {"v": 99})
     assert transcript.latest_custom("wake_schedules") == {"v": 2}
     assert transcript.latest_custom("missing") is None
+
+
+def _captured_frame(*, stream: str, revision: str) -> CapturedFrame:
+    return CapturedFrame(stream_id=stream, revision_id=revision, producer_scope="mcp:sess:cam")
+
+
+def _capture_images(history) -> list[ImageContent]:
+    return [
+        block
+        for message in history
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_reapplies_the_capture_elision_frontier(transcript):
+    """The recorded frontier elides the SAME superseded captures on resume."""
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "SUMMARY",
+        first.id,
+        100,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "1", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1, "the superseded capture stays elided on resume"
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "2"
+
+
+@pytest.mark.asyncio
+async def test_resume_without_or_with_malformed_frontier_changes_nothing(transcript):
+    first = await transcript.append_message(
+        Message.user(
+            "go",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_message(
+        Message.user(
+            "again",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="2"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction("SUMMARY", first.id, 100)  # no frontier
+    plain = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY2", first.id, 100, preserve_data={"capture_elisions": {"applied": -1}}
+    )
+    malformed = transcript.build_llm_history()
+
+    await transcript.append_compaction(
+        "SUMMARY3",
+        first.id,
+        100,
+        preserve_data={"capture_elisions": {"applied": 1, "identities": "nope"}},
+    )
+    malformed_ids = transcript.build_llm_history()
+
+    assert len(_capture_images(plain)) == 2
+    assert len(_capture_images(malformed)) == 2
+    assert len(_capture_images(malformed_ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_ignores_a_record_that_names_no_present_block(transcript):
+    """An address that matches nothing in the segment elides nothing."""
+    first = await transcript.append_message(
+        Message.user(
+            "only",
+            images=[
+                ImageContent(
+                    data="aGVsbG8=",
+                    mime_type="image/png",
+                    captured_frame=_captured_frame(stream="screen", revision="1"),
+                )
+            ],
+        )
+    )
+    await transcript.append_compaction(
+        "S",
+        first.id,
+        10,
+        preserve_data={
+            "capture_elisions": {
+                "applied": 1,
+                "identities": [["mcp:sess:cam", "screen", "9", 0]],
+            }
+        },
+    )
+
+    history = transcript.build_llm_history()
+
+    images = _capture_images(history)
+    assert len(images) == 1
+    assert images[0].captured_frame is not None
+    assert images[0].captured_frame.revision_id == "1"
 
 
 @pytest.mark.asyncio
@@ -2071,20 +2269,27 @@ def test_a_metadata_read_decodes_only_the_rows_above_the_match(tmp_path, monkeyp
     entry = read_latest_custom_entry(directory, "todo_snapshot")
 
     assert entry is not None and entry.id == "the-match"
-    assert decoded <= 5, f"the walk decoded {decoded} rows for a 3-row tail"
-    assert decoded >= 3, "the match and the rows above it must have been decoded"
+    # THE METRIC MOVED WITH THE FAST PATH, the intent did not. This read used to
+    # answer by JSON-decoding every row above the match, which a count pinned
+    # well (``<= 5`` here, 501 in the head case below). It now finds the match by
+    # the bytes every row of that type carries and decodes ONLY the candidate, so
+    # the decode count is 1 whatever the journal's size — and what stays
+    # proportional to the journal is the BYTE SCAN, measured at 66 ms for the
+    # whole 118 MB reference journal against 457 ms for the walk it replaces.
+    # A mutation that reverted to decoding every row fails this bound.
+    assert decoded <= 2, f"the fast path decoded {decoded} rows for a 3-row tail"
 
 
-def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
-    tmp_path, monkeypatch
-):
-    """The honest worst case, pinned so it cannot be mistaken for a regression.
+def test_a_metadata_read_near_the_head_is_still_correct_without_parsing_it(tmp_path, monkeypatch):
+    """The honest worst case, re-pinned after the fast path: same answer, no parse.
 
-    A legacy ``subagent_roster`` row written once near byte zero reaches the file
-    start, so that read costs what today's whole-file parse costs — never worse,
-    and it answers correctly rather than reporting a bounded "unknown". This is
-    the case the design refuses to add a ``max_bytes`` knob for: a ceiling here
-    would have to invent an answer for a caller that today always gets one.
+    A legacy ``subagent_roster`` row written once near byte zero is the shape that
+    reaches the file start. The answer is unchanged — the row is found and
+    returned — and the OWNER of that cost changed: it is now the backward byte
+    scan (every chunk of the file is examined for one string) rather than a
+    JSON-decode of all 500 rows above it. The design still refuses a ``max_bytes``
+    knob here for the reason this test originally stated: a ceiling would have to
+    invent an answer for a caller that always gets one.
     """
     directory = tmp_path / "sess"
     directory.mkdir()
@@ -2104,7 +2309,7 @@ def test_a_metadata_read_near_the_head_costs_the_journal_and_is_still_correct(
     entry = read_latest_custom_entry(directory, "subagent_roster")
 
     assert entry is not None and entry.id == "ancient"
-    assert decoded == 501, "the walk must reach the file start to answer honestly"
+    assert decoded <= 2, f"the needle scan parsed {decoded} rows to answer one row"
 
 
 def test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises(tmp_path):

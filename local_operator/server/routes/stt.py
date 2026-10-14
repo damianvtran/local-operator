@@ -39,8 +39,10 @@ from starlette.status import (
     HTTP_502_BAD_GATEWAY,
 )
 
+from local_operator.clients.radient_cost import RadientCost
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
+from local_operator.i18n.keys import wire_errors_media as _wm
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_config_manager,
@@ -48,6 +50,7 @@ from local_operator.server.dependencies import (
     get_provider_auth_store,
 )
 from local_operator.server.models.schemas import CRUDResponse
+from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt import AudioPath, AudioPathResolution
 from local_operator.stt import audio as stt_audio
 from local_operator.stt.cascade import (
@@ -91,7 +94,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     if not provider or not model:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="provider and model must be provided together, or neither.",
+            detail=_wm.provider_model_pair().envelope(),
         )
     # An unknown provider is refused by name rather than answered about:
     # ``build_model_spec`` happily returns a placeholder spec for any string,
@@ -102,7 +105,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     if get_provider_definition(provider) is None:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown provider {provider!r}.",
+            detail=_wm.unknown_provider(provider=repr(provider)).envelope(),
         )
     # Imported lazily: model/configure.py is heavy and pulls the session
     # machinery, which the health of a plain `/v1/stt/paths` call should not
@@ -114,7 +117,7 @@ def _resolve_query_model(provider: Optional[str], model: Optional[str]) -> Any |
     except Exception as exc:
         raise HTTPException(
             status_code=HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown model {provider}/{model}: {exc}",
+            detail=_wm.unknown_model(provider=provider, model=model, error=str(exc)).envelope(),
         )
 
 
@@ -168,6 +171,10 @@ async def create_stt_transcription_endpoint(
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
+    #: Optional client correlation id (PR-3): additive and tolerant — used for
+    #: the spend record (analytics + the session's pending marker) and the hub
+    #: correlation header on the Radient rung; never for credential lookup.
+    session_id: Optional[str] = Form(None),
     provider: Optional[str] = Query(
         None,
         description=(
@@ -203,7 +210,7 @@ async def create_stt_transcription_endpoint(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save uploaded audio file: {str(e)}",
+            detail=_wm.save_audio_failed(error=str(e)).envelope(),
         )
     finally:
         await file.close()
@@ -217,6 +224,10 @@ async def create_stt_transcription_endpoint(
             model=model_spec,
             language=language,
             prompt=prompt,
+            # The caller's conversation id for the hub correlation header and
+            # the emitted record — attribution only; the cascade's credential
+            # scope stays as it was (QA round 1, Q4).
+            correlation_session_id=str(session_id or "") or None,
         )
     except SttUnavailable as exc:
         if not exc.attempts:
@@ -224,9 +235,8 @@ async def create_stt_transcription_endpoint(
             # reads to offer the audio door (``model_audio``).
             raise HTTPException(
                 status_code=HTTP_409_CONFLICT,
-                detail={
-                    "code": "stt_unavailable",
-                    "message": str(exc),
+                detail=_wm.media_refusal(error=str(exc)).envelope(code="stt_unavailable")
+                | {
                     "rungs": [_rung_json(rung) for rung in exc.resolution.rungs],
                     "model_audio": exc.resolution.model_audio_capable,
                 },
@@ -236,18 +246,45 @@ async def create_stt_transcription_endpoint(
         # upstream/transport), exactly as the legacy route maps them.
         raise HTTPException(
             status_code=exc.status_code or HTTP_502_BAD_GATEWAY,
-            detail=exc.detail or str(exc),
+            detail=_wm.media_refusal(error=exc.detail or str(exc)).envelope(),
         )
     except ValueError as ve:  # A client-side validation error (e.g. prompt length)
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=_wm.media_refusal(error=str(ve)).envelope()
+        )
     except Exception as e:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during transcription: {str(e)}",
+            detail=_wm.transcription_unexpected(error=str(e)).envelope(),
         )
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+
+    # The charge (PR-3): only the Radient rung reports one — the hub's envelope
+    # carries the cost object and the executor parsed it into ``outcome.cost``.
+    # The unit count is the server's metered seconds when stated; a BYO rung
+    # states neither count nor amount (no audio-duration reader exists here),
+    # and both stay unknown rather than zero. The provider label names the
+    # vendor that actually served when the cost object omits one.
+    cost = outcome.cost if isinstance(outcome.cost, RadientCost) else None
+    _rung_providers = {
+        AudioPath.PROVIDER_STT_ELEVENLABS.value: "elevenlabs",
+        AudioPath.PROVIDER_STT_OPENAI.value: "openai",
+    }
+    emit_voice_spend(
+        config_manager=config_manager,
+        channel="stt",
+        # The envelope's own provider field outranks the path label (QA round
+        # 1, Q3): an amount-less older hub still names the vendor it used, and
+        # the cost object — when one was stated — wins inside the builder.
+        provider=outcome.provider or _rung_providers.get(outcome.path.value, ""),
+        units=None,
+        unit="seconds",
+        cost=cost,
+        session_id=str(session_id or ""),
+        request_id="",
+    )
 
     return CRUDResponse(
         status=200,

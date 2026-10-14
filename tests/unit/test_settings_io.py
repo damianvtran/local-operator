@@ -65,6 +65,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_AUTO_UPDATE_TEAMS,
         DEFAULT_CHECK_INTERVAL_MIN,
     )
+    from local_operator.i18n.resolve import DEFAULT_LANGUAGE
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -90,6 +91,11 @@ def _consumer_defaults() -> dict[str, object]:
     # ``NetworkSettings.from_config`` resolves an absent key against
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
+    #
+    # The mesh-roll switch is the same shape, from ITS reader: ``rollouts``'
+    # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
+    # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
+    # same value or the page would advertise a policy the driver does not apply.
     from local_operator.network.credentials import GRANT_TTL_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
@@ -98,6 +104,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_HANDSHAKES,
         DEFAULT_PORT,
     )
+    from local_operator.network.rollouts import DEFAULT_ROLLOUT_ON_UPDATE
 
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
@@ -109,6 +116,8 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.session.cleanup import (
+        DEFAULT_DELEGATED_ENABLED,
+        DEFAULT_DELEGATED_MAX_AGE_HOURS,
         DEFAULT_ENABLED,
         DEFAULT_MAX_INACTIVE_DAYS,
         DEFAULT_MAX_SESSIONS,
@@ -145,6 +154,11 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.ui_console.policy import (
+        DEFAULT_LIVE_LIMIT,
+        DEFAULT_OWNER_LIMIT,
+        DEFAULT_USER_RESERVED,
+    )
     from local_operator.wakes.display import DEFAULT_TIME_FORMAT
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
@@ -152,6 +166,9 @@ def _consumer_defaults() -> dict[str, object]:
     retry = RetrySettings()
     compaction = CompactionSettings()
     consumers: dict[str, object] = {
+        "console.max_live": DEFAULT_LIVE_LIMIT,
+        "console.max_owner": DEFAULT_OWNER_LIMIT,
+        "console.user_reserved": DEFAULT_USER_RESERVED,
         # The theme the TUI actually boots on. The registry restates "dark"
         # rather than importing this (that import would put `rich` on the CLI's
         # path), so THIS is what stops the two drifting — as they had: the
@@ -159,6 +176,12 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The language resolver's own default, from the module that READS the
+        # key (`i18n.resolve.resolve_language`). The registry restates "auto"
+        # rather than importing it (settings_io stays off the resolver's import
+        # path); THIS entry is what turns a drift between the two into a red
+        # test rather than a page advertising a default nothing honours.
+        "language": DEFAULT_LANGUAGE,
         # The opt-in hider's own constant, beside the predicate that reads it
         # (`local_operator.cross_session`), so a registry default that drifts
         # from the code's is a red test rather than a page that lies.
@@ -224,6 +247,8 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_inactive_days": DEFAULT_MAX_INACTIVE_DAYS,
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
+        "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
+        "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry
@@ -241,6 +266,10 @@ def _consumer_defaults() -> dict[str, object]:
         "network.listen_address": DEFAULT_LISTEN_ADDRESS,
         "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
+        # Read fresh by every update front end and re-read by the rollout driver
+        # (``rollouts.rollout_policy`` resolves an absent key against exactly
+        # this constant — the reader's own fallback, not a restatement).
+        "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
@@ -341,6 +370,8 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
     consumers.update(_monitor_consumer_defaults())
+    consumers.update(_supplements_consumer_defaults())
+    consumers.update(_team_bridge_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -351,9 +382,14 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.aida import proactive as aida_proactive
     from local_operator.aida.bootstrap import DEFAULT_ENABLED
 
+    # The static routes' served-root list, asked of the module that reads it.
+    from local_operator.server.utils.static_roots import DEFAULT_CONFIGURED_ROOTS
+
+    consumers["static.roots"] = DEFAULT_CONFIGURED_ROOTS
     consumers["aida.enabled"] = DEFAULT_ENABLED
     consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
+    consumers["aida.cadence.interval_hours"] = aida_proactive.DEFAULT_INTERVAL_HOURS
     consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
@@ -458,6 +494,25 @@ def _classification_consumer_defaults() -> dict[str, object]:
     }
 
 
+def _supplements_consumer_defaults() -> dict[str, object]:
+    """``values.supplements.*`` defaults, asked of the module that reads them
+    (``local_operator.supplements.policy``), not restated beside the registry rows."""
+    from local_operator.supplements import policy
+
+    return {
+        "supplements.enabled": policy.DEFAULT_ENABLED,
+        "supplements.files": policy.DEFAULT_FILES,
+        "supplements.graphics": policy.DEFAULT_GRAPHICS,
+        "supplements.model": policy.DEFAULT_MODEL,
+        "supplements.maxTurns": policy.DEFAULT_MAX_TURNS,
+        "supplements.maxOutputTokens": policy.DEFAULT_MAX_OUTPUT_TOKENS,
+        "supplements.timeoutS": policy.DEFAULT_TIMEOUT_S,
+        "supplements.maxCostUsd": policy.DEFAULT_MAX_COST_USD,
+        "supplements.maxFeatured": policy.DEFAULT_MAX_FEATURED,
+        "supplements.denyPrefixes": list(policy.DEFAULT_DENY_PREFIXES),
+    }
+
+
 def _monitor_consumer_defaults() -> dict[str, object]:
     """``values.monitor.*`` defaults, asked of the package that reads them.
 
@@ -482,6 +537,31 @@ def _monitor_consumer_defaults() -> dict[str, object]:
         "monitor.maxConsecutiveFailures": monitor_settings.DEFAULT_MAX_CONSECUTIVE_FAILURES,
         "monitor.maxDeliveriesPerHour": monitor_settings.DEFAULT_MAX_DELIVERIES_PER_HOUR,
         "monitor.normalizeTimestamps": monitor_settings.DEFAULT_NORMALIZE_TIMESTAMPS,
+    }
+
+
+def _team_bridge_consumer_defaults() -> dict[str, object]:
+    """The registry's ``team_bridge.*`` rows, asked of the module that reads them.
+
+    The agent-messages feature's readers live in
+    ``local_operator.team_bridge.settings`` (stdlib-only precisely so this test
+    can import it cheaply), and the registry rows carry literals because
+    ``settings_io`` stays off the package's import path. This block is what
+    turns a drifted literal into a red test rather than a page that advertises
+    a state the feature will not honour — the rule every consumer block above
+    follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
+    state (no row), and the allowlist's defaults are server truth surfaced as
+    data by ``team_bridge.client.allowlist_view``, not config.
+    """
+
+    from local_operator.team_bridge.settings import (
+        DEFAULT_TEAM_BRIDGE_ENABLED,
+        DEFAULT_TEAM_BRIDGE_SESSION,
+    )
+
+    return {
+        "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.session": DEFAULT_TEAM_BRIDGE_SESSION,
     }
 
 
@@ -597,6 +677,74 @@ def test_the_team_depth_maximum_matches_max_org_depth() -> None:
 
     setting = settings_io.BY_KEY["subagents.max_team_depth"]
     assert setting.maximum == MAX_ORG_DEPTH
+
+
+def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
+    """Every value the settings page ACCEPTS must come back AS STORED from the reader.
+
+    The registry's ``[minimum, maximum]`` is the page's control range; the reader's
+    accept range (``policy``'s bounds, applied by ``SupplementSettings.from_values``)
+    must CONTAIN it, or a value a user clicked is silently swapped for the default.
+    Agent review round 1, R4 found the two pairs disagreeing both ways: ``maxCostUsd: 0``
+    -- "never spend" -- came back as the default, and ``maxOutputTokens`` had no page
+    maximum while the reader maps anything above 1,000,000 to 6000. Exercised THROUGH
+    ``from_values`` at both extremes of every bounded row, so it fails on whichever side
+    of the pair drifts -- the shape ``test_the_team_depth_maximum_matches_max_org_depth``
+    gives the one-sided case.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    rows = (
+        ("supplements.maxTurns", "maxTurns", "max_turns", policy.MAX_TURNS_BOUNDS),
+        (
+            "supplements.maxOutputTokens",
+            "maxOutputTokens",
+            "max_output_tokens",
+            policy.MAX_OUTPUT_TOKENS_BOUNDS,
+        ),
+        ("supplements.timeoutS", "timeoutS", "timeout_s", policy.TIMEOUT_S_BOUNDS),
+        ("supplements.maxFeatured", "maxFeatured", "max_featured", policy.MAX_FEATURED_BOUNDS),
+    )
+    for key, value_key, field, bounds in rows:
+        setting = settings_io.BY_KEY[key]
+        assert (
+            setting.minimum,
+            setting.maximum,
+        ) == bounds, f"{key}: the page's range is not the reader's range {bounds!r}"
+        for bound in bounds:
+            stored = SupplementSettings.from_values({"supplements": {value_key: bound}})
+            assert getattr(stored, field) == bound, (
+                f"{key}: the page accepts {bound!r} but the reader stores "
+                f"{getattr(stored, field)!r}"
+            )
+    # The cost cap is the one deliberately ONE-SIDED pair: the page's [0, 100] is a control
+    # window, while the reader honours any value >= 0 as stored (no upper cutoff -- a
+    # hand-edited higher cap is the user's own stated guard, not a number to substitute).
+    # ``0`` is the load-bearing end: "never spend" must survive as 0.
+    cost = settings_io.BY_KEY["supplements.maxCostUsd"]
+    assert (cost.minimum, cost.maximum) == (0.0, 100.0)
+    assert SupplementSettings.from_values({"supplements": {"maxCostUsd": 0.0}}).max_cost_usd == 0.0
+    assert (
+        SupplementSettings.from_values({"supplements": {"maxCostUsd": 100.0}}).max_cost_usd == 100.0
+    )
+
+
+def test_supplements_max_cost_default_is_pinned_as_a_literal() -> None:
+    """The shipped cap is $1.00 per job, pinned as a LITERAL.
+
+    ``test_every_default_matches_its_consumer`` compares the registry row against
+    ``policy.DEFAULT_MAX_COST_USD``, so the two moving together stays green; the NUMBER is
+    what needs pinning. $1.00 is the operator directive of 2026-10-10 -- roughly one
+    Opus-class turn -- where the original $0.20 assumed a Sonnet-class generator envelope.
+    """
+    from local_operator.supplements import policy
+    from local_operator.supplements.policy import SupplementSettings
+
+    assert settings_io.BY_KEY["supplements.maxCostUsd"].default == 1.00
+    assert policy.DEFAULT_MAX_COST_USD == 1.00
+    # And the reader's own fallback agrees, so an absent key stores the same number.
+    assert SupplementSettings.from_values({}).max_cost_usd == 1.00
 
 
 def test_display_keys_are_flat_dotted() -> None:
@@ -1548,7 +1696,9 @@ def test_write_is_atomic_and_leaves_no_temp_file(tmp_path: Path) -> None:
     own small confusion."""
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 3)
-    assert [path.name for path in tmp_path.iterdir()] == ["config.yml"]
+    # The persistent writer sidecar is deliberate, not an abandoned atomic
+    # replacement temporary. Removing it after release would split lock domains.
+    assert {path.name for path in tmp_path.iterdir()} == {"config.yml", ".config-write.lock"}
 
 
 def test_write_fsyncs_the_parent_directory_after_the_rename(
@@ -2902,3 +3052,66 @@ def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> N
     assert settings_io.validate(setting, "ctrl+g") is None
     assert settings_io.validate(setting, "banana") is not None
     assert settings_io.validate(setting, "primary+alt+shift+space") is not None
+
+
+# -- delegated-work retention keys ------------------------------------------
+
+
+@pytest.mark.parametrize("hours", [2, 48, 720])
+def test_delegated_max_age_accepts_the_whole_range(manager: ConfigManager, hours: int) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert settings_io.validate(setting, hours) is None
+    settings_io.write_setting(manager, setting, hours)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["session"]["cleanup"]["delegated"]["max_age_hours"] == hours
+
+
+@pytest.mark.parametrize("hours", [1, 0, -5, 721, 100000])
+def test_delegated_max_age_refuses_out_of_range_with_the_range_sentence(
+    manager: ConfigManager, hours: int
+) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    message = settings_io.validate(setting, hours)
+    assert message == f"max_age_hours must be between 2 and 720 (30 days); got {hours}"
+    with pytest.raises(ValueError, match="between 2 and 720"):
+        settings_io.write_setting(manager, setting, hours)
+
+
+@pytest.mark.parametrize("raw", ["abc", "2.5", ""])
+def test_delegated_max_age_text_that_is_not_a_whole_number_is_refused(raw: str) -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    with pytest.raises(ValueError, match="whole number"):
+        settings_io.coerce(setting, raw)
+
+
+def test_delegated_max_age_refuses_a_bool_and_a_float() -> None:
+    setting = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert settings_io.validate(setting, True) == "expected a number"
+    assert settings_io.validate(setting, 2.5) == "expected a whole number"
+
+
+def test_delegated_rows_carry_the_contract_a_bounded_control_needs() -> None:
+    """minimum/maximum/unit are the whole contract the desktop control renders."""
+    hours = settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"]
+    assert (hours.minimum, hours.maximum, hours.unit, hours.default) == (2, 720, "hours", 48)
+    assert hours.gated_by == "session.cleanup.delegated.enabled"
+    switch = settings_io.BY_KEY["session.cleanup.delegated.enabled"]
+    assert switch.default is True and switch.kind is Kind.BOOL
+    # The two classes are separate sections; the parent keys stayed parent keys.
+    assert switch.section == hours.section == "session_delegated"
+    assert settings_io.BY_KEY["session.cleanup.enabled"].section == "session_cleanup"
+
+
+def test_delegated_rows_round_trip_through_the_policy_reader(manager: ConfigManager) -> None:
+    from local_operator.session.cleanup import DELEGATED_PATH, policy_from_config
+
+    for key in ("session.cleanup.delegated.enabled", "session.cleanup.delegated.max_age_hours"):
+        assert settings_io.BY_KEY[key].path[:3] == DELEGATED_PATH, key
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["session.cleanup.delegated.max_age_hours"], 96
+    )
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["session.cleanup.delegated.enabled"], False
+    )
+    policy = policy_from_config(ConfigManager(manager.config_dir))
+    assert (policy.delegated_enabled, policy.delegated_max_age_hours) == (False, 96)

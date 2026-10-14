@@ -703,3 +703,66 @@ def test_the_relayed_window_agrees_with_the_ledger_when_usage_arrives_early(tmp_
     )
     rec.close()
     store.close()
+
+
+# -- PR-3: the basis/source labels are decided at record time -----------------
+
+
+def _basis_row(tmp_path, usage):
+    with sqlite3.connect(tmp_path / "a.db") as connection:
+        return connection.execute(
+            "SELECT provider, billing_basis, cost_source FROM calls"
+        ).fetchone()
+
+
+def test_a_provider_receipt_records_as_provider_reported(tmp_path):
+    """``usd_cost`` is the provider's own statement: basis billed, source reported."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    usage = Usage(
+        input_tokens=100,
+        output_tokens=50,
+        context_tokens=100,
+        usd_cost=0.0034,
+        provider="openrouter",
+        model_id="vendor/model",
+    )
+    asyncio.run(_drain(fn, _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    assert _basis_row(tmp_path, usage) == ("openrouter", "billed", "provider_reported")
+
+
+def test_a_subscription_login_records_api_equivalent_catalogue_labels(tmp_path):
+    """A login flavour is quota money — and the COLLAPSE must not erase it.
+
+    The labels are decided BEFORE ``credential_provider_id`` folds
+    ``openai-device`` into ``openai``: the row's provider is the collapsed one
+    (one vendor is one row), while the basis still says the figure is an
+    API-EQUIVALENT, not a metered bill.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    usage = Usage(
+        input_tokens=100,
+        output_tokens=50,
+        context_tokens=100,
+        provider="openai-device",
+        model_id="gpt-6",
+    )
+    asyncio.run(_drain(fn, _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    assert _basis_row(tmp_path, usage) == ("openai", "subscription_api_equivalent", "catalogue")
+
+
+def test_a_metered_call_without_a_receipt_records_the_rate_table_labels(tmp_path):
+    """No receipt, no flavour: the figure is rate-derived — billed/catalogue."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn()
+    usage = Usage(input_tokens=100, output_tokens=50, context_tokens=100)
+    asyncio.run(_drain(fn, _request(), [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    # Unstamped usage: the request's own model spec names the provider.
+    assert _basis_row(tmp_path, usage) == ("anthropic", "billed", "catalogue")

@@ -17,9 +17,17 @@ from pydantic import BaseModel, ConfigDict
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_settings as _we
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
+
+# Cheap and stdlib-only on purpose: the two registry drainers (this route and
+# the TUI page) must be able to ask "may the agent-messages section render
+# here, right now" without importing the client stack or fetching anything
+# (RFC §5.6 makes the section's visibility dynamic; §5.4 says the static
+# registry is not the gate). See `team_bridge.availability`.
+from local_operator.team_bridge import availability as bridge_availability
 
 router = APIRouter(tags=["Settings"], dependencies=[Depends(require_desktop)])
 # The underlying manager writes a whole YAML snapshot. Serialize this server's
@@ -73,6 +81,17 @@ class SettingView(BaseModel):
     warning: str = ""
     placeholder: str = ""
     gated_by: str | None = None
+    #: A live sentence about this row's CURRENT server-side posture, and
+    #: whether the row can change effective behaviour. Agent messages in
+    #: §5.6 F (plan lapse / confirmed kill): the local preference rows stay
+    #: visible for honesty, but the note is the contract's own sentence — the
+    #: neutral "Agent messages are turned off" in v1 (review round 2, R9) —
+    #: and the UI presents the controls view-only rather than implying an edit
+    #: resumes the flow (H1 review round 1, Q3/D3). Additive and optional,
+    #: like the three fields above: a client that ignores them sees the
+    #: response it saw before, and every other row carries the defaults.
+    state_note: str = ""
+    read_only: bool = False
     #: The value grammar of a HOTKEY row (``"app"`` / ``"desktop"``), DERIVED
     #: in ``settings_io``'s registry from ``keymap.KEY_ACTIONS`` — never
     #: authored twice, so the wire cannot disagree with what the writers
@@ -80,6 +99,11 @@ class SettingView(BaseModel):
     #: that ignores it sees the previous response, and an app that predates it
     #: keeps rendering hotkeys by the rules it already shipped.
     hotkey_scope: str = ""
+    #: What an INT/FLOAT row counts ("hours"), so a UI can render a bounded
+    #: control from ``minimum``/``maximum``/``unit`` without parsing the help.
+    #: The stored value is always in this unit. Additive on the same terms as
+    #: the fields above: an older app ignores it, an older server omits it.
+    unit: str = ""
 
 
 class SettingsView(BaseModel):
@@ -105,6 +129,18 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         if setting.kind is settings_io.Kind.CASCADE
         else settings_io.read_setting(manager, setting)
     )
+    state_note = ""
+    read_only = False
+    if setting.section == bridge_availability.BRIDGE_SECTION:
+        # The posture comes from the process-local record the status
+        # discipline writes (never a fetch here): §5.6 F renders its note and
+        # asks the UI to present the controls view-only (Q3/D3).
+        observed = bridge_availability.observed(manager.config_dir)
+        if observed is not None and observed.get("read_only"):
+            read_only = True
+            note = observed.get("note")
+            if isinstance(note, str):
+                state_note = note
     return SettingView(
         key=setting.key,
         section=setting.section,
@@ -127,13 +163,20 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         placeholder=setting.placeholder,
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
+        unit=setting.unit,
+        state_note=state_note,
+        read_only=read_only,
     )
 
 
 def _setting(key: str) -> settings_io.Setting:
     setting = settings_io.resolve_key(key)
     if setting is None:
-        raise HTTPException(404, "This setting is not registered.")
+        # Refusals carry the RFC §2.6 envelope ({code, params, text}) so clients
+        # can react to `code` and older readers still get the sentence in
+        # `text`. The contract is `detail: str | {code, params, text}` while
+        # routes migrate in slices (docs/design/i18n.md §2.6).
+        raise HTTPException(404, _we.not_registered().envelope())
     return setting
 
 
@@ -144,9 +187,8 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
             settings_io._require_readable_config(manager)
             manager.reload()
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
+        root = manager.config_dir
         return CRUDResponse(
             status=200,
             message="Settings retrieved.",
@@ -159,8 +201,19 @@ async def list_settings(manager: ConfigManager = Depends(get_config_manager)):
                         "description": section.description,
                     }
                     for section in settings_io.SECTIONS
+                    # §5.6: a dynamically-gated section (agent messages) is
+                    # ABSENT — both its header and every row belonging to it —
+                    # until this daemon has observed an eligible state. The
+                    # record is written by the status discipline's boundary
+                    # reads (`team_bridge.availability`); a daemon that never
+                    # read shows nothing, which is the fail-closed direction.
+                    if bridge_availability.section_visible(section.name, root)
                 ],
-                settings=[_view(manager, setting) for setting in settings_io.SETTINGS],
+                settings=[
+                    _view(manager, setting)
+                    for setting in settings_io.SETTINGS
+                    if bridge_availability.section_visible(setting.section, root)
+                ],
             ),
         )
 
@@ -194,7 +247,7 @@ async def edit_setting(
 ):
     setting = _setting(key)
     if _private_endpoint(edit.value):
-        raise HTTPException(422, "Use an endpoint without inline credentials or query parameters.")
+        raise HTTPException(422, _we.inline_credentials().envelope())
     async with _write_lock:
         try:
             if setting.kind is settings_io.Kind.CASCADE:
@@ -204,11 +257,12 @@ async def edit_setting(
             else:
                 settings_io.write_setting(manager, setting, edit.value)
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
         except ValueError as error:
-            raise HTTPException(422, str(error)) from None
+            # The ValueError prose is the settings_io layer's own sentence
+            # (translated at its source in a later slice); `text` carries it
+            # VERBATIM so readers that only show the string see no change.
+            raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
         return CRUDResponse(status=200, message="Setting saved.", result=_view(manager, setting))
 
 
@@ -219,9 +273,10 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
         try:
             settings_io.reset_setting(manager, setting)
         except settings_io.ConfigUnreadableError:
-            raise HTTPException(
-                409, "The configuration file cannot be read. Repair it before saving."
-            )
+            raise HTTPException(409, _we.config_unreadable().envelope())
         except ValueError as error:
-            raise HTTPException(422, str(error)) from None
+            # The ValueError prose is the settings_io layer's own sentence
+            # (translated at its source in a later slice); `text` carries it
+            # VERBATIM so readers that only show the string see no change.
+            raise HTTPException(422, _we.invalid_value(error=str(error)).envelope()) from None
         return CRUDResponse(status=200, message="Setting reset.", result=_view(manager, setting))

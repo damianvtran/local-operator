@@ -424,7 +424,7 @@ async def test_publish_requires_a_radient_credential(
         response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "RADIENT_API_KEY is required"
+    assert response.json()["detail"]["text"] == "RADIENT_API_KEY is required"
     mock_client.assert_not_called()
 
 
@@ -442,7 +442,7 @@ async def test_publish_unknown_local_agent_keeps_the_local_404(
     response = await test_app_client.post("/v1/agents/does-not-exist/publish", json={})
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Agent with ID does-not-exist not found"
+    assert response.json()["detail"]["text"] == "Agent with ID does-not-exist not found"
 
 
 @pytest.mark.asyncio
@@ -505,7 +505,7 @@ async def test_publish_maps_every_hub_code_onto_its_status_and_structure(
     assert response.status_code == status
     detail = response.json()["detail"]
     assert detail["code"] == code
-    assert detail["message"] == "The hub refused this publication."
+    assert detail["text"] == "The hub refused this publication."
     assert detail["details"] == details
 
 
@@ -634,7 +634,7 @@ async def test_publish_reports_a_refused_credential_rather_than_a_hub_outage(
     assert response.status_code == hub_status
     detail = response.json()["detail"]
     assert detail["code"] == "hub_unauthorized"
-    assert detail["message"] == "Invalid API key provided."
+    assert detail["text"] == "Invalid API key provided."
     # The hub's code is carried when it sent one, and nothing is invented when it did
     # not -- the live hub's prose-only 401 answers exactly as it did before.
     assert detail["details"] == ({"hub_code": hub_code} if hub_code else {})
@@ -986,7 +986,7 @@ async def test_publish_org_target_without_a_login_shows_the_re_login_remedy(
         )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    assert response.json()["detail"]["text"] == ORG_LOGIN_REMEDY
     mock_client.assert_not_called()
 
 
@@ -1011,7 +1011,7 @@ async def test_publish_org_target_at_a_refused_hub_names_the_configuration_remed
     assert response.status_code == 400
     # Byte-equal to the ONE shared sentence the CLI prints too (agent review
     # round 1, MINOR-2): the two surfaces render the same object.
-    assert response.json()["detail"] == org_destination_refused_sentence(
+    assert response.json()["detail"]["text"] == org_destination_refused_sentence(
         "http://127.0.0.1:4999/v1", DEFAULT_RADIENT_API_BASE_URL
     )
     mock_client.assert_not_called()
@@ -1072,7 +1072,7 @@ async def test_publish_org_target_refuses_a_malformed_pair_before_any_credential
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == message
+    assert response.json()["detail"]["text"] == message
     mock_client.assert_not_called()
     fake_org_credential.assert_not_awaited()
 
@@ -1167,7 +1167,7 @@ async def test_republish_org_target_without_a_login_shows_the_re_login_remedy(
         )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    assert response.json()["detail"]["text"] == ORG_LOGIN_REMEDY
     mock_client.assert_not_called()
 
 

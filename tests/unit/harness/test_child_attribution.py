@@ -944,7 +944,7 @@ async def test_a_paused_row_uses_a_mechanism_neutral_verb(iso) -> None:
 async def test_a_settled_record_with_no_outcome_reads_gone_not_cancelled(iso) -> None:
     """D3, fixed at the ladder's single rung.
 
-    A [redacted] record is stamped ``settled`` by ``restore`` itself, so the hard
+    A restored record is stamped ``settled`` by ``restore`` itself, so the hard
     parent-death shape lands on the last rung with NO outcome. It used to read
     ``cancelled`` — an attribution nobody made, contradicted on the same row by the
     reconcile detail. The design's §2.5 table expects ``gone``.

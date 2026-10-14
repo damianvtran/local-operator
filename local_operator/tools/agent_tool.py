@@ -88,7 +88,6 @@ from local_operator.agent_profiles import (
 )
 from local_operator.harness.subagent import (
     configured_effort_tiers,
-    depth_closed_the_tier_choice,
     describe_effort_tiers,
     model_may_choose_tier,
 )
@@ -1436,7 +1435,7 @@ async def execute_agent(
     """
 
     try:
-        params = AgentParams.model_validate(args, context=effort_validation_context(context))
+        params = AgentParams.model_validate(args, context=effort_validation_context())
     except ValidationError as exc:
         return _validation_error(tool_call_id, "agent", exc)
 
@@ -1465,9 +1464,7 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
-def _effort_pin_description(
-    model_choice: bool, session_model_label: str | None = None, delegation_depth: int = 0
-) -> str:
+def _effort_pin_description(model_choice: bool, session_model_label: str | None = None) -> str:
     """The ``effort`` description for create/update, matching the live schema.
 
     With model choice ON and tiers configured it names what each resolves to so
@@ -1479,21 +1476,8 @@ def _effort_pin_description(
     not "no tiers are configured" — the operator owns the choice, so the enum
     is ``inherit`` even where tiers exist. Saying "no tiers are configured"
     there would be FALSE, which is why this takes the flag rather than reading
-    ``configured_effort_tiers()`` for its zero-tier arm. The flag is still the
-    arm: the only live config read besides the tier list is
-    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`, which
-    picks the WORDING for a subagent (depth, not the key, closed the picker
-    under ``model_choice=model``; under ``operator`` the key did) and never
-    changes which arm renders.
+    ``configured_effort_tiers()`` for its zero-tier arm.
     """
-    if not model_choice and depth_closed_the_tier_choice(delegation_depth):
-        # A subagent is refused for who it is, not for the key, so the operator
-        # copy below (which names ``subagents.model_choice=operator``) would be
-        # false under ``model_choice=model`` — see ``model_may_choose_tier``.
-        return (
-            "create/update: no effort tiers are yours to choose (you are a subagent; "
-            "only the top-level session pins tiers); 'inherit' clears a pin."
-        )
     if not model_choice:
         # Names the OPERATOR's route as well as the model's, in place of the
         # older "the operator sets tier pins": that sentence said the operator
@@ -1532,11 +1516,10 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         return None
     # ONE read of the policy per build, shared by the schema, the description
     # and the validator's wrapper — see ``build_task_tool``.
-    depth = context.delegation_depth
-    model_choice = model_may_choose_tier(depth)
+    model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         AgentParams.model_json_schema(),
-        description=_effort_pin_description(model_choice, context.session_model_label, depth),
+        description=_effort_pin_description(model_choice, context.session_model_label),
         extra=(INHERIT_EFFORT,),
         model_choice=model_choice,
     )
@@ -1571,6 +1554,5 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             parameters,
             model_choice=model_choice,
             session_model_label=context.session_model_label,
-            delegation_depth=depth,
         ),
     )

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 import requests
 from pydantic import BaseModel, SecretStr
 
-from local_operator.clients._http import response_body
+from local_operator.clients._http import APIError, api_error_from_exception
 
 
 class ImageSize(str, Enum):
@@ -149,10 +149,14 @@ class FalClient:
             # Regular async mode response with request_id and status
             return FalRequestStatus(request_id=data["request_id"], status=data["status"])
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
-            raise RuntimeError(
-                f"Failed to submit FAL API request: {str(e)}, Response Body: {error_body}"
-            )
+            # Typed twin of the legacy prose shape: same sentence, scrubbed
+            # body, plus the machine-readable status for a caller to switch
+            # on (APIError IS a RuntimeError, so old catchers keep working).
+            raise api_error_from_exception(
+                e,
+                prefix="Failed to submit FAL API request",
+                secrets=(self.api_key.get_secret_value(),),
+            ) from e
 
     def _get_request_status(self, request_id: str) -> FalRequestStatus:
         """Get the status of a FAL API request.
@@ -177,10 +181,11 @@ class FalClient:
 
             return FalRequestStatus(request_id=request_id, status=data["status"])
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
-            raise RuntimeError(
-                f"Failed to get FAL API request status: {str(e)}, Response Body: {error_body}"
-            )
+            raise api_error_from_exception(
+                e,
+                prefix="Failed to get FAL API request status",
+                secrets=(self.api_key.get_secret_value(),),
+            ) from e
 
     def _get_request_result(self, request_id: str) -> FalImageGenerationResponse:
         """Get the result of a completed FAL API request.
@@ -205,12 +210,13 @@ class FalClient:
 
             return FalImageGenerationResponse.model_validate(data)
         except requests.exceptions.RequestException as e:
-            error_body = response_body(e)
-            raise RuntimeError(
-                f"Failed to get FAL API request result: {str(e)}, Response Body: {error_body}"
-            )
+            raise api_error_from_exception(
+                e,
+                prefix="Failed to get FAL API request result",
+                secrets=(self.api_key.get_secret_value(),),
+            ) from e
         except Exception as e:
-            raise RuntimeError(f"Failed to parse FAL API response: {str(e)}")
+            raise APIError(f"Failed to parse FAL API response: {str(e)}", status_code=None) from e
 
     def generate_image(
         self,
@@ -299,7 +305,7 @@ class FalClient:
         start_time = time.time()
         # Ensure request_status is not None before proceeding
         if request_status is None:
-            raise RuntimeError("Failed to get request status from FAL API")
+            raise APIError("Failed to get request status from FAL API", status_code=None)
 
         request_id = request_status.request_id
 
@@ -311,7 +317,7 @@ class FalClient:
                 if request_status.status.upper() == "COMPLETED":
                     return self._get_request_result(request_id)
                 elif request_status.status.upper() == "FAILED":
-                    raise RuntimeError(f"FAL API request failed: {request_id}")
+                    raise APIError(f"FAL API request failed: {request_id}", status_code=None)
 
                 # Wait before polling again
                 time.sleep(poll_interval)
@@ -333,6 +339,7 @@ class FalClient:
         try:
             return self._get_request_result(request_id)
         except Exception:
-            raise RuntimeError(
-                f"FAL API request timed out after {max_wait_time} seconds: {request_id}"
+            raise APIError(
+                f"FAL API request timed out after {max_wait_time} seconds: {request_id}",
+                status_code=None,
             )

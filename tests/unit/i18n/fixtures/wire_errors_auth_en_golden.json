@@ -1,0 +1,114 @@
+[
+  {
+    "site": 0,
+    "line": 114,
+    "status": 404,
+    "text": "This sign-in is no longer available. Start again.",
+    "reason": null
+  },
+  {
+    "site": 1,
+    "line": 121,
+    "status": 422,
+    "text": "Enter a non-empty value of at most 32768 characters.",
+    "reason": null
+  },
+  {
+    "site": 2,
+    "line": 142,
+    "status": 503,
+    "text": "The credential store could not be read — the provider census needs it.",
+    "reason": null
+  },
+  {
+    "site": 3,
+    "line": 321,
+    "status": 404,
+    "text": "Provider account not found",
+    "reason": null
+  },
+  {
+    "site": 4,
+    "line": 350,
+    "status": 503,
+    "text": "synthetic ' {tail} العربية 日本語",
+    "reason": null
+  },
+  {
+    "site": 5,
+    "line": 352,
+    "status": 422,
+    "text": "synthetic ' {tail} العربية 日本語",
+    "reason": null
+  },
+  {
+    "site": 6,
+    "line": 391,
+    "status": 409,
+    "text": "This sign-in is not waiting for input.",
+    "reason": null
+  },
+  {
+    "site": 7,
+    "line": 397,
+    "status": 422,
+    "text": "The provider rejected this API key.",
+    "reason": null
+  },
+  {
+    "site": 8,
+    "line": 397,
+    "status": 422,
+    "text": "synthetic ' {tail} العربية 日本語",
+    "reason": "synthetic ' {tail} العربية 日本語"
+  },
+  {
+    "site": 9,
+    "line": 401,
+    "status": 409,
+    "text": "This sign-in is not waiting for input.",
+    "reason": null
+  },
+  {
+    "site": 10,
+    "line": 446,
+    "status": 422,
+    "text": "This provider does not accept an API key.",
+    "reason": null
+  },
+  {
+    "site": 11,
+    "line": 450,
+    "status": 422,
+    "text": "The provider rejected this API key.",
+    "reason": null
+  },
+  {
+    "site": 12,
+    "line": 450,
+    "status": 422,
+    "text": "synthetic ' {tail} العربية 日本語",
+    "reason": "synthetic ' {tail} العربية 日本語"
+  },
+  {
+    "site": 13,
+    "line": 507,
+    "status": 422,
+    "text": "Only a local provider's server can be tested.",
+    "reason": null
+  },
+  {
+    "site": 14,
+    "line": 510,
+    "status": 422,
+    "text": "This provider has no server address to test.",
+    "reason": null
+  },
+  {
+    "site": 15,
+    "line": 536,
+    "status": 422,
+    "text": "No stored credentials were found for this provider.",
+    "reason": null
+  }
+]

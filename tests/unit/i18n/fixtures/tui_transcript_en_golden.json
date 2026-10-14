@@ -1,0 +1,12 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (key name)",
+  "tui.transcript.ask.not_answered": "not answered",
+  "tui.transcript.ask.not_provided": "not provided",
+  "tui.transcript.attach.receipt": "↑ {count, plural, one {# image} other {# images}} attached",
+  "tui.transcript.catchup.headline": "catch-up — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# missed wake} other {# missed wakes}}",
+  "tui.transcript.queued.newest": "· queued for the next runtime — esc takes it back",
+  "tui.transcript.queued.older": "· queued for the next runtime",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "another session"
+}

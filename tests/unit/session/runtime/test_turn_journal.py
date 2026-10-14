@@ -1371,3 +1371,35 @@ def test_a_dump_armed_after_the_turn_began_is_not_its_evidence(
     # (c) NO READABLE EPOCH — refused, not guessed.
     dump.write_text(f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n", encoding="utf-8")
     assert journal.death_verdict(row)[1] != STALL_BOUND_CAUSE
+
+
+def test_a_boot_record_carries_the_spawn_chain_and_old_rows_stay_readable(
+    tmp_path: Path,
+) -> None:
+    """2026-10-09/D1: the chain rides the boot record — with its recorded liveness.
+
+    The boot record is the artifact attribution readers prefer, so each entry's
+    liveness as recorded at spawn (``alive_at_spawn``) travels through both the
+    JSON file and ``from_json`` unchanged; the arrival reading is added only
+    when a signal actually lands (the receipt). An older row without the key
+    parses to ``None`` rather than failing or inventing one.
+    """
+    chain = [
+        {"pid": 5, "argv0": "lop exec", "alive_at_spawn": True},
+        {
+            "pid": 9,
+            "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+            "alive_at_spawn": True,
+        },
+    ]
+    path = journal.write_boot_record(
+        "sess-chain", update.BuildStamp("1.0.0", "abc1234"), root=tmp_path, spawn_chain=chain
+    )
+    data = json.loads(path.read_text())
+    assert data["spawn_chain"] == chain
+    rebuilt = journal.BootRecord.from_json(data)
+    assert rebuilt is not None and rebuilt.spawn_chain == chain
+
+    legacy = {key: value for key, value in data.items() if key != "spawn_chain"}
+    old = journal.BootRecord.from_json(legacy)
+    assert old is not None and old.spawn_chain is None

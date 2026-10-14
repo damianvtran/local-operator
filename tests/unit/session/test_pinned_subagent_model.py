@@ -624,7 +624,7 @@ async def test_task_tool_tells_the_model_not_to_retry_on_another_tier(tmp_path, 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         raise SubagentModelUnavailable("hi", "no model configured at subagents.models.hi")
 
     context = ToolContext(subagent_launcher=launcher)
@@ -804,6 +804,133 @@ async def test_the_task_result_names_the_model_each_child_will_run_on(tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selector", "expected", "owns_model"),
+    [
+        ("inherit", "openai/gpt-6.1", False),
+        (None, "openai/gpt-6.1", False),
+        ("anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", True),
+    ],
+    ids=["explicit-inherit", "no-role", "explicit-pin"],
+)
+async def test_initial_receipt_names_selected_child_not_parent_fallback(
+    tmp_path, monkeypatch, selector, expected, owns_model
+):
+    """A parent's temporary fallback must not masquerade as the selected model
+    inherited by a fresh child in the receipt that precedes its own route."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    write_model_choice_config(config_dir, {})
+    # Credentials are outside this label regression; the scripted provider
+    # needs only the validated pin spec, never a real API key.
+    monkeypatch.setattr(
+        "local_operator.mobile.peer_model.validate_subagent_selection",
+        lambda provider, model_id: ModelSpec(
+            provider=provider, model_id=model_id, context_window=100_000
+        ),
+    )
+    stream = OneShotStream()
+    selected = ModelSpec(provider="openai", model_id="gpt-6.1", context_window=100_000)
+    session = Session(
+        model=selected,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    session._active_fallback = ModelSpec(
+        provider="radient", model_id="auto", context_window=100_000
+    )
+    assert session.model is selected
+    assert session.effective_model_label == "radient/auto", "negative-control premise"
+    try:
+        task = {"label": "provenance", "prompt": "go"}
+        if selector is not None:
+            task["model"] = selector
+        result = await execute_task(
+            "call-receipt",
+            {"context": "goal", "tasks": [task]},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+        assert not result.is_error, result.content
+        assert result.details is not None
+        job = session.jobs.get(result.details["jobs"][0]["job_id"])
+        assert job is not None
+        receipt_label = job.model_label
+        text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+        assert job.owns_model is owns_model
+        # Capture before yielding to the runner, then independently check its
+        # actual request so changing inheritance to the fallback cannot pass.
+        await wait_for(lambda: job.status == "completed")
+        assert stream.requests
+        assert (
+            f"{stream.requests[0].model.provider}/{stream.requests[0].model.model_id}" == expected
+        )
+        assert receipt_label == expected
+        assert expected in text
+        assert "radient/auto" not in text
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_nested_initial_receipt_uses_immediate_parents_selected_model(tmp_path, monkeypatch):
+    """The ancestor's route and middle child's route are independent of the
+    selected model handed to the middle child's own inheriting worker."""
+    import asyncio
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    release = asyncio.Event()
+    requests = []
+
+    def stream(request, signal):
+        requests.append(request)
+
+        async def gen():
+            if request.messages[-1].text == "hold manager":
+                await release.wait()
+            yield StreamTextDelta(delta="done")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    root = Session(
+        model=ModelSpec(provider="openai", model_id="gpt-6.1", context_window=100_000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    root._active_fallback = ModelSpec(
+        provider="anthropic", model_id="claude-sonnet-5-5", context_window=100_000
+    )
+    try:
+        manager_id = root._launch_subagent(label="manager", prompt="hold manager")
+        await wait_for(
+            lambda: (record := root.subagent_comms._record(manager_id)) is not None and record.child
+        )
+        manager = root.subagent_comms._record(manager_id).child
+        assert manager.model_label == "openai/gpt-6.1"
+        manager._active_fallback = ModelSpec(
+            provider="radient", model_id="auto", context_window=100_000
+        )
+        worker_id = manager._launch_subagent(label="worker", prompt="go", model="inherit")
+        worker = manager.jobs.get(worker_id)
+        assert worker is not None
+        receipt_label = worker.model_label
+        assert worker.owns_model is False
+        await wait_for(lambda: worker.status == "completed")
+        assert len(requests) == 2
+        assert f"{requests[-1].model.provider}/{requests[-1].model.model_id}" == "openai/gpt-6.1"
+        assert receipt_label == "openai/gpt-6.1"
+    finally:
+        release.set()
+        await root.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_resume_in_operator_mode_restamps_the_recorded_tier_on_the_new_row(
     tmp_path, monkeypatch
 ):
@@ -865,7 +992,7 @@ async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
 
-    def launcher(label, prompt, *, agent="task", effort=None):
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
         return f"job-{label}"
 
     context = ToolContext(subagent_launcher=launcher, session_model_label="test/m")

@@ -273,6 +273,11 @@ class OwnerDial:
 #: are per-CONNECTION facts, which is exactly why the relay forwards one
 #: upstream connection per viewer rather than multiplexing them).
 #:
+#: ``supplements`` (turn-supplements, lane C0) is on the list BEFORE any client declares it,
+#: because the entry-times declaration below shipped inert for want of exactly this line: the
+#: owner reads no declaration, never sends the events, and the viewer shows nothing with
+#: nothing logged. It is the viewer's half of the ``supplements-v1`` two-half gate.
+#:
 #: ``display_history_audit`` AND ``display_history_entry_times`` ARE ON THIS
 #: LIST FOR THE REASON THE OTHERS ARE: they are the same kind of per-connection
 #: declaration, and they gate whether the owner may put extra fields on a
@@ -289,6 +294,19 @@ AUTH_FIELDS: tuple[str, ...] = (
     "display_window",
     "display_history_audit",
     "display_history_entry_times",
+    # The owner's capability AND viewer declaration gate order metadata. This
+    # relay must forward the latter, not silently make a capable peer legacy.
+    "journal_order",
+    # THE COMPLETE CONTRACT'S OWN DECLARATION, named here because the
+    # allowlist guard refused to let it ship silently: the client declares it
+    # beside ``journal_order`` (projection.py) as the viewer's half of the
+    # four-part gate, and a declaration this copy dropped would have made the
+    # peer-source contract inert on the attach path exactly as the
+    # entry-times join once shipped inert (agent review round 1, Q2a — the
+    # guard's literal-key fix surfaced it; the fix is to name it, never to
+    # widen the copy).
+    "peer_journal_source",
+    "supplements",
     "slash_consumers",
     "surface",
 )

@@ -1,3 +1,5 @@
+import type { SupplementBeat } from "./lib/supplement";
+
 /**
  * Wire types for the mobile control plane.
  *
@@ -72,6 +74,14 @@ export interface TranscriptEntryDetails {
 	   conversation_name / model_label / session_id / cwd, all advisory. Rides
 	   through the fold's `details` so the card can label who reached in. */
 	sender?: PeerSender;
+	/* Optional hub receipt facts. A requested agent reply is not operator
+	   attention and cannot establish an outstanding-reply state. */
+	body?: string;
+	direction?: string;
+	label?: string;
+	job_id?: string;
+	expects_reply?: boolean;
+	steer?: boolean;
 	/* Severity ink for a `notice` row, mirroring the TUI's NoticeBlock kind.
 	   A refusal, a failed turn and a failed compaction are `error`; an
 	   unattended gate timeout and a declined compaction are `warning`.
@@ -139,6 +149,10 @@ export interface TranscriptEntry {
 	    bytes): each is `{index, mime_type}`. The pixels are fetched lazily from
 	    the image endpoint — see `imageUrl` in api.ts. */
 	images?: TranscriptImageRef[];
+	/** Video artifact refs — the parallel family to `images`, its own index
+	    space; each is `{index, mime_type, duration_s?}`. Bytes come lazily
+	    from the attachment route (see `attachmentUrl` in api.ts). */
+	videos?: TranscriptVideoRef[];
 	/** Assistant rows stream: `final` flips true on message_end. */
 	final: boolean;
 }
@@ -149,6 +163,18 @@ export interface TranscriptEntry {
 export interface TranscriptImageRef {
 	index: number;
 	mime_type: string;
+}
+
+/** A reference to one video artifact on a tool row — the parallel family to
+    `TranscriptImageRef`, with its OWN index space (a video artifact never
+    shifts an image index and vice versa). The bytes live in the attachment
+    store and come lazily from the attachment route, which is Range-capable
+    because phone Safari will not play a <video> served as a full-body 200.
+    `duration_s` rides only when the artifact carried one. */
+export interface TranscriptVideoRef {
+	index: number;
+	mime_type: string;
+	duration_s?: number;
 }
 
 export interface TodoItem {
@@ -362,6 +388,52 @@ export interface PendingAsk {
 	draft_question_ids?: string[];
 }
 
+/** One aggregated row of the published `spend_channels` object
+    (`session/frontend_state.py::FrontendSpendChannelRow`). Money is raw INTEGER
+    micro-USD, like every money field on this wire; `amount_micro` null means
+    the money could not be stated — never a zero. `label` is the inference
+    by-identity bucket key (`provider/model`) and is empty on channel rows. */
+export interface SpendChannelRow {
+	channel: string;
+	provider?: string;
+	model?: string;
+	label?: string;
+	units?: number | null;
+	unit?: string;
+	amount_micro?: number | null;
+	knowledge?: string;
+	basis?: string[];
+	price_versions?: string[];
+}
+
+/** The session's published per-channel spend (`FrontendSpendChannels`), already
+    serialised and row-capped by the runtime
+    (`FrontendStateStore.spend_channels_copy`): the ONE object every surface
+    renders, so no client re-sums. Integer micro-USD throughout;
+    `knowledge` is `CostKnowledge` (`spend-context.ts`). ABSENT means "this
+    runtime publishes no channel ledger" — a null would instead claim an empty
+    one — so an absence renders the legacy reading, never an empty breakdown. */
+export interface SpendChannels {
+	version: number;
+	/** False for a session whose journal predates the channel ledger: the
+	    totals are inference-only and a surface must say "channels not
+	    tracked" rather than implying $0 of channel spend. */
+	tracked: boolean;
+	total_micro: number;
+	knowledge?: string;
+	/** Money per billing basis; the buckets reconcile to `total_micro`.
+	    `billed`/`subscription_api_equivalent`/`estimated`/`not_tracked_micro`
+	    are micro-USD SUMS (subscription dollars stay in their own bucket,
+	    never added into `billed`), and `not_tracked_calls` is a COUNT of rows
+	    whose amount could not be stated — a call count, not money. */
+	by_basis?: Record<string, number>;
+	rows?: SpendChannelRow[];
+	children?: Record<string, unknown>;
+	/** Present only when voice records exist in analytics but not in the fold
+	    (§4.2's return-path fallback): the total then excludes them. */
+	pending?: Record<string, unknown> | null;
+}
+
 export interface SessionProjection {
 	attention?: CompletionAttention;
 	session_id: string;
@@ -444,8 +516,24 @@ export interface SessionProjection {
 	context_tokens?: number | null;
 	context_window?: number | null;
 	context_is_estimate?: boolean | null;
+	/** The published per-channel spend object (PR-2). Raw micro-USD and the
+	    backend's own knowledge rung; `lib/spend-context.ts` spells it. Absent
+	    on an older daemon — the legacy `cumulative_parent_cost` block above
+	    then renders exactly as it did before this field existed. */
+	spend_channels?: SpendChannels | null;
 	/** Projection epoch; drop stale repaints. */
 	version: number;
+	/**
+	 * Turn supplements ("Highlights", memo §3.1 row 18): the newest beat per ANCHOR —
+	 * the final assistant message's id, which is the `TranscriptEntry.id` the block
+	 * hangs under. Absent when the daemon carries none: the daemon emits the key
+	 * only when it has beats (an empty map is absence, and the off-loop frame pin
+	 * holds a supplement-free frame to the parent's bytes), and an older daemon
+	 * omits it entirely — both read as "no beats", never as "unknown". The
+	 * projection's own `pid` carries the liveness the stale-row rule needs
+	 * (`lib/supplement.ts`, `beatLive`): 0 means a disk rebuild.
+	 */
+	supplements?: Record<string, SupplementBeat>;
 }
 
 /** The opener of an agent workstream, mirroring the desktop contract
@@ -642,6 +730,9 @@ export interface SttCapability {
     dict and stays `unknown` here so a reader cannot invent its keys. */
 export interface Capabilities {
 	features?: Record<string, unknown>;
+	/** Separate routing capability: core features.i18n alone does not mean the
+	    relay app serves catalogues. Consumers must require both bits. */
+	i18n?: { catalogues: number };
 	stt?: SttCapability;
 }
 
@@ -690,7 +781,19 @@ export type CommandOp =
 	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and
 	   injects nothing — no turn is bought. */
 	| { op: "ask_dismiss"; ask_id: string }
-	| { op: "snapshot" };
+	| { op: "snapshot" }
+	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch
+	   answers with its own receipt (`cancelled` / `steering` / `restarting` / the
+	   neutral `already finished`), carried over the SAME session command route
+	   every other mutation uses — the relay scopes them to the session in the
+	   URL and the anchor+job pair in the frame, and forwards them to the live
+	   runtime. `anchor` is the answer the block hangs under; `job` is the id the
+	   press names. Never authority-increasing: `cancel` cuts the session's own
+	   background work, `steer`/`restart` inject only the instruction the next
+	   attempt runs with. */
+	| { op: "supplement_cancel"; anchor: string; job: string }
+	| { op: "supplement_steer"; anchor: string; job: string; text: string }
+	| { op: "supplement_restart"; anchor: string; job: string };
 
 /* ---- projects (GET/POST/DELETE ``/api/projects…``) ------------------------ */
 

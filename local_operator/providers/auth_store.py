@@ -69,7 +69,8 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -83,6 +84,7 @@ from local_operator.providers.registry import (
 )
 
 if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
+    from local_operator.providers.usage import QuotaHealth
     from local_operator.providers.usage_cache import UsageCacheStore
 
 logger = logging.getLogger("local_operator.providers.auth_store")
@@ -1034,6 +1036,30 @@ class _SerializedConnection:
         with self._lock:
             self._conn.commit()
 
+    @property
+    def in_transaction(self) -> bool:
+        with self._lock:
+            return self._conn.in_transaction
+
+    def rollback(self) -> None:
+        # Muse seals first, then writes metadata. A failed metadata statement
+        # must leave this connection clean before its sealed key is discarded.
+        with self._lock:
+            self._conn.rollback()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        # Hold both this connection's lock and the SQLite write reservation:
+        # another logout/login must not replace metadata under a compensated
+        # Muse deletion. The caller commits within its cross-store guard.
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                self._conn.rollback()
+                raise
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -1060,6 +1086,11 @@ class AuthStore:
         HTTP clients stay per-process.
     """
 
+    #: The WRITABLE handle, definitely typed. A read-only store never assigns it
+    #: (its handle lives in :attr:`_ro_conn`); the annotation keeps the type
+    #: non-Optional for every unguarded ``self._conn.x`` on the writable path.
+    _conn: _SerializedConnection
+
     def __init__(
         self,
         db_path: str | Path | None = None,
@@ -1067,8 +1098,14 @@ class AuthStore:
         config_dir: Path | None = None,
         config_overrides: dict[str, str] | None = None,
         usage_cache: "UsageCacheStore | None" = None,
+        read_only: bool = False,
     ) -> None:
         self._db_path = Path(db_path) if db_path is not None else default_db_path()
+        #: Metadata-only mode for the paired-phone usage seam. Every open is
+        #: ``mode=ro`` over an existing file and constructor performs NO disk
+        #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
+        #: (:meth:`list_credentials`) work; write paths must not be reached.
+        self._read_only = read_only
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1115,7 +1152,133 @@ class AuthStore:
         #: Set by :meth:`close`. Read by :func:`shared_auth_store` to decide
         #: whether the process-level store it is holding is still usable.
         self._closed = False
-        self._conn = self._connect()
+        if read_only:
+            # Construction must WRITE NOTHING: an absent database is simply an
+            # empty store, so the read-only handle is allowed to be ``None``
+            # instead of raising out of the constructor (the mode=ro open cannot
+            # be created, only opened). It lives in its OWN Optional attribute,
+            # and the WRITABLE ``self._conn`` is left UNASSIGNED here, so pyright
+            # keeps ``self._conn``'s declared type definite -- assigning a
+            # possibly-``None`` to it widened the attribute to Optional and made
+            # every unguarded ``store._conn.x`` across the tree a pyright error.
+            # Read paths branch on ``self._read_only`` and never touch
+            # ``self._conn`` on such a store.
+            self._ro_conn = self._connect_read_only()
+        else:
+            self._ro_conn = None
+            self._conn = self._connect()
+
+    @classmethod
+    def open_read_only(cls, db_path: str | Path | None = None) -> "AuthStore":
+        """A metadata-only store that writes nothing on construction or read.
+
+        The paired-phone seam must be able to read persisted credential
+        METADATA (which providers/rows exist) without the default store's
+        constructor side effects: ``mkdir`` of the config root, ``O_CREAT`` of
+        auth.db, the WAL PRAGMA, the schema ``executescript`` and three
+        ``chmod`` calls. Building a default store and merely refraining from
+        writing would still have performed all of those, so the read-only open
+        is a distinct constructor rather than a flag a caller could forget.
+        An absent database reads as an empty store.
+        """
+        store = cls(db_path, read_only=True)
+        return store
+
+    def _connect_read_only(self) -> _SerializedConnection | None:
+        """The metadata-only handle, or ``None`` when there is nothing to read.
+
+        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
+        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
+        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
+        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
+        promise forbids. sqlite also refuses every write through this handle.
+
+        Returns ``None`` when there is nothing to read: an ABSENT database
+        (legitimately empty) or one that will not open. Callers distinguish the
+        two states by :meth:`read_only_unavailable`; returning a bare ``None``
+        here is what keeps construction from creating a file to find out.
+        """
+        if not self._db_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._db_path}?mode=ro&immutable=1",
+                timeout=5.0,
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return _SerializedConnection(conn)
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+
+    def read_only_unavailable(self) -> bool:
+        """Whether a read-only store could not be read (vs. genuinely empty).
+
+        ``False`` when the database is simply absent — "empty" is a legitimate
+        answer, and the seam must be able to say it without creating the file.
+        ``True`` when the file exists but cannot yield credentials: it will not
+        open (corrupt/locked), OR it opens but lacks the tables/columns this
+        store's read path requires. The second case is a foreign or half-built
+        database — a valid SQLite file that is NOT a credential store — and
+        reporting it as empty would tell the phone "no accounts" when the truth
+        is "this is not a store I can read". Only meaningful for a read-only
+        store; a writing store always has a live, schema-applied handle.
+        """
+        if not self._read_only:
+            return False
+        if not self._db_path.exists():
+            return False
+        if self._ro_conn is None:
+            return True
+        return not self._has_required_schema()
+
+    def _has_required_schema(self) -> bool:
+        """Whether the required credential table AND its columns are present.
+
+        ``sqlite_master`` alone is not enough: a database can hold a
+        ``auth_credentials`` table missing ``identity_key`` (an older or foreign
+        build), which then fails at the first SELECT rather than at open. Both
+        the table and every column the read path selects are required.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return False
+        try:
+            cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(auth_credentials)").fetchall()
+            }
+        except Exception:  # noqa: BLE001 — unreadable schema = unavailable
+            return False
+        required = {
+            "id",
+            "provider",
+            "credential_type",
+            "data",
+            "disabled_cause",
+            "identity_key",
+            "created_at",
+            "updated_at",
+        }
+        return required.issubset(cols)
+
+    def read_only_sidecar_present(self) -> bool:
+        """True when a non-empty ``-wal`` sits beside the store's database.
+
+        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
+        so a committed DELETE in the WAL is invisible to it: the reader still
+        sees the removed credential row. A non-empty ``-wal`` is that exact
+        on-disk signal, which the seam surfaces as staleness so a possibly-
+        deleted account is never presented as current. A zero-length WAL holds
+        no frames and is not staleness.
+        """
+        try:
+            wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
+            return wal.exists() and wal.stat().st_size > 0
+        except OSError:
+            return False
 
     @property
     def db_path(self) -> Path:
@@ -1181,7 +1344,15 @@ class AuthStore:
         # its only consumer: everything else detects a closed connection the way
         # sqlite does, with ``ProgrammingError`` on use.
         self._closed = True
-        self._conn.close()
+        # A read-only store over an ABSENT database has no handle: closing it
+        # must be a safe no-op, not a ``NoneType.close`` raise. The phone route
+        # closes whatever it opened, and "there was nothing to open" is the
+        # common cold-start case.
+        if self._read_only:
+            if self._ro_conn is not None:
+                self._ro_conn.close()
+        else:
+            self._conn.close()
         if self._usage_cache is not None:
             self._usage_cache.close()
             self._usage_cache = None
@@ -1277,8 +1448,7 @@ class AuthStore:
             updated_at=row[7],
         )
 
-    @staticmethod
-    def _oauth_key_fn(provider: str) -> GetApiKeyFn | None:
+    def _oauth_key_fn(self, provider: str) -> GetApiKeyFn | None:
         """The extractor that pulls the WIRE token out of an OAuth row.
 
         Which field is the bearer is a property of the row, and the row belongs
@@ -1291,6 +1461,12 @@ class AuthStore:
         flavour by its own definition would authenticate inference with the
         token the inference endpoint rejects.
         """
+        if self._storage_id(provider) == "meta-muse":
+            from local_operator.providers.meta_muse_credentials import read_key
+
+            # Secret references belong to THIS manager's root, not whichever
+            # HOME happens to be inherited by a desktop worker or mesh child.
+            return lambda creds: read_key(creds, self._config_dir or self._db_path.parent) or ""
         definition = get_provider_definition(provider)
         if definition is not None and definition.get_api_key is not None:
             return definition.get_api_key
@@ -1326,15 +1502,18 @@ class AuthStore:
         ``provider`` is resolved through :meth:`_storage_id`, so asking for a
         login flavour returns the rows its login actually wrote.
         """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return []
         if provider is not None:
             provider = self._storage_id(provider)
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials WHERE provider = ? ORDER BY id",
                 (provider,),
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
                 " created_at, updated_at FROM auth_credentials ORDER BY id"
             ).fetchall()
@@ -1357,6 +1536,36 @@ class AuthStore:
         return None
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
+        """Seal Muse secrets before metadata serialization; preserve other providers."""
+        if self._storage_id(provider) != "meta-muse":
+            return self._upsert_credential_metadata(provider, credential)
+        from local_operator.providers.meta_muse_credentials import (
+            delete_key,
+            seal_credential,
+        )
+
+        old_rows = self.list_credentials("meta-muse", include_disabled=True)
+        sealed = seal_credential(credential, self._config_dir or self._db_path.parent)
+        try:
+            row = self._upsert_credential_metadata("meta-muse", sealed)
+        except BaseException:
+            self._conn.rollback()
+            # Post-write hooks can fail AFTER SQL committed. Do not destroy a
+            # key that a committed row now owns while surfacing that failure.
+            if not any(
+                row.data.get("access_secret_ref") == sealed["access_secret_ref"]
+                for row in self.list_credentials("meta-muse", include_disabled=True)
+            ):
+                delete_key(sealed, self._config_dir or self._db_path.parent)
+            raise
+        for old in old_rows:
+            if old.id == row.id:
+                delete_key(old.data, self._config_dir or self._db_path.parent)
+        return row
+
+    def _upsert_credential_metadata(
+        self, provider: str, credential: dict[str, Any]
+    ) -> StoredCredential:
         """Insert, or update the row for the same identity (org scope ⇒ rows).
 
         Revives soft-deleted rows for the same identity (re-login), and lifts
@@ -1590,7 +1799,10 @@ class AuthStore:
         return stored
 
     def get_credential(self, credential_id: int) -> StoredCredential | None:
-        row = self._conn.execute(
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        row = conn.execute(
             "SELECT id, provider, credential_type, data, disabled_cause, identity_key,"
             " created_at, updated_at FROM auth_credentials WHERE id = ?",
             (credential_id,),
@@ -1607,6 +1819,78 @@ class AuthStore:
 
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
+        row = self.get_credential(credential_id)
+        if row is not None and row.provider == "meta-muse":
+            from local_operator.providers.meta_muse_credentials import (
+                reversible_key_deletion,
+            )
+
+            with self._conn.transaction():
+                # Re-read after the write reservation, so a concurrent login
+                # cannot leave us deleting the former key and the NEW row.
+                row = self.get_credential(credential_id)
+                if row is None:
+                    self._conn.commit()
+                    return
+                metadata = row.data
+                self._conn.execute("SAVEPOINT muse_logout")
+                reservation_ready = True
+                owned_ref = metadata.get("access_secret_ref")
+
+                def still_recorded() -> bool:
+                    # Never read ownership, much less restore, without the
+                    # reservation. Mutable account metadata is not key identity.
+                    if not reservation_ready or not self._conn.in_transaction:
+                        return False
+                    current = self.get_credential(credential_id)
+                    return (
+                        current is not None
+                        and current.provider == "meta-muse"
+                        and current.data.get("access_secret_ref") == owned_ref
+                    )
+
+                with reversible_key_deletion(
+                    metadata, self._config_dir or self._db_path.parent, restore_if=still_recorded
+                ):
+                    try:
+                        self._conn.execute(
+                            "DELETE FROM auth_credential_blocks WHERE credential_id = ?",
+                            (credential_id,),
+                        )
+                        self._conn.execute(
+                            "DELETE FROM auth_credentials WHERE id = ?", (credential_id,)
+                        )
+                        self._conn.commit()
+                    except BaseException:
+                        reservation_ready = False
+                        try:
+                            if self._conn.in_transaction:
+                                try:
+                                    # Statement-only errors keep the original
+                                    # reservation through compensation.
+                                    self._conn.execute("ROLLBACK TO SAVEPOINT muse_logout")
+                                except sqlite3.Error:
+                                    # A lost/unusable savepoint needs the same
+                                    # protected ownership check as a lost txn.
+                                    self._conn.rollback()
+                                    self._conn.execute("BEGIN IMMEDIATE")
+                            else:
+                                # SQLITE_INTERRUPT/RAISE(ROLLBACK) and a durable
+                                # commit can BOTH clear in_transaction. Reacquire
+                                # before ANY row read; provider+ref ownership,
+                                # not that flag, distinguishes restore vs skip.
+                                self._conn.execute("BEGIN IMMEDIATE")
+                            reservation_ready = True
+                        except Exception as recovery_error:
+                            raise AuthStoreError(
+                                "Muse logout compensation incomplete: metadata write "
+                                "reservation could not be recovered. Sign in again to repair "
+                                "the account; no unlocked key restoration was attempted."
+                            ) from recovery_error
+                        # The outer transaction releases its reservation only
+                        # after the sealed-key ownership check/restore finishes.
+                        raise
+            return
         self._conn.execute(
             "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
         )
@@ -1617,7 +1901,9 @@ class AuthStore:
         self, provider: str, disabled_cause: str = "logged-out"
     ) -> int:
         """Logout: wipe every credential stored under ``provider``. Returns count."""
-        rows = self.list_credentials(provider)
+        rows = self.list_credentials(
+            provider, include_disabled=self._storage_id(provider) == "meta-muse"
+        )
         for row in rows:
             self.delete_credential(row.id)
         return len(rows)
@@ -2253,7 +2539,7 @@ class AuthStore:
     def _needs_refresh(creds: dict[str, Any], *, force: bool = False) -> bool:
         if force:
             return True
-        access = creds.get("access")
+        access = creds.get("access") or creds.get("access_secret_ref")
         if not access:
             return True
         expires = creds.get("expires")
@@ -2277,6 +2563,10 @@ class AuthStore:
         authorized_at can never rewrite them — identity is fixed at login.
         """
         creds = dict(row.data)
+        if row.provider == "meta-muse" and force:
+            # The account bearer was discarded after mint. A failed static key
+            # cannot be refreshed by silently onboarding (or charging) again.
+            raise CredentialInvalidError("Muse Code key needs a new sign-in; run /login meta-muse.")
         # The IdP's own refusal, persisted on the row, is honoured BEFORE the
         # freshness check and therefore before any POST. The ordering matters: a
         # tombstoned grant is dead whether or not its access token has expired
@@ -2594,7 +2884,9 @@ class AuthStore:
         except AuthStoreError:
             return None
 
-    async def ensure_oauth_fresh_or_raise(self, credential_id: int) -> dict[str, Any] | None:
+    async def ensure_oauth_fresh_or_raise(
+        self, credential_id: int, *, force: bool = False
+    ) -> dict[str, Any] | None:
         """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
 
         The probe above collapses every unusable state into ``None``, which is
@@ -2605,11 +2897,19 @@ class AuthStore:
         disabled, or not an OAuth credential; a refresh that failed raises
         :class:`AuthStoreError` with the underlying transport or IdP error
         chained on ``__cause__``, so a caller can classify on it.
+
+        ``force`` skips the expiry pre-check and refreshes unconditionally, for
+        the one caller that has an authoritative rejection the clock cannot
+        see: an owner-pinned request whose bearer the server answered 401 to
+        (the bridge client, ``team_bridge``). It does NOT bypass the
+        tombstoned-grant check — a grant the IdP has declared dead is dead
+        whatever the caller believes — and it stays refresh-single-flight like
+        every other path through ``_ensure_oauth_fresh``.
         """
         row = self._refreshable_row(credential_id)
         if row is None:
             return None
-        return await self._ensure_oauth_fresh(row)
+        return await self._ensure_oauth_fresh(row, force=force)
 
     def refresh_deferred(self, credential_id: int) -> bool:
         """Whether an unsettled send is holding this row's refresh off right now.
@@ -2913,12 +3213,20 @@ class AuthStore:
     def _cached_remaining_fraction(
         self, row: StoredCredential, provider: str, model_id: str, now_ms: int
     ) -> float | None:
-        """Remaining shared quota (0..1) for ``row`` from the cache, or ``None``.
+        """Numeric view retained for callers; paid balances have no fraction."""
+        health = self._cached_quota_health(row, provider, model_id, now_ms)
+        return health.remaining_fraction if health is not None else None
+
+    def _cached_quota_health(
+        self, row: StoredCredential, provider: str, model_id: str, now_ms: int
+    ) -> "QuotaHealth | None":
+        """Cached quota verdict, preserving definite usability without a fraction.
 
         ``None`` is UNKNOWN, not zero: no report, an unparseable one, one
         older than :data:`USAGE_PICK_MAX_REPORT_AGE_MS`, or a report whose
-        windows carry no measurable fraction. The caller treats unknown as
-        neutral so a cold cache cannot demote an account.
+        windows carry neither a measurable fraction nor definite payable
+        capacity. The caller keeps unknown neutral without treating a healthy
+        absolute wallet as unknown or fabricating its remaining percentage.
 
         TWO sources feed this, and the newer report wins. The per-account
         preflight row is keyed exactly as the message-boundary preflight
@@ -2974,7 +3282,9 @@ class AuthStore:
         # recency contest below would mask a slightly older real preflight
         # report and rank a 95%-used account as neutral (review round 2, F7).
         candidates = [
-            r for r in candidates if any(limit.amount.fraction() is not None for limit in r.limits)
+            r
+            for r in candidates
+            if any(limit.amount.fraction() is not None or limit.paid_usable() for limit in r.limits)
         ]
         if not candidates:
             return None
@@ -2988,15 +3298,17 @@ class AuthStore:
             # carries a ``resets_at_ms`` in the past, so "every reset is still
             # ahead" is exactly that test. A window with no reset timestamp
             # cannot be vouched for, so it makes the whole report unknown.
+            # A paid wallet can change independently of a future plan reset.
+            # Never vouch for stale credits with the included window's horizon.
+            if any(limit.paid_usable() for limit in report.limits):
+                return None
             measured = [limit for limit in report.limits if limit.amount.fraction() is not None]
             if not measured or any(
                 limit.resets_at_ms is None or limit.resets_at_ms <= now_ms for limit in measured
             ):
                 return None
         health = usage_health(report, model_id, now_ms=now_ms)
-        if health.state == "unknown" or health.remaining_fraction is None:
-            return None
-        return health.remaining_fraction
+        return health if health.state != "unknown" else None
 
     def _usage_ranked_order(
         self,
@@ -3020,7 +3332,7 @@ class AuthStore:
         to an account, and steers that binding toward headroom.
 
         HOW. Every row's remaining shared fraction is read from the cache
-        (:meth:`_cached_remaining_fraction`, no network). The rows within
+        (:meth:`_cached_quota_health`, no network). The rows within
         ``tolerance`` of the best-known remaining fraction form a bucket of
         "equally good" accounts; unknown rows join the bucket as neutral
         members, since no evidence is not evidence against. The bucket is
@@ -3052,13 +3364,17 @@ class AuthStore:
             return fallback
         try:
             now_ms = self._now_ms()
+            health = {r.id: self._cached_quota_health(r, provider, model_id, now_ms) for r in rows}
             remaining = {
-                r.id: self._cached_remaining_fraction(r, provider, model_id, now_ms) for r in rows
+                cid: h.remaining_fraction if h is not None else None for cid, h in health.items()
             }
+            usable = any(
+                h is not None and h.state in ("healthy", "reserve") for h in health.values()
+            )
             known = [v for v in remaining.values() if v is not None]
-            if not known:
+            if not known and not usable:
                 return fallback
-            best = max(known)
+            best = max(known, default=0.0)
             floor = best - self._usage_pick_tolerance
             bucket: list[StoredCredential] = []
             rest: list[StoredCredential] = []
@@ -3070,7 +3386,16 @@ class AuthStore:
                 # missing report is most often a cold cache or a window that
                 # just reset -- and penalising an account for the absence of
                 # data is how a fresh login gets starved by its own silence.
-                (bucket if value is None or value >= floor else rest).append(r)
+                # Absolute paid headroom is definite usability, not a synthetic
+                # fraction. Keep unknown neutral, but a known spent row cannot
+                # tie with a definitely usable wallet even if all fractions=0.
+                verdict = health[r.id]
+                depleted = verdict is not None and verdict.state == "depleted"
+                (
+                    bucket
+                    if (not (usable and depleted) and (value is None or value >= floor))
+                    else rest
+                ).append(r)
             # Stable sort: rows with equal remaining keep the store's row
             # order, which is the order the hash fallback also assumes.
             rest.sort(key=lambda r: -(remaining[r.id] or 0.0))
@@ -4028,8 +4353,7 @@ class AuthStore:
         # them requires pretending here that the fault never happened.
         return False
 
-    @staticmethod
-    def _row_matches_key(row: StoredCredential, api_key: str) -> bool:
+    def _row_matches_key(self, row: StoredCredential, api_key: str) -> bool:
         if row.credential_type == "api_key":
             return row.data.get("key") == api_key
         # Compare against the SAME extractor the cascade used to produce the
@@ -4043,7 +4367,7 @@ class AuthStore:
         # would replace "rotate away from the failing credential" with a crash.
         # The extractor reads fields directly, so fall back to the raw compare
         # when it cannot produce a key.
-        key_fn = AuthStore._oauth_key_fn(row.provider)
+        key_fn = self._oauth_key_fn(row.provider)
         if key_fn is not None:
             try:
                 return key_fn(row.data) == api_key

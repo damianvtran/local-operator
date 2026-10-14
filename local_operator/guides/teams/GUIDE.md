@@ -21,10 +21,33 @@ Never copy a team's collaboration or project brief into an agent's base instruct
 
 Roster members are the same roles/specialists `/agent` exposes: authoring an agent for a team also makes it individually invokable with `/agent <name> <message>` — in a session with no team attached (a team owns the session's agent slot; see [Running a team](#running-a-team)) — so its name must follow the no-spaces rule either way.
 
+## Reuse before you create
+
+A team is a durable roster for a function or product domain, not scaffolding for
+a single task. Check the registry (`team list`) before authoring one: if a
+registered team already covers the work, use it. An existing team is almost
+always the right home, and a parallel one costs a roster to own and maintain
+for one job.
+
+- **Never create a team ad-hoc for a one-off task** — an investigation, a
+  review, a migration, a release. The domain's existing team covers it: `lopdev`
+  for anything in the local-operator/harness code, the product team for a
+  service, and so on.
+- **New teams are for materially new functions or product domains** with no good
+  existing coverage — a genuinely new product, organisation, or standing
+  responsibility. Unsure whether the bar is cleared? It is not; default to the
+  existing team.
+- **To parallelize a one-off, spawn a session, not a team.** Use the `sessions`
+  tool with the existing team attached (`team=<name>`) and hand it the brief;
+  it runs to completion without the initiator owning a new roster or managing
+  its members.
+
 ## When the user asks to create a team
 
-Work with them. Do not invent a roster silently. Ask, using the `ask` tool when a
-choice is theirs. If the call returns a receipt rather than the answers, the host
+First, confirm no registered team covers the domain — see
+[Reuse before you create](#reuse-before-you-create). Then work with them. Do
+not invent a roster silently. Ask, using the `ask` tool when a choice is
+theirs. If the call returns a receipt rather than the answers, the host
 queues asks: the roster comes from the answers, which arrive as a turn, never
 from the receipt:
 

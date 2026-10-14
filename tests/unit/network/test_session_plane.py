@@ -27,14 +27,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import contextlib
 import gc
 import json
 import logging
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -239,6 +243,24 @@ def _seed_journal(root: Path, session_id: str, texts: list[str]) -> list[str]:
         ids.append(message.id)
     (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return ids
+
+
+@contextlib.contextmanager
+def _live_pid() -> Iterator[int]:
+    """One more real live pid, for a cell that needs two live records at once.
+
+    Spawned rather than invented — ``classify`` reads the pid, so a fabricated
+    number would be a live-looking value only until the machine answered for
+    it — and killed in the ``finally`` whatever the test does. One pid holds
+    one record file (``registry.record_path`` is keyed by pid), which is why a
+    second live record needs a second running process.
+    """
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        yield child.pid
+    finally:
+        child.kill()
+        child.wait()
 
 
 def _append_hidden_row(root: Path, session_id: str) -> str:
@@ -1406,6 +1428,255 @@ def test_a_live_rows_started_is_the_records_epoch_not_its_bool(root: Path) -> No
     assert row["started"] == 1789400000.0
 
 
+def test_the_live_half_carries_the_persons_last_send_clock(root: Path) -> None:
+    """A RUNNING row's ordering clock is the person's own last send, off the journal.
+
+    The desktop sidebar's RUNNING order reads ``last_user_at`` (falling back to
+    ``created_at``, then catalogue order), and the origin's peer listing is
+    where a remote row gets its claim — the producer half of the carry half
+    #2084 shipped, read with the same tracker the local half uses
+    (``session/last_user.py``).
+
+    THE SCAN, PINNED IN ONE NUMBER: the newest QUALIFYING row is the STEER — an
+    ordinary unstamped user row carrying a producer identity, exactly what
+    ``_drain_steering`` writes — while an assistant row and a harness injection
+    (``kind: custom``) land AFTER the last typed prompt. A reader that skipped
+    steers would answer the prompt's ts, one that counted non-typed rows would
+    answer one of theirs, and only the person's own words answer the steer's
+    ``1789400300.0``.
+    """
+    import os
+
+    from local_operator.harness.types import Message
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    prompt = Message.user("the original prompt")
+    steer = Message.user("actually, do it the other way")
+    steer_payload = encode_message_payload(steer)
+    # The write ``transcript.append_message`` gives a producer steer: the
+    # ordinary user payload plus the producer identity, nothing else.
+    steer_payload["producer_command_id"] = "cid-steer"
+    directory = root / "sessions" / SESSION
+    directory.mkdir(parents=True)
+    journal = [
+        TranscriptEntry(prompt.id, 1789400000.0, ENTRY_MESSAGE, encode_message_payload(prompt)),
+        TranscriptEntry(
+            "a" * 24,
+            1789400100.0,
+            ENTRY_MESSAGE,
+            encode_message_payload(Message.assistant("working")),
+        ),
+        TranscriptEntry(
+            "c" * 24,
+            1789400200.0,
+            ENTRY_MESSAGE,
+            {"kind": "custom", "custom_type": "job_result", "details": {"text": "a job"}},
+        ),
+        TranscriptEntry(steer.id, 1789400300.0, ENTRY_MESSAGE, steer_payload),
+    ]
+    (directory / "transcript.jsonl").write_text(
+        "\n".join(entry.to_json() for entry in journal) + "\n", encoding="utf-8"
+    )
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION,
+            conversation_name="live one",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            started=True,
+            started_at=1789400000.0,
+            # THE PAY RULE'S POSITIVE LIMB: a running row is one the sidebar's
+            # RUNNING order can read, so this one buys the scan.
+            busy=True,
+        ),
+        root,
+    )
+    row = next(item for item in server.local_session_rows() if item["session_id"] == SESSION)
+    assert row["state"] == "live", "the record must classify live for the cell to mean anything"
+    assert row["last_user_at"] == 1789400300.0, (
+        "the value must be the steer's ts — the newest qualifying row — so a "
+        "reader that skipped steers, or counted assistant/custom rows, lands "
+        f"elsewhere: {row['last_user_at']!r}"
+    )
+
+
+def test_the_send_clock_is_bought_only_for_rows_the_remote_section_can_order(
+    root: Path,
+) -> None:
+    """The local half's pay rule, mirrored on the origin's peer listing.
+
+    ``desktop_sessions`` computes ``last_user_at`` only for the status codes the
+    sidebar files under RUNNING — "a row the section will not order must not buy
+    one", because the tracker's cold scan is a real read. The remote order reads
+    the same field on the same condition, and the running status codes a
+    federated row can reach are ``busy`` (pinned above), ``wedged`` and a waiting
+    gate (``pending``); ``delegating`` is derived from live child counts a
+    federated row does not carry, so it can never appear remotely and buys
+    nothing. Everything else publishes ``None`` — the unknown whose fallback
+    (``created_at``, then catalogue order) behaves exactly as before this field
+    existed — including rows whose transcripts COULD answer: an idle resident
+    and a cold session on disk both carry a qualifying journal here and must
+    still read ``None``.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    def _typed_journal(session_id: str, ts: float) -> None:
+        directory = root / "sessions" / session_id
+        directory.mkdir(parents=True)
+        message = Message.user("a typed prompt")
+        entry = TranscriptEntry(message.id, ts, ENTRY_MESSAGE, encode_message_payload(message))
+        (directory / "transcript.jsonl").write_text(entry.to_json() + "\n", encoding="utf-8")
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    idle = "1de1de1de1de"
+    cold = "c01dc01dc01d"
+    gate = "9a7e9a7e9a7e"
+    wedged = "6ed66ed66ed6"
+
+    # 1. AN IDLE RESIDENT: live, with a qualifying row, filed under Today on the
+    # far side — no scan.
+    _typed_journal(idle, 1789400000.0)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=idle,
+            conversation_name="idle one",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+        ),
+        root,
+    )
+    # 2. A COLD SESSION ON DISK: same journal, no record at all — nothing files
+    # it under Running remotely, so it buys no scan either.
+    _typed_journal(cold, 1789400000.0)
+
+    # 3. A WAITING GATE and 4. A WEDGED RUN: both file under Running on the far
+    # side, so both buy the scan.
+    with _live_pid() as gate_pid, _live_pid() as wedged_pid:
+        _typed_journal(gate, 1789400100.0)
+        registry.publish(
+            SessionRecord(
+                pid=gate_pid,
+                kind="tui",
+                session_id=gate,
+                conversation_name="gated one",
+                cwd=str(root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+                detached=True,
+                pending="approval",
+            ),
+            root,
+        )
+        _typed_journal(wedged, 1789400200.0)
+        registry.publish(
+            SessionRecord(
+                pid=wedged_pid,
+                kind="tui",
+                session_id=wedged,
+                conversation_name="wedged one",
+                cwd=str(root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+            ),
+            root,
+        )
+        # ``publish`` re-stamps the heartbeat of the process that owns the
+        # record, so the stale stamp a WEDGED run would have is written
+        # afterwards, into the record file itself.
+        record_file = registry.record_path(wedged_pid, root)
+        stale = json.loads(record_file.read_text())
+        stale["heartbeat_at"] = time.time() - 3600.0
+        record_file.write_text(json.dumps(stale))
+        rows = {item["session_id"]: item for item in server.local_session_rows()}
+
+    by_id = rows
+    assert by_id[idle]["state"] == "live", "the cell needs a live idle row to mean anything"
+    assert by_id[idle]["last_user_at"] is None, "an idle row is Today's, and buys no scan"
+    assert by_id[cold]["state"] == "stored", "the cell needs a cold row to mean anything"
+    assert by_id[cold]["last_user_at"] is None, "a cold row is never filed under Running"
+    assert by_id[gate]["last_user_at"] == 1789400100.0, "a waiting gate IS a running row"
+    assert by_id[wedged]["state"] == "wedged", "the cell needs a wedged row to mean anything"
+    assert by_id[wedged]["last_user_at"] == 1789400200.0, "a wedged run IS a running row"
+
+
+def test_the_ordering_clock_crosses_a_dialed_listing(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole chain over a real socket: B's journal -> B's rows -> A's listing.
+
+    The cells above pin each layer in isolation; this one is the real path a
+    viewer walks — A dials B, B answers ``net_catalog`` with the row it built
+    from its own record and journal, and A's federated listing carries the
+    value. A frame filter or a fan-out that rebuilt rows instead of copying
+    them would drop an unknown key silently, which no builder-level cell can
+    see; the dialed hop is where that class of loss lives.
+    """
+    import os
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed_journal(server_b.root, SESSION, ["the original prompt", "do it the other way"])
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION,
+            conversation_name="live one",
+            cwd=str(server_b.root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            started=True,
+            started_at=1700000000.0,
+            # A running row is one the remote sidebar can order, so B buys the
+            # scan; the value below is the newest typed row ``_seed_journal``
+            # wrote.
+            busy=True,
+        ),
+        server_b.root,
+    )
+    _dial_to(server_a, record, host_b, port_b)
+    payload = _call(server_a.root, "peer_session_rows")["detail"]
+    row = next(item for item in payload["sessions"] if item["session_id"] == SESSION)
+    assert row["locality"] == "remote", row
+    assert row["last_user_at"] == 1700000001.0, (
+        "the person's clock must cross the link — the newest typed row's ts — "
+        f"not be dropped between B's answer and A's listing: {row['last_user_at']!r}"
+    )
+
+
 def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2167,6 +2438,875 @@ def test_a_bad_page_limit_is_refused_by_name_on_both_halves_of_the_read(
         assert ok.get("op") == "ack", ok
         assert len(ok["detail"]["entries"]) == 2, ok
         assert link.alive
+    finally:
+        link.close("test")
+
+
+def test_a_bad_open_frame_flag_is_refused_by_name_on_both_halves_of_the_read(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open-frame flag shares ``limit``'s discipline: one spelling, refused
+    rather than coerced, on both halves of the read.
+
+    ``relay.validate_open_frame`` accepts exactly the two spellings a caller may
+    write — JSON ``true`` and ``1`` — and refuses everything else with
+    ``protocol_error`` by the SAME shared decision on the local control frame and
+    on the link's own frame (the R1-5/Q2 rule, one layer out). ``false`` and
+    ``0`` are NOT second spellings of "no": absence is (see the validator), so
+    they are refusals, not answers.
+    """
+    server_a, server_b, _h, _p = peer_pair
+    _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        # THE LOCAL HALF: the flag on this device's own control frame.
+        for bad in ("yes", "1", 0, False, 2, 1.5):
+            reply = _call(
+                server_a.root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+                open_frame=bad,
+            )
+            assert reply.get("op") == "error", (bad, reply)
+            assert reply.get("code") == "protocol_error", (bad, reply)
+        # THE PEER HALF: the same validator, on the link's own frame.
+        for bad in ("1", 0, False, 2, 1.5):
+            refused = link.request(
+                {
+                    "op": "net_session_history",
+                    "req": 99_200,
+                    "locality": "remote",
+                    "session_id": SESSION,
+                    "open_frame": bad,
+                },
+                timeout=10.0,
+            )
+            assert refused is not None and refused.get("op") == "error", (bad, refused)
+            assert refused.get("code") == "protocol_error", (bad, refused)
+        # AND BOTH ACCEPTED SPELLINGS STILL SERVE A PAGE, so the refusals are
+        # not a blanket no.
+        for good in (1, True):
+            ok = _call(
+                server_a.root,
+                "peer_session_history",
+                peer=server_b.identity.device_id,
+                session_id=SESSION,
+                open_frame=good,
+            )
+            assert ok.get("op") == "ack", (good, ok)
+            assert len(ok["detail"]["entries"]) == 3, (good, ok)
+        assert link.alive
+    finally:
+        link.close("test")
+
+
+def test_the_open_frame_flag_rides_the_page_request_only_when_asked(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the wire carries: the key present IFF asked, and today's frame
+    byte-for-byte otherwise.
+
+    The LINK is the only thing stubbed (the ``_ctl_peer_stop`` precedent), so the
+    frames asserted are the ones this code really sends. An absent flag must not
+    become ``false`` on the wire — an older owner is sent today's frame exactly,
+    and "no" has no second spelling for an owner to refuse (see
+    ``relay.validate_open_frame``).
+    """
+    server_a, _server_b, _host, _port = peer_pair
+    seen: list[dict[str, Any]] = []
+    detail = {"entries": [{"id": "e1"}], "has_more": False, "cursor_missing": False}
+
+    class _RecordingLink:
+        def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            seen.append(dict(frame))
+            return {"op": "ack", "req": frame.get("req"), "detail": dict(detail)}
+
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: _RecordingLink())
+
+    base = {"peer": "d_" + "c" * 32, "session_id": SESSION, "limit": 25, "req": 1}
+    reply = server_a.control_dispatch("peer_session_history", dict(base))
+    assert reply["op"] == "ack", reply
+    # BYTE-FOR-BYTE TODAY'S FRAME: asserted as an EXACT dict (minus the relay's
+    # own request counter, which is per-process), not a subset — a subset would
+    # not see an ``open_frame: false`` the frame must not carry.
+    assert {key: value for key, value in seen[0].items() if key != "req"} == {
+        "op": "net_session_history",
+        "locality": "remote",
+        "session_id": SESSION,
+        "before_id": None,
+        "limit": 25,
+    }, seen[0]
+
+    for asked in (1, True):  # the two accepted spellings
+        reply = server_a.control_dispatch("peer_session_history", {**base, "open_frame": asked})
+        assert reply["op"] == "ack", (asked, reply)
+        assert seen[-1]["open_frame"] is True, (asked, seen[-1])
+    assert len(seen) == 3
+
+
+def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypatch) -> None:
+    """old owner / new viewer, old viewer / new owner, new / new — over real relays.
+
+    THE FLAG MUST NOT COST AN OLDER OWNER ITS ANSWER. The old owner named here is
+    a build that predates the flag (v0.68.11, the build on this mesh's cloud
+    peer): verified from the tag, its ``dispatch``, ``Authorizer`` and
+    ``_op_session_history`` are BYTE-IDENTICAL to this build's minus this change,
+    and none of them reads a key it does not name — so the simulation is exactly
+    one fact: THE HANDLER NEVER READS ``open_frame``. The key is dropped before
+    delegating to the real handler, which is that build's whole relationship to
+    it, while the REAL authoriser and dispatch still run on B — they are where a
+    key-set check would live, and they are what the new viewer's frame crosses.
+
+    The three directions, one contract: an owner that does not know the flag
+    answers today's page; a viewer that does not ask sends today's frame; both
+    new serves the owner's BUILT frame — the flag's three keys ride the answer,
+    and a viewer that does not read them tolerates them exactly as it tolerates
+    their absence (the client contract already agrees on both).
+    """
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    today_keys = {"entries", "has_more", "cursor_missing", "has_newer"}
+    try:
+        # NEW VIEWER -> NEW OWNER: the frame is BUILT (the facts half landed);
+        # its three keys ride the answer and the page keeps the journal's ids.
+        new_new = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=1,
+            limit=50,
+        )
+        assert new_new.get("op") == "ack", new_new
+        assert set(new_new["detail"]) == today_keys | {
+            "runs",
+            "runs_state",
+            "head_cut",
+        }, new_new["detail"]
+        assert new_new["detail"]["runs_state"] in {"ready", "building"}, new_new["detail"]
+        assert [entry["id"] for entry in new_new["detail"]["entries"]] == ids
+
+        # OLD VIEWER -> NEW OWNER: no key on the frame, the same answer.
+        old_new = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        assert old_new.get("op") == "ack", old_new
+        assert set(old_new["detail"]) == today_keys, old_new["detail"]
+        assert old_new["detail"]["entries"] == new_new["detail"]["entries"]
+
+        # NEW VIEWER -> OLD OWNER: the key arrives on a real dispatch (recorded
+        # below) and the old reading of it is: unread.
+        delivered: list[dict[str, Any]] = []
+        original = server_b._handlers["net_session_history"]  # noqa: SLF001 — the relay's table
+
+        def _owner_older_than_the_flag(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+            delivered.append(dict(frame))
+            without = {key: value for key, value in frame.items() if key != "open_frame"}
+            return original(link_, without)
+
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _owner_older_than_the_flag)
+        new_old = _call(
+            server_a.root,
+            "peer_session_history",
+            peer=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=1,
+            limit=50,
+        )
+        assert new_old.get("op") == "ack", new_old
+        assert set(new_old["detail"]) == today_keys, new_old["detail"]
+        assert new_old["detail"]["entries"] == new_new["detail"]["entries"]
+        # THE KEY REALLY CROSSED: it is on the frame the real dispatch delivered
+        # to the handler — the authoriser admitted it and the old reading ignored
+        # it. That pair IS the compatibility claim.
+        assert delivered and delivered[0].get("open_frame") is True, delivered
+    finally:
+        link.close("test")
+
+
+def test_the_open_frame_reply_fields_pass_through_the_whole_read_unchanged(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reply's optional run facts cross both hops verbatim — or not at all.
+
+    THE OWNER'S BUILD NOW EXISTS (``RelayServer._open_frame_detail``, the cells
+    beside this one), so what this cell keeps pinning is the OTHER half of the
+    contract: whatever an owner's answer carries crosses the link, the viewer
+    relay's control socket, and the whole of
+    ``projection.peer_stored_history_page`` VERBATIM when present. The owner's
+    participation is simulated at the last honest place — the handler's own
+    answer — so a future change to the build's field shapes cannot pass by
+    quietly changing what the crossing does with them. The two properties:
+    fields the contract names are carried UNCHANGED when present, and absent
+    fields leave today's answer exactly as it is.
+    """
+    from local_operator.network import projection
+
+    server_a, server_b, _h, _p = peer_pair
+    ids = _seed_journal(server_b.root, SESSION, ["one", "two", "three"])
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    today_keys = {"entries", "has_more", "cursor_missing", "has_newer"}
+    # One run in the contract's own vocabulary, with a ``None`` and a ``False``
+    # inside it: coercion at any hop would show up as a changed value.
+    runs = [
+        {
+            "run_key": "r1",
+            "opening_user_id": ids[0],
+            "closing_answer_id": None,
+            "settled": False,
+            "outcome": None,
+            "started_ts": 1_700_000_000.0,
+        }
+    ]
+    original = server_b._handlers["net_session_history"]  # noqa: SLF001 — the relay's table
+    delivered: list[dict[str, Any]] = []
+    seen_frames: list[dict[str, Any]] = []
+
+    def _owner_with_the_facts_half(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+        delivered.append(dict(frame))
+        produced = original(link_, frame)
+        assert isinstance(produced, dict), produced  # the op always answers a page dict
+        return {**produced, "runs": runs, "runs_state": "ready", "head_cut": False}
+
+    def _recording_owner(link_: relay.PeerLink, frame: dict[str, Any]) -> Any:
+        seen_frames.append(dict(frame))
+        return original(link_, frame)
+
+    try:
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _owner_with_the_facts_half)
+        page = projection.peer_stored_history_page(
+            server_a.root,
+            device_id=server_b.identity.device_id,
+            session_id=SESSION,
+            open_frame=True,
+            limit=50,
+        )
+        if page is None:
+            raise AssertionError("the store page came back unservable")
+        assert page["runs"] == runs, page["runs"]  # VERBATIM: same ids, ``None`` and all
+        assert page["runs_state"] == "ready"
+        assert page["head_cut"] is False  # present but falsy: carried, not dropped
+        assert [entry["id"] for entry in page["entries"]] == ids
+        # The ASK rode the whole way in: the handler at the far edge saw the flag.
+        assert delivered and delivered[0].get("open_frame") is True, delivered
+
+        # ABSENT = TODAY, EXACTLY: the same read against the real owner, with no
+        # flag in the request (recorded at the handler, the far edge of the
+        # viewer's own chain) and no new keys in the answer.
+        monkeypatch.setitem(server_b._handlers, "net_session_history", _recording_owner)
+        plain = projection.peer_stored_history_page(
+            server_a.root,
+            device_id=server_b.identity.device_id,
+            session_id=SESSION,
+            limit=50,
+        )
+        if plain is None:
+            raise AssertionError("the plain store page came back unservable")
+        assert set(plain) == today_keys, plain
+        assert [entry["id"] for entry in plain["entries"]] == ids
+        assert seen_frames and "open_frame" not in seen_frames[0], seen_frames
+    finally:
+        link.close("test")
+
+
+# ---------------------------------------------------------------------------
+# The open frame's FACTS half: the owner's build over the stored read, and the
+# viewer that surfaces it (``docs/DESKTOP_API.md`` §"The open frame")
+# ---------------------------------------------------------------------------
+
+
+def _frame_conversation(turns: int = 3, *, per_turn_tools: int = 2, long_run: int = 0) -> list[Any]:
+    """A journal with the rows an open frame distinguishes (the desktop twin's shape).
+
+    ``ckpt`` rows are what ``page_seq_bounds`` maps a page's ordinals through,
+    ``spend`` rows are what the strip must drop (so the unit of ``limit`` is
+    visible in the served page), and the tools carry ``provider_payload`` keys
+    no surface paints — so the strip's provider arm is exercised on real rows.
+    ``long_run`` replaces the LAST turn's tool count, for the head-cut cells.
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    rows: list[Any] = []
+    ts = 1000.0
+
+    def add(id_: str, type_: str, payload: dict[str, Any]) -> None:
+        nonlocal ts
+        ts += 1
+        rows.append(TranscriptEntry(id_, ts, type_, payload))
+
+    for turn in range(turns):
+        add(
+            f"user{turn:02d}",
+            ENTRY_MESSAGE,
+            {"kind": "message", "role": "user", "content": [{"text": f"turn {turn}"}]},
+        )
+        count = long_run if (long_run and turn == turns - 1) else per_turn_tools
+        for call in range(count):
+            add(
+                f"tool{turn:02d}{call:02d}",
+                ENTRY_MESSAGE,
+                {
+                    "kind": "message",
+                    "role": "tool",
+                    "content": [{"text": "output"}],
+                    "provider_payload": {
+                        "details": {},
+                        "duration_s": 2.5,
+                        "native_replay": "r" * 64,
+                    },
+                },
+            )
+        add(
+            f"ans{turn:02d}",
+            ENTRY_MESSAGE,
+            {"kind": "message", "role": "assistant", "content": [{"text": f"answer {turn}"}]},
+        )
+        add(f"spend{turn:02d}", "custom", {"custom_type": "session_spend.v1", "details": {}})
+        add(
+            f"ckpt{turn:02d}",
+            "custom",
+            {
+                "custom_type": "frontend_state_checkpoint_v1",
+                "details": {"state": {"session_id": "seed", "sequence": turn}},
+            },
+        )
+    return rows
+
+
+def _write_frame_journal(root: Path, session_id: str, rows: list[Any]) -> list[str]:
+    """Write ``rows`` as a real journal and answer their ids, in order."""
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        "\n".join(row.to_json() for row in rows) + "\n", encoding="utf-8"
+    )
+    return [str(row.id) for row in rows]
+
+
+def _warm_frame_index(root: Path, session_id: str) -> None:
+    """Publish a RESIDENT index for ``root``/``session_id``, the product's own way.
+
+    Through ``start_refresh`` rather than ``refresh_index``: the frame's fast path
+    reads the RESIDENT index, which only the refresh task publishes (the desktop
+    twin's ``_Harness.warm`` makes the same choice for the same reason).
+    """
+
+    async def _warm() -> None:
+        from local_operator.session import transcript_index as ti
+
+        task, _started = ti.start_refresh(root, session_id)
+        assert await task is not None
+
+    asyncio.run(_warm())
+
+
+def _owner_frame(
+    server: relay.RelayServer,
+    *,
+    limit: int = 50,
+    before_id: str | None = None,
+    open_frame: bool = True,
+) -> dict[str, Any]:
+    """One owner-side stored read, answered by the owner's handler DIRECTLY.
+
+    The fine-grained owner cells do not need a link: ``_op_session_history`` is
+    the reader (a link only carries its answer), and calling it directly makes
+    each cell about ONE property — the page's unit, the cut, the caps — with no
+    handshake between the assertion and the code under test. ``open_frame=False``
+    is the same read WITHOUT the flag, for the contrast cells. The link-level
+    cells around these carry the transport.
+    """
+    frame: dict[str, Any] = {"req": 1, "session_id": SESSION, "limit": limit}
+    if before_id is not None:
+        frame["before_id"] = before_id
+    if open_frame:
+        frame["open_frame"] = 1
+    # THE LINK IS A PLACEHOLDER THIS OP NEVER READS — it takes the parameter for
+    # the dispatch signature only, so a real ``PeerLink`` is constructed BY TYPE
+    # (``__new__``, the shape ``test_membership._handler_link`` uses for its own
+    # direct handler calls; a duck would not type-check). Nothing is set on it on
+    # purpose: a handler that grows a read off the link must extend this helper
+    # rather than assume one.
+    return server._op_session_history(relay.PeerLink.__new__(relay.PeerLink), frame)
+
+
+def test_the_owner_open_frame_strips_and_counts_paintable_rows(peer_pair: Devices) -> None:
+    """THE UNIT CHANGE, owner side: ``limit`` counts PAINTABLE rows, not journal entries.
+
+    The same journal the plain page spends slots on — spend and checkpoint rows
+    are journal entries a surface cannot paint — is read as a frame: no served
+    entry is a row the desktop cannot draw, the page still begins at a user row
+    (the alignment rule), and the provider replay material inside a kept row is
+    gone with the rest of the strip.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+
+    frame = _owner_frame(server_b, limit=6)
+    served_types = [str(entry["payload"].get("custom_type") or "") for entry in frame["entries"]]
+    assert "session_spend.v1" not in served_types, frame["entries"]
+    assert "frontend_state_checkpoint_v1" not in served_types, frame["entries"]
+    roles = [entry["payload"].get("role") for entry in frame["entries"]]
+    assert len(frame["entries"]) >= 6, frame
+    assert roles[0] == "user", frame["entries"][:1]
+    for entry in frame["entries"]:
+        provider = entry["payload"].get("provider_payload")
+        if provider is not None:
+            assert "native_replay" not in provider, entry
+
+    # THE CONTRAST, same journal and same limit: the plain page spends its slots
+    # on those very rows, which is the unit change this flag is for.
+    plain = _owner_frame(server_b, limit=6, open_frame=False)
+    plain_types = [str(entry["payload"].get("custom_type") or "") for entry in plain["entries"]]
+    assert "session_spend.v1" in plain_types, plain["entries"]
+
+
+def test_the_owner_open_frame_extends_to_a_runs_head_and_says_when_cut(
+    peer_pair: Devices,
+) -> None:
+    """The run-aligned extension, and ``head_cut`` when a cap refuses it.
+
+    LEFT: a page whose ``limit`` lands mid-run is extended back to the run's
+    opening user row — the rows the hunt added are the point, because a page
+    that began at a tool row would make the client condense a turn, then
+    re-condense it as the next page arrives.
+
+    RIGHT: a run longer than the hunt's whole row budget gets exactly ``limit``
+    rows and ``head_cut: true`` — the fragment is admitted rather than paid for
+    in bytes, and ``runs`` carries the true size instead.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+
+    # LEFT: two turns of two tools; limit 3 lands inside turn 1.
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=2, per_turn_tools=2))
+    frame = _owner_frame(server_b, limit=3)
+    assert frame["head_cut"] is False, frame
+    assert [entry["id"] for entry in frame["entries"]] == [
+        "user01",
+        "tool0100",
+        "tool0101",
+        "ans01",
+    ], frame["entries"]
+    # The cut dropped rows the read HAD fetched (turn 0), so the fold owes the
+    # reader a "there is more above this page".
+    assert frame["has_more"] is True, frame
+
+    # RIGHT: a 300-tool run; the head hunt cannot reach its user row, and the
+    # resident index says so in one subtraction before the reads are paid.
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=1, long_run=300))
+    _warm_frame_index(server_b.root, SESSION)
+    frame = _owner_frame(server_b, limit=5)
+    assert len(frame["entries"]) == 5, frame["entries"]
+    assert frame["entries"][0]["payload"].get("role") == "tool", frame["entries"]
+    assert frame["head_cut"] is True, frame
+    assert frame["has_more"] is True, frame
+    assert frame["runs_state"] == "ready" and frame["runs"], frame
+
+
+def test_the_owner_open_frame_caps_the_page_and_folds_the_flags(peer_pair: Devices) -> None:
+    """The hard caps: a page cannot grow past its row budget, and the flags fold.
+
+    ``limit`` 500 (the contract's ceiling) asks for more PAINTABLE rows than a
+    frame may hold: the served page is capped at ``OPEN_FRAME_MAX_ROWS`` (400)
+    regardless, the rows the cap refused are admitted through ``has_more`` (they
+    were READ — a reader must be able to page back), and ``head_cut`` says the
+    oldest served run is a fragment: the cap dropped its opening user row, which
+    is the exact state ``head_cut`` exists to admit (the desktop twin's F2). The
+    journal is sized so the cap BINDS — 4 tools per turn make the aligned window
+    carry 450 paintable rows against the 400-row budget.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=130, per_turn_tools=4))
+
+    frame = _owner_frame(server_b, limit=500)
+    assert len(frame["entries"]) == 400, len(frame["entries"])
+    assert frame["has_more"] is True, frame
+    assert frame["head_cut"] is True, frame
+
+
+def test_the_owner_open_frame_facts_are_ready_when_resident_and_building_when_cold(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two fact states the owner can answer without a wait — and the work each does.
+
+    COLD: ``runs: []`` with ``building``, and the refresh is ENSURED (the cold
+    branch is held still with the refresh recorder standing in for the scan, so
+    the state cannot race the assertion) rather than scanned on the reader
+    thread. The recorder's calls are the proof the read asked the page loop for
+    the work.
+
+    READY: a resident index — built through the REAL engine, ``start_refresh``
+    and its publication — answers with run facts, and no new refresh is
+    scheduled for a read whose facts are already there.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    ids = _write_frame_journal(
+        server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2)
+    )
+
+    from local_operator.session import transcript_index as ti
+
+    started: list[str] = []
+    original = ti.start_refresh
+
+    # COLD, the state held still: the recorder STANDS IN for the scan (the real
+    # one would race the assertion below), and its calls are the proof the read
+    # asked the page loop for the work rather than doing it here.
+    def _recorder(root: Path, session_id: str) -> Any:
+        started.append(session_id)
+        return None
+
+    monkeypatch.setattr(ti, "start_refresh", _recorder)
+    cold = _owner_frame(server_b)
+    assert cold["runs"] == [], cold
+    assert cold["runs_state"] == "building", cold
+    assert started.count(SESSION) >= 1, started
+
+    # REAL SCHEDULING, the half the recorder cannot prove: with the engine
+    # restored, the read's ensure must actually LAND a refresh — on the page
+    # loop, off the reader thread — for the client's next read to carry facts.
+    monkeypatch.setattr(ti, "start_refresh", original)
+    asked = _owner_frame(server_b)
+    assert asked["runs_state"] in {"ready", "building"}, asked
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and ti.fresh_resident(server_b.root, SESSION) is None:
+        time.sleep(0.02)
+    assert (
+        ti.fresh_resident(server_b.root, SESSION) is not None
+    ), "the refresh the read ensured never landed"
+
+    # READY: a resident index answers with run facts, and no second scan is
+    # scheduled for facts that are already there.
+    seen: list[str] = []
+
+    def _watcher(root: Path, session_id: str) -> Any:
+        seen.append(session_id)
+        return None
+
+    monkeypatch.setattr(ti, "start_refresh", _watcher)
+    ready = _owner_frame(server_b)
+    assert seen == [], "a resident index must not pay a new refresh"
+    assert ready["runs_state"] == "ready", ready
+    assert ready["runs"], ready
+    user_ids = {rid for rid in ids if rid.startswith("user")}
+    assert ready["runs"][-1]["opening_user_id"] == "user02", ready["runs"]
+    assert all(run["opening_user_id"] in user_ids for run in ready["runs"]), ready["runs"]
+
+
+def test_the_owner_open_frame_without_a_journal_is_empty_and_unsupported(
+    peer_pair: Devices,
+) -> None:
+    """A session directory with no journal: the empty page, ``unsupported`` facts.
+
+    A draft's directory exists before its first row is written. The frame cannot
+    promise run facts about nothing, so the arm mirrors the desktop twin's: the
+    empty page with ``cursor_missing`` taken from the request, and the
+    ``unsupported`` triple on it.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    (server_b.root / "sessions" / SESSION).mkdir(parents=True, exist_ok=True)
+
+    frame = _owner_frame(server_b)
+    assert frame == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "has_newer": None,
+        "runs": [],
+        "runs_state": "unsupported",
+        "head_cut": False,
+    }, frame
+    # And a cursor read says the cursor MISSED rather than inventing an empty tail.
+    cursored = _owner_frame(server_b, before_id="does-not-exist")
+    assert cursored["cursor_missing"] is True, cursored
+    assert cursored["runs_state"] == "unsupported", cursored
+
+
+def test_the_owner_open_frame_memo_serves_a_settled_repeat_without_touching_the_journal(
+    peer_pair: Devices,
+) -> None:
+    """A repeat open of a settled conversation BUILDS nothing: one stat, one dict.
+
+    THE STRUCTURAL INVARIANT, not a timing bound (AGENTS.md, "Timing, flakes,
+    and how to assert that something is fast"): the second read must not call
+    the page reader at all, and its answer must be the first's byte for byte. A
+    memo hit is a fact about what the code did; a millisecond budget would be a
+    bet on this host's load.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    reads: list[str | None] = []
+    original = server_b._stored_page_read  # noqa: SLF001 — the reader under the memo
+
+    def _counting_read(directory: Path, *, before_id: str | None, limit: int) -> Any:
+        reads.append(before_id)
+        return original(directory, before_id=before_id, limit=limit)
+
+    server_b._stored_page_read = _counting_read  # type: ignore[method-assign]
+
+    first = _owner_frame(server_b, limit=50)
+    assert first["runs_state"] == "ready", first
+    builds = len(reads)
+    assert builds >= 1, "the first read must build from the journal"
+
+    second = _owner_frame(server_b, limit=50)
+    assert second == first
+    assert len(reads) == builds, "a memo hit must not touch the page reader"
+
+    # A DIFFERENT WINDOW IS A DIFFERENT KEY: the memo must not answer a read it
+    # was not built for.
+    _owner_frame(server_b, limit=6)
+    assert len(reads) > builds, "a different limit must build its own frame"
+
+
+def test_the_owner_open_frame_memo_invalidates_the_moment_the_journal_moves(
+    peer_pair: Devices,
+) -> None:
+    """The key is the journal's own stat triple, so an append must rebuild.
+
+    Same invalidation ``transcript_index._sig_matches`` uses — (inode, size,
+    mtime) — adopted so a frame can never disagree with the facts it carries:
+    an append moves size and mtime, and ``compact_file``'s ``os.replace`` mints
+    a new inode.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    before = _owner_frame(server_b, limit=50)
+    ids_before = [entry["id"] for entry in before["entries"]]
+
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=4, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    after = _owner_frame(server_b, limit=50)
+    ids_after = [entry["id"] for entry in after["entries"]]
+    assert ids_after != ids_before, "a moved journal must not be answered from the memo"
+    assert any(rid.startswith("user03") for rid in ids_after), ids_after
+
+
+def test_the_owner_open_frame_memo_never_pins_a_building_frame(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``runs_state: building`` is not memoizable: the next read is the follow-up.
+
+    The contract's own follow-up is that the next read carries the facts, so a
+    cached ``building`` frame would break the only promise a cold-index read
+    makes. The index is forced cold here; both reads must go to the pages.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation())
+    monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
+
+    reads: list[str | None] = []
+    original = server_b._stored_page_read  # noqa: SLF001 — the reader under the memo
+
+    def _counting_read(directory: Path, *, before_id: str | None, limit: int) -> Any:
+        reads.append(before_id)
+        return original(directory, before_id=before_id, limit=limit)
+
+    server_b._stored_page_read = _counting_read  # type: ignore[method-assign]
+
+    first = _owner_frame(server_b, limit=50)
+    assert first["runs_state"] == "building", first
+    builds = len(reads)
+    second = _owner_frame(server_b, limit=50)
+    assert second["runs_state"] == "building", second
+    assert len(reads) > builds, "a building frame must not be memoized"
+
+
+def test_the_relay_warms_the_open_frame_strip_calls_at_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The strip's two lazy chains are paid by the warm, not by the first open.
+
+    Measured on the S3 fixture: the first open that reached a user row paid
+    110-449 ms of imports on the link reader thread; the isolated probe put the
+    pipeline's first call at 448.7 ms against 0.8 ms warm. This cell pins the
+    warm's EXACT calls (the two predicates ``strip_entry`` makes) without
+    asserting an import's absence — other tests in one process confound that.
+    """
+    from local_operator.harness import rows as rows_mod
+
+    calls: list[str] = []
+
+    def _record_injection(row: Any) -> bool:
+        calls.append("injection")
+        return False
+
+    def _record_chrome(text: str) -> bool:
+        calls.append("chrome")
+        return False
+
+    monkeypatch.setattr(rows_mod, "is_harness_injection", _record_injection)
+    monkeypatch.setattr(rows_mod, "is_harness_chrome", _record_chrome)
+
+    relay.warm_open_frame_strip_now()
+
+    assert calls == ["injection", "chrome"], calls
+
+
+def test_relay_start_runs_the_open_frame_prewarm_once(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the real startup hookup, not just the standalone warm body.
+
+    The event is a completion signal, not a performance assertion: removing
+    start()'s prewarm call must fail this cell even when the body test passes.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    warmed = threading.Event()
+    calls: list[int] = []
+
+    def _warm() -> None:
+        calls.append(threading.get_ident())
+        warmed.set()
+
+    monkeypatch.setattr(relay, "warm_open_frame_strip_now", _warm)
+    startup_thread = threading.get_ident()
+    try:
+        server_b.start()
+        assert warmed.wait(10), "relay startup never scheduled the strip warm"
+        assert len(calls) == 1, calls
+        assert calls[0] != startup_thread, "startup must not pay the warm inline"
+    finally:
+        server_b.stop()
+
+
+def test_open_frame_prewarm_thread_exhaustion_defers_only_the_warm(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Thread creation can fail before the warm body's failure guard is reached."""
+    _server_a, server_b, _h, _p = peer_pair
+
+    def _cannot_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("synthetic thread exhaustion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", _cannot_start)
+        with caplog.at_level(logging.DEBUG, logger=relay.__name__):
+            server_b._warm_open_frame_strip()  # noqa: SLF001 — startup's optional hook
+    assert "open-frame strip warm could not start" in caplog.text
+
+
+def test_the_owner_open_frame_sizes_the_reply_with_its_runs_included(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The size-fit sees the WHOLE frame — ``runs`` included — and keeps the newest rows.
+
+    With room, a frame carrying run facts fits the link budget untouched. Sized
+    down to nearly one row, the trim keeps the NEWEST rows, says ``has_more``,
+    and — the point of this cell — the trim is measured against a frame whose
+    ``runs`` are already on it, so the facts survive the bound rather than
+    being spelled off the reply or making it unfittable.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=4, per_turn_tools=2))
+    _warm_frame_index(server_b.root, SESSION)
+
+    full = _owner_frame(server_b, limit=50)
+    assert full["runs_state"] == "ready" and full["runs"], full
+    assert (
+        relay.session_history_reply_bytes(1, full) <= relay.SESSION_HISTORY_REPLY_BUDGET_BYTES
+    ), "the frame exceeded the link budget without a cap binding"
+
+    # Sized so that ONE row fits beside the runs: the largest suffix is exactly one.
+    one = relay.session_history_reply_bytes(
+        1, {**full, "entries": full["entries"][-1:], "has_more": True}
+    )
+    monkeypatch.setattr(relay, "SESSION_HISTORY_REPLY_BUDGET_BYTES", one)
+    trimmed = _owner_frame(server_b, limit=50)
+    assert len(trimmed["entries"]) == 1, trimmed["entries"]
+    assert trimmed["entries"][0]["id"] == full["entries"][-1]["id"], trimmed["entries"]
+    assert trimmed["has_more"] is True, trimmed
+    assert trimmed["runs_state"] == "ready", trimmed
+    assert trimmed["runs"] == full["runs"], trimmed
+    assert relay.session_history_reply_bytes(1, trimmed) <= one
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_surfaces_the_owners_frame_for_a_peer_row(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole viewer path: bridge -> control socket -> owner build -> back.
+
+    The desktop bridge's peer arm threads the flag into the stored read, so the
+    OWNER's facts arrive on the page the desktop returns — over the real pair of
+    relays and the real control socket. Then the same page WITHOUT the owner's
+    build (the old-owner shape, the key dropped before the handler) falls back
+    to the documented unsupported triple, and a flagless read keeps today's four
+    keys and today's unstripped rows.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.server.utils.desktop_sessions import DesktopSessionBridge
+
+    server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _frame_conversation(turns=3, per_turn_tools=2))
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+    row = SessionRow(
+        id=SESSION,
+        mtime=1_700_000_000.0,
+        name="frame probe",
+        live_state="idle",
+        locality="remote",
+        owner_device=server_b.identity.device_id,
+        owner_device_name="device-b",
+        reachable=True,
+        unreachable_reason="",
+    )
+    bridge = DesktopSessionBridge(server_a.root, SESSION, "", remote_row=row)
+    try:
+        page = await bridge.history(open_frame=True, limit=50)
+        assert {"runs", "runs_state", "head_cut"} <= set(page), page
+        assert page["runs_state"] in {"ready", "building"}, page
+        served_types = [str(entry["payload"].get("custom_type") or "") for entry in page["entries"]]
+        assert "session_spend.v1" not in served_types, page["entries"]
+        assert "frontend_state_checkpoint_v1" not in served_types, page["entries"]
+        # THE STORED DOOR STILL STAMPS ITS OWN VOCABULARY, frame or not.
+        assert {entry["ts_source"] for entry in page["entries"]} == {"entry"}, page["entries"]
+
+        # FLAGLESS: today's page, exactly four keys, nothing stripped.
+        plain = await bridge.history(limit=50)
+        assert set(plain) == {"entries", "has_more", "cursor_missing", "has_newer"}, plain
+        plain_types = [str(entry["payload"].get("custom_type") or "") for entry in plain["entries"]]
+        assert "session_spend.v1" in plain_types, plain["entries"]
+
+        # THE OLD OWNER: the key dropped before the handler (the compat matrix's
+        # own simulation). The bridge defaults the three fields — the documented
+        # triple — and the page falls back to today's unstripped rows.
+        original = server_b._handlers["net_session_history"]
+
+        def _owner_older_than_the_facts_half(link_: Any, frame: dict[str, Any]) -> Any:
+            return original(link_, {k: v for k, v in frame.items() if k != "open_frame"})
+
+        monkeypatch.setitem(
+            server_b._handlers, "net_session_history", _owner_older_than_the_facts_half
+        )
+        aged = await bridge.history(open_frame=True, limit=50)
+        assert aged["runs"] == [], aged
+        assert aged["runs_state"] == "unsupported", aged
+        assert aged["head_cut"] is False, aged
+        aged_types = [str(entry["payload"].get("custom_type") or "") for entry in aged["entries"]]
+        assert "session_spend.v1" in aged_types, aged["entries"]
     finally:
         link.close("test")
 

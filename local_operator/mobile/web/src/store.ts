@@ -9,6 +9,10 @@
  * reopen ourselves.
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { supplementsFromWire } from "./lib/supplement";
+import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
+import { createWireLoader } from "./i18n/wire-cache";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
 import type {
 	Capabilities,
 	SessionProjection,
@@ -43,12 +47,22 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 }
 
 export function normalizeProjection(incoming: SessionProjection): SessionProjection {
-	return {
+	const projection: SessionProjection = {
 		...incoming,
 		transcript: list(incoming.transcript),
 		todos: list(incoming.todos).map(normalizeTodoPhase),
 		subagents: list(incoming.subagents).map(normalizeSubagent),
 	};
+	/* Turn supplements: the sibling map is re-read through its ONE reader at
+	   this last trust boundary, like every nested shape beside it — a beat
+	   whose anchor/state does not parse is dropped rather than rendered from
+	   a guess. ABSENT stays absent: the daemon emits the key only when it
+	   carries beats, and every renderer reads a missing key and an empty map
+	   the same way (the distinction is deliberately not laundered here). */
+	if (incoming.supplements !== undefined) {
+		projection.supplements = supplementsFromWire(incoming.supplements);
+	}
+	return projection;
 }
 
 export interface ProjectionSlot {
@@ -66,6 +80,32 @@ let sessionsConnected = false;
    "unchanged" — and the voice mic's rule for it is the rule for
    ``available: false``: hide. */
 let capabilities: Capabilities | null = null;
+/* Backend preference and actual UI copy language are different facts. Until
+   C bundles own copy, the SPA remains English/LTR under every backend frame.
+   No OS/device/storage guess is allowed to impersonate backend authority. */
+let localeSnapshot: LocaleSnapshot = Object.freeze({
+	backendLocale: null, uiLocale: "en", direction: "ltr", revision: 0,
+});
+export const messageRuntime = createMessageRuntime(() => localeSnapshot, () => publishLocaleSnapshot());
+export const wireCatalogueLoader = createWireLoader({
+	context: () => ({ origin: typeof location === "object" ? location.origin : "", locale: localeSnapshot.backendLocale }),
+	capabilities: () => capabilities,
+	activate: (namespace, locale, messages) => { messageRuntime.registerWire(namespace, locale, messages); },
+	deactivate: (namespace, locale) => { messageRuntime.unregisterWire(namespace, locale); },
+});
+export function initializeLocaleMetadata(): void {
+	if (typeof document === "object") {
+		document.documentElement.lang = localeSnapshot.uiLocale;
+		document.documentElement.dir = localeSnapshot.direction;
+	}
+}
+function publishLocaleSnapshot(backendLocale = localeSnapshot.backendLocale): void {
+	const uiLocale = messageRuntime.uiLocaleFor(backendLocale);
+	localeSnapshot = Object.freeze({ backendLocale, uiLocale, direction: directionFor(uiLocale), revision: localeSnapshot.revision + 1 });
+	wireCatalogueLoader.invalidateContext();
+	initializeLocaleMetadata();
+	emit(); // one existing notification channel, including same-locale registration
+}
 /* The pins the user has ASKED FOR and the daemon has not answered for yet,
    held as the value that was asked for. An overlay on the server's list, never
    a rewrite of it, and the distinction is the whole point.
@@ -103,6 +143,25 @@ const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore re
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
 const listeners = new Set<() => void>();
+
+/* THE SPA'S OWN ENGLISH COPY, registered before any consumer renders the relay
+   (the RFC's "bundle a bootstrap set", §2.1/§3.3). This is what makes the
+   owned-copy language an ACTUAL rendered fact rather than a claim: `uiLocaleFor`
+   only returns a non-English UI locale when SOME bundle carries the WHOLE
+   English key set plus the resolved locale, so with English-only copy the SPA
+   stays EN/LTR under every backend frame — `lang`/`dir` describe the copy on
+   screen, not the backend preference (that stays on `useLanguage`). The bundle
+   is generated from the explicit owned namespaces (§ bundled.gen.ts); no wire
+   prose is bundled, so this cannot smuggle a served namespace into the client.
+   Registration runs through the ONE store channel — `registerBundle` ->
+   `changed()` -> `publishLocaleSnapshot` — so it repaints and re-labels the
+   document instead of creating a second locale truth. Placed AFTER the
+   listener set is declared: an init-time registration notifies that set, so
+   registering above it would emit into a `listeners` binding still in its
+   temporal dead zone and abort module evaluation. */
+for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
+	messageRuntime.registerBundle(namespace, "en", { ...messages });
+}
 
 function emit() {
 	for (const l of listeners) l();
@@ -192,6 +251,13 @@ export function publishMarkNotice(notice: MarkNotice | null): void {
 /** The daemon's capability answer (``capabilities`` on the list payload). */
 export function useCapabilities(): Capabilities | null {
 	return useSyncExternalStore(subscribe, () => capabilities);
+}
+
+export function useLanguage(): string | null {
+	return useSyncExternalStore(subscribe, () => localeSnapshot.backendLocale);
+}
+export function useLocaleSnapshot(): LocaleSnapshot {
+	return useSyncExternalStore(subscribe, () => localeSnapshot);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -316,6 +382,7 @@ export function retainSessionListStream(): () => void {
 					};
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
+					wireCatalogueLoader.invalidateCapabilities();
 					sessionsConnected = true;
 					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
@@ -345,6 +412,105 @@ export function retainSessionListStream(): () => void {
 		if (listStreamRefs === 0 && listStreamClose) {
 			listStreamClose();
 			listStreamClose = null;
+		}
+	};
+}
+
+/* ------------------------------------------------------------------ */
+/* Config stream (resolved language), refcounted                       */
+/* ------------------------------------------------------------------ */
+
+const CONFIG_STREAM_PATH = "/api/config/events";
+
+let configStreamClose: (() => void) | null = null;
+let configStreamCancel: (() => void) | null = null;
+let configStreamRefs = 0;
+
+function applyConfigFrame(data: string): void {
+	try {
+		const payload = JSON.parse(data) as {
+			changed_keys?: string[];
+			language?: string;
+		};
+		if (!isResolvedLocale(payload.language)) return;
+		publishLocaleSnapshot(payload.language);
+	} catch {
+		/* A malformed frame is dropped; the next one repaints. */
+	}
+}
+
+/* Probe ONCE whether this daemon serves the config stream.
+
+   An older daemon answers 404 on ``/api/config/events``. The EventSource
+   wrapper cannot see that status (its error event carries none), so
+   subscribing blind would retry a route that will never exist with the full
+   15 s backoff — forever, on every load. One probe fetch settles it: headers
+   land immediately even for a live event-stream (``fetch`` resolves on them;
+   the body is then cancelled).
+
+   ONLY 404 is PERMANENT absence (CI round 1, MINOR-3). Every other non-ok
+   answer — a 5xx behind a restarting proxy, a captive portal, a tunnel that
+   is not up yet — is TRANSIENT and branches to the retry path, so it
+   self-heals instead of disabling live language for the whole load; a
+   NETWORK failure is the same retry. A daemon that disappears AFTER a
+   successful probe keeps the stream wrapper's normal reconnect behaviour;
+   the probe covers the mixed-version load. */
+async function configEndpointPresence(): Promise<"present" | "absent" | "retry"> {
+	try {
+		const res = await fetch(CONFIG_STREAM_PATH, {
+			headers: { Accept: "text/event-stream" },
+		});
+		const isStream =
+			(res.headers.get("content-type") ?? "").includes("text/event-stream");
+		try {
+			await res.body?.cancel();
+		} catch {
+			/* dropping the probe's body is best-effort */
+		}
+		if (res.ok && isStream) return "present";
+		return res.status === 404 ? "absent" : "retry";
+	} catch {
+		return "retry";
+	}
+}
+
+export function retainConfigStream(): () => void {
+	configStreamRefs++;
+	if (configStreamRefs === 1) {
+		let disposed = false;
+		let attempt = 0;
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		const start = async () => {
+			if (disposed) return;
+			const presence = await configEndpointPresence();
+			if (disposed) return;
+			if (presence === "retry") {
+				const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt++);
+				timer = setTimeout(start, delay);
+				return;
+			}
+			if (presence === "absent") return; // 404: no subscription, no retries
+			configStreamClose = openEventStream(
+				CONFIG_STREAM_PATH,
+				"config",
+				applyConfigFrame,
+				() => {},
+				() => {},
+			);
+		};
+		configStreamCancel = () => {
+			disposed = true;
+			if (timer) clearTimeout(timer);
+			configStreamClose?.();
+			configStreamClose = null;
+		};
+		void start();
+	}
+	return () => {
+		configStreamRefs--;
+		if (configStreamRefs === 0) {
+			configStreamCancel?.();
+			configStreamCancel = null;
 		}
 	};
 }

@@ -53,6 +53,21 @@ def _running_card(**details: object) -> ToolCard:
     return card
 
 
+#: The video member of the detection set (surfaces programme, R1): the same
+#: live variant — and the one affordance it must not inherit (R4) is pinned
+#: beside it.
+VIDEO_TOOL = "generate_video"
+
+
+def _video_running_card(**details: object) -> ToolCard:
+    card = ToolCard("v0", VIDEO_TOOL, {"prompt": "a cat"})
+    card.begin_running(VIDEO_TOOL, {"prompt": "a cat"}, None)
+    card._expanded = True
+    if details:
+        card.set_live_details(details)
+    return card
+
+
 def _content(card: ToolCard, width: int = 100) -> str:
     return card._build_content(width).plain
 
@@ -354,6 +369,69 @@ def test_a_non_imagegen_card_keeps_the_generic_live_body() -> None:
     assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
 
 
+# --- the video member of the detection set ---------------------------------
+
+
+def test_a_video_card_wears_the_live_body_and_never_the_interrupt_hint() -> None:
+    """R1 + R4: ``generate_video`` joins the detection set so the live body
+    (state word, graphic, queue line, logs) applies unchanged, and the ONE gate
+    that must not follow is the interrupt hint — a video job is not
+    interruptible in-turn (contract §4.2: its cancel rail is the post-turn
+    `jobs op='cancel'`). The exclusion is video-only, proven against the live
+    sibling."""
+    card = _video_running_card(stage="running")
+    body = _content(card)
+    assert "⋯ running" in body
+    # No fraction ever for video: the canvas is the honest indeterminate read.
+    assert "░" * 10 in body
+    assert "█" not in body and "%" not in body
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+    # The image sibling (not excluded) still carries the affordance, so the
+    # negative above is the video predicate and not a gate that quietly died.
+    sibling = _running_card(stage="running")
+    assert IMAGE_INTERRUPT_HINT in sibling._build_row(100).plain
+
+
+def test_a_queued_video_card_counts_the_queue_and_never_the_hint() -> None:
+    """The queued wait is the same wait (§5.4's ``queued · N ahead``): the
+    queue line renders for video exactly as for its sibling, and the hint —
+    which only ever appears while a call can be interrupted — never fires."""
+    card = ToolCard("v1", VIDEO_TOOL, {"prompt": "a cat"})
+    card.set_composing(64, VIDEO_TOOL)
+    card.mark_queued()
+    card.set_live_details({"stage": "queued", "queue_position": 2})
+    card.toggle_expanded()
+    body = _content(card)
+    assert "2 requests ahead" in body
+    assert IMAGE_INTERRUPT_HINT not in card._build_row(100).plain
+
+
+def test_a_video_card_settles_with_no_live_furniture() -> None:
+    """R5/§3.1/§2.4: the card's in-turn life ends at the settle — the receipt
+    text IS the whole card, no ticking motif and no fabricated graphic. The
+    text is the §2.4 SUBMIT receipt the lane's tool returns (the call is
+    detached; "Video generation started … cancel with ``jobs op='cancel'``"),
+    NOT the later completion sentence — "Video ready — …" is the `job_result`
+    delivery's own text (§5.1) and delivered rows are not repainted onto the
+    card (§3.1). The minutes-long presence is the band counter and the job
+    rail. (Remediation round 1, D1: this fixture used to carry the completion
+    text — the frame and this pin now carry the text the card settles with.)"""
+    card = _video_running_card(stage="in_progress")
+    card.mark_done(
+        "Video generation started — job `abc123` (mode i2v, 8 s, ~$1.60 est., Radient). "
+        "You'll get a completion notice when it settles; cancel with "
+        "`jobs op='cancel', job_id='abc123'`."
+    )
+    body = _content(card, 200)
+    assert "Video generation started" in body
+    # The remedy half survives at a width the card can hold it at — and the
+    # settled status must never read as the readiness claim (D1).
+    assert "cancel with" in body and "job_id='abc123'" in body
+    assert "Video ready" not in body
+    assert "░" not in body and "█" not in body
+    assert "⋯" not in body
+
+
 # --- app wiring ------------------------------------------------------------
 
 
@@ -393,6 +471,41 @@ async def test_tool_updates_feed_the_adapter_through_the_app() -> None:
         assert card._imagegen_live.queue_position == 2
         assert card._imagegen_live.fraction == 0.25
         assert card._imagegen_live.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_video_updates_reach_the_variant_and_withhold_the_hint_through_the_app() -> None:
+    """The same wiring line the image tool rides, for the video member: the
+    update's details reach the adapter (the card wears the live body) and the
+    collapsed row withholds the interrupt hint (R4) — exercised through the
+    real app's ToolStarted/ToolUpdated path, not the card alone."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 30)) as pilot:
+        await pilot.pause()
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="v0", tool_name=VIDEO_TOOL, args={"prompt": "p"}
+                )
+            )
+        )
+        await pilot.pause()
+        app.post_message(
+            ToolUpdated(
+                ToolExecutionUpdateEvent(
+                    tool_call_id="v0",
+                    tool_name=VIDEO_TOOL,
+                    partial_result=AgentToolUpdate(
+                        details={"stage": "in_progress", "queue_position": 1}
+                    ),
+                )
+            )
+        )
+        await pilot.pause()
+        card = app._tool_cards["v0"]
+        assert card._imagegen_live is not None
+        assert card._imagegen_live.state == "running"
+        assert IMAGE_INTERRUPT_HINT not in card._build_row(110).plain
 
 
 @pytest.mark.asyncio

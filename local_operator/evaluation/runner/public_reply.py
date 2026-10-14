@@ -72,15 +72,23 @@ def _compact_action_schema(schema: dict[str, Any], models: tuple[Any, ...]) -> d
 
 
 def bind_compact_actions(
-    value: Mapping[str, Any], actions: list[Any], expected_observation_id: str
+    value: Mapping[str, Any],
+    actions: list[Any],
+    expected_observation_id: str,
+    *,
+    channel_arguments: bool = False,
 ) -> list[Any]:
     """Validate every supplied binding, then fill canonical per-action IDs.
 
     The compact reply requires the ID at its outer object, regardless of whether
     its action array is nested under ``action_batch``. Legacy per-action IDs are
     accepted as input only after each is checked against that same pending ID.
+    ``channel_arguments`` rides the unwrap below for the same reason
+    :func:`_batch_observation_ids` carries it: the binding must be read through
+    the SAME normalisation that produced the actions, or a channel-wrapped
+    reply would be judged on an object the reader never looked at.
     """
-    framed = _unwrap_tool_call(value)
+    framed = _unwrap_tool_call(value, channel_arguments=channel_arguments)
     if not isinstance(framed, Mapping):
         raise ValueError("decision must be a JSON object")
     binding = framed.get(_BINDING_KEY)
@@ -170,6 +178,39 @@ _TOOL_CALL_ARGUMENT_KEYS = (
 #: -- and two leaves room for a wrapper inside a wrapper without turning the
 #: decoder into a search over arbitrary nesting.
 _MAX_UNWRAP_DEPTH = 2
+
+#: How many sole-key wrappers a SEQUENCE element may sit behind before the
+#: reader gives up; see :func:`read_action_sequence`. One covers every measured
+#: element -- an ``{"input": "<one action>"}`` wrapper, and a string element
+#: whose own head is another element -- and two matches ``_MAX_UNWRAP_DEPTH``'s
+#: arithmetic, so the two bounds cannot drift into "the wrapper unwraps but the
+#: sequence will not".
+_MAX_SEQUENCE_NESTING = 2
+
+#: Keys a model has used to NAME ITS OWN REPLY -- the measured carriers of the
+#: sealed corpus, recounted 2026-10-11: ``reply`` (26 admitted replies across
+#: the corpus, overwhelmingly the sealed 2026-10-03 set the change was built
+#: from), ``answer`` (the key carrying the decision in ``{"answer": ...,
+#: "reasoning": ...}``), ``streaming_json`` (1) and ``reply_again_corrected``
+#: (1). A sole key from this set whose value READS as a decision
+#: (:func:`_reads_as_decision`) is the reply the model is sending.
+#:
+#: Deliberately NOT "any sole key" IN PROSE: an object like ``{"note": "<a
+#: decision quoted inside it>"}``, or the refusal corpus's own ``{"wrapper":
+#: {...}}``, states something ABOUT a decision rather than the decision itself,
+#: and a rule that read any sole key in prose would execute it. These names are
+#: the model's words for the thing it is sending -- not per-model or per-vendor
+#: marker syntax, which ``harness/reply_channel.py`` refuses in writing -- and a
+#: new name is a deliberate addition with corpus evidence, never an accident of
+#: a structural rule.
+#:
+#: What PROSE may never widen into, the dedicated reply channel reads
+#: STRUCTURALLY instead (``_unwrap_tool_call``'s third stage): there the
+#: argument object IS the reply the model is sending, so a sole key names its
+#: own payload rather than stating something about a decision, and the name --
+#: invented or measured -- adds no information either way. The gate is
+#: :func:`_exactly_one_decision`, and it logs every name it tolerates.
+_REPLY_CARRIER_KEYS = ("reply", "answer", "streaming_json", "reply_again_corrected")
 
 #: How many candidate ``{`` positions the trailing-remainder scan may try before
 #: giving up. Each failed decode rescans forward one character, so an unbounded
@@ -460,7 +501,7 @@ class DecisionParseError(ValueError):
 _ABSENT = object()
 
 
-def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
+def _decode_leading_json(payload: str, *, channel_arguments: bool = False) -> tuple[Any, str, int]:
     """Decode the leading JSON value and return it with any trailing noise.
 
     Returns the value, its trailing text, and how many UTF-8 BYTES of framing
@@ -471,6 +512,18 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
     answer -- and it is counted in BYTES, which is what the sealed field states
     and what a consumer slicing the reply's own prefix needs (the framing this
     tolerance reads is not always ASCII: ``思考中：``, a fullwidth-bar DSML wrapper).
+
+    ``channel_arguments`` states that the payload is the argument text of a
+    dedicated reply-channel call. It rides EVERY reader that decodes the same
+    bytes -- the competing-batch rule below (the ids a remainder is judged
+    against must come from the same unwrap the normaliser will use), the
+    candidate scan underneath it, and :func:`_carried_value`'s inner decode of
+    a string payload -- because a reader that drops it reads a DIFFERENT
+    reply: it can miss a second decision an invented-name wrapper hides in a
+    remainder (measured: ``{"reply_json": "<batch>, {\"zzz\": <batch>}"}``
+    accepted with the remainder silently dropped), or refuse at a later
+    boundary a reply this decoder accepted. One fact about one byte string;
+    it must not be lost between readers.
 
     ``json.loads`` demands that the WHOLE string be one value, so a model that
     emitted a complete, correct batch and then appended a stray token lost the
@@ -649,8 +702,12 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
             raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
     if trailing:
-        observation_ids, uses_string_actions = _batch_observation_ids(decoded)
-        offset, exhausted = _competing_batch_offset(trailing, observation_ids, decoder)
+        observation_ids, uses_string_actions = _batch_observation_ids(
+            decoded, channel_arguments=channel_arguments
+        )
+        offset, exhausted = _competing_batch_offset(
+            trailing, observation_ids, decoder, channel_arguments=channel_arguments
+        )
         if offset is not None or (exhausted and uses_string_actions):
             raise DecisionParseError(
                 "decision carries a second action batch for the same observation; "
@@ -943,6 +1000,8 @@ def _competing_batch_offset(
     trailing: str,
     observation_ids: set[str],
     decoder: json.JSONDecoder,
+    *,
+    channel_arguments: bool = False,
 ) -> tuple[int | None, bool]:
     """The competing batch offset and whether unexamined candidates remain.
 
@@ -984,7 +1043,7 @@ def _competing_batch_offset(
         index = max(end, start + 1)
         if not isinstance(candidate, Mapping):
             continue
-        candidate_ids, _ = _batch_observation_ids(candidate)
+        candidate_ids, _ = _batch_observation_ids(candidate, channel_arguments=channel_arguments)
         if candidate_ids & observation_ids:
             return start, False
     # Exhaustion matters only when there is at least one candidate that the
@@ -993,7 +1052,7 @@ def _competing_batch_offset(
     return None, trailing.find("{", index) >= 0
 
 
-def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
+def _actions_from_json_string(value: Any, *, channel_arguments: bool = False) -> tuple[Any, bool]:
     """The action array a JSON-encoded ``actions`` STRING evidently carries.
 
     A model that writes its actions as a string -- ``{"actions": "[{...}]"}``
@@ -1044,12 +1103,27 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     :func:`_decode_leading_json` refuses to make for leading noise. The decision
     is what must not cost the turn; the note is memory, and a batch carrying no
     note is the ordinary legacy shape this module already accepts.
+
+    ``channel_arguments`` rides both inner readers (the :func:`_decode_leading_json`
+    that finds the leading array, and the :func:`_competing_batch_offset` scan
+    over what follows it) for the reason every other reader of these bytes
+    carries it: a reader that drops it reads a DIFFERENT reply. Measured on
+    this change: ``{"reply_json": {"actions": "<arr>, {\"zzz\": {same-obs}}"}}``
+    was ACCEPTED with the hidden same-observation batch silently dropped -- the
+    invented key is exactly what the flag-less candidate scan cannot unwrap,
+    the same failure the string carrier itself had. The flag is safe here
+    (never over-broad): the scan only ever looks at text that would otherwise
+    be DROPPED, it compares against this reply's own observation ids, and when
+    it finds a competitor this function keeps the refusal (returns the string
+    unchanged) -- a tolerance may accept a decision, it may never drop one.
     """
 
     if not isinstance(value, str):
         return value, False
     try:
-        decoded, trailing, _framing = _decode_leading_json(value)
+        decoded, trailing, _framing = _decode_leading_json(
+            value, channel_arguments=channel_arguments
+        )
     except DecisionParseError:
         return value, False
     if not isinstance(decoded, list) or not decoded:
@@ -1057,13 +1131,16 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     if not all(isinstance(action, Mapping) for action in decoded):
         return value, False
     if trailing:
-        observation_ids, _uses_string_actions = _batch_observation_ids({"actions": decoded})
+        observation_ids, _uses_string_actions = _batch_observation_ids(
+            {"actions": decoded}, channel_arguments=channel_arguments
+        )
         offset, exhausted = _competing_batch_offset(
             trailing,
             observation_ids,
             # The decoder is built with the same hook as ``_decode_leading_json``'s
             # so a candidate carrying duplicate keys is refused identically.
             json.JSONDecoder(object_pairs_hook=_unique_object),
+            channel_arguments=channel_arguments,
         )
         if offset is not None or exhausted:
             # Unlike the legacy array spelling, this reply is accepted only by
@@ -1073,7 +1150,7 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     return decoded, True
 
 
-def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
+def _batch_observation_ids(value: Any, *, channel_arguments: bool = False) -> tuple[set[str], bool]:
     """The observation ids an action-batch-shaped object binds to.
 
     Read from the ACTIONS rather than from a top-level ``observation_id``: a
@@ -1087,16 +1164,31 @@ def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
     The batch is located through the same normalisation an accepted reply gets,
     so a WRAPPED second batch competes exactly as a bare one does -- otherwise
     normalising the framing would have quietly disabled this rule for the very
-    shapes the normalisation admits.
+    shapes the normalisation admits. That same reason is why a bare action
+    ARRAY -- a wrapper's payload, which the normaliser now reads -- yields its
+    elements' ids here: a decision that arrived as an array must not be blind
+    to a competing batch in its own remainder. ``channel_arguments`` is the
+    same normalisation rule one level up: when the payload IS the reply
+    channel's call arguments, the unwrap here reads the shapes the channel
+    normaliser reads, so a channel-wrapped decision is not blind either.
     """
 
     try:
-        value = _unwrap_tool_call(value)
+        value = _unwrap_tool_call(value, channel_arguments=channel_arguments)
     except DecisionParseError:
         # A wrapper whose payload is not JSON at all cannot be a batch this
         # scan is looking for. Degrading here is required: this runs over
         # untrusted trailing text on the decode hot path.
         return set(), False
+    if isinstance(value, list):
+        return (
+            {
+                action["observation_id"]
+                for action in value
+                if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
+            },
+            False,
+        )
     if not isinstance(value, Mapping):
         return set(), False
     # Match the normaliser's two locations independently. In particular, the
@@ -1110,7 +1202,13 @@ def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
     observation_ids: set[str] = set()
     uses_string_actions = False
     for raw_actions in (value.get("actions"), nested_value):
-        actions, coerced = _actions_from_json_string(raw_actions)
+        # The flag rides every reader of these bytes; this scan may be the one
+        # that decides a competing batch exists, and an invented-key candidate
+        # is invisible to it without the channel fact (see
+        # ``_actions_from_json_string``).
+        actions, coerced = _actions_from_json_string(
+            raw_actions, channel_arguments=channel_arguments
+        )
         uses_string_actions = uses_string_actions or coerced
         if not isinstance(actions, list):
             continue
@@ -1134,39 +1232,371 @@ def _carries_decision(value: Mapping[str, Any]) -> bool:
     return "actions" in value or "action_batch" in value
 
 
-def _unwrap_tool_call(value: Any) -> Any:
+def _is_single_action(value: Any) -> bool:
+    """Whether a value is one action object: a ``kind`` tag and no batch.
+
+    Judged on the ``kind`` KEY alone, never on whether the kind is KNOWN: an
+    unknown kind is the validator's refusal to make (``union_tag_invalid``,
+    whose hint names the vocabulary), and refusing it here as ``batch-shape``
+    was the generic sentence that taught nothing. A value that already carries a
+    decision (``actions``/``action_batch``) is never one action -- it states a
+    batch, and the batch paths judge it.
+    """
+
+    return (
+        isinstance(value, Mapping)
+        and not _carries_decision(value)
+        and isinstance(value.get("kind"), str)
+    )
+
+
+def _reads_as_decision(value: Any) -> bool:
+    """Whether a decoded value reads as the reply's decision at all.
+
+    The gate for unwrapping a model-named sole-key carrier, and deliberately
+    the same question the normaliser asks of a reply: a decision-carrying
+    object, one action object, or a non-empty array of objects. Never a
+    validation -- whether the actions are ADMISSIBLE stays ``parse_decision``'s
+    question, as this module's docstring states.
+    """
+
+    if isinstance(value, Mapping):
+        return _carries_decision(value) or _is_single_action(value)
+    if isinstance(value, list):
+        return bool(value) and all(isinstance(item, Mapping) for item in value)
+    return False
+
+
+def _exactly_one_decision(value: Any) -> Any | None:
+    """The one decision a sole-key value states on the reply channel, or ``None``.
+
+    The gate for the STRUCTURAL sole-key reading. On the dedicated reply
+    channel the call's argument object IS the reply the model is sending
+    (``harness/reply_channel.envelope_from_tool_call`` hands its raw argument
+    JSON to the same decoder every prose reply crosses), so the key the model
+    chose names its own payload rather than stating anything ABOUT a decision,
+    and the carrier vocabulary is not evidence about it. What licenses reading
+    a name this build has never seen is the same question
+    :func:`_reads_as_decision` asks of a carrier -- does the VALUE state a
+    decision -- with one refinement the channel corpus needs.
+
+    The refinement is the LIST. The measured
+    ``{"reply_objects": "[{...envelope...}]"}`` wraps the whole envelope in a
+    one-element array, and reading that array as the actions it is not would
+    refuse a valid decision at its own validation. A list is therefore the
+    envelope it carries when it carries exactly one -- and otherwise ``None``,
+    because two envelopes are the same ambiguity as two action arrays in one
+    reply (which one did the model mean?) and the reply keeps the refusal it
+    had. A list of plain ACTION objects is untouched: it IS one actions array,
+    the shape the normaliser already reads under a wrapper.
+
+    Never a validation: whether the actions are admissible stays
+    ``parse_decision``'s question, judged downstream on the SAME structure this
+    returns -- this picks out the decision, it does not check it.
+    """
+
+    if isinstance(value, Mapping):
+        if _carries_decision(value) or _is_single_action(value):
+            return value
+        return None
+    if isinstance(value, list):
+        if not value or not all(isinstance(item, Mapping) for item in value):
+            return None
+        if any(_carries_decision(item) for item in value):
+            # Exactly one envelope: the one decision the list carries. More
+            # than one (or one beside something else) is the ambiguity the
+            # two-batch rule refuses, not a statement this may pick apart.
+            if len(value) == 1:
+                return value[0]
+            return None
+        return value
+    return None
+
+
+def _skip_sequence_separators(text: str, position: int) -> int:
+    """Advance past the whitespace and commas between sequence elements."""
+
+    while position < len(text) and text[position] in " \t\r\n,":
+        position += 1
+    return position
+
+
+def _sequence_element(value: Any, depth: int) -> list[Any] | None:
+    """One sequence element as its actions, or ``None`` if it is not one.
+
+    An element is one action-shaped object, or a sole-key generic tool-call
+    wrapper (the same :data:`_TOOL_CALL_ARGUMENT_KEYS` a wrapper may carry
+    anywhere else) around one, whose string payload may itself be a single
+    action or a nested sequence -- bounded by :data:`_MAX_SEQUENCE_NESTING`.
+    A batch object is never an element: a sequence of BATCHES is the competing
+    question the decoder refuses elsewhere, not a sequence of actions.
+    """
+
+    if not isinstance(value, Mapping) or _carries_decision(value):
+        return None
+    if _is_single_action(value):
+        return [value]
+    if depth >= _MAX_SEQUENCE_NESTING or len(value) != 1:
+        return None
+    (key,) = value
+    if key not in _TOOL_CALL_ARGUMENT_KEYS:
+        return None
+    inner = value[key]
+    if isinstance(inner, str):
+        return read_action_sequence(inner, _depth=depth + 1)
+    if _is_single_action(inner):
+        return [inner]
+    return None
+
+
+def _sequence_tail(rest: str, decoder: json.JSONDecoder) -> bool:
+    """Whether ``rest`` is the only way a sequence may close.
+
+    Two markers, both measured: one stray ``]`` -- the closer of an array the
+    reply never opened -- and, after it, the tail of the model's own envelope
+    (``, "public_observations": "<string>"`` and a closing brace, or the brace
+    alone: ``]}`` -- the envelope's own closer, appended when the model
+    double-encoded its array).
+    The note inside that tail is NOT recovered, the same disposition
+    :func:`_actions_from_json_string` documents: it is a JSON fragment, and
+    finding where the model's object began is the guess this decoder refuses to
+    make for leading noise. The decision is what must not cost the turn.
+    Anything else -- prose, a second batch, another element -- is not a marker
+    and refuses the sequence.
+    """
+
+    rest = rest.strip()
+    if not rest:
+        return True
+    if not rest.startswith("]"):
+        return False
+    rest = rest[1:].strip()
+    if not rest:
+        return True
+    if rest.startswith("}"):
+        # The envelope's own closer, with no note between it and the array's:
+        # ``]}``. It adds nothing a decision could hide in -- it is the other
+        # half of the double-encoding ``]`` already tolerates.
+        return not rest[1:].strip()
+    if not rest.startswith(","):
+        return False
+    rest = rest[1:].lstrip()
+    try:
+        key, end = decoder.raw_decode(rest)
+    except (ValueError, RecursionError):
+        return False
+    if key != "public_observations":
+        return False
+    rest = rest[end:].lstrip()
+    if not rest.startswith(":"):
+        return False
+    rest = rest[1:].lstrip()
+    try:
+        note, end = decoder.raw_decode(rest)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(note, str):
+        return False
+    rest = rest[end:].strip()
+    if rest == "}":
+        rest = ""
+    return not rest
+
+
+def read_action_sequence(text: str, *, _depth: int = 0) -> list[Any] | None:
+    """Read ``text`` as a sequence of single actions, or ``None``.
+
+    THE MEASURED SHAPE. A model streaming its INNER actions array -- the model
+    wrote the range's action objects but never its brackets -- arrives as a
+    comma- or newline-joined run of complete single-action objects: the head of
+    an envelope whose leading ``{"actions": [`` was never emitted, closed by
+    the stray ``]`` of the array it was writing, sometimes with the tail of its
+    own envelope after it (``, "public_observations": "..."``). Across the 10
+    sealed 2026-10-03 OSWorld trajectories (measured 2026-10-11, 137 sealed
+    rejections) 18 of the 97 ``batch-shape`` refusals are exactly this shape --
+    10 as objects concatenated at the top level (2 of them each wrapped in
+    ``{"input": "<one action>"}``) and 8 inside a wrapper's string. A refusal
+    cost a full billed round trip for a decision that was already complete, in
+    order, and bound to the current observation.
+
+    THE GRAMMAR, and nothing outside it: one or more elements separated ONLY by
+    whitespace and/or commas, each element one action object or a sole-key
+    generic-call wrapper around one (see :func:`_sequence_element`); optionally
+    one stray ``]``; optionally the envelope tail :func:`_sequence_tail`
+    accepts; then the end. The whole text must be consumed -- this is a reader,
+    not a search -- and the ORDER is the elements' order, because a sequence of
+    actions executes in the order it was written.
+
+    What still refuses, deliberately: a sequence containing a BATCH object
+    (which one did the model mean? -- the same question the competing-batch
+    rule refuses), a non-action element, prose between elements, two strays, or
+    a tail that is not the note fragment. The note in that tail is not
+    recovered, per :func:`_sequence_tail`. Duplicate keys inside an element are
+    refused through the same hook the rest of the decoder uses.
+    """
+
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_object)
+    actions: list[Any] = []
+    position = 0
+    length = len(text)
+    while True:
+        position = _skip_sequence_separators(text, position)
+        if position >= length or text[position] == "]":
+            break
+        try:
+            value, end = decoder.raw_decode(text, position)
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: the C decoder recurses per
+            # nesting level and raises it (NOT a ValueError subclass) on a
+            # deeply nested payload, and untrusted model output must degrade to
+            # "not a sequence", never to an unexpected exception.
+            return None
+        elements = _sequence_element(value, _depth)
+        if elements is None:
+            return None
+        actions.extend(elements)
+        position = end
+    if not actions or not _sequence_tail(text[position:], decoder):
+        return None
+    return actions
+
+
+def _carried_value(text: str, *, channel_arguments: bool = False) -> Any:
+    """The value a wrapper's JSON-encoded payload holds.
+
+    The leading JSON value, as the wrapper has always been read, plus the one
+    spelling the sealed corpus produced under ``input``: a string that carries
+    MORE than its first value, where the whole string reads as a SEQUENCE of
+    single actions (``"{action}, {action}]"``) and the sequence is returned
+    instead.
+
+    ``channel_arguments`` rides the inner decode for the same reason every
+    other reader of these bytes carries it (see ``_decode_leading_json``): the
+    competing-batch rule runs INSIDE that decode, over the string's own
+    remainder, and a candidate the channel reading would unwrap must be
+    unwrapped here too -- measured before this flag reached the inner call:
+    ``{"reply_json": "<batch>, {\"zzz\": {\"actions\": [same-obs]}}"}`` was
+    accepted with the hidden batch silently dropped, while the identical
+    candidate under a declared key refused and the bare spelling refused. The
+    sequence fallback below needs no scan of its own: its tail grammar admits
+    only the note fragment (``_sequence_tail``), so a batch after a sequence
+    fails the reader and the payload keeps its refusal (measured: batch-shape).
+
+    What deliberately does NOT move: a payload whose first value is a single
+    action and whose remainder is not a clean sequence keeps the refusal it
+    already had. The remainder could be another decision, and returning the
+    leading action would execute it while silently dropping the rest -- the
+    same reason a bare one-action reply (see ``normalise_public_reply``'s
+    ``at_end``) is read only as a reply's whole content.
+    """
+
+    decoded, trailing, _framing = _decode_leading_json(text, channel_arguments=channel_arguments)
+    if not trailing:
+        return decoded
+    sequence = read_action_sequence(text)
+    if sequence is not None:
+        return sequence
+    if _is_single_action(decoded):
+        raise DecisionParseError("decision must carry a non-empty actions array")
+    return decoded
+
+
+def _unwrap_tool_call(value: Any, *, channel_arguments: bool = False) -> Any:
     """Strip up to :data:`_MAX_UNWRAP_DEPTH` generic function-call layers.
 
-    A tool call is a name plus an argument object, so a harness that carries a
-    call as TEXT carries one of :data:`_TOOL_CALL_ARGUMENT_KEYS` around the
-    envelope. The reply already arrives on a channel that names the contract, so
-    the wrapper holds no decision information at all -- unwrapping it normalises
-    where the envelope is framed and leaves what it says untouched.
+    Two stages always, plus a third only when the value IS the reply-channel
+    call's own arguments (``channel_arguments``), all bounded by the depth and
+    by refusing to look inside an object that already carries a decision (see
+    :func:`_carries_decision`):
+
+    * **A declared argument key** (``_TOOL_CALL_ARGUMENT_KEYS``): a call is a
+      name plus an argument object, so a harness that carries a call as TEXT
+      carries one of those keys around the envelope. The reply already arrives
+      on a channel that names the contract, so the wrapper holds no decision
+      information at all -- unwrapping it normalises where the envelope is
+      framed and leaves what it says untouched.
+    * **A sole key the MODEL named** -- the measured ``{"reply": "<the whole
+      envelope as a string>"}``, or ``answer``/``streaming_json``/
+      ``reply_again_corrected`` (:data:`_REPLY_CARRIER_KEYS`): one key and
+      nothing else, whose value READS as a decision
+      (:func:`_reads_as_decision`). With no sibling to weigh, the key is not
+      choosing between two statements -- there is one -- and a key that names
+      the reply is the model saying so. A sole value that does not read as a
+      decision is left alone: the reply keeps the refusal it always had rather
+      than borrowing the wrapper's own parse error.
+    * **ANY sole key at all, ON THE CHANNEL** (``channel_arguments``): a call
+      to the reply channel carries the reply itself, so its argument object is
+      not a statement about a decision and the name cannot change what is
+      read -- :func:`_exactly_one_decision` is the gate, and it is still
+      "exactly one decision": a key with a sibling, or a value that is not
+      one decision, keeps the refusal the reply had. A tolerated name is
+      LOGGED, because a tolerance nobody can observe is indistinguishable
+      from the harness quietly mangling a reply. Prose deliberately does NOT
+      get this reading: a ``{"note": "<decision>"}`` there is a statement
+      ABOUT a decision, and executing it is exactly what
+      :data:`_REPLY_CARRIER_KEYS` exists to prevent.
+
+    The stages compose as a PIPELINE, not a symmetric set: a declared wrapper
+    around a model-named one still reaches the envelope
+    (``{"input": "{\"reply_json\": ...}"}`` on the channel), while the
+    reverse order states nothing at the inner layer and keeps the refusal it
+    had.
 
     A layer whose value is a STRING is parsed as JSON (that is the
-    ``input``-as-a-JSON-string shape) through :func:`_decode_leading_json`, not
+    ``input``-as-a-JSON-string shape) through :func:`_carried_value`, not
     through a second parser, so the tolerance and the competing-batch rule a
-    wrapped reply gets are the ones a prose reply gets.
-
-    Bounded twice over: by the depth, and by refusing to look inside an object
-    that already carries a decision (see :func:`_carries_decision`). Anything
-    still wrapped after the bound is left alone to be refused as the malformed
-    reply it then is -- this is a normaliser, not a search.
+    wrapped reply gets are the ones a prose reply gets. Anything still wrapped
+    after the bound is left alone to be refused as the malformed reply it then
+    is -- this is a normaliser, not a search.
     """
 
     for _ in range(_MAX_UNWRAP_DEPTH):
         if not isinstance(value, Mapping) or _carries_decision(value):
             return value
         candidates = [key for key in _TOOL_CALL_ARGUMENT_KEYS if key in value]
-        if len(candidates) != 1:
+        if len(candidates) > 1:
             return value
-        key = candidates[0]
-        inner = value[key]
-        if isinstance(inner, str):
-            # The framing offset is the INNER string's question and is not
-            # carried out of the normaliser: a wrapper's tolerance is not this
-            # reply's framing, and the record belongs to the reply that was read.
-            inner, _trailing, _framing = _decode_leading_json(inner)
+        if candidates:
+            inner = value[candidates[0]]
+            if isinstance(inner, str):
+                # The framing offset is the INNER string's question and is not
+                # carried out of the normaliser: a wrapper's tolerance is not
+                # this reply's framing, and the record belongs to the reply
+                # that was read.
+                inner = _carried_value(inner, channel_arguments=channel_arguments)
+        else:
+            if len(value) != 1:
+                return value
+            (sole,) = value
+            if sole not in _REPLY_CARRIER_KEYS and not channel_arguments:
+                return value
+            inner = value[sole]
+            if isinstance(inner, str):
+                try:
+                    inner = _carried_value(inner, channel_arguments=channel_arguments)
+                except DecisionParseError:
+                    return value
+            if channel_arguments:
+                decision = _exactly_one_decision(inner)
+                if decision is None:
+                    return value
+                if sole not in _REPLY_CARRIER_KEYS:
+                    # The roster the sealed counts cannot keep: an accepted
+                    # reply's published bytes are the canonical envelope, so
+                    # the invented name survives ONLY in this line -- a reader
+                    # of the run's logs can see which names the model invents;
+                    # only REFUSED turns can be recounted from sealed
+                    # artifacts. (The renderer below is the same bounded
+                    # whole-or-nothing guard the extra-key tolerance uses.)
+                    logger.warning(
+                        "model reply-channel call carried its decision under the sole "
+                        "key %s; read structurally on the channel, where the call's "
+                        "arguments ARE the reply",
+                        _unexpected_key_summary([sole]),
+                    )
+                inner = decision
+            elif not _reads_as_decision(inner):
+                return value
         value = inner
     return value
 
@@ -1236,7 +1666,11 @@ def _report_ignored_keys(
 
 
 def normalise_public_reply(
-    value: Any, *, action_binding: str = LEGACY_ACTION_BINDING
+    value: Any,
+    *,
+    action_binding: str = LEGACY_ACTION_BINDING,
+    at_end: bool = True,
+    channel_arguments: bool = False,
 ) -> tuple[list[Any], str | None, tuple[str, ...]]:
     """The one accepted reply shape, however the reply was framed.
 
@@ -1255,28 +1689,126 @@ def normalise_public_reply(
     bare array under ``action_batch``, the full envelope, any of those inside
     one generic tool-call wrapper, any of those with a ``reply_version`` or with
     extra keys beside them, and an ``actions`` value that is a JSON-encoded
-    STRING carrying the array (see :func:`_actions_from_json_string`). What is
-    still REFUSED is what cannot be read as a decision: malformed or duplicated
-    JSON, two action arrays that could each be the decision, a batch that is not
-    an object carrying ``actions``, and a string that does not decode to a
-    non-empty array of action objects. Those are the refusals that are doing
-    real work, and they are the only ones left in this module.
+    STRING carrying the array (see :func:`_actions_from_json_string`). Three
+    spellings the sealed 2026-10-03 corpus produced are read as the SAME
+    decision, each because the reply's own bytes state it and nothing else:
+
+    * **one action object** -- ``{"kind": ..., ...}`` where a full envelope
+      was expected: one action written as a sentence instead of an array. It is
+      promoted to a one-action batch (a shape the protocol accepts), and an
+      unknown ``kind`` is then refused by the validator with its own class and
+      the vocabulary named, not by the generic batch sentence here.
+    * **an action SEQUENCE** -- the objects of the array, the brackets never
+      written (see :func:`read_action_sequence`).
+    * **a bare array under a wrapper** -- ``{"input": [<actions>]}``, an array
+      that arrived as the payload of a generic tool-call layer.
+
+    ``at_end`` is what bounds the newer spellings: ``True`` means ``value`` is
+    the reply's whole content (its own last word), which is the only case where
+    one action or a bare array IS the decision. With material after them the
+    reply stated more than they read, and this decoder refuses rather than
+    execute part of a reply and silently drop the rest -- the same line the
+    competing-batch rule draws for whole batches. The older spellings keep
+    their one-sided trailing tolerance unchanged; ``at_end`` defaults to
+    ``True`` so a caller that has no trailing question (every test, and the
+    redaction path) reads exactly the reply it holds.
+
+    What is still REFUSED is what cannot be read as a decision. Malformed or
+    duplicated JSON, two action arrays that could each be the decision, and a
+    string that does not decode to a non-empty array of action objects were
+    always refused and stay so. Beside them, the classes this change
+    deliberately does NOT read, each for a stated reason:
+
+    * an object that states no action at all (``{}``, a note-only envelope):
+      the protocol's batch carries at least one action, so there is nothing to
+      admit; the repair those refusals get is the accepted shape itself plus
+      the one action that says "a note and no work" -- a ``wait`` (see the
+      runner's ``batch-shape`` hint);
+    * a carrier with a SIBLING key (``{"answer": ..., "reasoning": ...}``,
+      ``{"language": ..., "text": ...}``): with two values to weigh, choosing
+      which one is the decision would need a per-model name vocabulary, and
+      the measured population is 2 replies -- refused rather than guessed;
+    * an object whose ``kind`` is missing: no declared vocabulary to measure
+      its other fields against, so the sibling-field tolerance cannot run; the
+      reply keeps the refusal it always had;
+    * material after the one thing this decoder read -- a second action, prose
+      after a single action -- because executing the head while dropping the
+      rest would run part of a reply;
+    * a top-level bare ARRAY (``[{...}, {...}]``): unchanged -- this module has
+      never read one, and :func:`read_action_sequence` covers the measured
+      spellings (the array's CONTENTS, brackets unwritten); widening the
+      non-object rule is its own contract decision. Measured cost as of
+      2026-10-11: 1 reply in the newer corpus wave.
+
+    ``channel_arguments`` says the value is the argument object of a dedicated
+    reply-channel call (``harness/reply_channel.envelope_from_tool_call``): the
+    one context where a sole key of ANY name is read structurally
+    (:func:`_exactly_one_decision`), because the call's own arguments ARE the
+    reply. Nothing else changes -- the same validated structure downstream, the
+    same refusals -- and prose keeps the named-carrier caution; see
+    ``_unwrap_tool_call`` for the bounds.
+
+    Those are the refusals that are doing real work, and they are the only
+    ones left in this module.
     """
 
     action_binding = _validate_action_binding(action_binding)
-    framed = _unwrap_tool_call(value)
+    framed = _unwrap_tool_call(value, channel_arguments=channel_arguments)
     if framed is not value:
         logger.warning(
             "model reply was wrapped in a generic tool-call serialization; the "
             "envelope inside it was decoded"
         )
+    if isinstance(framed, list) and framed is not value:
+        # A wrapper's payload WAS the action array (``{"input": [...]}``): the
+        # call's arguments are the array itself, so there is no envelope to
+        # read a second action array from and the array is the decision.
+        if not framed or not all(isinstance(action, Mapping) for action in framed):
+            raise DecisionParseError("decision must carry a non-empty actions array")
+        if not at_end:
+            raise DecisionParseError("decision must carry a non-empty actions array")
+        logger.warning(
+            "model reply carried its actions as a bare array under a generic "
+            "tool-call wrapper; read as the decision it states (%d action(s))",
+            len(framed),
+        )
+        note = _public_note(value, None) if isinstance(value, Mapping) else None
+        actions, tolerated_fields = drop_sibling_action_fields(framed)
+        return actions, note, tolerated_fields
     if not isinstance(framed, Mapping):
         raise DecisionParseError("decision must be a JSON object")
+    if at_end and _is_single_action(framed):
+        # One action, stated on its own, IS the decision: the model wrote a
+        # batch of one as a sentence rather than as an array. Promoted to the
+        # one-action batch the protocol accepts -- byte for byte the action it
+        # wrote, so nothing executes that the reply did not state. An unknown
+        # ``kind`` is then refused by the validator, with the vocabulary named
+        # (``union_tag_invalid``), rather than by the generic batch sentence.
+        # It returns EARLY because everything below reads an ENVELOPE's keys
+        # (``actions``, ``public_observations``) and reporting the action's own
+        # fields -- ``kind``, ``text`` -- as "keys the reply contract does not
+        # use" would let the log line disown what was just executed.
+        #
+        # The read is bounded by ``at_end``: with material after a single
+        # action the reply stated more than it, and this decoder refuses below
+        # rather than execute the head and silently drop the rest. Both caller
+        # entry points derive ``at_end`` from the reply they hold; a caller
+        # with no trailing question (every test, the redaction path) reads the
+        # whole value it passed.
+        logger.warning(
+            "model reply stated a single action object instead of an actions "
+            "array; read as a one-action batch"
+        )
+        actions, tolerated_fields = drop_sibling_action_fields([framed])
+        return actions, None, tolerated_fields
     batch = framed.get("action_batch")
     nested_actions, nested_from_string = _actions_from_json_string(
-        batch.get("actions") if isinstance(batch, Mapping) else batch
+        batch.get("actions") if isinstance(batch, Mapping) else batch,
+        channel_arguments=channel_arguments,
     )
-    top_actions, top_from_string = _actions_from_json_string(framed.get("actions"))
+    top_actions, top_from_string = _actions_from_json_string(
+        framed.get("actions"), channel_arguments=channel_arguments
+    )
     if isinstance(top_actions, list) and isinstance(nested_actions, list):
         # Two action arrays in one reply is the SAME ambiguity as two batches in
         # one payload -- which one did the model mean? -- and it is a question
@@ -1317,12 +1849,18 @@ def normalise_public_reply(
     return actions, note, tolerated_fields
 
 
-def decode_public_reply(payload: str) -> dict[str, Any]:
+def decode_public_reply(payload: str, *, channel_arguments: bool = False) -> dict[str, Any]:
     """The canonical envelope of a reply payload, whatever its framing.
 
     The string entry point, for callers holding the model's own bytes. The reply
     may be a bare action array, an ``action_batch`` wrapper, the full envelope,
-    any of those inside one generic tool-call serialization, followed by text.
+    any of those inside one generic tool-call serialization, a single action (a
+    batch of one), a SEQUENCE of single actions, followed by text where the
+    trailing tolerance applies. ``channel_arguments`` is the caller's statement
+    that the bytes are a dedicated reply-channel call's own arguments, and it
+    widens exactly the readings that statement licenses (see
+    ``normalise_public_reply``); every other caller leaves it ``False`` and
+    holds the prose contract.
 
     Returns ``{"actions": [...], "public_observations": str}`` so no caller has
     to know which accepted spelling the model used. Duplicate JSON keys are
@@ -1330,8 +1868,18 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
     is one decision.
     """
 
-    value, _trailing, _framing = _decode_leading_json(payload)
-    actions, note, _dropped = normalise_public_reply(value)
+    value, trailing, _framing = _decode_leading_json(payload, channel_arguments=channel_arguments)
+    if trailing:
+        # A sequence is the reply's WHOLE content or it is nothing: read
+        # before the value (see ``read_action_sequence``), and when it does not
+        # read, the value is judged with ``at_end=False`` so a one-action head
+        # is not promoted over material it did not state as a sequence.
+        sequence = read_action_sequence(payload)
+        if sequence is not None:
+            return {"actions": sequence, "public_observations": ""}
+    actions, note, _dropped = normalise_public_reply(
+        value, at_end=not trailing, channel_arguments=channel_arguments
+    )
     return {"actions": actions, "public_observations": note or ""}
 
 
@@ -1499,14 +2047,25 @@ _ESCAPE_DECODERS = (
 )
 
 
-def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
+def redact_public_reply(
+    payload: str, redactions: RedactionSet, *, channel_arguments: bool = False
+) -> str:
     """Drop an entire unsafe note before either evidence or accepted replay.
 
     Scan decoded text (including percent escapes) before serializing: scanning
     raw JSON alone would miss a credential spelt with JSON unicode escapes.
     This is the existing resolved-secret boundary, not a general secret detector.
+
+    ``channel_arguments`` is the knowledge that these bytes are the
+    reply-channel call's own arguments; this re-decode is the SECOND reader of
+    an already-accepted reply, so a caller holding one must carry the flag
+    beside it (``ModelDecision.channel_arguments``). Without it the re-decode
+    takes the prose path and refuses the very replies the channel reading
+    admitted -- raised outside every rejection handler, so the episode seals
+    failed/unscored as an adapter error (measured on the r3 wrapped-with-note
+    family).
     """
-    value = decode_public_reply(payload)
+    value = decode_public_reply(payload, channel_arguments=channel_arguments)
     notes = value["public_observations"]
     try:
         redactions.assert_clear(notes)
@@ -1852,15 +2411,28 @@ def public_reply_contract(action_binding: str = LEGACY_ACTION_BINDING) -> dict[s
     contract = {
         "schema": schema,
         "accepted_framings": (
-            "one leading JSON object, any trailing text after it, and any preamble, code "
-            "fence or native tool-call wrapper in FRONT of it when the reply carries "
-            "exactly one decision; duplicate keys and a second action batch for the same "
-            "observation are refused"
+            "one leading JSON object, trailing text after a complete envelope, and any "
+            "preamble, code fence or native tool-call wrapper in FRONT of it when the "
+            "reply carries exactly one decision; a one-action object or a bare array under "
+            "a wrapper is read only as the reply's WHOLE content, because executing its "
+            "head while dropping material after it would run part of a reply; duplicate "
+            "keys and a second action batch for the same observation are refused"
         ),
         "accepted_shapes": (
-            '{"actions": [...]}, or the same array under one "action_batch" wrapper, or '
-            "either of those inside one generic tool-call serialization; keys the reply "
-            'contract does not use, including a "reply_version", are ignored'
+            '{"actions": [...]}; a bare array under one generic tool-call wrapper; the '
+            'same array under one "action_batch" wrapper; either of those inside one '
+            "generic tool-call serialization; ONE action object where the batch was "
+            "expected; a SEQUENCE of one-action objects separated by commas or "
+            "whitespace (the array's contents, its brackets never written -- one stray "
+            "']' and the model's own trailing '}' are tolerated); or the whole decision "
+            'under a sole "reply", "answer", "streaming_json" or '
+            '"reply_again_corrected" key in prose, and under a sole key of ANY name when '
+            "the reply arrives as the dedicated reply-channel call's own arguments "
+            "(there the call's arguments ARE the reply; a value that is a list carrying "
+            "exactly ONE envelope counts as that envelope, while two decision-valued "
+            "payloads are refused like two action arrays; a tolerated name is logged); "
+            "keys the reply contract does not use, including "
+            'a "reply_version", are ignored'
         ),
         "binding": (
             "every action is bound to the current observation and its frames by the "

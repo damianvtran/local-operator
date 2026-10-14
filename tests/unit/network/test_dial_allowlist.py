@@ -100,6 +100,7 @@ _SCAN_FLOOR: dict[str, frozenset[str]] = {
             "display_window",
             "surface",
             "operator_nonce",
+            "journal_order",
         }
     ),
 }

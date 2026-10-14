@@ -1,3 +1,4 @@
+import math
 import os
 import shutil
 import tempfile
@@ -10,9 +11,14 @@ from local_operator.clients._http import APIError
 from local_operator.clients.radient import (
     RadientClient,
     RadientTranscriptionResponseData,
+    new_correlation_id,
 )
-from local_operator.server.dependencies import get_radient_client
+from local_operator.clients.radient_cost import cost_from_payload
+from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_errors_media as _wm
+from local_operator.server.dependencies import get_config_manager, get_radient_client
 from local_operator.server.models.schemas import CRUDResponse
+from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt.errors import (
     classify_upstream_failure as _classify_upstream_failure,
 )
@@ -37,6 +43,7 @@ router = APIRouter()
 )
 async def create_transcription_endpoint(
     radient_client: Annotated[RadientClient, Depends(get_radient_client)],
+    config_manager: Annotated[ConfigManager, Depends(get_config_manager)],
     file: UploadFile = File(...),
     # `model` and `provider` are deliberately unset by default: the daemon must not
     # choose a speech-to-text backend. Radient's agent-server owns that choice (its
@@ -56,6 +63,11 @@ async def create_transcription_endpoint(
     temperature: Optional[float] = Form(0.0),
     language: Optional[str] = Form(None),
     provider: Optional[str] = Form(None),
+    #: Optional client correlation id (PR-3): additive and tolerant — a caller
+    #: that has it sends it, every other form value keeps working unchanged,
+    #: and it is used for the spend record (analytics + the session's pending
+    #: marker) and for the hub correlation header. Never for credential lookup.
+    session_id: Optional[str] = Form(None),
 ) -> CRUDResponse[RadientTranscriptionResponseData]:
     """
     Transcribe an audio file using the specified model and parameters.
@@ -70,7 +82,7 @@ async def create_transcription_endpoint(
     if not radient_client.api_key:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Radient API key is not configured on the server.",
+            detail=_wm.radient_key_missing().envelope(),
         )
 
     # Save the uploaded file temporarily.
@@ -90,12 +102,13 @@ async def create_transcription_endpoint(
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save uploaded audio file: {str(e)}",
+            detail=_wm.save_audio_failed(error=str(e)).envelope(),
         )
     finally:
         await file.close()
 
     try:
+        request_id = new_correlation_id()
         transcription_result = radient_client.create_transcription(
             file_path=temp_file_path,
             model=model,
@@ -104,6 +117,32 @@ async def create_transcription_endpoint(
             temperature=temperature,
             language=language,
             provider=provider,
+            session_id=str(session_id or "") or None,
+            client_request_id=request_id,
+        )
+
+        # The charge (PR-3): the hub's transcription envelope carries the cost
+        # object inside ``result``. The unit count is the metered seconds —
+        # the server's own when stated, else the audio duration CEILED, which
+        # is the meter the hub prices by ("rounded up to the whole second");
+        # an absent amount stays unknown, never zero. ``isfinite`` is load-
+        # bearing: pydantic accepts ``duration=inf`` and ``math.ceil`` RAISES
+        # on it, which would 500 the route and discard a successful paid call
+        # (review round 1, MINOR 2) — a non-finite duration is simply "no
+        # count stated", the same reading the adapter gives non-finite money.
+        duration = getattr(transcription_result, "duration", None)
+        units = None
+        if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
+            units = float(math.ceil(duration))
+        emit_voice_spend(
+            config_manager=config_manager,
+            channel="stt",
+            provider=str(getattr(transcription_result, "provider", "") or "radient"),
+            units=units,
+            unit="seconds",
+            cost=cost_from_payload(transcription_result.model_dump()),
+            session_id=str(session_id or ""),
+            request_id=request_id,
         )
 
         return CRUDResponse(
@@ -116,10 +155,10 @@ async def create_transcription_endpoint(
         # but good to have a catch here.
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Temporary audio file not found after saving.",
+            detail=_wm.temp_audio_missing().envelope(),
         )
     except ValueError as ve:  # For validation errors from the client
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise HTTPException(status_code=400, detail=_wm.media_refusal(error=str(ve)).envelope())
     except APIError as upstream:
         raise _classify_upstream_failure(upstream, provider or "upstream")
     except RuntimeError as re:  # For API errors or other runtime issues from the client
@@ -127,11 +166,14 @@ async def create_transcription_endpoint(
         # only for a server-side configuration fault (no Radient API key) or an
         # unforeseen internal error. Every failure that came from Radient or
         # from the provider it called arrives typed, handled above.
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(re))
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_wm.media_refusal(error=str(re)).envelope(),
+        )
     except Exception as e:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred during transcription: {str(e)}",
+            detail=_wm.transcription_unexpected(error=str(e)).envelope(),
         )
     finally:
         # Clean up the temporary directory and its contents

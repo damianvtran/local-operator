@@ -1,0 +1,40 @@
+{
+  "width": 220,
+  "title": "Spend (USD/day)",
+  "data": {
+    "d": {
+      "title": "Spend (USD/day)",
+      "columns": [
+        "service",
+        "usd"
+      ],
+      "rows": [
+        [
+          "Search",
+          420
+        ],
+        [
+          "Billing",
+          610
+        ],
+        [
+          "Notify",
+          910
+        ],
+        [
+          "Gateway",
+          380
+        ],
+        [
+          "Media",
+          250
+        ],
+        [
+          "Archive",
+          1000
+        ]
+      ]
+    }
+  },
+  "draw": "LO.bar(document.getElementById('c'),'d',{x:'service',y:'usd',unit:'USD/day'})"
+}

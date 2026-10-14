@@ -41,9 +41,13 @@ Two functions are a hard contract the session guardrail depends on
 (`builtin.py:3755`, `3778`; consumed at `session.py:3315-3331` and
 `1232-1236`):
 
-- `open_todos(session_id)` — the *single* definition of "open" the stop-time
-  continuation guardrail (`Session._todo_continuation`) fires on. Excludes
-  `blocked` deliberately.
+- `open_todos(session_id)` — the *single* definition of **pending** work that
+  the stop-time continuation guardrail (`Session._todo_continuation`)
+  reconciles at the yield boundary. Excludes `blocked` deliberately — and that
+  is no longer an exemption from the guardrail: blocked work is unfinished too,
+  so it is reconciled at the same boundary through `blocked_todos`, this
+  function's mirror, which is what lets the reminder state the two obligations
+  separately (`blocked_todos` added 2026-10-10; see §5.1).
 - `todo_fingerprint(session_id)` — the `(text,status)` tuple over EVERY item in
   order that the no-progress latch compares between two yields.
 
@@ -60,7 +64,7 @@ describe the same data (AGENTS.md, and the comment at `todo_panel.py:102-108`).
 |---|----------|----------------|
 | A | Store shape | Phased: `list[{"name", "items":[{text,status[,reason]}]}]`. Flat `init` maps to one implicit phase named `"Todos"`, rendered **headerless**. |
 | B | Ops | Keep the existing six op names. Add an optional `phase` field for addressing; add a `phased` init payload alongside flat `items`. Do **not** add `start`/`unblock`/`rm`/`append` — local-operator has no `in_progress` status and no per-item removal today. |
-| C | Guardrail | `open_todos` = pending items across all phases (flattened, unchanged shape). `todo_fingerprint` grows to a **3-tuple** `(phase_name, text, status)` per item in phase-then-item order. `_stamped_todo_fingerprint` must widen to match — a coupled edit. |
+| C | Guardrail | `open_todos` = pending items across all phases (flattened, unchanged shape). `todo_fingerprint` grows to a **3-tuple** `(phase_name, text, status)` per item in phase-then-item order. `_stamped_todo_fingerprint` must widen to match — a coupled edit. **As built (round-1 remediation): a 4-tuple with `reason` — see the note under §5.2.** |
 | D | Panel | Phase-header rows with per-phase `done/total`, items indented; single-phase lists stay headerless (byte-identical to today). Reuses the existing `_body_rows`/`_row_cells` budget. |
 | E | Auto-remove | **Hide** settled phases in the panel after a delay (default 60s), never mutate the store. Only fully-settled phases are hidden; never scrub closed rows while a phase has open work. Timer lives app-level. |
 | F | Expand/collapse | Hotkey **`ctrl+t`** (audited free) toggles a panel `expanded` flag. Hotkey-only for round 1; a clickable affordance is feasible (band siblings already handle `on_click`) and is proposed as a fast-follow, not a blocker. |
@@ -274,9 +278,13 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
 ```
 
 Open = pending items across ALL phases, phase-then-item order. `blocked` stays
-excluded (the honest-stop escape hatch, `builtin.py:3761`). The returned dicts
-are plain item dicts, so `_todo_reminder_text` (`session.py:370`, lists
-`item['text']`) needs **no change**.
+out of *this* function (the honest-stop escape hatch, `builtin.py:3761`), and it
+is no longer out of the guardrail: `blocked_todos` (`builtin.py`, the mirror
+added 2026-10-10) returns the blocked subset, the guardrail's work set is
+pending + blocked, and `_todo_reminder_text` (`session.py:1118`) takes both
+lists so each group's obligation gets its own paragraph. The item dicts stay
+plain (no phase key), so row rendering is unchanged apart from a blocked row
+carrying `— blocked: {reason}`.
 
 > Should the reminder name the phase? Optional and *not* recommended for round
 > 1: the reminder lists open item texts so the model can echo them into
@@ -285,7 +293,28 @@ are plain item dicts, so `_todo_reminder_text` (`session.py:370`, lists
 > revisit only if a model conflates same-text items in different phases (rare;
 > texts are unique identifiers by the tool's own contract).
 
+> **As built (2026-10-12): the blocked pass fires once per blocked IDENTITY
+> change, not once per turn.** `_run_turn_pipeline` resets only the pending
+> latch (`_todo_reminder_fingerprint`); `_blocked_reminder_fingerprint` —
+> `(phase, text, status)` per blocked item — is cross-turn by design, so an
+> unchanged parked set is not re-asserted on every wake or quiet end, a new or
+> moved item earns exactly one reconciliation, and a reason-only rewrite no
+> longer re-fires (it still expires the stale rendered assertion, because the
+> full fingerprint rides the reminder's `details`). The pending branch keeps
+> its per-turn re-arm; both latches are in-memory, so a restart re-asks once
+> per current set.
+
 ### 5.2 `todo_fingerprint` — grows to a 3-tuple
+
+> **As built (round-1 remediation, 2026-10-10): the live arity is a 4-tuple,
+> `(phase_name, text, status, reason)`.** `block` on an item that is already
+> blocked rewrites `reason` in place and leaves the status alone, and the
+> reminder RENDERS that reason as the condition the model is asked to re-check —
+> so a status-bearing tuple called a corrected condition "unmoved", the live
+> reminder kept asserting the old wait, and the expiry check could never retire
+> it. The fourth element is `str(item.get("reason") or "")`, so every item that
+> is not blocked contributes `""`. The 3-tuple below is the original plan and
+> stays as written.
 
 The latch must detect movement, and with phases a *phase rename* or an item
 moving between phases is movement the current 2-tuple is blind to. Include
@@ -323,6 +352,11 @@ return tuple(
 )
 ```
 
+> **As built:** this normaliser filters `len(item) == 4` and coerces the fourth
+> element (round-1 remediation — the blocked reason joined the fingerprint, see
+> §5.2). The paragraph and snippet above are the original coupled edit and stay
+> as written; the coupling itself is unchanged, only the arity moves.
+
 This is the single most important line in the whole change to get right, and
 it is in a *different file* from the tool. It is called out again in the test
 plan (§8) and the workstream split (§9): **workstream A owns both `builtin.py`
@@ -330,12 +364,15 @@ and this `session.py` line as one atomic unit.**
 
 ### 5.4 What the guardrail does with hidden phases
 
-Panel auto-hide (§7) is **view-only**: it never touches the store, so
-`open_todos` and `todo_fingerprint` are unaffected. A hidden phase whose items
-are still pending is still open work the guardrail nudges on. Hidden ≠
+Panel auto-hide (§7) is **view-only**: it never touches the store, so the
+guardrail's two projections (`open_todos` for pending, `blocked_todos` for the
+blocked items it reconciles) and `todo_fingerprint` are all unaffected — the
+pending/blocked split does not change what hiding can hide. A hidden phase whose
+items are still pending is still open work the guardrail nudges on, and one
+whose items are blocked is still accounted for at the yield boundary. Hidden ≠
 resolved — stated explicitly because the opposite (hiding = clearing) would let
 a stalled plan read as finished to the guardrail, exactly the failure the
-`blocked`-exclusion comments guard against.
+`blocked`-reconciliation comments guard against.
 
 ---
 
@@ -613,7 +650,8 @@ and calling `event.stop()` (the band's mouse-isolation rule, AGENTS.md
 The guardrail's `_stamped_todo_fingerprint` widening (§5.3) is covered by the
 existing steering e2e tests **only if** one of them exercises the
 no-second-nudge path with a phased list — add that (§8.2) because the current
-suite builds flat lists and would not catch a 2-vs-3-tuple mismatch.
+suite builds flat lists and would not catch a 2-vs-3 (now 3-vs-4, with
+`reason`) tuple mismatch.
 
 ### 8.2 New tests
 
@@ -632,13 +670,19 @@ suite builds flat lists and would not catch a 2-vs-3-tuple mismatch.
 - `_as_phases` coerces a legacy flat list.
 
 **Guardrail (`session.py`), unit/e2e:**
-- `open_todos` flattens pending across phases, still excludes `blocked`.
+- `open_todos` flattens pending across phases and still excludes `blocked`;
+  `blocked_todos` flattens the blocked subset the same way, and the guardrail
+  reconciles both.
 - `todo_fingerprint` is a 3-tuple including phase name; a phase rename moves the
-  fingerprint; an item moving phases moves it.
+  fingerprint; an item moving phases moves it. *(As built: a 4-tuple carrying the
+  blocked `reason` as well, and a re-`block` that only rewrites the reason is
+  asserted as movement — round-1 remediation, §5.2.)*
 - **`_stamped_todo_fingerprint` round-trips a 3-tuple** (the JSON list→tuple
   coercion at `session.py:509`), and a phased no-progress list is nudged exactly
   once (mirrors `test_a_model_that_cannot_proceed_is_nudged_once`
-  `:230`, but phased) — this is the test that catches the §5.3 coupling.
+  `:230`, but phased) — this is the test that catches the §5.3 coupling. *(As
+  built: the four-element form, and a stamped reminder whose blocked reason was
+  rewritten expires.)*
 
 **Panel (`todo_panel.py`), tui render:**
 - Multi-phase list renders headers with `done/total`, items indented, marks
@@ -742,7 +786,9 @@ Adopt omp's proven model with the smallest coherent surface: a uniform
 `"Todos"` phase (§3), the existing six ops plus an optional `phase` addressing
 field and a `phases` init payload (§4, **no** new `start`/`unblock`/`rm` — this
 harness has no `in_progress` status to justify them), `open_todos` unchanged in
-shape and `todo_fingerprint` widened to a phase-aware 3-tuple with its
+shape (with `blocked_todos` added beside it as the guardrail's blocked
+projection) and `todo_fingerprint` widened to a phase-aware 3-tuple (as built: a
+4-tuple carrying the blocked `reason`) with its
 `session.py` normaliser widened in lockstep (§5), a panel that renders phase
 headers with per-phase progress and indented items while single-phase lists
 stay byte-identical to today (§6), auto-hide of fully-settled phases as a

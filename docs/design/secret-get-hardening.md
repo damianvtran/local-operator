@@ -965,6 +965,31 @@ over-masking is a defect, `redaction_shapes.py:58-70`):
 > stated residuals are the honest remainder: rot13, gzip, a double base64, a
 > per-character shift, a value below the floor (verbatim only), and a spelling
 > longer than its 64 KiB hold.
+>
+> **Amended 2026-10-12.** The "verbatim only" line above no longer holds. A value
+> below the floor now also gets its JSON ESCAPING, when that escaping is at least
+> `_SHORT_ESCAPE_MIN_SPELLING_LEN = 12` characters and decodes back to the value —
+> which is the spelling such a value is actually published in when a tool result
+> carries it (the `\uXXXX` runs a read produces, against a store holding only the
+> verbatim bytes). Every other family stays behind the value floor, and the
+> residual narrows to a value whose escaping is shorter than the spelling bound —
+> a one-character CJK value, six characters of escape. Both bounds, and why they
+> are two numbers rather than one, are documented beside the constants in
+> `local_operator/redaction_shapes.py`.
+>
+> **And the residual of that change is not only coverage.** The escaping family
+> can also OVER-mask: its needles are value-specific, so a collision means an
+> unrelated document that happens to carry this value's escaping. Whether that
+> happens depends on the corpus being read and on how short the needle is — there
+> is no zero-collision guarantee at any length, and the shortest spelling the
+> bound admits (a two-character value) is the one most likely to collide by
+> construction. It is reachable on the real read path: such a value masked an
+> unrelated escaped document, one marker where the base left the document
+> untouched. Over-masking is not a release, and it is narrower than what such a
+> value already had — its verbatim spelling has no floor, so two adjacent
+> characters of ordinary text were already being rewritten — but it is why the
+> bound is documented as a bound rather than as a guarantee. The sampled rates
+> from that measurement are evidence on the pull request, not restated here.
 
 ### 5.3 Coordination with the open work, checked rather than assumed
 
@@ -1407,8 +1432,8 @@ module under test: <worktree>/local_operator/tools/builtin.py
   RAW-BYTE LEAK: False
 
 [single-line, value then newline] value is 28 bytes
-  chunks=[[redacted], b'\n']
-  [redacted]\n'
+  chunks=[b'out: [redacted]', b'\n']
+  released=b'out: [redacted]\n'
   RAW-BYTE LEAK: False
 ```
 

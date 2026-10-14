@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "Warning: this run cannot ask for approval (no terminal attached), so any tool call that needs approval will be denied.\n  Remedies: --control parks cards for a supervisor; --yolo auto-approves every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds this run's reach to them; tool_approval_mode: auto in the config answers every call the same way for every run.",
+  "wire.exec.clear_goal_needs_start": "--clear-goal adjusts a run, it does not start one. Pair it with --resume SESSION_ID plus a prompt or --loop.",
+  "wire.exec.error_line": "Error: {error}",
+  "wire.exec.error_preflight": "Error: preflight failed: {error}",
+  "wire.exec.exec_epilog": "Examples:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nResume restores the transcript, team, profile, goal and name first; explicit\nstartup flags override their own slots. Team and profile may coexist. A loop\nruns after the optional initial prompt; --loop N counts continuations only.\nSaved loop progress is visible on resume, but iterations never replay automatically.\nA goal alone does not run a model. Prompts are literal, not slash commands.\n--goal only SETS the objective; unlike the TUI's /goal it does not also\nsend that text as a message, because the prompt is exec's message channel.\n--agent/--agent-id select legacy agent data and are mutually exclusive.\nDefault non-TTY approvals deny. --control may wait for a supervisor; --yolo\nis an explicit override, never implied by --background or --team.\n--tools bounds what the run can reach: excluded tools are unreachable.\nForeground events/text use stdout; receipts use stderr. Detached runs log\nboth streams and print distinct job/session IDs. Use lop --resume SESSION_ID\nto view a live run or resume a finished one; exec refuses a live owner.",
+  "wire.exec.exec_help": "Execute a task or goal loop in a persisted session without starting the TUI",
+  "wire.exec.goal_only_sets_objective": "--goal sets the objective but does not start work (unlike the TUI's /goal). Add a prompt, pipe one on stdin (or '-'), or run a loop with --loop N.",
+  "wire.exec.log_pointer": "Log: {log_path}",
+  "wire.exec.no_exec_job": "No exec job {job_id}; job IDs are printed by --background and recorded in {jobs_path}",
+  "wire.exec.no_prompt": "no prompt. Pass one as an argument, pipe it on stdin (or '-'), or run a loop with --loop/--loop-goal",
+  "wire.exec.receipt_failure_suffix": " (execution receipt) — {failure}",
+  "wire.exec.receipt_suffix": " (execution receipt)",
+  "wire.exec.session_pointer": "Session: {session_id} (the conversation) — attach or resume: lop --resume {session_id}",
+  "wire.exec.status_pointer": "Status: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "Warning: --tools names no tool this run could reach: {names}. The session reached {count} tool(s).",
+  "wire.exec.turn_did_not_complete": "the turn did not complete",
+  "wire.exec.waiting_on_you": "Waiting on you? lop sessions shows what a run needs"
+}

@@ -12,6 +12,7 @@ import pytest
 import local_operator.skills.api as api_module
 import local_operator.skills.discovery as discovery_module
 from local_operator.skills.api import (
+    PACKAGED_SKILL_ROOT,
     _url_name,
     default_skill_roots,
     make_skill_resolver,
@@ -47,12 +48,18 @@ class TestDefaultSkillRoots:
         # Deepest (most project-local) root comes first.
         assert roots.index(project / _SKILLS_SUBDIR) < roots.index(tmp_path / _SKILLS_SUBDIR)
 
-    def test_home_root_appended_last(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_packaged_root_appended_last_home_before_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
         roots = default_skill_roots(tmp_path / "elsewhere")
-        assert roots[-1] == home / _SKILLS_SUBDIR
+        # The packaged builtin catalog is the WEAKEST root: appended after the
+        # global and ecosystem roots so a user copy in any earlier root wins.
+        assert roots[-1] == PACKAGED_SKILL_ROOT
+        assert roots[-2] == home / _SKILLS_SUBDIR
 
     def test_cwd_outside_home_still_walks_up(self, tmp_path: Path) -> None:
         # RS-04/RS-11: a repo at /opt-style paths (outside $HOME) must still

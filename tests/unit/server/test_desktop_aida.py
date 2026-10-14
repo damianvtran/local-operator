@@ -45,7 +45,7 @@ def client(isolated_root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     app.state.config_manager = ConfigManager(config_dir=isolated_root)
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     client = httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers)
     return client
 
@@ -223,18 +223,20 @@ async def test_a_lock_held_for_the_whole_wait_refuses_with_the_tuis_sentence(
                 reply = refused[word]
                 assert reply.status_code == 409, reply.text
                 # ``detail`` is compared WHOLE: the code is what the client
-                # classifies on and the message is what it renders.
+                # classifies on and the sentence (now on the envelope's `text`)
+                # is what it renders.
                 assert reply.json()["detail"] == {
                     "code": "aida_store_busy",
-                    "message": notices[0],
+                    "params": {"error": notices[0]},
+                    "text": notices[0],
                 }, (word, reply.json(), notices)
         finally:
             peer.release()
 
-    sentence = refused["resume"].json()["detail"]["message"]
+    sentence = refused["resume"].json()["detail"]["text"]
     assert sentence.startswith("could not resume Aida: "), sentence
     assert "Try again in a moment" in sentence, sentence
-    assert refused["pause"].json()["detail"]["message"].startswith("could not pause Aida: ")
+    assert refused["pause"].json()["detail"]["text"].startswith("could not pause Aida: ")
 
 
 @pytest.mark.asyncio
@@ -298,7 +300,7 @@ async def test_the_read_payload_carries_the_configured_name(
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
     app.state.config_manager = ConfigManager(config_dir=isolated_root)
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test", headers=headers
     ) as http:
@@ -332,7 +334,7 @@ async def test_disabled_install_answers_get_and_refuses_post(client, isolated_ro
     # instance more than once"), and the fresh construction is also what the
     # desktop does after a settings change.
     transport = httpx.ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {TOKEN}", "Host": "127.0.0.1:1111"}
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test", headers=headers
     ) as http:

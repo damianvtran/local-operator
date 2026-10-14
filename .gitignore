@@ -62,6 +62,13 @@ scratch/
 # `main` this sweep branched from, where the whole store is still present.
 bench/
 
+# In-repo worktrees (one per parallel lane): untracked lane trees, never
+# part of the shipped package. Root-anchored (``/.worktrees/``): the lane
+# trees live at the repository root only, and an unanchored pattern would
+# demand a mirror rule in mobile/web/.gitignore (whose tree-mirror guard
+# requires it) for a rule that can never apply inside that subtree.
+/.worktrees/
+
 # Slice-0 POC (infra/remote-agents-poc): the CodeBuild context zip's staging
 # directory and the driver's downloaded run artifacts. Both are regenerable
 # output — the context is built from `image/`, and a run's evidence belongs in

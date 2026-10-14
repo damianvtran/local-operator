@@ -1315,6 +1315,7 @@ def _bind_boot_instrumentation(
     global _boot_record_pid
     try:
         from local_operator import update as update_mod
+        from local_operator.macos_disclaim import spawn_chain_facts
         from local_operator.session.runtime import journal
 
         session = getattr(handle, "_session", None)
@@ -1326,7 +1327,12 @@ def _bind_boot_instrumentation(
         return None
 
     try:
-        journal.write_boot_record(identity, build, cwd=cwd)
+        # The spawn chain rides the boot record too (not just the signal
+        # receipt): the record is the artifact attribution readers already
+        # prefer, and a chain recorded only at signal time would be missing for
+        # every clean exit. Read from this process's environment — see
+        # ``macos_disclaim`` for who writes it and why (2026-10-09 incident).
+        journal.write_boot_record(identity, build, cwd=cwd, spawn_chain=spawn_chain_facts())
         _boot_record_pid = os.getpid()
         # THIS BOOT IS THE ONE MOMENT A NEW WRITER JOINS THE NAMESPACE, so it is
         # where the namespace is bounded: nothing else reaps ``run/host`` (see
@@ -3610,12 +3616,12 @@ async def _abandon_move(
     :func:`_drain_for` with it, so the departure is still retried on every tick and
     still happens at the first idle instant — but the LATCH IS NOT TAKEN AGAIN, and
     that matters more than it looks: a second ``begin_drain`` re-runs
-    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list and
-    so discards the one-shot wakes this drain has already swallowed. A reminder that
-    fired before the bound would then never fire at all, which is a silent loss of
-    the operator's work in exchange for a re-announcement nobody needs — the drain
-    is already latched as a commitment (the record still says it is leaving for the
-    build on disk when its turn ends, which is still true).
+    ``Session.retire_wakes_to_inbox``, whose per-session re-arm queue used to be
+    started fresh and so discarded the one-shot wakes this drain had already
+    swallowed. That queue is gone — the reservation now lives in the scheduler's
+    owned view (``WakeScheduler.hold_pending``), which a second retire does not
+    clear — but the latch is still not taken twice: the commitment is already
+    recorded, and re-announcing it helps nobody.
 
     THAT RETRY IS ALSO WHAT MAKES THE DWELL ARM SAFE TO FIRE EARLY, which is the
     half a reader of the dwell bound needs: on the STALENESS arm the work has stopped
@@ -4049,6 +4055,32 @@ async def _drain_for_signal(
     stop.set()
 
 
+def _resume_consumed_ids(directory: Path) -> set[str]:
+    """Inbox/job ids a predecessor already delivered, from the checkpoint record.
+
+    The successor reads this ONCE at boot (before it listens) so a row the
+    predecessor already delivered is not delivered a second time. Unreadable,
+    absent, deferred or non-resumable ⇒ empty: the rows are delivered normally,
+    because unknown is not permission to suppress a delivery.
+    """
+    try:
+        from local_operator.service_handoff import resumable
+        from local_operator.session.transcript import (
+            CHECKPOINT_CUSTOM_TYPE,
+            read_latest_custom,
+        )
+
+        record = read_latest_custom(directory, CHECKPOINT_CUSTOM_TYPE)
+    except Exception:  # noqa: BLE001 — unreadable is not permission to filter
+        return set()
+    if not resumable(record):
+        return set()
+    consumed = record.get("inbox_consumed_ids") if record else None
+    if not isinstance(consumed, list):
+        return set()
+    return {item for item in consumed if isinstance(item, str) and item}
+
+
 async def _drain_inbox_into(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
@@ -4140,6 +4172,17 @@ async def _drain_inbox_into(handle: object) -> int:
     # deferral writes back ONE row per wake (carrying its fire count), which is
     # also what keeps a later drain's merge from double-counting.
     lines = coalesce_wake_rows(lines)
+    # SUCCESSOR RESUME (ready-successor handoff). A checkpointed move may have
+    # already delivered some spooled rows on the predecessor; the record's
+    # ``inbox_consumed_ids`` is the durable "delivered once" set. Dropping those
+    # rows here is what makes delivery exactly-once across the swap rather than
+    # at-least-once. Unreadable/absent/deferred ⇒ no filtering (the rows are
+    # delivered normally), matching the rule that unknown is not permission to
+    # change behaviour. Read BEFORE the deferral split so the deferral writes
+    # back only what it will not deliver.
+    consumed = _resume_consumed_ids(directory)
+    if consumed:
+        lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]

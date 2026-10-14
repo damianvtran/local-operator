@@ -71,9 +71,12 @@ Three rules, each stated once:
 
 from __future__ import annotations
 
+import os
 import re
+import stat as stat_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 #: What a URL begins with, in ONE literal: the guard that decides what may
 #: reach the browser and the finder that decides what is offered are then the
@@ -259,6 +262,172 @@ def is_openable(url: str) -> bool:
     guard that only refused lowercase would be a guard with a hole in it.
     """
     return bool(_OPENABLE_RE.match(url))
+
+
+# ---------------------------------------------------------------------------
+# The FILE affordance (turn-supplements T3)
+# ---------------------------------------------------------------------------
+#
+# A file callout is NOT an ``http(s)`` link and must never become one: the
+# click opens **Reveal in Finder** (``open -R``), and only for a path this
+# predicate vouches for. Paint-time gating and open-time gating call the SAME
+# function — a callout paints its link only when this admits the path, and the
+# click re-checks before spawning anything — because the two moments read the
+# same filesystem state at different times and the dangerous direction is the
+# later one.
+
+#: Suffixes a callout may carry a link for: text/markdown, the tabular
+#: formats, JSON and the raster images plus PDF. SVG is deliberately absent —
+#: it is scriptable markup, the relay file route excludes ``image/svg+xml``
+#: for the same reason, and "Reveal in Finder" is not worth teaching the
+#: affordance to special-case.
+FILE_AFFORDANCE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".txt",
+        ".text",
+        ".log",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".csv",
+        ".tsv",
+        ".json",
+        ".jsonl",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".html",
+        ".xml",
+        ".py",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".heic",
+        ".pdf",
+    }
+)
+
+#: Suffixes that are NEVER admitted, allowlist or not. These are executables
+#: and OS-bound bundles: reveal-in-Finder on some of them is one Return key
+#: from LAUNCHING the thing (a ``.command`` or ``.app`` opens; ``.pkg``
+#: installs), which is the round-1 S-R5 class this list exists to close. Kept
+#: as an explicit deny rather than left to the allowlist so the intent is
+#: readable at the site and a future allowlist edit cannot re-admit one by
+#: accident.
+FILE_AFFORDANCE_DENIED_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".app",
+        ".command",
+        ".sh",
+        ".scpt",
+        ".workflow",
+        ".pkg",
+        ".dmg",
+        ".terminal",
+        ".webloc",
+        ".inetloc",
+    }
+)
+
+
+def file_affordance(
+    path: str,
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    home: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """The ``file:`` URI to paint a callout for, or ``None`` when refused.
+
+    Admits **regular files only**, in the row's two allowed path spellings —
+    session-relative (resolved against ``cwd``) or ``~/``-relative (resolved
+    against ``home``, the real home by default). Refused, each with its one
+    reason: a bare absolute path (the wire contract stores neither spelling);
+    a suffix outside :data:`FILE_AFFORDANCE_SUFFIXES`; anything on
+    :data:`FILE_AFFORDANCE_DENIED_SUFFIXES`; a directory, device or FIFO; an
+    executable bit; a path that does not exist; and any path whose RESOLVED
+    form lands outside both allowed roots (``cwd`` and ``home``) — the
+    symlink-escape check, so a ``report.md`` symlinked to ``~/.ssh/id_rsa``
+    resolves to a private key outside the session roots and is refused.
+
+    The return is ``Path.as_uri()`` rather than string concatenation, so
+    percent-encoding is the standard library's job: the URI is written
+    verbatim into a terminal escape sequence (rich/textual write
+    ``style._link`` verbatim), and interpolation would be an
+    escape-injection hole exactly as the design's T3 row records.
+
+    STAT, NOT A TOCTOU-FREE HANDLE: the check runs at paint time AND again at
+    click time, so a file that changes nature between the two is re-judged by
+    the second call. Between the click check and the ``open -R`` spawn there
+    is no atomic open, and there cannot be one — the opened thing is Finder,
+    not a file descriptor — but the window is the same one every
+    reveal-in-Finder has and the path a click can reach is one this predicate
+    admitted a moment earlier.
+    """
+    raw = path.strip()
+    if not raw:
+        return None
+    if raw.startswith("~"):
+        # `~` is resolved against the ``home`` the CALLER names, not against
+        # ``Path.expanduser``'s process home: the two agree in production and
+        # diverge exactly where a test (or a future remote-session viewer)
+        # needs the root to be the one the call is about.
+        root = Path(home).expanduser() if home is not None else Path.home()
+        rest = raw[1:].lstrip("/")
+        candidate = root / rest if rest else root
+    elif Path(raw).is_absolute():
+        return None
+    elif cwd is not None:
+        candidate = Path(cwd) / raw
+    else:
+        # Session-relative with no cwd to resolve against: guessing a root is
+        # how a relative path silently reads a different file than the row
+        # meant, so this refuses instead.
+        return None
+    # Refusals by NAME first (cheap, and independent of what the filesystem
+    # currently holds), then by what the path IS.
+    suffix = candidate.suffix.lower()
+    if suffix in FILE_AFFORDANCE_DENIED_SUFFIXES:
+        return None
+    if suffix not in FILE_AFFORDANCE_SUFFIXES:
+        return None
+    try:
+        # ``stat`` FOLLOWS symlinks, which is the check that matters: it is
+        # the target's nature (regular file, not executable, not a directory)
+        # that decides, and a broken link simply fails here.
+        info = candidate.stat()
+    except OSError:
+        return None
+    if not stat_mod.S_ISREG(info.st_mode):
+        return None
+    if info.st_mode & (stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH):
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        roots = [Path(home).expanduser().resolve() if home is not None else Path.home().resolve()]
+        if cwd is not None:
+            roots.append(Path(cwd).resolve())
+    except (OSError, ValueError):
+        return None
+    if not any(_under(resolved, root) for root in roots):
+        return None
+    try:
+        return resolved.as_uri()
+    except (OSError, ValueError):
+        return None
+
+
+def _under(path: Path, root: Path) -> bool:
+    """Whether ``path`` (resolved) sits at or below ``root`` (resolved)."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _trim(url: str) -> str:

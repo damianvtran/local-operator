@@ -20,6 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_operator.supplements.contract import (
+    SUPPLEMENTS_FEATURE_KEY,
+    SUPPLEMENTS_FEATURE_VERSION,
+)
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
@@ -51,6 +56,13 @@ def feature_flags() -> dict[str, Any]:
         # bug, so the sentence stands alone.
         "commands": 2,
         "catalogues": 1,
+        # The catalogue route and the resolved `language` field beside this
+        # map. Additive like every key here: a client that predates it ignores
+        # it and reads exactly what it read before — which is why `i18n` is a
+        # NEW key rather than a bump of an existing one (nothing is withheld)
+        # and why no existing client changes behaviour while it is dark
+        # (M0 state: en-only, RFC §9 P1).
+        "i18n": 1,
         # The SESSIONLESS skill catalogue: `GET /v1/desktop/skills` answers
         # for an explicit `cwd` (home when omitted) with no session at all,
         # and every answer — sessionless or session form — carries `version`,
@@ -245,6 +257,18 @@ def feature_flags() -> dict[str, Any]:
         # attempting an operation whose failure it cannot classify,
         # while everything else keeps working and is not gated on this.
         "radient_org": 1,
+        # Agent messages (Team Bridge, RFC §5.4): the desktop routes over
+        # `/v1/desktop/team-bridge/...` -- status, settings read/write and the
+        # allowlist. Its OWN key rather than a bump, by the rule `radient_org`
+        # states above: a renderer that does not see it is talking to a
+        # backend whose messaging routes do not exist, so the Inbox/settings
+        # surfaces must say "update the backend" instead of mounting an
+        # affordance whose every call 404s. NOTHING is gated on the number
+        # itself: with the server dark (BRIDGE_ENABLED off) the routes answer
+        # 503 `messaging_unavailable`, which the status route renders as a
+        # state, not an error -- the capability advertises that the routes
+        # EXIST, never that the deployment carries traffic.
+        "team_bridge": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -329,6 +353,39 @@ def feature_flags() -> dict[str, Any]:
         # key exists so the NEW renderer can tell whether asking is worthwhile
         # before it sends a flag the old backend ignores.
         "entry_ts": 1,
+        # Viewer opt-in: journal-index ordinals/domain, not publication seq.
+        "journal_order": 1,
+        # THE COMPLETE PEER-SOURCE CONTRACT, and a NEW key rather than a bump of
+        # `journal_order` for the rule this whole map is written to: a renderer
+        # that only knows the LOCAL journal-order negotiation must keep working
+        # against a backend whose PEER stored reads still answer today's
+        # unsupported shape, and a renderer that sends the new
+        # `peer_journal_source` query/read purposes must be able to tell whether
+        # this backend can honour them at all before it relies on per-response
+        # acknowledgment. Remote activation requires this feature AND the new
+        # query AND new-viewer support AND the authenticated owner's per-response
+        # ACK; any one missing keeps the legacy path. Nothing user-visible changes
+        # on an old renderer, which sends no new query and sees today's bytes.
+        "peer_journal_source": 1,
+        # THE OPEN FRAME. `open_frame=1` on `GET .../{id}` (the snapshot),
+        # `GET .../{id}/history` and `GET .../{id}/events` asks for the page in
+        # the unit a surface PAINTS: `limit` counts paintable rows, the cut
+        # extends back to a run's opening user row under a hard cap (with
+        # `head_cut` when the cap binds), non-painted bytes are stripped, and
+        # `runs`/`runs_state` carry the per-run facts a collapsed turn's bar
+        # needs — settled runs only, so a live tail is never stated as settled.
+        #
+        # Its own key rather than a bump of anything: the shape is ADDITIVE (a
+        # client that sends no flag receives today's page byte-for-byte), and the
+        # clients gate on it before sending, because the UNIT of `limit` changes
+        # with it — a renderer that sent the flag without reading `runs` would
+        # simply get fewer rows than it asked for and no reason stated.
+        #
+        # LOCAL JOURNALS ONLY in this revision. A peer-owned id answers today's
+        # shape with `runs_state: "unsupported"` (the owner-side read is where
+        # the same strip belongs), so a renderer must treat `unsupported` and an
+        # absent `runs` alike.
+        "open_frame": 1,
         # ``/info``'s host read and ``/session``'s one-snapshot ledger
         # report. A NEW key rather than a bump of `catalogues`, and the
         # rule is the one `session_search` states above: a renderer
@@ -339,6 +396,17 @@ def feature_flags() -> dict[str, Any]:
         # renderer that does not see it shows the backend update action
         # instead of calling them.
         "diagnostics": 1,
+        # The per-channel spend object: `FrontendSessionState.spend_channels`
+        # (versioned, integer micro-USD — see docs/design/spend-channels.md)
+        # and the `/session` "Spend by channel" section that renders it. A NEW
+        # key on the `diagnostics` rule above: a renderer that does not see it
+        # keeps its legacy inference-only cost strip unchanged, and a NEW
+        # renderer against an old backend keeps that same legacy view rather
+        # than inventing channel rows. The field itself is additive on an
+        # `extra="allow"` model, so nothing breaks in either direction without
+        # the key; the key exists so the new renderer can tell whether the
+        # channel view is worthwhile before it renders one.
+        "cost_channels": 1,
         # The machine-wide desktop event feed and its delivery-presence
         # lease. TWO keys rather than one, because each has a consumer
         # that can be absent independently:
@@ -666,6 +734,19 @@ def feature_flags() -> dict[str, Any]:
         # client that shows one against an older backend would be offering a
         # route that 404s.
         "projects_request_update": 1,
+        # THE DELIBERATE FORCE-CLOSE DOOR on the projects surface: `force_done`
+        # on `PATCH /v1/desktop/projects/{key}` (and the relay's `PATCH
+        # /api/projects/{key}`), plus the `project_done_incomplete` refusal code
+        # (with the `incomplete` names) and the `forced_done` flag on the PATCH
+        # answer. Before it, the `done` gate's refusal told the caller to "pass
+        # force_done=true" while `ProjectPatch` (`extra="forbid"`) 422'd that
+        # very field, so no desktop or phone client could ever close a project
+        # over open milestones. ITS OWN KEY, not a bump of `projects`, by the
+        # rule above: an older renderer keeps working untouched, and a client
+        # must NOT offer a force it cannot send — on a backend without this key
+        # the body would be rejected as an unknown field. Absent ⇒ no
+        # "close anyway" affordance anywhere.
+        "projects_force_done": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed
@@ -721,5 +802,48 @@ def feature_flags() -> dict[str, Any]:
         # additive — an absent key means the surface is not there, which is the
         # pre-voicing behaviour rather than a degraded one.
         "tts": 1,
+        # TURN SUPPLEMENTS ("Highlights"), the STATIC HTTP flag: the contract (event,
+        # row, capability strings, document assembler) is in this build. The document
+        # routes are 404 stubs until lane C2 fills them in, and nothing emits a
+        # supplement until lane C1, so no renderer is yet answered. It is deliberately
+        # NOT the attach gate --
+        # live events and projected rows ride the ``supplements-v1`` capability on
+        # the owner record ANDed with the viewer's own declaration (see
+        # ``supplements.contract.negotiated``) -- so a renderer reads this key to decide
+        # whether to ASK, and the capability decides whether it is ANSWERED. No
+        # released renderer reads it; lane C1 puts it behind the ``LOP_SUPPLEMENTS``
+        # kill switch the way ``references`` is.
+        SUPPLEMENTS_FEATURE_KEY: SUPPLEMENTS_FEATURE_VERSION,
+        # THE PER-SESSION CODE-REQUEST SURFACE: `GET
+        # /v1/desktop/sessions/{id}/code-requests` (this conversation's PRs/MRs, from the
+        # derived index) plus its `/refresh` child. ONE key for the family, because the
+        # read and the refresh are one contract revision: a renderer that can draw the
+        # list is the renderer that owns the Retry affordance.
+        #
+        # WHY A KEY AT ALL: the routes are ADDITIVE — an older renderer never calls one —
+        # so this gates nothing for an old client. It is how a renderer learns the surface
+        # EXISTS before it builds a rail item or a chip whose query would 404 on a backend
+        # without it. Absent, the conversation shows no code-request affordance at all,
+        # which is the pre-feature state rather than a degraded one.
+        #
+        # `1` IS THE FEATURE'S FIRST VERSION, not the contract's: this slice's rows are
+        # link-only, and the adapter slice that adds remote state is expected to widen the
+        # row (an additive field) rather than bump this key — a renderer that can read
+        # link-only rows can read a fuller one.
+        "code_requests": 1,
+        # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
+        # empty-session advisory that the selected account has no quota left
+        # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
+        # bump of `catalogues`/`auth`, by the rule `code_requests` states
+        # above: the route is ADDITIVE — an older renderer never calls it —
+        # so this gates nothing for an old client. It is how a renderer
+        # learns the surface EXISTS before it mounts the notice line and
+        # starts a refetch cycle whose request an older backend answers with
+        # a 404. Absent, the empty session renders exactly as today, with no
+        # notice affordance and no request; that is the pre-feature state
+        # rather than a degraded one. The renderer must also treat a 404 as
+        # definitive (show nothing, do not retry), because a backend that
+        # answers this key yet 404s the route is broken, not slow.
+        "quota_notice": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

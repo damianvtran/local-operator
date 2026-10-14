@@ -464,6 +464,9 @@ def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
         return ollama_default_model_info.model_copy(
             update={"id": hosting, "name": LOCAL_PRESETS[hosting][0]}
         )
+    elif hosting == "meta-muse":
+        if model in meta_muse_models:
+            return meta_muse_models[model]
     elif hosting == "deepseek":
         if model in deepseek_models:
             return deepseek_models[model]
@@ -1086,7 +1089,7 @@ drops ``cache_control`` on the most expensive models in the catalogue.
 Over-report and the provider answers 400 naming the real limit, which at least
 says what happened. 200k is therefore deliberately the floor rather than the 1M
 the 5 generation serves: a wrong 1M window puts the compaction threshold
-(``min(0.8 * window, 600k)``) at 600k, so a genuinely-200k model would 400 on
+(``min(0.8 * window, 400k)``) at 400k, so a genuinely-200k model would 400 on
 every turn past 200k instead of merely compacting sooner than it had to.
 
 ``max_tokens`` is the floor among the CURRENT generations (64k) rather than the
@@ -2989,7 +2992,169 @@ glm_models: Dict[str, ModelInfo] = {
 #: curated name at once to find out which ones are shared by two models (see
 #: ``model/naming.py``), and rebuilding that from a hard-coded second list of
 #: hostings would rot the moment a provider is added here and not there.
+# Meta's official model docs and coding-agent recipe name Wonder 1.0 and
+# Spark 1.3. Spark 1.2 is observed in OpenCodex's Muse catalogue. These are
+# discoverability seeds, NOT account-entitlement or allowance-debit evidence.
+# Authenticated /muse-code/models (2026-10-12) states 1,007,997 context and
+# 128,000 output for these rows. Full is discovery-only: its real ID and
+# visibility were observed there, not invented as a public API alias.
+#
+# PRICES are Meta's published pay-as-you-go Standard rates
+# (https://dev.meta.ai/docs/pricing-rate-limits, read 2026-10-12): Wonder
+# $4.00 input / $20.00 output / $0.20 cached input, Spark $1.25 / $4.25 /
+# $0.15 for every Spark version. Muse Code through this provider is a flat
+# subscription, so these figures are the API-EQUIVALENT value of a call —
+# exactly how `session/spend.py` labels subscription-flavour rows
+# (basis ``subscription``, source ``catalogue``) — never a claim that Meta
+# debited this amount per token. Until these rows carried prices, every
+# Muse call resolved 0/0 and the status band rendered ``$—``.
+#
+# CACHE SEMANTICS (https://dev.meta.ai/docs/prompt-caching): caching is
+# automatic prefix caching with NO cache-write rate — Meta publishes only
+# a cached-input (read) rate, and a first/unmatched prefix is billed as
+# ordinary input. ``cached_tokens`` is a SUBSET of ``input_tokens``
+# (Responses: ``input_tokens_details.cached_tokens``), which the OpenAI-wire
+# handling in `cost_for_usage` already subtracts before pricing, so cached
+# tokens are charged once at the read rate and never double-counted.
+# ``cache_writes_price`` is therefore stated at the input rate: it is the
+# rate an uncached (cache-writing) token actually bears, and Meta reports
+# no separate write bucket today, so the field only matters if a future
+# client starts reporting one.
+meta_muse_models: Dict[str, ModelInfo] = {
+    "muse-wonder-1.0": ModelInfo(
+        id="muse-wonder-1.0",
+        name="Muse Wonder 1.0",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        input_price=4.0,
+        output_price=20.0,
+        cache_reads_price=0.20,
+        cache_writes_price=4.0,  # No Meta write premium: uncached input rate
+        description="Muse Wonder via unofficial Muse Code sign-in; account availability varies.",
+        recommended=True,
+    ),
+    "muse-spark-1.3": ModelInfo(
+        id="muse-spark-1.3",
+        name="Muse Spark 1.3",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        input_price=1.25,
+        output_price=4.25,
+        cache_reads_price=0.15,
+        cache_writes_price=1.25,  # No Meta write premium: uncached input rate
+        description="Muse Spark through unofficial Muse Code sign-in; account availability varies.",
+    ),
+    "muse-spark-1.2": ModelInfo(
+        id="muse-spark-1.2",
+        name="Muse Spark 1.2",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        input_price=1.25,
+        output_price=4.25,
+        cache_reads_price=0.15,
+        cache_writes_price=1.25,  # No Meta write premium: uncached input rate
+        description="Muse Spark 1.2 via unofficial Muse Code sign-in; account availability varies.",
+    ),
+    # Spark 1.1 is a Standard-mode Model API model on the same published
+    # Spark price table; it was missing here, so a discovered 1.1 row fell
+    # through to the unknown template at 0/0.
+    "muse-spark-1.1": ModelInfo(
+        id="muse-spark-1.1",
+        name="Muse Spark 1.1",
+        context_window=1_007_997,
+        max_tokens=128_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
+        reasoning_default_effort="medium",
+        supports_responses_api=True,
+        supports_prompt_cache=True,
+        input_price=1.25,
+        output_price=4.25,
+        cache_reads_price=0.15,
+        cache_writes_price=1.25,  # No Meta write premium: uncached input rate
+        description="Muse Spark 1.1 via unofficial Muse Code sign-in; account availability varies.",
+    ),
+}
+
+
+def meta_muse_family_model_info(model_id: str) -> Optional[ModelInfo]:
+    """The best shipped description for a Muse id :data:`meta_muse_models` lacks.
+
+    Same discipline as :func:`anthropic_family_model_info`, for the ids
+    discovery can surface before this registry is taught them (a new Spark
+    point release, ``muse-wonder-full-1.0``). LIMITS and capabilities are
+    inherited from the tier's shipped row — every Muse text model observed
+    so far shares the 1,007,997/128,000 envelope — but PRICES ARE DROPPED:
+    a new generation is exactly where a price changes, and the ranked
+    catalogue chain (`model/prices.py`, which now maps ``meta-muse`` to
+    models.dev's ``meta`` key with OpenRouter's ``meta/`` namespace behind
+    it) is the leg authorised to fill money for an unshipped id.
+
+    ``muse-wonder-full-*`` deliberately stays price-less even after that
+    chain runs: Meta has published no per-token price for Wonder Full
+    (subscription-only; "pricing per token is not yet announced"), so the
+    honest rendering is unpriced (``$—``), never Wonder 1.0's rate borrowed
+    onto a different model. Contributor ids (``…-contributor``) resolve
+    their published discounted table through the catalogue chain instead
+    of inheriting Standard prices here, for the same reason.
+
+    Returns a deep copy, so a caller that writes to the result cannot
+    rewrite the process-wide registry.
+    """
+    wanted = model_id.strip().casefold().removeprefix("meta/")
+    tier_row: ModelInfo | None = None
+    # The separator is the boundary: a bare ``muse-wonder``/``muse-spark``
+    # prefix would also seize unrelated ids that merely begin with those
+    # letters (``muse-wonderful-…``, ``muse-sparkle-…``) and hand them this
+    # tier's limits and capabilities. Requiring ``muse-wonder-`` /
+    # ``muse-spark-`` keeps the match to ids in the tier's own namespace
+    # (point releases, ``muse-wonder-full-*``, ``…-contributor``).
+    if wanted.startswith("muse-wonder-"):
+        tier_row = meta_muse_models["muse-wonder-1.0"]
+    elif wanted.startswith("muse-spark-"):
+        tier_row = meta_muse_models["muse-spark-1.3"]
+    if tier_row is None:
+        return None
+    return tier_row.model_copy(
+        deep=True,
+        update={
+            # The stripped spelling, not the caller's raw one: tier rows are
+            # keyed bare (``muse-spark-1.3``), so a ``meta/``-qualified or
+            # oddly-cased request must not leak that spelling into the row's
+            # identity. Callers key on the id they asked for (and
+            # ``configure`` re-stamps ``info.id`` from the model spec), so
+            # normalising here changes no caller's lookup.
+            "id": wanted,
+            "name": wanted,
+            "input_price": 0.0,
+            "output_price": 0.0,
+            "cache_reads_price": None,
+            "cache_writes_price": None,
+        },
+    )
+
+
 _STATIC_MODEL_MAPS: Dict[str, Dict[str, "ModelInfo"]] = {
+    "meta-muse": meta_muse_models,
     "anthropic": anthropic_models,
     "openai": openai_models,
     "google": google_models,

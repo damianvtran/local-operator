@@ -175,6 +175,30 @@ class ProjectSummary(BaseModel):
     updated_at: float = 0.0
 
 
+class ProjectPatched(ProjectSummary):
+    """The ``PATCH`` answer: the summary plus whether the call force-closed.
+
+    ``forced_done`` is True only when the caller sent ``force_done: true`` AND
+    THIS call moved the project into ``done`` (it was not done before) AND at
+    least one milestone is still incomplete
+    (:func:`local_operator.projects.closed_with_open_milestones` with
+    ``was_done``, the tool receipt's predicate narrowed to the transition). A
+    re-send, or an edit that merely carries the flag on an already-closed row,
+    answers False. WHY IT IS HERE: the tool
+    records a forced close as receipt text only — nothing is persisted, so the
+    row alone cannot say "this was closed over open work". The response is the
+    only moment a client can say so ("closed with N milestones open"; N is
+    ``milestones_total - milestones_completed`` on this same object).
+
+    Always present on a PATCH answer (``false`` when not forced) rather than
+    omitted, so a client reads one boolean instead of testing for the key.
+    It is NOT on the listing/board rows (:class:`ProjectSummary` is the shared
+    row model and stays unchanged) and is not stored.
+    """
+
+    forced_done: bool = False
+
+
 class LinkedSessionView(BaseModel):
     """One linked session row of the composed view.
 
@@ -348,6 +372,23 @@ class ProjectPatch(_Request):
     completed_at: str | None = None
     estimate: float | None = None
     estimate_unit: str | None = None
+    #: The deliberate door past the ``done`` gate — a REQUEST FLAG, never a
+    #: stored field. Setting ``status='done'`` over incomplete milestones is
+    #: refused (422 ``project_done_incomplete``); resending the same PATCH with
+    #: ``force_done: true`` closes the project anyway, exactly as the agent
+    #: tool's ``force_done`` does. The routes pop it out BEFORE building the
+    #: store's edit model (``ProjectEdit`` has no such field and must not gain
+    #: one: the flag describes this call, not the row) and pass it to the
+    #: registry as the keyword. With any other status, or nothing incomplete,
+    #: it is a harmless no-op — the same leniency as the tool.
+    #:
+    #: STRICT on purpose: this flag overrides a safety check, so only a real
+    #: JSON boolean arms it. Pydantic's lax coercion would read ``"yes"`` /
+    #: ``"true"`` / ``1`` as True — a client that sends a string by mistake
+    #: must be told (422), not silently allowed to close a plan over open work.
+    #: Gated by the ``projects_force_done`` capability: ``extra="forbid"``
+    #: would 422 this key on an older backend.
+    force_done: bool = Field(default=False, strict=True)
 
 
 class ProjectDelete(_Request):
@@ -483,6 +524,22 @@ def project_summary(
         progress_refreshed_by=project.progress_refreshed_by,
         updated_at=project.updated_at,
     )
+
+
+def project_patched(
+    project: Project,
+    *,
+    live_sessions: int,
+    window: float | None = None,
+    forced_done: bool = False,
+) -> ProjectPatched:
+    """:func:`project_summary` plus the PATCH-only ``forced_done`` verdict.
+
+    Built from the summary rather than re-listing its fields so the two cannot
+    drift: the PATCH answer is the summary a list row would be, plus one flag.
+    """
+    summary = project_summary(project, live_sessions=live_sessions, window=window)
+    return ProjectPatched(**summary.model_dump(), forced_done=forced_done)
 
 
 def linked_session_view(row: dict[str, Any]) -> LinkedSessionView:

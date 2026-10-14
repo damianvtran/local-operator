@@ -214,6 +214,7 @@ class UsageStats:
     exhausted: int = 0
     warning: int = 0
     unknown: int = 0
+    balances: int = 0
 
     def describe(self) -> str:
         """``6 windows · 1 exhausted · 1 near limit`` — worst state first."""
@@ -224,6 +225,8 @@ class UsageStats:
             parts.append(f"{self.exhausted} exhausted")
         if self.warning:
             parts.append(f"{self.warning} near limit")
+        if self.balances:
+            parts.append(f"{self.balances} reported balance{'s' if self.balances != 1 else ''}")
         if self.unknown:
             parts.append(f"{self.unknown} not reported")
         return " · ".join(parts)
@@ -233,7 +236,7 @@ def collect_stats(
     reports,
 ) -> UsageStats:  # noqa: ANN001 — provider types stay off the TUI import graph
     """Tally every window across every report by its effective status."""
-    windows = exhausted = warning = unknown = 0
+    windows = exhausted = warning = unknown = balances = 0
     for report in reports:
         for limit in report.limits:
             windows += 1
@@ -243,8 +246,11 @@ def collect_stats(
             elif status == "warning":
                 warning += 1
             elif status == "unknown":
-                unknown += 1
-    return UsageStats(windows, exhausted, warning, unknown)
+                if format_amount(limit.amount) or getattr(limit, "unlimited", False):
+                    balances += 1
+                else:
+                    unknown += 1
+    return UsageStats(windows, exhausted, warning, unknown, balances)
 
 
 def format_age(ms: float) -> str:
@@ -333,6 +339,16 @@ def format_amount(amount) -> str:  # noqa: ANN001 — see collect_stats
     return ""
 
 
+def _display_amount(limit):  # noqa: ANN001, ANN201
+    # A blocked paid wallet is still funded. Keep its observed remaining
+    # amount visible without altering the backend's consumed/fraction facts.
+    if getattr(limit, "paid_fallback", False) and limit.amount.remaining is not None:
+        from dataclasses import replace
+
+        return replace(limit.amount, used=None)
+    return limit.amount
+
+
 def usage_bar(fraction: float | None, width: int) -> str:
     """A proportion bar, or dots when the fraction is unmeasurable.
 
@@ -409,7 +425,9 @@ def _measure_columns(reports, width: int, now_ms: float) -> _Columns:  # noqa: A
     label_cells = [
         cell_len(limit.label) + (len(TIER_INDENT) if limit.tier else 0) for limit in limits
     ]
-    numbers_cells = [cell_len(format_amount(limit.amount) or "not reported") for limit in limits]
+    numbers_cells = [
+        cell_len(format_amount(_display_amount(limit)) or "not reported") for limit in limits
+    ]
     reset_cells = [cell_len(format_countdown(limit.resets_in_ms(now_ms))) for limit in limits]
     # The label truncates rather than pushing the numbers off the row: it is the
     # one column whose content the user can still identify from a prefix.
@@ -469,7 +487,7 @@ def _limit_row(  # noqa: ANN001
             row.append(bar[:filled], style=tint)
             row.append(bar[filled:], style=faint)
 
-    numbers = format_amount(limit.amount) or "not reported"
+    numbers = format_amount(_display_amount(limit)) or "not reported"
     row.append("  ")
     row.append(numbers.rjust(columns.numbers), style=dim)
 
@@ -653,7 +671,22 @@ def _provider_header(report, now_ms: float) -> Text:  # noqa: ANN001
         # states the condition AND the remedy, so repeating a vaguer version
         # of it in the heading spends the same cells saying less.
         row.append("  ·  usage unavailable", style=dim)
-    binding = binding_limit(report)
+    payable = [limit for limit in report.limits if limit.paid_usable()]
+    if payable:
+        # Eligible credit replaces included shared quota, but only explicit
+        # provider scope can replace a model-family cap.
+        from dataclasses import replace
+
+        remaining_gates = [
+            limit
+            for limit in report.limits
+            if not getattr(limit, "paid_fallback", False)
+            and limit.tier
+            and not any(p.supersedes_tiers for p in payable)
+        ]
+        binding = binding_limit(replace(report, limits=remaining_gates))
+    else:
+        binding = binding_limit(report)
     if binding is not None:
         fraction = binding.amount.fraction() or 0.0
         tint = Style(color=_status_color(binding.effective_status()))
@@ -770,6 +803,15 @@ def build_usage_body(  # noqa: ANN001
     if not reports:
         return UsageBody(lines, frozenset({0}))
 
+    # Usage owns HTTP fetchers as well as these fixed provenance strings.
+    # Import only when painting actual reports: importing the panel at first
+    # paint must not pull httpx/the provider stack onto every app startup.
+    from local_operator.providers.usage import (
+        META_MUSE_ALLOWANCE_NOTE,
+        META_MUSE_NO_OBSERVATION_NOTE,
+        META_MUSE_USAGE_NOTES,
+    )
+
     columns = _measure_columns(reports, width, now_ms)
 
     dim = Style(color=theme_mod.semantic_color("dim"))
@@ -788,6 +830,72 @@ def build_usage_body(  # noqa: ANN001
         header.truncate(max(1, width), overflow="ellipsis")
         lines.append(header)
         account_note = _account_status_note(report, now_ms, header_ms)
+        from local_operator.i18n.keys import tui_usage
+        from local_operator.i18n.text import tr
+
+        paid_text = tr("tui.usage")
+        # Reuse the backend's normalized eligibility, not wallet funding alone.
+        paid = [limit for limit in report.limits if limit.paid_usable()]
+        exhausted_plan = any(
+            not getattr(limit, "paid_fallback", False)
+            and getattr(limit, "shared", False)
+            and not limit.tier
+            and limit.amount.fraction() is not None
+            and limit.amount.fraction() >= 1
+            for limit in report.limits
+        )
+        retained_tiers = any(
+            limit.tier and limit.amount.fraction() is not None and limit.amount.fraction() >= 1
+            for limit in report.limits
+        ) and not any(limit.supersedes_tiers for limit in paid)
+        # Paid explanations annotate their meter, never consume the pinned
+        # staleness-note budget. In a short viewport a number must win the tie.
+        paid_notes: dict[str, str] = {}
+        for allowance in report.limits:
+            copy = []
+            if (
+                paid
+                and exhausted_plan
+                and allowance.shared
+                and not allowance.tier
+                and not allowance.paid_fallback
+            ):
+                copy.append(paid_text(tui_usage.paid_continue()))
+            if retained_tiers and allowance.tier:
+                copy.append(paid_text(tui_usage.paid_family_caps()))
+            if allowance.paid_fallback:
+                qualifier = (
+                    paid_text(tui_usage.paid_blocked())
+                    if allowance.available is False
+                    else (
+                        paid_text(tui_usage.paid_eligibility_unknown())
+                        if allowance.available is None
+                        else paid_text(tui_usage.paid_unlimited()) if allowance.unlimited else ""
+                    )
+                )
+                if qualifier:
+                    copy.append(qualifier)
+            paid_notes[allowance.id] = " ".join(copy)
+        muse_note = (
+            report.notes
+            if report.provider == "meta-muse"
+            and isinstance(report.notes, str)
+            and report.notes in META_MUSE_USAGE_NOTES
+            else None
+        )
+        if muse_note and cell_len(muse_note) + 2 > width:
+            # A passive snapshot's source is a correctness qualifier, not
+            # decoration. Compact the WORDS before the layout drops meters.
+            # Fold an ordinary age into the same retained row on short panes;
+            # re-auth/unavailable remedies keep their separate status priority.
+            if muse_note == META_MUSE_ALLOWANCE_NOTE:
+                age = ""
+                if account_note.startswith("last known "):
+                    age = f" ({account_note.removeprefix('last known ')})"
+                    account_note = ""
+                muse_note = f"Sign-in snapshot{age}; r won't update Muse"
+            elif muse_note == META_MUSE_NO_OBSERVATION_NOTE:
+                muse_note = "No sign-in allowance observed"
         if account_note:
             # The two-cell indent is part of the budget the note has to fit in.
             account_note = _fit_status_note(account_note, max(1, width - 2))
@@ -804,9 +912,18 @@ def build_usage_body(  # noqa: ANN001
             cuts.add(len(lines))
             notes.add(len(lines) - 1)
         if report.notes:
-            note = Text(f"  {report.notes}", style=dim)
+            # Muse's source/unknown explanation must travel with its meters
+            # just like an age note. Generic endpoint notes remain decoration;
+            # this does not retune another provider or the theme's dim palette.
+            note = Text(
+                f"  {muse_note or report.notes}",
+                style=Style(color=theme_mod.semantic_color("fg")) if muse_note else dim,
+            )
             note.truncate(max(1, width), overflow="ellipsis")
             lines.append(note)
+            if muse_note:
+                cuts.add(len(lines))
+                notes.add(len(lines) - 1)
         if not report.limits:
             lines.append(Text("  no windows reported", style=dim))
             cuts.add(len(lines))
@@ -817,7 +934,18 @@ def build_usage_body(  # noqa: ANN001
             meter = _limit_row(limit, columns, now_ms, degraded=bool(account_note))
             lines.append(meter)
             detail = getattr(limit, "detail", "")
-            if detail:
+            paid_note = paid_notes.get(limit.id, "")
+            if paid_note:
+                # The existing detail projection drops annotations before any
+                # meter; primary ink meets contrast unlike the decorative ramp.
+                row = Text(
+                    f"{TIER_INDENT}{paid_note}",
+                    style=Style(color=theme_mod.semantic_color("fg")),
+                )
+                row.truncate(max(1, width), overflow="ellipsis")
+                lines.append(row)
+                details.add(len(lines) - 1)
+            if detail and not paid_note:
                 # Indented under its meter and truncated to the row it
                 # ANNOTATES — the meter's own ink, not the card's width. A
                 # balance row's right edge is wherever its number ends, which at

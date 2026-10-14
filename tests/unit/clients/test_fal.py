@@ -6,6 +6,7 @@ import pytest
 import requests
 from pydantic import SecretStr
 
+from local_operator.clients._http import APIError
 from local_operator.clients.fal import (
     FalClient,
     FalImage,
@@ -169,6 +170,9 @@ def test_submit_request_error(fal_client: FalClient) -> None:
         with pytest.raises(RuntimeError) as exc_info:
             fal_client._submit_request({"prompt": "test prompt"})
         assert "Failed to submit FAL API request" in str(exc_info.value)
+        # Typed since the legacy-client pass: APIError IS a RuntimeError, so
+        # old catchers keep working while new callers switch on the status.
+        assert isinstance(exc_info.value, APIError)
 
 
 def test_get_request_status_success(
@@ -209,6 +213,7 @@ def test_get_request_status_error(fal_client: FalClient) -> None:
         with pytest.raises(RuntimeError) as exc_info:
             fal_client._get_request_status("test-request-id")
         assert "Failed to get FAL API request status" in str(exc_info.value)
+        assert isinstance(exc_info.value, APIError)
 
 
 def test_get_request_result_success(

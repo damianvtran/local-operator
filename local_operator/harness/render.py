@@ -147,8 +147,9 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
 
     ``compaction_summary`` markers become a user message carrying the summary;
     a snapcompact archive in ``preserve_data`` is rendered back into
-    text_head → imaged middle → text_tail blocks (base64 ``ImageContent``
-    between ``TextContent`` edges). ``fork_boundary`` and ``wake_prompt``
+    text_head → middle → text_tail blocks (``TextContent`` runs and base64
+    ``ImageContent`` frames, laid out per the archive's per-page replay
+    policy — ``middle_kinds``). ``fork_boundary`` and ``wake_prompt``
     deliveries become user messages of their formatted text, and the newest of
     EACH reminder type — ``todo_reminder`` and ``project_reminder`` (each only
     its own newest; the two are independent claims) — becomes one too; other

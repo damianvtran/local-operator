@@ -67,11 +67,14 @@ class StubSession:
     Deliberately not a real ``Session``: constructing one costs a config dir, a
     credential store and a model registry, and none of that is what this
     property is about. Every method here is one ``_read_only_prompt`` actually
-    calls, implemented as the identity it needs, so a failure can only come
-    from the bound.
+    calls, and the one class attribute it reads, implemented as the identity
+    it needs, so a failure can only come from the bound.
     """
 
     _frozen_system_blocks: list[str] = []
+    #: The one attribute ``_read_only_prompt`` reads off the session now that
+    #: attachment hints are boundary-aware; ``None`` is the ordinary session.
+    _confinement_root: str | None = None
 
     def __init__(self, history: list[Message]) -> None:
         self._history = history

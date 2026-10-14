@@ -57,10 +57,22 @@ async def _worked_in_session(tmp_path, turns: int = 1):
 
 
 def _last_custom_type(session_dir) -> str:
+    """The newest NON-CLOSING custom row's type.
+
+    ``Session._write_closing_checkpoint`` appends one ``frontend_state_checkpoint_v1``
+    row at teardown to every runtime that ended a turn, so IT — not the row the
+    test just wrote — is the journal's last row. Skipping it keeps these tests
+    about the row they wrote; the closing row's own mtime behaviour is pinned in
+    ``tests/unit/session/test_closing_checkpoint.py``.
+    """
     import json
 
     lines = (session_dir / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
-    return json.loads(lines[-1])["payload"].get("custom_type", "")
+    for line in reversed(lines):
+        custom_type = json.loads(line)["payload"].get("custom_type", "")
+        if custom_type != "frontend_state_checkpoint_v1":
+            return custom_type
+    return ""
 
 
 @pytest.mark.asyncio
@@ -122,7 +134,12 @@ async def test_two_boot_notices_in_a_row_do_not_move_the_clock(tmp_path):
 
     assert session_activity(session_dir) == pytest.approx(before, abs=1e-6)
     lines_after = len(transcript_path.read_text(encoding="utf-8").splitlines())
-    assert lines_after == lines_before + 2
+    # TWO notices and ONE closing checkpoint: the teardown row
+    # (``Session._write_closing_checkpoint``) is written to every runtime that
+    # ended a turn and is what bounds the session's next cold open. Counted on
+    # purpose — an unaccounted row here would mean the clock assertion above was
+    # measuring a journal nobody wrote.
+    assert lines_after == lines_before + 3
     assert _last_custom_type(session_dir) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE
 
 

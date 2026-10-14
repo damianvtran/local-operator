@@ -49,7 +49,14 @@ def test_the_desktop_draft_422_bodies_are_unchanged(pair, body) -> None:
     with pytest.raises(HTTPException) as caught:
         _draft_model_spec(DraftModel(provider=provider, model_id=model_id))
     assert caught.value.status_code == 422
-    assert caught.value.detail == body
+    # E2a: the envelope retains the refusal's code and sentence byte-for-byte
+    # (the constant above stays the pre-extraction record); pinned WHOLE so a
+    # stray extra field fails here.
+    assert caught.value.detail == {
+        "code": body["code"],
+        "params": {"error": body["message"]},
+        "text": body["message"],
+    }
 
 
 def test_the_desktop_draft_unbuildable_body_is_unchanged(monkeypatch) -> None:
@@ -64,7 +71,8 @@ def test_the_desktop_draft_unbuildable_body_is_unchanged(monkeypatch) -> None:
         _draft_model_spec(DraftModel(provider="deepseek", model_id="deepseek-flash"))
     assert caught.value.detail == {
         "code": "model_unavailable",
-        "message": "'deepseek-flash' could not be resolved.",
+        "params": {"error": "'deepseek-flash' could not be resolved."},
+        "text": "'deepseek-flash' could not be resolved.",
     }
 
 

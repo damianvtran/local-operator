@@ -27,7 +27,6 @@ tokeniser touch — happens on the recorder's background thread.
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
@@ -253,14 +252,26 @@ class CallSnapshot:
     decode_us: int = 0
     decode_tokens: int = 0
     decode_calls: int = 0
+    #: The basis the call's figure is read under, and where the figure came
+    #: from (PR-3, design §3.4). Decided at RECORD time
+    #: (:func:`local_operator.session.spend.inference_billing_labels`) from the
+    #: RAW serving provider — before ``credential_provider_id`` collapses a
+    #: login flavour — and the receipt, because neither survives to the
+    #: background writer. The defaults are the schema's own DEFAULTs, which is
+    #: what a legacy row reads: a snapshot from an older caller stays honest
+    #: rather than being relabelled here.
+    billing_basis: str = "not_tracked"
+    cost_source: str = "none"
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
     """``(cost in micro-USD, price known)`` for a snapshot, never raising.
 
-    Called by the store on its BACKGROUND thread (never the event loop), where
-    the potentially-blocking ``resolve_model_info`` cold-memo lookup is free —
-    the same reason the SQLite write lives there. Prices through
+    Called by the store on its BACKGROUND thread (never the event loop).
+    A valid provider receipt needs no metadata; only the estimate fallback
+    performs the potentially-blocking ``resolve_model_info`` cold lookup.
+    Keeping that lookup off the event loop does not make it free: a cold
+    catalogue can still delay every later item on the single writer. Prices through
     ``cost_for_usage``, the one money computation the whole app shares, so the
     analytics dollar total cannot diverge from the status band. Returns
     ``(0, False)`` for a model with no published price (rendered ``$—``, not a
@@ -274,26 +285,21 @@ def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
     if snapshot.priced:
         return int(snapshot.cost_micro), bool(snapshot.cost_known)
     try:
-        from local_operator.model.configure import cost_for_usage, resolve_model_info
+        from local_operator.model.configure import (
+            _usage_cost,
+            cost_for_usage,
+            resolve_model_info,
+        )
 
-        info = resolve_model_info(snapshot.provider, snapshot.model_id)
-        # A provider-reported dollar is ground truth even when the registry has
-        # no row for this id (OpenRouter, a brand-new SKU). Asking the table
-        # first used to drop that figure and store the call as unpriced.
-        # Malformed reports (negative, non-finite) are "not reported" — the
-        # same rule ``cost_for_usage`` uses — so we fall through to the table
-        # rather than marking a garbage figure as known.
-        reported = snapshot.usd_cost
+        # The server's receipt is authoritative even for an unknown SKU or an
+        # unavailable catalogue. Validate it with the same helper as price_call
+        # BEFORE resolving metadata, so recording a bill cannot wait on a price
+        # estimate it will never use. Invalid receipts still take the ordinary
+        # table path; zero is a known receipt, not an absent one.
+        reported = _usage_cost(snapshot)
         if reported is not None:
-            try:
-                cost = float(reported)
-            except (TypeError, ValueError):
-                cost = None
-            else:
-                if not (math.isfinite(cost) and cost >= 0):
-                    cost = None
-            if cost is not None:
-                return int(round(cost * 1_000_000)), True
+            return int(round(reported * 1_000_000)), True
+        info = resolve_model_info(snapshot.provider, snapshot.model_id)
         if not (info.input_price or info.output_price):
             return 0, False
         # ``cost_for_usage`` duck-types its usage arg, so a plain object with the
@@ -675,6 +681,52 @@ class ModelRateRow:
         if self.wall_calls <= 0 or self.wall_us <= 0:
             return None
         return self.wall_tokens / (self.wall_us / 1_000_000.0)
+
+
+@dataclass(frozen=True)
+class ChannelBreakdownRow:
+    """One (channel, provider, basis, source) group of the channel ledger.
+
+    Read by ``AnalyticsStore.channel_breakdown`` for the analytics payload's
+    ``channels`` section and the session report's channel rows (PR-2, design
+    §6). ``amount_micro`` sums the KNOWN amounts only and ``known_calls``
+    counts the rows that carried one, so a reader can always separate "spent
+    nothing" from "could not be sized" — the same pairing the rollup tables
+    and the published ``spend_channels`` object keep. ``cost_source`` stays in
+    the key because ``billed``/``provider_reported`` and
+    ``billed``/``catalogue`` are different claims about the same channel.
+    """
+
+    channel: str
+    provider: str
+    billing_basis: str
+    cost_source: str
+    units: float
+    amount_micro: int
+    calls: int
+    known_calls: int
+
+
+@dataclass(frozen=True)
+class ChannelPeriodRow:
+    """One calendar bucket's channel spend, from ``channel_daily``/``_monthly``.
+
+    The rollups carry the FULL dimension key (day/month × channel × provider ×
+    model × basis); this read SUMS provider and model away by default so the
+    result is a chartable series — one row per ``(period, channel, basis)`` —
+    and keeps ``provider`` as a grouping dimension when ``by_provider=True`` is
+    asked for (mirroring ``daily_series``'s ``by_model``). ``amount_micro`` is
+    the known-money sum; ``known_calls`` counts the calls that had an amount.
+    """
+
+    period: str
+    channel: str
+    provider: str
+    billing_basis: str
+    units: float
+    amount_micro: int
+    calls: int
+    known_calls: int
 
 
 #: Depth cap for the per-session forest walk, mirroring the store's own cap on
@@ -1080,6 +1132,15 @@ class SessionReport:
     #: measure", the second is "we measured, and it was zero". Every session
     #: recorded before this feature has no tool data and must read ``unknown``.
     tool_calls: ToolCallStats | None = None
+    #: The channel ledger's rows for this exact session, grouped by
+    #: (channel, provider, basis, source) — PR-2's ``channels`` section on the
+    #: desktop session report, read on the report's own WAL snapshot when the
+    #: caller opts in (``session_report(..., channels=True)``). Empty for a
+    #: caller that did not ask, for a session with no channel rows, and for a
+    #: ledger without the channel tables at all (a pre-feature database reads
+    #: as "no channels recorded", exactly like an empty one — the section is
+    #: additive and never fails the report).
+    channels: tuple[ChannelBreakdownRow, ...] = ()
 
     @property
     def subtree_aggregate(self) -> UsageAggregate:

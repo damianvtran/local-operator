@@ -1965,11 +1965,12 @@ def test_the_probe_is_a_reader(tmp_path):
     asyncio.run(feed.close())
 
 
-def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
+def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
     """THE I/O BUDGET, as a COUNT. One extra stat is the whole cost of watching.
 
-    The record doorbell is one ``os.stat`` on ``run/mobile`` added to a tick that
-    already made three (the attention store and its two journal sidecars), and on
+    The record doorbell is one ``os.stat`` on ``run/mobile`` and the settings
+    doorbell one on ``config.yml``, added to a tick that already made three (the
+    attention store and its two journal sidecars), and on
     a store where nothing moved it must read NOTHING: not one record, not the
     wake index, no SQL. Every later byte on this path is paid per event rather
     than per tick, which is the difference between this and the whole-list refetch
@@ -1995,9 +1996,159 @@ def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
-    assert counts["stat"] + counts["lstat"] <= 4, counts
+    assert counts["stat"] + counts["lstat"] <= 5, counts
     assert counts["record_reads"] == 0, counts
     assert counts["scandir"] == 0, counts
+    asyncio.run(feed.close())
+
+
+def _config_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [frame for frame in frames if frame["type"] == "config"]
+
+
+def test_a_language_write_publishes_one_config_frame(tmp_path, monkeypatch):
+    """The settings doorbell (wave 4 slice A): a language write reaches the stream.
+
+    The write is made THE WAY every origin makes it — a ``config.yml`` edit — so
+    the frame is origin-agnostic by construction: the TUI page, the desktop
+    route, the agent's ``setting`` tool and a hand edit are all this one file
+    write, and the doorbell cannot tell (or need to tell) them apart.
+    """
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: auto\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    from local_operator.i18n.frames import config_frame_payload
+    from local_operator.i18n.resolve import resolve_language
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    _tick(feed)
+
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    # The payload is the SHARED builder's output, byte-for-byte: the one
+    # contract this surface keeps with the relay daemon's /api/config/events
+    # (tests/unit/test_i18n_config_frame_contract.py pins the builder itself).
+    assert frames[0]["payload"] == config_frame_payload(["language"], resolve_language())
+    asyncio.run(feed.close())
+
+
+def test_a_write_through_the_settings_funnel_publishes_the_config_frame(tmp_path, monkeypatch):
+    """The origin half end to end: drive ``settings_io.write_setting`` — the one
+    funnel the TUI page, the desktop route and the agent's ``setting`` tool all
+    call — and the doorbell must see a real settings write, not only a raw file
+    swap."""
+    root = tmp_path
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    # The FIRST write on a virgin config dir materializes config.yml (the
+    # manager's in-memory defaults + the written key), which would make the
+    # doorbell's first frame list every default. Real life never looks like
+    # that — the file exists long before the agent's write — so seed it, then
+    # baseline on the seeded state and assert the deltas are EXACT.
+    manager = ConfigManager(root)
+    setting = settings_io.resolve_key("language")
+    assert setting is not None
+    settings_io.write_setting(manager, setting, "auto")
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    settings_io.write_setting(manager, setting, "en")
+    _tick(feed)
+
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["language"]
+    asyncio.run(feed.close())
+
+
+def test_the_settings_baseline_does_not_replay(tmp_path, monkeypatch):
+    """Same no-replay rule as every other channel: a language configured before
+    the client connected is what its own capabilities read already shows, and
+    announcing it would be a frame about last week."""
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    asyncio.run(feed.close())
+
+
+def test_a_touch_without_a_value_change_publishes_nothing(tmp_path, monkeypatch):
+    """The values compare is the frame's gate, not the stat: rewriting the same
+    bytes (or an mtime-only touch) must publish nothing, or a sync tool flipping
+    timestamps would ring the doorbell forever."""
+    root = tmp_path
+    body = "values:\n  language: en\n"
+    (root / "config.yml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    (root / "config.yml").write_text(body, encoding="utf-8")
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    asyncio.run(feed.close())
+
+
+def test_a_broken_config_announces_nothing_and_is_never_renamed(tmp_path, monkeypatch):
+    """Review round 1, MINOR-3(a): an unreadable config publishes NO frame —
+    there is nothing truthful to name — and the FEED never renames the file:
+    the raw read keeps the last good snapshot, so the repair is what publishes.
+    (A `ConfigManager` construction would move the malformed file aside; this
+    path must never be the thing that does.)"""
+    root = tmp_path
+    (root / "config.yml").write_text("values:\n  language: en\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOP_LANG", raising=False)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)
+
+    broken = "values: [not, a, mapping\n"
+    (root / "config.yml").write_text(broken, encoding="utf-8")
+    _tick(feed)
+
+    assert _config_frames(_queued(subscription)) == []
+    assert list(root.glob("config.yml.bad.*")) == []
+    assert (root / "config.yml").read_text(encoding="utf-8") == broken
+
+    # THE REPAIR is the change that publishes, diffed against the last good
+    # snapshot so it names exactly what moved across the broken window.
+    (root / "config.yml").write_text(
+        "values:\n  language: en\n  auto_save_conversation: false\n", encoding="utf-8"
+    )
+    _tick(feed)
+    frames = _config_frames(_queued(subscription))
+    assert len(frames) == 1, frames
+    assert frames[0]["payload"]["changed_keys"] == ["auto_save_conversation"]
     asyncio.run(feed.close())
 
 
@@ -4090,3 +4241,177 @@ def test_the_feed_does_not_inherit_the_desktop_pre_open_supersession(tmp_path):
     assert frames[-1]["type"] == "gap"
     assert frames[-1]["payload"]["reason"] == "overflow"
     assert frames[-1]["payload"]["subscription_id"] == subscription.id
+
+
+# -- the code-request channel -------------------------------------------------
+
+
+def _index_updated_at(root: Path, session_id: str) -> float:
+    """The revision the route reports for one session: the index's ``updated_at`` in ms."""
+    index = root / "code_requests" / f"{session_id}.json"
+    # The ROUTE's own conversion, to the digit: ``int(updated_at * 1000)``. Returning the
+    # float would compare 1791570123456.789 against the 1791570123456 the feed publishes
+    # and fail on precision rather than on behaviour.
+    return int(float(json.loads(index.read_text())["updated_at"]) * 1000)
+
+
+def _tick_probe(feed: DesktopFeed) -> None:
+    """One tick with the code-request probe's clock rewound.
+
+    The probe is gated to once per ``CATALOGUE_PROBE_INTERVAL_S``, and a synchronous test
+    runs its ticks microseconds apart — so without the rewind the second tick would be
+    gated shut and the test would assert absence for the wrong reason.
+    """
+    feed._code_requests_probed_at = 0.0
+    _tick(feed)
+
+
+def _code_request_index(root: Path, session_id: str, rows: int = 1) -> Path:
+    """Write a derived code-request index the way ``code_requests/ledger.py`` does."""
+    directory = root / "code_requests"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "session_id": session_id,
+                "updated_at": time.time(),
+                "rows": [
+                    {
+                        "key": f"github.com/o/r#{index + 1}",
+                        "ref": {
+                            "forge": "github",
+                            "host": "github.com",
+                            "project": "o/r",
+                            "number": index + 1,
+                            "url": f"https://github.com/o/r/pull/{index + 1}",
+                            "full": True,
+                        },
+                        "relation": "opened",
+                    }
+                    for index in range(rows)
+                ],
+                "tool_output_only": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_code_request_index_that_predates_the_connection_is_not_replayed(tmp_path):
+    """A conversation with rows is not NEWS to a client that has just connected: the
+    baseline primes the tokens, exactly as the catalogue's and authoring's do."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    _code_request_index(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    assert [frame["type"] for frame in _queued(subscription)] == []
+    asyncio.run(feed.close())
+
+
+def test_a_new_code_request_index_publishes_one_frame_for_that_session(tmp_path):
+    root = tmp_path
+    sid = "ab" * 6
+    other = "cd" * 6
+    _listable_session(root, sid)
+    _listable_session(root, other)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    _queued(subscription)
+
+    _code_request_index(root, sid)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["type"] for frame in frames] == ["code_requests"]
+    assert frames[0]["session_id"] == sid
+    # The revision is the INDEX's own ``updated_at`` in milliseconds — the same currency
+    # the route reports for the session, not a counter local to this process.
+    assert frames[0]["payload"]["revision"] == int(_index_updated_at(root, sid))
+
+    # The SAME index does not publish again, and a second session's list is its own frame.
+    _tick_probe(feed)
+    assert _queued(subscription) == []
+    _code_request_index(root, other, rows=2)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["session_id"] for frame in frames] == [other]
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
+
+    # A re-scan that changes WHICH rows are listed moves the token even when the file's
+    # length is unchanged, so an edit in place still reaches the client.
+    _code_request_index(root, other, rows=1)
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["session_id"] for frame in frames] == [other]
+    assert frames[0]["payload"]["revision"] == _index_updated_at(root, other)
+    asyncio.run(feed.close())
+
+
+def test_a_removed_code_request_index_invalidates_the_row(tmp_path):
+    """Rows deleted (or a session deleted) must reach the client, or the pane keeps
+    drawing a row nothing backs."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    path = _code_request_index(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick_probe(feed)
+    _queued(subscription)
+
+    path.unlink()
+    _tick_probe(feed)
+    frames = _queued(subscription)
+    assert [frame["type"] for frame in frames] == ["code_requests"]
+    assert frames[0]["session_id"] == sid
+    asyncio.run(feed.close())
+
+
+def test_the_code_request_probe_creates_nothing_and_reads_nothing_when_idle(tmp_path):
+    """A READER, in the strong sense: an absent directory is an empty answer, and a
+    second probe over unchanged files reads no file at all."""
+    root = tmp_path
+    sid = "ab" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    assert feed._code_requests_probe() == {}
+    assert not (root / "code_requests").exists()
+
+    _code_request_index(root, sid)
+    assert list(feed._code_requests_probe()) == [sid]
+    reads = {"count": 0}
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.parent == root / "code_requests":
+            reads["count"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    with monkeypatch_read_text(counting_read_text):
+        feed._code_requests_probe()
+    assert reads["count"] == 0, "an unchanged index must not be re-read"
+
+
+def monkeypatch_read_text(replacement):
+    """Context manager swapping ``Path.read_text`` for the duration of a probe."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _manage():
+        original = Path.read_text
+        Path.read_text = replacement
+        try:
+            yield
+        finally:
+            Path.read_text = original
+
+    return _manage()

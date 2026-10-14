@@ -50,6 +50,7 @@ from local_operator.analytics.model import (
 )
 from local_operator.analytics.recorder import (
     AnalyticsRecorder,
+    enqueue_channel_record,
     get_recorder,
     record_call,
     record_tool_call,
@@ -72,6 +73,7 @@ __all__ = [
     "get_recorder",
     "record_call",
     "record_tool_call",
+    "enqueue_channel_record",
     "reset_recorder_for_test",
     "AnalyticsStore",
     "default_db_path",

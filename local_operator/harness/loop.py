@@ -25,6 +25,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import time
 import uuid
 from collections import Counter
@@ -58,6 +59,7 @@ from local_operator.harness.types import (
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -276,6 +278,14 @@ FAULT_EXECUTION = "execution"  # the tool ran and failed (HTTP 500, missing file
 # empty ``is_error`` tool_result content with a 400, and other providers
 # serialize "" — one placeholder block keeps the wire legal for every client.
 EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
+#: ``ToolResult.details`` keys whose values can carry file CONTENT the caller
+#: wrote, and so take the SAME mask as the result text wherever a result is
+#: redacted (see ``AgentLoop._redact_details``). The file tools' rendered diff
+#: is the one such field today; extended deliberately, never by sweeping every
+#: string in the dict — ``details`` also carries counters and identity values
+#: (``added``/``removed``/``path``/``spill`` handles) whose readers compare
+#: exact values.
+_CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 # Steering-interrupt poll interval for ``interruptible`` tools mid-run.
 STEERING_INTERRUPT_POLL_S = 0.25
 
@@ -311,12 +321,45 @@ NAMELESS_CALL_RECOVERY_PROMPT = (
     "without it if it is no longer needed."
 )
 
+#: What the loop tells the model after a turn arrived with no text and no tool
+#: calls on a clean stop. Like the nameless-call notice above it is the only
+#: record of why the conversation continues: the empty message itself is
+#: REMOVED from the wire history (an assistant turn with no content blocks is
+#: illegal on the Anthropic wire and teaches a re-ask to repeat it), so without
+#: this prompt the fact that the turn arrived empty would be invisible to the
+#: model -- and, on a resumed session, to the reader. Harness chrome -- see
+#: ``harness.rows.harness_chrome_prompts``.
+WORDLESS_STOP_RECOVERY_PROMPT = (
+    "Harness recovery notice: your last message arrived with no text and no "
+    "tool calls, so there was nothing to act on and the turn would have ended "
+    "silently. Produce your next tool call, or your final answer if the work "
+    "is done."
+)
+
 #: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
 #: reasoning model that spent its whole output budget thinking) is retried one
 #: effort rung lower before the turn ends the ordinary way. Two covers the
 #: observed failure shape (a high rung, then the rung below it also silent)
 #: without burning the user's quota on a model that cannot answer today.
 MAX_EMPTY_TRUNCATION_RETRIES = 2
+
+#: How many times ONE run will re-ask a model whose turn ended with NO text
+#: and NO tool calls on a clean ``stop`` — a WORDLESS STOP. Distinct from the
+#: empty ``length`` truncation above: that turn was cut off at the output
+#: limit and has a retreat (a lower effort rung); this turn was not cut off at
+#: any limit -- the model simply returned nothing, so no setting exists to
+#: retreat to and the re-ask carries the one fact only this layer knows: the
+#: message arrived empty. Measured 2026-10-14 on the OSWorld arm 325633a: a
+#: blank terminal message (the measured shape was a bare newline of text and
+#: no calls) ended a 163-step episode ``agent_stop``/``empty-message`` with
+#: the episode's partial work unclaimed.
+#:
+#: ONE: a second wordless stop in the same run is the model's answer, not an
+#: accident, and ends the turn the ordinary way. Run-scoped like every sibling
+#: recovery (the echo, connectivity and nameless budgets), because a fresh
+#: allowance per turn would re-buy the same diagnosis. Each re-ask is one
+#: extra model call.
+MAX_WORDLESS_STOP_RECOVERIES = 1
 
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
@@ -348,6 +391,16 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: it was given — a first-party 5xx, or a refusal, 4xx or in-band — so replaying
 #: that turn would re-bill it while hiding a failure the user needs to see.
 MAX_CONNECTIVITY_CONTINUATIONS = 3
+
+#: The fault-only recovery window for the interrupted-end class (a bare
+#: ``error`` finish): milliseconds of wall clock in which the run may keep
+#: re-asking after its FIRST eligible fault, intersected with the caller's
+#: ``LoopConfig.deadline`` when one exists. It bounds the harness's own
+#: patience -- an engineering choice, not an OSWorld or task limit -- so a
+#: provider that keeps ending streams wordlessly cannot be re-asked around
+#: the loop's other clocks. It is armed ONLY after the first eligible fault;
+#: the ordinary path never starts a timer.
+INTERRUPTED_RECOVERY_WINDOW_MS = 600_000.0
 
 #: What the loop tells the model after the network cut its answer short.
 #:
@@ -547,6 +600,32 @@ def _lower_effort(model: "ModelSpec") -> str | None:
         return None
     index = rungs.index(current)
     return rungs[index - 1] if index > 0 else None
+
+
+def _graceful_cancel_requested(config: LoopConfig) -> bool:
+    """Has a supervisor asked the loop to stop at the next safe boundary?
+
+    Read at EVERY next-model safe point, not just the post-response boundary:
+    the post-tool boundary AND each recovery decision that would otherwise
+    spend another provider request on this turn (the nameless-call re-ask, the
+    empty-truncation retreat). Those recoveries exist to keep a turn alive;
+    the one thing they must never do is outlive the caller's stop -- a
+    recovery firing here while the flag was set spent request N+1 AFTER the
+    cancel landed on request N, which is the leak reported from the QA
+    step-boundary matrix (a nameless call on the Nth request was re-asked and
+    paid for with a third request the caller's budget never admitted).
+
+    Asked as one helper because the dangerous rule is the same at every site:
+    a broken host hook must degrade to "no cancel" and never strand a turn
+    (see the boundary's own note). A copied try/except is how one site ends up
+    raising where another swallows, so every caller shares this reading.
+    """
+    if config.graceful_cancel_requested is None:
+        return False
+    try:
+        return bool(config.graceful_cancel_requested())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # How long the batch waits for tools to unwind after an ABORT before it stops
@@ -1166,6 +1245,124 @@ def _scrub_argument_value(value: Any, redact: Callable[[str], str]) -> tuple[Any
     return value, False
 
 
+#: One JSON string token of a (possibly truncated) argument document: the opening quote, the
+#: body up to the closing quote (``\\.`` consumes an escape pair, so an escaped quote never
+#: ends it), and the closing quote -- empty when the stream was cut inside the string.
+_JSON_STRING_TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)("?)', re.DOTALL)
+
+#: A well-formed JSON escape. Used only when ``json.loads`` rejects a body (a truncated
+#: ``\\u00`` at the cut, a model's invalid escape) so the rest of the string is still judged.
+_JSON_ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
+_JSON_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+_JSON_KEY_COLON = re.compile(r"\s*:")
+
+
+def _decode_json_string_body(body: str) -> str:
+    """The characters a JSON string BODY denotes: ``\\n`` -> a real newline, ``\\"`` -> ``"``."""
+    try:
+        decoded = json.loads(f'"{body}"')
+    except ValueError:
+        return _JSON_ESCAPE.sub(
+            lambda m: (
+                chr(int(m.group(1)[1:], 16))
+                if m.group(1)[0] == "u"
+                else _JSON_SIMPLE_ESCAPES[m.group(1)]
+            ),
+            body,
+        )
+    return decoded if isinstance(decoded, str) else body
+
+
+def _scrub_json_string_values(text: str, redact: Callable[[str], str]) -> str:
+    """Scrub the JSON string VALUES in ``text``, judged as the characters they denote.
+
+    The raw carrier (``raw_arguments``) is JSON TEXT: a newline inside a string value is
+    the two characters backslash-n, and the shape rules' word-boundary and line-start
+    anchors cannot see it (QA on PR #2133, Q-1 / Q-7). This pass closes that gap exactly:
+    each string value's body is DECODED (``\\n`` -> a real newline), judged on its own --
+    the same characters, judged the same way as ``arguments`` gets -- and only a value the
+    scrub changed is re-encoded. Everything else keeps the exact bytes the provider sent.
+
+    Works whether or not ``text`` parses: an unterminated body (a stream cut mid-call, the
+    fragment ``_assemble_tool_call`` leaves beside empty ``arguments``) is judged as the
+    truncated value it is.
+
+    THIS pass skips a string that is recognisably an object KEY (a closing quote followed by
+    a colon), because a masked key would rename the argument -- mirroring
+    ``_scrub_argument_value``, which scrubs values only. The claim is scoped to this pass:
+    pass 1 (``redact`` over the whole rendering) can still rewrite a key-shaped string, and
+    is deliberately untouched -- its spans are what the shape corpus pins.
+    """
+
+    def judge(match: re.Match[str]) -> str:
+        body, closing = match.group(1), match.group(2)
+        if closing and _JSON_KEY_COLON.match(text, match.end()):
+            return match.group(0)
+        decoded = _decode_json_string_body(body)
+        scrubbed = redact(decoded)
+        if scrubbed == decoded:
+            return match.group(0)
+        return '"' + json.dumps(scrubbed)[1:-1] + closing
+
+    return _JSON_STRING_TOKEN.sub(judge, text)
+
+
+def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
+    """The copy of a call's ``raw_arguments`` that history stores and replays.
+
+    **The defect this fixes (QA on PR #2133, Q-1 / Q-7).** ``redact(raw)`` judged the JSON
+    TEXT, where a newline is the two characters backslash-n. The shape rules anchor on word
+    boundaries and real line starts, so a key, ``Bearer`` value or bare token after a line
+    break in a heredoc, a ``write`` body or an env block was not recognised and was
+    persisted to ``transcript.jsonl`` and replayed to the provider on every later request --
+    while the identical value in ``arguments`` was masked. (The session hook happened to
+    contain some parseable rows by registering the value during the ``arguments`` pass
+    first; that is an ordering accident, not cover: with the shape function alone, or when
+    ``arguments`` is empty because the call never parsed, the value survived.)
+
+    Two passes, VALUE-FIRST, and the order is load-bearing (QA round 2, Q-1, measured):
+
+    * :func:`_scrub_json_string_values` first -- each string value's body is decoded and
+      judged on the characters it DENOTES, the same judgement ``_scrub_argument_value``
+      gives the decoded view. This runs first because the text pass can EAT the boundary
+      this pass needs: when a credential assignment sits directly before a ``Bearer`` line
+      (two values, one escaped newline apart in the payload), the text pass rewrote the
+      assignment's value AND consumed the escape between the two lines -- judging the
+      rendering, it read the value as running on to the end of the string -- so the
+      word-boundary rule could no longer anchor the bearer value at all. Judging the values
+      first masks the bearer value before anything can rewrite its neighbourhood.
+    * ``redact`` on the text, LAST, because the keyed rules (``"api_key": "..."``) need the
+      key beside the value in one string, and masking a span ACROSS a quote (which the
+      shapes can do) is behaviour the corpus pins here. What the value pass masked is
+      already the mask marker by then, and the marker is stable under the text pass.
+
+    Ordering differential, measured over this repository's shape corpus (323 positive / 220
+    negative rows, each judged as ``json.dumps({"command": row})``): 15 positive rows and NO
+    negative row differ between the two orders, and every differing row keeps its mask in
+    both, at the same marker count. What the old order's text pass additionally covered in
+    those rows was damage: in 14 of the 15 it left the rendering unparseable (a span ran
+    across the escape, into a neighbouring name), while the value-first order leaves valid
+    JSON; in the one row that stayed parseable it masked a following name the value pass
+    leaves intact. Nothing released (any negative row) moved in either direction.
+
+    Deliberately NOT derived by re-serialising ``arguments`` (the direction PR #2133's
+    discussion floated): ``json.dumps`` adds a second escaping layer, and on the rows built
+    around escaped spellings that layer is judged differently from the value it came from
+    (six corpus rows measured over-masked through it), while the text pass above already
+    gives the keyed cover a re-serialise would lose.
+    """
+    return redact(_scrub_json_string_values(raw, redact))
+
+
 def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
     """The copy of an assistant turn that history STORES and REPLAYS.
 
@@ -1177,6 +1374,11 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     ``--flag``) was surviving in the journal in full even though the RESULT of
     that call is scrubbed. This returns the copy for that second use; the caller
     keeps executing the original.
+
+    **BOTH carriers of the call are scrubbed, each with real line boundaries**:
+    ``arguments`` (decoded values) and ``raw_arguments`` (the JSON string the wire replays
+    verbatim). See :func:`_scrub_raw_arguments` for why the string cannot simply be
+    redacted as text.
 
     **IDENTITY IS PRESERVED when nothing changed**, and that is load-bearing
     rather than tidy: the loop's error and refusal paths retract a message they
@@ -1196,12 +1398,17 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
         # came from rather than as an anonymous one.
         with tool_source(call.name, call.arguments):
             arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
-            raw = redact(call.raw_arguments) if isinstance(call.raw_arguments, str) else None
-        changed = changed or arguments_changed or raw != call.raw_arguments
+            raw = (
+                _scrub_raw_arguments(call.raw_arguments, redact)
+                if isinstance(call.raw_arguments, str)
+                else None
+            )
+        call_changed = arguments_changed or raw != call.raw_arguments
+        changed = changed or call_changed
         calls.append(
-            call
-            if not (arguments_changed or raw != call.raw_arguments)
-            else call.model_copy(update={"arguments": arguments, "raw_arguments": raw})
+            call.model_copy(update={"arguments": arguments, "raw_arguments": raw})
+            if call_changed
+            else call
         )
     if not changed:
         return message
@@ -1271,6 +1478,13 @@ class AgentLoop:
         ``agent_start`` first and exactly one terminal ``agent_end`` whose
         ``messages`` are every message produced by this run. ``generation``
         stamps both boundary events so UIs can drop superseded ends.
+
+        ONE EXCEPTION TO THE PAIR: a run opened to drain the steering queue
+        (``drain_steering_on_open``) that finds nothing left to take retires
+        before its first event -- no ``agent_start``/``agent_end``, no
+        provider request (see ``_run``'s opening-drain comment; the session
+        already documents this silent settle for a dropped turn in
+        ``_drop_pre_aborted_turn``).
         """
         return self._run(initial_messages, context, config, signal, generation)
 
@@ -1301,10 +1515,42 @@ class AgentLoop:
         signal: AbortSignal | None,
         generation: int = 0,
     ) -> AsyncIterator[AgentEvent]:
+        # THE OPENING DRAIN (``drain_steering_on_open``): a run opened BECAUSE
+        # the steering queue holds a message with no live turn to take it
+        # (``Session.steer``'s idle wake) takes the queue ONCE, before its
+        # start event and before any request. Two properties ride this
+        # position, both load-bearing:
+        #
+        # * EMPTY MEANS RETIRE. The queue can empty between the host's
+        #   under-lock guard and this take -- an in-flight drain that
+        #   suspended mid-append takes a later row first, a recall removes one
+        #   -- and a run that finds nothing has nothing to ask the model. It
+        #   returns before ``AgentStartEvent``, so no front end paints a turn
+        #   for zero work and no provider call is spent (the same silent
+        #   settle ``Session._drop_pre_aborted_turn`` documents; the run
+        #   publishes no attention outcome either, since an end event is what
+        #   ``_publish_attention_outcome`` reads).
+        # * THE MESSAGES RIDE THE FIRST REQUEST. ``pending`` is populated
+        #   before the inner loop, so the first iteration folds them via
+        #   ``_drain_pending`` and issues ONE request carrying them. The
+        #   historical wake shape drained at the top of the first inner
+        #   iteration, where ``first_inner`` skipped it: the first call headed
+        #   out empty and the steer rode a continuation (measured: two calls,
+        #   the first carrying nothing new).
+        #
+        # Opt-in and run-scoped -- set only by that wake -- so every ordinary
+        # run keeps the historical shape where a steer can never appear in its
+        # first request (a spooled row parks behind the turn lock and lands at
+        # the boundary; see the session's ``_drain_spooled_peer_inbox`` note).
+        pending: list[AgentMessage] = []
+        if config.drain_steering_on_open:
+            if config.get_steering_messages is not None:
+                pending.extend(await config.get_steering_messages())
+            if not pending and not initial_messages:
+                return
         signal, deadline_task = self._wire_deadline(config, signal)
         new_messages: list[AgentMessage] = []
         context.messages.extend(initial_messages)
-        pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
         reentries: dict[str, int] = {}  # per-producer outer-loop re-entries
         # A reasoning model can spend its ENTIRE output budget thinking and be
@@ -1316,6 +1562,11 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # Turns this run has re-asked after arriving with no text and no tool
+        # calls on a clean stop -- see ``MAX_WORDLESS_STOP_RECOVERIES``.
+        # Run-scoped and topped up by nothing, like the truncation budget
+        # above: a fresh allowance per turn would re-buy the same diagnosis.
+        wordless_stop_recoveries = 0
         # The output contract's budget for THIS run (== per turn: a ``--loop``
         # iteration re-enters ``_run`` fresh). Counted only on the terminal
         # seam, so every non-clean exit -- abort, stream error, continuation
@@ -1339,11 +1590,29 @@ class AgentLoop:
         # than a bare flag so a mid-run model switch re-derives its own
         # answer instead of inheriting a decision made about another model.
         echo_fill_route: tuple[str, str] | None = None
-        # Turns this run has continued after the network cut them short. Run-
-        # scoped, not per-turn: a laptop carried between networks can interrupt
-        # the same run more than once, and the budget bounds the RUN's total
-        # tolerance for that rather than handing each turn a fresh allowance.
+        # Turns this run has continued after a stream died mid-answer -- the
+        # network-cut family AND the interrupted-end family (a bare ``error``
+        # finish) share ONE budget, because they are one policy: the run
+        # tolerates a bounded number of re-asks, not a per-family allowance
+        # that either family could spend alone. Run-scoped, not per-turn: a
+        # laptop carried between networks can interrupt the same run more than
+        # once, and the budget bounds the RUN's total tolerance for that
+        # rather than handing each turn a fresh allowance.
         connectivity_continuations = 0
+        # The interrupted-end family's second bound: a fault-only ABSOLUTE
+        # window for the whole recovery chain, armed at the first eligible
+        # fault (see INTERRUPTED_RECOVERY_WINDOW_MS).
+        # ``interrupted_recovery_deadline_ms`` carries the armed end and
+        # ``interrupted_recovery_signal`` aborts an IN-FLIGHT recovery stream
+        # at it (combined into each recovery turn's signal, so a stalled
+        # synthetic stream is cut rather than merely blocked from restarting);
+        # ``interrupted_recovery_timer`` is the one task that trips the signal;
+        # ``pending_interrupted_recovery`` is the pin the next ``_model_turn``
+        # consumes. All stay None/absent on the ordinary path.
+        interrupted_recovery_deadline_ms: float | None = None
+        interrupted_recovery_signal: AbortSignal | None = None
+        interrupted_recovery_timer: asyncio.Task[None] | None = None
+        pending_interrupted_recovery: "_InterruptedRecovery | None" = None
         # The effort ceiling an empty-truncation retreat imposed; rides on
         # every request under it so the session's frozen auto-effort cannot
         # raise the retry back to the rung that produced nothing.
@@ -1403,15 +1672,32 @@ class AgentLoop:
 
                     assistant, stop_reason, stream_error = None, "stop", None
                     turn_connectivity_loss = False
+                    turn_retryable_interruption = False
+                    turn_attempted_selector: "ModelSpec | None" = None
                     nameless_call_drops = 0
                     # The spec this call was BUILT with, which is not
                     # ``config.model`` whenever the host resolves per call. The
                     # echo fill below is gated on what was actually sent.
                     turn_model: "ModelSpec | None" = None
+                    # The pin is consumed by THIS call and only this call: an
+                    # interrupted turn's re-ask happens immediately, and any
+                    # later turn is a different decision.
+                    recovery_for_call = pending_interrupted_recovery
+                    pending_interrupted_recovery = None
+                    # A recovery stream runs under the fault-only window's
+                    # signal TOO, so the window cuts it mid-flight; every other
+                    # turn keeps the caller's signal unchanged.
+                    turn_signal = signal
+                    if interrupted_recovery_signal is not None:
+                        turn_signal = (
+                            AbortSignal.any_of(signal, interrupted_recovery_signal)
+                            if signal is not None
+                            else interrupted_recovery_signal
+                        )
                     async for event in self._model_turn(
                         context,
                         config,
-                        signal,
+                        turn_signal,
                         effort_ceiling=effort_ceiling,
                         echo_fill_route=echo_fill_route,
                         context_tokens_hint=(
@@ -1419,6 +1705,7 @@ class AgentLoop:
                             if run_context_tokens is not None
                             else self._host_context_tokens_hint(config)
                         ),
+                        recovery=recovery_for_call,
                     ):
                         if isinstance(event, _ModelTurnResult):
                             assistant, stop_reason, stream_error = (
@@ -1428,13 +1715,26 @@ class AgentLoop:
                             )
                             turn_model = event.model
                             turn_connectivity_loss = event.connectivity_loss
+                            turn_retryable_interruption = event.retryable_interruption
+                            turn_attempted_selector = event.attempted_selector
                             nameless_call_drops = event.nameless_call_drops
                         else:
                             yield event
                     if assistant is None:
                         raise RuntimeError("model turn produced no assistant message")
 
-                    if turn_connectivity_loss:
+                    if not (turn_connectivity_loss or turn_retryable_interruption):
+                        # A CLEAN turn reaps the fault-only window: the run has
+                        # recovered (or never faulted under it), and the timer
+                        # and signal must not outlive the reason they exist --
+                        # a later ordinary turn must not inherit a stale abort.
+                        if interrupted_recovery_timer is not None:
+                            self._unwire_deadline(interrupted_recovery_timer)
+                            interrupted_recovery_timer = None
+                        interrupted_recovery_signal = None
+                        interrupted_recovery_deadline_ms = None
+
+                    if turn_connectivity_loss or turn_retryable_interruption:
                         # THE NETWORK WENT AWAY MID-TURN — the laptop was closed
                         # at home and opened at work. The provider layer has
                         # already spent its patient budget waiting for a route
@@ -1461,8 +1761,91 @@ class AgentLoop:
                         # state, so a sentence cut mid-word is continued rather
                         # than rewritten. That beats the alternative this
                         # replaces, which was ending the entire run.
-                        if connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS:
+                        #
+                        # A STOP OUTRANKS THE RESUME (round-1 review R1 / QA
+                        # Q1): resuming would spend request N+1 on a turn the
+                        # caller already stopped at request N, and the notice
+                        # below would promise the remainder "is being fetched
+                        # on the next attempt" -- a promise this path then
+                        # breaks. Skipping the resume falls through to the
+                        # failure terminal below: the same bounded end the
+                        # spent-budget path takes, with the requested stop as
+                        # the verdict instead of a lone provider error.
+                        graceful_cut = _graceful_cancel_requested(config)
+                        # The interrupted-end family adds three narrow gates the
+                        # connectivity arm does not need:
+                        #
+                        #  - NO COMPLETE EXECUTABLE CALL on the failed turn. A
+                        #    complete call in a stream the provider ABANDONED is
+                        #    a request the model made, but executing it would
+                        #    authorize work from a response nothing vouches for,
+                        #    so the narrow first scope keeps such turns terminal
+                        #    instead of authorizing calls it did not clear.
+                        #  - a KNOWN serving spec: the re-ask pins the machine
+                        #    that served the failure, and an unknown spec would
+                        #    force a guess, which this path must never make.
+                        #  - the host must still resolve the SAME requested
+                        #    spec; a model switch mid-run cancels the choice
+                        #    instead of overruling it.
+                        #
+                        # These gates are versioned with the marker: widening
+                        # them is a contract change, not a tweak.
+                        now_ms = time.time() * 1000.0
+                        within_recovery_window = (
+                            interrupted_recovery_deadline_ms is None
+                            or now_ms <= interrupted_recovery_deadline_ms
+                        )
+                        interrupted_gates_ok = True
+                        if turn_retryable_interruption:
+                            complete_calls = [
+                                call for call in assistant.tool_calls if call.arguments
+                            ]
+                            current = self._current_model(config)
+                            # The pin is the EFFECTIVE API selector of the
+                            # failed attempt, carried FAULT-ONLY on the marked
+                            # end by the failover frame that already holds the
+                            # per-attempt spec (``StreamEndEvent.
+                            # attempted_selector``). UNKNOWN means REFUSE: the
+                            # loop must never guess the route from the
+                            # request's model -- after a sticky handoff or
+                            # driver fallback the request can name A while B
+                            # served the failure, and a re-ask of A would be a
+                            # silent route rewrite wearing a same-route label.
+                            # A user model switch since the fault still cancels
+                            # the recovery choice.
+                            interrupted_gates_ok = (
+                                not complete_calls
+                                and turn_attempted_selector is not None
+                                and turn_model is not None
+                                and current.provider == turn_model.provider
+                                and current.model_id == turn_model.model_id
+                            )
+                        if (
+                            connectivity_continuations < MAX_CONNECTIVITY_CONTINUATIONS
+                            and not graceful_cut
+                            and within_recovery_window
+                            and interrupted_gates_ok
+                        ):
                             connectivity_continuations += 1
+                            if turn_retryable_interruption and turn_model is not None:
+                                # Arm the fault-only window at the FIRST eligible
+                                # fault. Its signal joins every recovery turn's
+                                # signal, so the window cuts an IN-FLIGHT stream
+                                # as well as refusing a next re-ask.
+                                if interrupted_recovery_deadline_ms is None:
+                                    chain_end = now_ms + INTERRUPTED_RECOVERY_WINDOW_MS
+                                    if config.deadline is not None:
+                                        chain_end = min(chain_end, float(config.deadline))
+                                    interrupted_recovery_deadline_ms = chain_end
+                                    interrupted_recovery_signal = AbortSignal()
+                                    interrupted_recovery_timer = self._arm_recovery_window(
+                                        interrupted_recovery_signal,
+                                        max(0.0, (chain_end - now_ms) / 1000.0),
+                                    )
+                                pending_interrupted_recovery = _InterruptedRecovery(
+                                    requested=turn_model,
+                                    attempted=turn_attempted_selector,
+                                )
                             # TRUNCATED calls are dropped; COMPLETE ones are not.
                             # A call still being dictated when the socket died is
                             # truncated JSON, and executing it would run a tool
@@ -1689,14 +2072,27 @@ class AgentLoop:
                             # three times that the machine had reconnected and
                             # then ended the run. Naming the budget also shows it
                             # being spent rather than repeating one identical line.
-                            yield NoticeEvent(
-                                text=(
+                            # SAME ROUTE is only true of the interrupted-end
+                            # family: its recovery pins the route the failed
+                            # turn attempted (``_InterruptedRecovery``). The
+                            # legacy connectivity cut re-asks through the
+                            # ordinary router, which may legitimately land on a
+                            # substitute, so it keeps the general wording --
+                            # one message, two honest variants.
+                            if turn_retryable_interruption:
+                                notice_text = (
+                                    "response stream interrupted mid-answer — "
+                                    "resuming the turn on the same route "
+                                    f"({connectivity_continuations}/"
+                                    f"{MAX_CONNECTIVITY_CONTINUATIONS})"
+                                )
+                            else:
+                                notice_text = (
                                     "response stream cut mid-answer — "
                                     f"resuming the turn ({connectivity_continuations}/"
                                     f"{MAX_CONNECTIVITY_CONTINUATIONS})"
-                                ),
-                                kind="warning",
-                            )
+                                )
+                            yield NoticeEvent(text=notice_text, kind="warning")
                             has_more_tool_calls = True
                             continue
                         # Budget spent and still offline: fall through to the
@@ -1714,6 +2110,15 @@ class AgentLoop:
                     new_messages.append(stored)
 
                     if stop_reason in ("error", "aborted", "refusal"):
+                        # A STOP OUTRANKS EVERY RESEND IN THIS SECTION (round-1
+                        # review R1 / QA Q2): the echo fill and the thinking-off
+                        # retreat would each spend request N+1 -- and mutate the
+                        # run's model -- on a turn the caller already stopped at
+                        # request N. Read ONCE here so both gates and the
+                        # terminal's verdict agree on a single reading; the
+                        # protected helper keeps a broken hook at no-cancel, and
+                        # the retries stay live whenever no stop is pending.
+                        graceful_error = _graceful_cancel_requested(config)
                         # FIRST recovery for a refused reasoning echo: re-send the
                         # SAME request with the echo filled.
                         #
@@ -1770,6 +2175,7 @@ class AgentLoop:
                             and turn_model is not None
                             and not turn_model.requires_reasoning_echo
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             reasoning_echo_fill_retries += 1
                             # The refused turn must not reach the retry's
@@ -1844,6 +2250,7 @@ class AgentLoop:
                             and not assistant.text.strip()
                             and not assistant.tool_calls
                             and _is_reasoning_echo_rejection(stream_error)
+                            and not graceful_error
                         ):
                             thinking_off = _thinking_off_effort(config.model)
                             if thinking_off is not None:
@@ -1893,7 +2300,17 @@ class AgentLoop:
                         # result. `aborted` is computed HERE rather than at the
                         # event below because the markers must agree with it:
                         # same verdict line, one reading.
-                        aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
+                        # A requested stop is a verdict of its own kind even
+                        # when the stop is what SKIPPED the resends above: the
+                        # turn ends because the caller asked, not because the
+                        # provider failed (round-1 review R1 / QA Q1-Q2). The
+                        # fault markers below read this same line, so they
+                        # cannot disagree with it.
+                        aborted = (
+                            stop_reason == "aborted"
+                            or bool(signal and signal.aborted)
+                            or graceful_error
+                        )
                         # Q-1 (round 1): the terminal left by an exhausted
                         # continuation budget must name its own history. The
                         # notices streamed the budget being spent while the run
@@ -1908,7 +2325,7 @@ class AgentLoop:
                         # is kept so the two terminal shapes can never share a
                         # message.
                         if (
-                            turn_connectivity_loss
+                            (turn_connectivity_loss or turn_retryable_interruption)
                             and not aborted
                             and connectivity_continuations >= MAX_CONNECTIVITY_CONTINUATIONS
                         ):
@@ -1916,7 +2333,7 @@ class AgentLoop:
                                 f"{stream_error} — the response stream was cut "
                                 f"mid-answer and the continuation budget is spent "
                                 f"({connectivity_continuations}/"
-                                f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)"
+                                f"{MAX_CONNECTIVITY_CONTINUATIONS} retries used)"
                             )
                         placeholder_details = {FAULT_KEY: FAULT_ABORTED} if aborted else None
                         placeholders = [
@@ -1953,8 +2370,19 @@ class AgentLoop:
                         # call the turn continues on its own; the drop is still
                         # told to the user, because it is real either way.
                         reasks_left = nameless_call_recoveries < MAX_NAMELESS_CALL_RECOVERIES
+                        # A requested boundary outranks the recovery: the re-ask
+                        # would spend request N+1 on a turn the caller already
+                        # stopped at request N. Skipping it here -- instead of
+                        # re-asking and only aborting afterwards -- falls
+                        # through to the post-tool boundary below, which ends
+                        # the turn as aborted: the same terminal a cancel
+                        # landing after a completed batch gets.
+                        graceful = _graceful_cancel_requested(config)
                         recovering = (
-                            not assistant.tool_calls and stop_reason == "toolUse" and reasks_left
+                            not assistant.tool_calls
+                            and stop_reason == "toolUse"
+                            and reasks_left
+                            and not graceful
                         )
                         ending = (
                             not assistant.tool_calls
@@ -2013,6 +2441,13 @@ class AgentLoop:
                         # cannot describe one event in two voices.
                         has_text = bool(assistant.text and assistant.text.strip())
                         silent = not has_text and not assistant.tool_calls
+                        # Same boundary rule as the nameless re-ask above: a
+                        # requested stop must not pay for the retreat's extra
+                        # request. Read only for the silent arm -- the recovery
+                        # this gates exists only there, and a non-silent length
+                        # turn already reaches the post-response boundary
+                        # below.
+                        graceful_length = silent and _graceful_cancel_requested(config)
                         # The limit's ARM, per call, computed ONCE — the notice
                         # below states the turn's arm from this list and the
                         # placeholder loop stamps each call's marker from it, so
@@ -2021,8 +2456,19 @@ class AgentLoop:
                         # same call. Empty (and therefore harmless) on the arms
                         # with no call: `silent`, and the prose arms.
                         cut_calls = [_limit_cut_arguments(call) for call in assistant.tool_calls]
-                        if silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES:
-                            lower = _lower_effort(config.model)
+                        retry_eligible = (
+                            silent and empty_truncation_retries < MAX_EMPTY_TRUNCATION_RETRIES
+                        )
+                        # The ladder is consulted even when the boundary has
+                        # already claimed the retreat: WHICH rung the turn would
+                        # have gone to is what the notice below reports, and it
+                        # is the difference between "no cheaper setting exists"
+                        # (nothing was skipped) and "a stop was
+                        # requested" (a rung existed and stayed unspent).
+                        # Claiming a ladder cause that was never consulted is
+                        # the false-cause class this family exists to remove.
+                        lower = _lower_effort(config.model) if retry_eligible else None
+                        if retry_eligible and not graceful_length:
                             if lower is not None:
                                 empty_truncation_retries += 1
                                 # The empty turn must not reach the retry's
@@ -2057,12 +2503,17 @@ class AgentLoop:
                             # and it names WHICH limit ended the retreat
                             # (review N1) so the user knows whether another
                             # manual retry could still step down.
-                            cause = (
-                                f"{empty_truncation_retries} lower-effort "
-                                f"{'retries' if empty_truncation_retries != 1 else 'retry'} spent"
-                                if empty_truncation_retries >= MAX_EMPTY_TRUNCATION_RETRIES
-                                else "no lower effort setting to retry at"
-                            )
+                            if empty_truncation_retries >= MAX_EMPTY_TRUNCATION_RETRIES:
+                                noun = "retry" if empty_truncation_retries == 1 else "retries"
+                                cause = f"{empty_truncation_retries} lower-effort {noun} spent"
+                            elif lower is None:
+                                cause = "no lower effort setting to retry at"
+                            else:
+                                # The ladder HAD a rung and it was not spent:
+                                # the boundary claimed the retreat, and that is
+                                # the only cause left to name -- a ladder claim
+                                # here would be false.
+                                cause = "a stop was requested"
                             yield NoticeEvent(
                                 text=(
                                     "the model spent its whole output budget "
@@ -2201,20 +2652,86 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                         )
+                    elif (
+                        config.recover_wordless_stop
+                        and stop_reason == "stop"
+                        and not (assistant.text or "").strip()
+                    ):
+                        # A WORDLESS STOP: a clean ``stop`` arrived with no
+                        # text and no tool calls, and no arm above claimed it
+                        # (not a ``length`` cut-off, not the nameless-call
+                        # family's ``toolUse``). Recovered ONLY on runs whose
+                        # host declares silence a failure here
+                        # (``config.recover_wordless_stop`` -- the session's
+                        # quiet-end rule inverted): a run whose words someone
+                        # is waiting on must not end in silence, while every
+                        # internal arrival -- delivery, catch-up, a non-notify
+                        # wake -- may end quietly and keeps the old ending,
+                        # paying no extra provider call. Where the bit is set,
+                        # there is nothing to act on and nothing will
+                        # be said, so without this arm the turn ends here and
+                        # every surface reads a deliberate stop -- measured
+                        # 2026-10-14 on the OSWorld arm 325633a (episode
+                        # ``ep-ccea28e40a23``): one blank terminal message ended
+                        # a 163-step episode as ``agent_stop``/``empty-message``
+                        # with its partial work unclaimed. Distinct from the
+                        # 2026-10-13 wordless ``error`` end, which is the
+                        # interrupted-stream family and recovers on its own arm
+                        # above: this turn was not interrupted either.
+                        #
+                        # The re-ask is the nameless recovery's shape: the loop
+                        # states the one fact the model cannot see (its message
+                        # arrived empty) and gives it ONE bounded chance to
+                        # produce its next action or its answer. A requested
+                        # stop outranks the re-ask (the nameless rule): falling
+                        # through ends the turn as it did before this arm
+                        # existed.
+                        wordless_graceful = _graceful_cancel_requested(config)
+                        if (
+                            wordless_stop_recoveries < MAX_WORDLESS_STOP_RECOVERIES
+                            and not wordless_graceful
+                        ):
+                            wordless_stop_recoveries += 1
+                            # The empty turn must not reach the re-ask's wire
+                            # history, for the empty-truncation retry's two
+                            # reasons: an assistant message with no content
+                            # blocks is illegal on the Anthropic wire, and
+                            # replaying "I said nothing" teaches the re-ask to
+                            # say nothing.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            # Persisted for the same reason every recovery
+                            # prompt is: a resumed session must be able to see
+                            # why it was re-asked. Harness chrome -- see
+                            # ``harness.rows.harness_chrome_prompts``.
+                            recovery = Message.user(WORDLESS_STOP_RECOVERY_PROMPT)
+                            context.messages.append(recovery)
+                            new_messages.append(recovery)
+                            yield NoticeEvent(
+                                text=(
+                                    "the model's reply arrived empty (no text, no "
+                                    "tool calls) — re-asking it for its next "
+                                    "action or finish"
+                                ),
+                                kind="warning",
+                            )
+                            # No TurnEndEvent, for the nameless recovery's
+                            # reason: nothing was announced or shown for this
+                            # turn, so there is no live row to settle.
+                            has_more_tool_calls = True
+                            continue
 
-                    graceful_cancel = False
-                    if config.graceful_cancel_requested is not None:
-                        # Asked HERE, at the boundary, precisely because the
-                        # tools that just ran may have pushed a commit or opened
-                        # a merge request. A supervisor's cancel stops the run
-                        # without tearing one of those in half; the completed
-                        # work stays in the transcript and the turn ends as
-                        # aborted, exactly like a signalled stop would.
-                        try:
-                            graceful_cancel = bool(config.graceful_cancel_requested())
-                        # A broken host hook must not strand the turn.
-                        except Exception:  # noqa: BLE001
-                            graceful_cancel = False
+                    # Asked HERE, at the boundary, precisely because the tools
+                    # that just ran may have pushed a commit or opened a merge
+                    # request. A supervisor's cancel stops the run without
+                    # tearing one of those in half; the completed work stays in
+                    # the transcript and the turn ends as aborted, exactly like
+                    # a signalled stop would. The same protected reading is
+                    # shared with the recovery decisions above
+                    # (``_graceful_cancel_requested``) so the sites cannot drift.
+                    graceful_cancel = _graceful_cancel_requested(config)
                     if (signal is not None and signal.aborted) or graceful_cancel:
                         # The abort landed while the batch was running. Its
                         # results are already appended above (every call paired,
@@ -2265,7 +2782,23 @@ class AgentLoop:
                             text="Repeated tool errors — requesting a different approach.",
                             kind="warning",
                         )
-                    has_more_tool_calls = bool(assistant.tool_calls)
+                    # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
+                    # ``no_reply`` call is an affirmative way to end the turn,
+                    # so a batch whose LAST result carries the quiet marker ends
+                    # it — with no further model call — exactly like a message
+                    # with no tool calls. LAST result only (review R8): an
+                    # earlier ``no_reply`` in a batch must never shorten the
+                    # turn, because its siblings' results would then never be
+                    # fed back and the model would continue blind. Everything
+                    # after runs as for any end: the boundary hooks, the yield
+                    # injections (an open todo, a late steer or peer message
+                    # still re-enters, so no inbound message is lost) and the
+                    # output-contract gate, which cannot misread silence here
+                    # because the tool is absent from contract sessions (see
+                    # ``Session._quiet_end_callable``).
+                    has_more_tool_calls = bool(assistant.tool_calls) and not _batch_ends_quiet(
+                        tool_results
+                    )
                     if has_more_tool_calls and config.on_turn_end is not None:
                         # The boundary hook fires only when the loop will
                         # CONTINUE — a terminal boundary is the post-turn
@@ -2437,6 +2970,11 @@ class AgentLoop:
             yield AgentEndEvent(messages=new_messages, generation=generation)
         finally:
             self._unwire_deadline(deadline_task)
+            # The fault-only recovery window dies with the run for the same
+            # reason: a timer that outlives it could abort a LATER prompt on
+            # the same session (the signal is run-local, but the task should
+            # still not be left to sleep).
+            self._unwire_deadline(interrupted_recovery_timer)
             if signal is not None:
                 # Drop any any_of() watcher tasks (e.g. the deadline combo) so
                 # they do not outlive the run.
@@ -2530,6 +3068,7 @@ class AgentLoop:
         effort_ceiling: str | None = None,
         context_tokens_hint: int | None = None,
         echo_fill_route: tuple[str, str] | None = None,
+        recovery: "_InterruptedRecovery | None" = None,
     ) -> AsyncIterator[AgentEvent | _ModelTurnResult]:
         """One provider call: build the request, stream it, assemble the
         assistant message, emitting message_start/update/end events.
@@ -2565,6 +3104,10 @@ class AgentLoop:
         # spec we built the request from. The run loop's echo fill acts on what
         # we SENT.
         request_model: "ModelSpec | None" = None
+        #: The bare-error finish marker carried off ``StreamEndEvent``; see
+        #: the event field for why it is an eligibility, not a cause.
+        retryable_interruption = False
+        attempted_selector: "ModelSpec | None" = None
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -2578,6 +3121,33 @@ class AgentLoop:
             # already-open provider stream does.
             preparing_at = time.monotonic()
             model = self._current_model(config)
+            # Same-route recovery pin: re-ask the interrupted turn on the
+            # EFFECTIVE API selector of the failed attempt -- the fault-only
+            # selector the failover stamped onto the marked end
+            # (``attempted_selector``), which is the route that actually
+            # carried the failure. The gate armed this pin only when that
+            # selector exists, so an unknown route has already refused rather
+            # than guess. PINNED ONLY when the host's resolution still
+            # matches the failed turn's requested spec -- ``same_route_retry``
+            # would otherwise force a route the host (or the user) has since
+            # switched AWAY from, which is a rewrite the flag must never
+            # perform. A mismatch cancels the choice and the turn proceeds
+            # ordinary.
+            same_route_retry = False
+            if recovery is not None:
+                if (
+                    model.provider == recovery.requested.provider
+                    and model.model_id == recovery.requested.model_id
+                ):
+                    # The gate armed this recovery only with a KNOWN effective
+                    # selector (``attempted_selector is not None``); the
+                    # assertion re-proves that narrowing locally so the static
+                    # type follows the same fact the gate enforces -- no cast,
+                    # no suppression.
+                    attempted = recovery.attempted
+                    assert attempted is not None
+                    model = attempted
+                    same_route_retry = True
             system_blocks = await self._current_system_blocks(context, config, model)
             # Resolving the prompt can publish a durable host-state update
             # (new goal, credentials, knowledge) into the append-only history.
@@ -2667,6 +3237,7 @@ class AgentLoop:
                 effort_ceiling=effort_ceiling,
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
+                same_route_retry=same_route_retry,
             )
             stream = _abortable_stream(config.stream_fn(request, signal), signal)
             async for event in stream:
@@ -2964,6 +3535,10 @@ class AgentLoop:
                         usage = event.usage
                     provider_payload = event.provider_payload
                     error = event.error
+                    retryable_interruption = bool(getattr(event, "retryable_interruption", False))
+                    attempted_selector = (
+                        event.attempted_selector if retryable_interruption else None
+                    )
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
@@ -3130,6 +3705,8 @@ class AgentLoop:
             stop_reason=stop_reason,
             error=error,
             connectivity_loss=connectivity_loss,
+            retryable_interruption=retryable_interruption,
+            attempted_selector=attempted_selector,
             model=request_model,
             nameless_call_drops=nameless_call_drops,
         )
@@ -3793,7 +4370,20 @@ class AgentLoop:
                                     planned.args,
                                     execution_context.cwd,
                                     nested_verdict,
-                                )
+                                ),
+                                # The same policy for the details half: this
+                                # result crosses back into arbitrary Python
+                                # WITH its details (``model_dump`` below), and
+                                # a write driven from eval quotes its bytes in
+                                # ``details['diff']`` like any other.
+                                "details": await self._redact_details(
+                                    result.details,
+                                    config.redact_tool_result,
+                                    name,
+                                    planned.args,
+                                    execution_context.cwd,
+                                    nested_verdict,
+                                ),
                             }
                         )
                     result.duration_s = time.monotonic() - started
@@ -4663,6 +5253,11 @@ class AgentLoop:
         the CALL otherwise — a hallucinated name has no tool, and that name is
         exactly what a "which tool does this model get wrong" view needs.
         """
+        if config.capture_prepared_write is not None:
+            try:
+                config.capture_prepared_write(item.call, result)
+            except Exception:
+                logger.debug("prepared write capture failed", exc_info=True)
         callback = config.record_tool_call
         if callback is None:
             return
@@ -4713,12 +5308,27 @@ class AgentLoop:
     ) -> None:
         for result in results:
             content: list[Content] = list(result.content)
+            details = result.details
             # Redact BEFORE the empty-result backfill: a redacted secret is
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
                 content = await self._redact_content(
                     content,
+                    redact,
+                    result.tool_name,
+                    _call_arguments(context, result.tool_call_id),
+                    _session_cwd(context),
+                    _exempt_source_verdict(context, result.tool_call_id),
+                )
+                # The details half of the same policy: a ``write``/``edit``
+                # result quotes the bytes it wrote in ``details['diff']``, and
+                # that text rides into ``provider_payload`` (the transcript,
+                # the settled card, every replay). See
+                # :meth:`_redact_details` for why the mask belongs at this
+                # seam and not at the diff's source.
+                details = await self._redact_details(
+                    details,
                     redact,
                     result.tool_name,
                     _call_arguments(context, result.tool_call_id),
@@ -4739,10 +5349,13 @@ class AgentLoop:
             # painted a blank column. One definition, so every producer of a
             # tool row agrees by construction.
             #
-            # ``content`` rides in on a copy of the result because the
-            # redaction and empty-result backfill above have already rewritten
-            # it; the ToolResult itself must not be mutated.
-            message = Message.tool_result(result.model_copy(update={"content": content}))
+            # ``content`` (and, when the hook ran, ``details``) rides in on a
+            # copy of the result because the redaction and empty-result
+            # backfill above have already rewritten it; the ToolResult itself
+            # must not be mutated.
+            message = Message.tool_result(
+                result.model_copy(update={"content": content, "details": details})
+            )
             context.messages.append(message)
             new_messages.append(message)
 
@@ -4825,6 +5438,102 @@ class AgentLoop:
                 index += 1
             else:
                 out.append(item)
+        return out
+
+    @staticmethod
+    async def _redact_details(
+        details: dict[str, Any] | None,
+        redact: Callable[[str], str],
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+        session_cwd: str | None = None,
+        exempt_verdict: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Mask the content-bearing text of a result's ``details`` OFF the loop.
+
+        **The channel this closes (follow-up to PR #2140, Aida-directed).**
+        ``write`` and ``edit`` render a unified diff of the file's before/after
+        into ``details['diff']`` (``tools/builtin._diff_details``), and the
+        stored row keeps it: ``Message.tool_result`` lifts ``details`` into
+        ``provider_payload['details']``, which the persisted transcript, the
+        settled tool card's expanded view, the mobile projection and every
+        replay read. A real credential written through ``write`` was masked in
+        the result TEXT (the sibling seam above) and left QUOTED in that diff,
+        so the transcript carried exactly the value the text scrub had removed.
+
+        **The mask belongs HERE, not at the diff's source.** ``_diff_details``
+        builds the diff from the bytes the executor actually wrote, and those
+        bytes are ground truth — the write itself stays byte-exact (the
+        standing rule: the harness must never alter what a tool writes). The
+        source cannot both describe the true bytes and stay masked. This seam
+        redacts a COPY built for storage and display: the executor's own
+        ``ToolResult``, the disk and the live event that already left for the
+        UI are all untouched, while the stored copy, the replay and the
+        transcript get the mask the result text already had.
+
+        **Only the content-bearing keys, and only their strings.**
+        :data:`_CONTENT_BEARING_DETAIL_KEYS` names them (the file tools' diff
+        today). The other keys in the same dict — ``added``/``removed``
+        counters, the ``path``, ``spill`` handles — keep their exact values,
+        because their readers parse and compare them (the diff badge, compaction
+        pruning, the spill reader).
+
+        **A sibling of :meth:`_redact_content`, not a fusion**, because the two
+        fire at different rates: the content scan is every result's hot path,
+        while a content-bearing details field exists only on the file tools'
+        results, so the common case must pay nothing — the walk below decides
+        ON the loop and only then crosses to the worker. The worker repeats the
+        tool-identity/exemption publish for the same reason
+        :meth:`_redact_content` does: the host's hook reads it to name the call
+        in the shape report, and a bare executor spelling would drop it.
+        """
+        if not details:
+            return details
+        # The ORDER here is the rebuild's order below: every string of each
+        # key's value, list/tuple items only (a non-``str`` item cannot carry
+        # text and rides back through untouched).
+        texts: list[str] = []
+        for key in _CONTENT_BEARING_DETAIL_KEYS:
+            value = details.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+            elif isinstance(value, (list, tuple)):
+                texts.extend(item for item in value if isinstance(item, str))
+        if not texts:
+            return details  # decided ON the loop: the common result pays no hop
+
+        def _run() -> list[str]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
+            ):
+                return [redact(text) for text in texts]
+
+        masked = await asyncio.to_thread(_run)
+        out = dict(details)
+        index = 0
+        for key in _CONTENT_BEARING_DETAIL_KEYS:
+            value = details.get(key)
+            if isinstance(value, str):
+                out[key] = masked[index]
+                index += 1
+            elif isinstance(value, (list, tuple)):
+                rebuilt: list[Any] = []
+                for item in value:
+                    if isinstance(item, str):
+                        rebuilt.append(masked[index])
+                        index += 1
+                    else:
+                        # Not text, so it neither takes a mask nor shifts one:
+                        # the index advances only over the strings the
+                        # collection phase banked (review round 1, R-2 — an
+                        # enumerated position put the mask one ahead for every
+                        # non-``str`` item and read past the list).
+                        rebuilt.append(item)
+                # Same concrete sequence back, so a consumer that checks the
+                # container type (the card accepts any Sequence, but a future
+                # one may not) sees exactly the shape it stored.
+                out[key] = list(rebuilt) if isinstance(value, list) else tuple(rebuilt)
         return out
 
     @staticmethod
@@ -4930,6 +5639,24 @@ class AgentLoop:
 
     # -- deadline wiring ----------------------------------------------------
 
+    @staticmethod
+    def _arm_recovery_window(recovery_signal: AbortSignal, delay_s: float) -> asyncio.Task[None]:
+        """One task that trips the interrupted-recovery window.
+
+        Same shape as ``_wire_deadline``'s timer and for the same reason: the
+        signal is what cuts the stream, a sleeping task only flips it, so the
+        two can never argue. It is cancelled by the same ``finally`` that
+        unwires the caller's deadline and by the first clean turn after it was
+        armed -- a timer that outlives its reason is the leak this shape has
+        already cost this fleet once.
+        """
+
+        async def _trip() -> None:
+            await asyncio.sleep(delay_s)
+            recovery_signal.abort("interrupted-turn recovery window exceeded")
+
+        return asyncio.ensure_future(_trip())
+
     def _wire_deadline(
         self, config: LoopConfig, signal: AbortSignal | None
     ) -> tuple[AbortSignal | None, asyncio.Task[None] | None]:
@@ -4995,6 +5722,25 @@ def _last_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
         if isinstance(message, Message) and message.role == "assistant":
             return message.text
     return None
+
+
+def _batch_ends_quiet(results: Sequence[ToolResult]) -> bool:
+    """Whether the batch's LAST result is the quiet-turn marker.
+
+    THE LAST RESULT ONLY, and that is load-bearing twice over (review R8): a
+    ``no_reply`` earlier in a batch must never shorten the turn — its siblings'
+    results would otherwise never be fed back to the model — so only a batch
+    that ENDS in the quiet result may end the turn here. An empty batch (the
+    length-limit arm pairs its placeholders outside ``results``) never
+    qualifies. Marker-based, never tool-name-based: the marker is what the
+    tool's own result stamps, so a call that was refused (an ``is_error``
+    result without the marker) leaves the turn running for the answer the
+    refusal asked for.
+    """
+    if not results:
+        return False
+    details = results[-1].details
+    return bool(details) and details.get(QUIET_TURN_KEY) is True
 
 
 def validate_tool_arguments(
@@ -5066,6 +5812,24 @@ def validate_tool_arguments(
 # ---------------------------------------------------------------------------
 # Internal carriers
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _InterruptedRecovery:
+    """A pending same-route re-ask for an interrupted turn.
+
+    ``requested`` is the spec the failed turn's request was built from -- the
+    pin is cancelled when the host no longer resolves to it (a user switch),
+    because continuing on the old route would overrule a decision the user
+    just made. ``attempted`` is the EFFECTIVE API selector of the attempt
+    that actually served the failure, carried FAULT-ONLY on the marked end
+    by the failover (a sticky handoff or fallback makes it differ from
+    ``requested``): the re-ask goes back to THAT route, never to a guessed
+    one. Armed only when the selector is known -- unknown refuses upstream.
+    """
+
+    requested: "ModelSpec"
+    attempted: "ModelSpec | None"
+
+
 @dataclass
 class _ModelTurnResult:
     """Internal carrier so ``_model_turn`` can return its assembled message
@@ -5084,6 +5848,13 @@ class _ModelTurnResult:
     #: answered badly. Carried out to the run loop, which continues such a turn
     #: instead of ending the run on it — see ``MAX_CONNECTIVITY_CONTINUATIONS``.
     connectivity_loss: bool = False
+    #: The bare-error finish marker (see ``StreamEndEvent.retryable_interruption``)
+    #: -- an eligibility for the same bounded continuation, with the narrower
+    #: gates the run loop applies (no complete call, a known effective selector).
+    retryable_interruption: bool = False
+    #: Effective API selector of the MARKED attempt (fault-only; stamped by
+    #: the failover on the forwarded end). The recovery pin without a guess.
+    attempted_selector: "ModelSpec | None" = None
     #: How many tool calls this turn emitted and had DROPPED because they
     #: arrived with no name (see ``_model_turn``'s assembly guard). There is no
     #: row to replay for such a call, so only the run loop can tell the model;

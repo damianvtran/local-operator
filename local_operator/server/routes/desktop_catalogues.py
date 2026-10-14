@@ -13,6 +13,8 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
+from local_operator.providers.usage import META_MUSE_USAGE_NOTES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -92,6 +94,17 @@ class Catalogue(BaseModel):
     #: and a flag that also said "credentials unknown" would invite a caller to
     #: badge rows that are not in doubt (Q3-2).
     credentials_known: bool = True
+    #: Which view this response is: ``usable`` withheld the rows the user has no
+    #: credential for, ``all`` is the whole catalogue. Echoes the REQUEST, so a
+    #: client that asked for ``usable`` and got ``credentials_known: false`` can
+    #: tell "the filter had nothing to go on" from "the user owns everything".
+    #: Absent from an older backend, which a client must read as ``all``.
+    scope: Literal["usable", "all"] = "all"
+    #: How many rows ``scope=usable`` withheld (the current-model exemption is
+    #: not counted). Always 0 for ``all``, and 0 when the credential store could
+    #: not be read -- nothing was withheld in either case. It is what a picker's
+    #: "Show all (N need sign-in)" toggle prints without a second request.
+    hidden: int = 0
 
 
 class UsageReports(BaseModel):
@@ -131,7 +144,21 @@ async def commands():
 
 
 @router.get("/v1/desktop/models", response_model=CRUDResponse[Catalogue])
-async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_auth)):
+async def models(
+    live: bool = False,
+    # ``all`` stays the default so every shipped client sees byte-identical rows
+    # (the new fields below are additive). The access-aware picker opts in with
+    # ``usable``; the legacy authoring catalogue ``/v1/models`` is untouched on
+    # purpose, because Settings comboboxes WANT to list providers the user has
+    # not signed in to.
+    scope: Literal["usable", "all"] = "all",
+    # The session's current ``provider/model``. The route is not session-scoped,
+    # so the caller names the row to keep: dropping it would make a session
+    # running an unreachable model look configured (the same exemption the TUI
+    # applies, `providers.catalogue.split_by_access`).
+    current: str | None = Query(default=None, max_length=256),
+    auth: DesktopAuth = Depends(get_desktop_auth),
+):
     controller = auth.controller()
     try:
         failures: dict[str, str] = {}
@@ -209,13 +236,28 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
         # under a "Connected" heading on a fixture with no credentials (D5).
         # Carrying the uncertainty separately lets the picker keep listing
         # everything while only claiming what is known.
-        credentials_known = controller.usable_providers() is not None
+        #
+        # ONE read answers both the flag and the filter, so a request can never
+        # report `credentials_known: true` beside a filter that ran on a
+        # different (or failed) read. Still on the loop thread (D18 above).
+        usable = controller.usable_providers()
+        credentials_known = usable is not None
+        hidden = 0
+        if scope == "usable":
+            # `usable is None` filters nothing -- an unreadable store must not
+            # present as "you own no models" -- and says so via
+            # `credentials_known`. The predicate is the picker seam's own.
+            from local_operator.providers.catalogue import split_by_access
+
+            entries, hidden = split_by_access(entries, usable=usable, current=current)
         return reply(
             {
                 "models": [dataclasses.asdict(row) | {"selector": row.selector} for row in entries],
                 "source": "live" if live else "initial",
                 "errors": failures,
                 "credentials_known": credentials_known,
+                "scope": scope,
+                "hidden": hidden,
             }
         )
     finally:
@@ -232,9 +274,9 @@ async def usage(
     controller = auth.controller()
     try:
         if provider and controller.provider(provider) is None:
-            raise HTTPException(422, "Unknown provider")
+            raise HTTPException(422, _wd.unknown_provider().envelope())
         if refresh and not live:
-            raise HTTPException(422, "Refresh requires live usage")
+            raise HTTPException(422, _wd.refresh_requires_live().envelope())
         reports = (
             await controller.fetch_usage([provider] if provider else None, force_refresh=refresh)
             if live
@@ -245,8 +287,17 @@ async def usage(
         for report in reports:
             row = dataclasses.asdict(report)
             # Arbitrary provider notes are not a safe public error vocabulary.
-            row["notes"] = None
-            row["age_ms"] = max(0, now - report.fetched_at)
+            # Muse's fixed local provenance is essential to interpreting its
+            # passive meters, so retain only its known constants, never a
+            # provider-supplied string (even one labelled as Muse).
+            row["notes"] = (
+                report.notes
+                if report.provider == "meta-muse"
+                and isinstance(report.notes, str)
+                and report.notes in META_MUSE_USAGE_NOTES
+                else None
+            )
+            row["age_ms"] = max(0, now - report.fetched_at) if report.fetched_at > 0 else None
             row["state"] = (
                 "reauth_required"
                 if report.credential_invalid
@@ -269,11 +320,12 @@ async def analytics(
     until_ms: int | None = Query(default=None, ge=0),
     session_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
     days: int = Query(default=30, ge=1, le=366),
+    months: int = Query(default=12, ge=1, le=120),
 ):
     from local_operator.analytics.store import AnalyticsStore
 
     if since_ms is not None and until_ms is not None and since_ms > until_ms:
-        raise HTTPException(422, "The start must precede the end")
+        raise HTTPException(422, _wd.start_after_end().envelope())
 
     def read_report():
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
@@ -302,6 +354,41 @@ async def analytics(
                 "aggregate": dataclasses.asdict(aggregate),
                 "daily": [dataclasses.asdict(row) for row in store.daily_series(days)],
                 "daily_scope": "all_sessions",
+                # PR-2's channels section, ADDITIVE on this payload: a client
+                # that does not know the key ignores it, and an old server
+                # simply never sends it. The shape follows the envelope's own
+                # conventions rather than inventing new ones:
+                #
+                #  * ``rows`` are the windowed breakdown from the RAW channel
+                #    ledger (``channel_breakdown``), so they honour the caller's
+                #    ``since_ms``/``until_ms``/``session_id`` exactly and read
+                #    ``amount_micro``+``known_calls`` as the known/unknown pair
+                #    (a zeroed row with ``known_calls=0`` is "could not be
+                #    sized", never "free").
+                #  * ``daily``/``monthly`` are the ROLLUP series
+                #    (``channel_daily``/``channel_monthly``), which survive the
+                #    raw ledger's 90-day prune but are calendar-bucketed and
+                #    carry no session dimension — hence ``series_scope:
+                #    "all_sessions"`` beside the row scope, the same
+                #    "say which source" convention ``daily_scope`` and
+                #    ``analytics/models``'s ``scope`` use. The two sources are
+                #    named because they can legitimately disagree about a
+                #    pruned window; the payload says which is which instead of
+                #    hiding the seam.
+                "channels": {
+                    "scope": "ledger",
+                    "series_scope": "all_sessions",
+                    "rows": [
+                        dataclasses.asdict(row)
+                        for row in store.channel_breakdown(
+                            since_ms=since_ms, until_ms=until_ms, session_id=session_id
+                        )
+                    ],
+                    "daily": [dataclasses.asdict(row) for row in store.channel_daily_series(days)],
+                    "monthly": [
+                        dataclasses.asdict(row) for row in store.channel_monthly_series(months)
+                    ],
+                },
                 "session_names": {
                     sid: name
                     for sid, name in (getattr(aggregate, "session_names", None) or {}).items()
@@ -348,7 +435,7 @@ async def analytics_models(
     from local_operator.analytics.store import AnalyticsStore
 
     if since_ms is not None and until_ms is not None and since_ms > until_ms:
-        raise HTTPException(422, "The start must precede the end")
+        raise HTTPException(422, _wd.start_after_end().envelope())
     if since_ms is None and until_ms is None and days is not None:
         since_ms = int(time.time() * 1000) - days * 86_400_000
 
@@ -512,7 +599,15 @@ async def session_report(
     def read_report() -> dict[str, Any]:
         store = AnalyticsStore(request.app.state.config_manager.config_dir / "analytics.db")
         try:
-            report = store.session_report(session_id, recent_limit=recent_limit)
+            # ``channels=True``: the channel rows ride the report's OWN WAL
+            # snapshot (see ``AnalyticsStore.session_report``), so the PR-2
+            # ``channels`` section and the inference figures above it cannot
+            # describe two different committed states. The route does not
+            # rebuild the rows: ``dataclasses.asdict`` already recurses into the
+            # tuple, and the key set is additive for the same reason the other
+            # additive fields on this payload are — an old client ignores a key
+            # it never read.
+            report = store.session_report(session_id, recent_limit=recent_limit, channels=True)
         finally:
             store.close()
         # ALL THREE group-bys are blanked BEFORE the dump rather than
@@ -575,7 +670,7 @@ async def _read_skills(roots: list[pathlib.Path], name: str | None) -> dict[str,
     if name is not None:
         by_name = {item.name: item for item in discovered}
         if name not in by_name:
-            raise HTTPException(404, "Skill not found")
+            raise HTTPException(404, _wd.skill_not_found().envelope())
         detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
     return {
         "skills": [{"name": item.name, "description": item.description} for item in discovered],
@@ -672,7 +767,7 @@ async def entities(
 ):
     spec = slash_command_for("/" + command.removeprefix("/"))
     if spec is None:
-        raise HTTPException(422, "Unknown command")
+        raise HTTPException(422, _wd.unknown_command().envelope())
     # READ: the rows are the local registries and catalogs, the current value is a
     # canonical facade field, and the profile registries are resolved from config
     # (with their own 503 when even those are unavailable — a durable verdict, not
@@ -708,7 +803,7 @@ async def entities(
         elif spec.name in {"team", "agent"}:
             registry = remote.team_registry if spec.name == "team" else remote.agent_registry
             if registry is None:
-                raise HTTPException(503, "The profile registry is unavailable")
+                raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
             if spec.name == "team":
                 from local_operator.org_chart import resolve_org
 

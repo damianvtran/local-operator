@@ -24,13 +24,22 @@ There are two tiers, and the tier boundary is the security decision:
   by walking the SAME module's AST — a ``Name`` to its module-level or
   earlier class-body assignment, an f-string to its parts, a ``.strip()``
   on a folded string — and nothing else: no attribute access, no
-  arithmetic, no imported name, no call with arguments. An f-string whose
-  interpolation is unresolvable (an imported ``HOST_SUFFIX``, a ``uuid4()``)
-  folds to its literal parts with ``instruction_static=False``; that is
-  honest because the harness makes no DECISION on the instruction text
-  (OSWorld's live object supplies the real one at ``reset``), while ``id``
-  and ``user_simulator`` — which do drive decisions — remain hard refusals
-  when they cannot be fully resolved.
+  arithmetic, no imported name, no call with arguments. ``id``,
+  ``user_simulator`` and every other decision field remain hard refusals
+  when they cannot be fully resolved — including any field that references
+  an instruction symbol this parse could not resolve.
+
+  ``instruction`` is the ONE deferrable field. The harness makes no
+  DECISION on the instruction text: what the model actually reads is the
+  runtime value the environment serves after ``reset`` (the official
+  post-setup mapping read in ``providers/aws.py``), and the descriptor's
+  copy is evidence metadata. So an instruction expression outside the
+  closed set — a helper call, an imported name, arithmetic, an f-string
+  whose interpolation is unresolvable — does not refuse the module: the
+  descriptor records ``instruction=None`` with ``instruction_static=False``
+  and the run resolves the real text at reset. It is never folded to a
+  literal skeleton, because a partial prefix is a fabricated instruction
+  no consumer may mistake for the task.
 - **Tier 2 (import, deferred to ``reset_start``/``score``):** the live module
   object, needed only when OSWorld's own machinery requires the class
   (``setup()``, a custom ``evaluate()`` override). By then the cleanup plan is
@@ -75,7 +84,9 @@ class TaskParseError(ValueError):
     Raised rather than falling back to import: failing preflight is cheap,
     executing unknown code to decide whether to spend money is not. A task
     whose fields are not statically resolvable is reported as a requirement
-    the adapter cannot satisfy, never silently executed.
+    the adapter cannot satisfy, never silently executed. The instruction
+    field is the documented exception — it defers to the environment at
+    reset rather than refusing (see ``TaskDescriptor.instruction``).
     """
 
 
@@ -89,7 +100,11 @@ class TaskDescriptor:
     """
 
     task_id: str
-    instruction: str
+    # None when the instruction is not statically resolvable, in which case
+    # the environment supplies the real text at reset (the official post-setup
+    # mapping read; see the module docstring). It is NEVER a fabricated
+    # prefix and never ``str(None)``: either the fully-folded text or None.
+    instruction: str | None
     config: tuple[Any, ...] = ()
     evaluator: Any = None
     related_apps: tuple[str, ...] = ()
@@ -109,10 +124,11 @@ class TaskDescriptor:
     # parser that only recorded the dict would judge the whole corpus as
     # unscorable and refuse every paid episode at ``score``.
     evaluate_override: bool = False
-    # False when ``instruction`` folded from an f-string whose interpolations
-    # could not be statically resolved; the text then carries only the literal
-    # parts. Recorded so a consumer that ever DID want the exact text (none
-    # does today) cannot mistake a partial fold for the real thing.
+    # False exactly when ``instruction`` is deferred (not statically
+    # resolvable): the field is then None and the run's authoritative text
+    # comes from the environment at reset. Recorded so a consumer can never
+    # mistake the absence of a static instruction for the task's instruction,
+    # and so evidence can state which episodes relied on the runtime read.
     instruction_static: bool = True
     source_sha256: str = ""
     # The raw module source, kept so requirement derivation can detect
@@ -265,11 +281,12 @@ def _literal(node: ast.AST, folder: _Folder, *, field: str) -> Any:
     """Resolve a class-level assignment value to a plain Python value.
 
     Literal nodes resolve directly; the closed static shapes in ``_Folder``
-    resolve by AST walk. Anything else means the field is not statically
-    resolvable, which is a ``TaskParseError`` rather than a reason to execute
-    the module. A PARTIAL fold (an f-string with an unresolvable
-    interpolation) is accepted only for ``instruction``; every other field
-    drives a pre-allocation decision and must resolve completely.
+    resolve by AST walk. Anything else — and any PARTIAL fold, an f-string
+    with an unresolvable interpolation — is a ``TaskParseError``: every field
+    this helper sees drives a pre-allocation decision, so it must resolve
+    completely. ``instruction`` never reaches here: ``load_static`` defers
+    it separately, because it is the one field the runtime can
+    authoritatively supply later.
     """
 
     folder.partial = False
@@ -280,7 +297,7 @@ def _literal(node: ast.AST, folder: _Folder, *, field: str) -> Any:
             f"task field {field!r} is not statically resolvable ({error}): "
             f"{ast.dump(node)[:200]}"
         ) from error
-    if folder.partial and field != "instruction":
+    if folder.partial:
         raise TaskParseError(
             f"task field {field!r} interpolates a value this module does not define: "
             f"{ast.dump(node)[:200]}"
@@ -327,11 +344,39 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
         for stmt in body_assigns:
             target = stmt.targets[0]
             assert isinstance(target, ast.Name)
+            if target.id == "instruction":
+                folder.bind_class_prefix(stmt)
+                # DEFER, and why this must not be "simplified" back into a
+                # refusal or a prefix fold: the instruction is the one field
+                # whose authoritative value is not here. The harness never
+                # feeds the model this descriptor; the reset observation
+                # carries the environment's own post-setup text (see
+                # providers/aws.py), so refusing the whole task because the
+                # metadata expression uses a helper call made payable tasks
+                # unpayable while protecting nothing downstream. Nothing on
+                # this path executes — deferral is a DATA decision, not an
+                # interpreter. And it defers ONLY this field: every other
+                # field still refuses when unresolved, including one that
+                # references this same instruction symbol, because those
+                # drive pre-allocation decisions. A partial f-string defers
+                # too: its literal skeleton would be a fabricated prefix, and
+                # no consumer can mistake None (with instruction_static
+                # False) for the task.
+                folder.partial = False
+                try:
+                    folded: Any = folder.fold(stmt.value)
+                except _Unresolved:
+                    folded = None
+                    instruction_static = False
+                else:
+                    if folder.partial:
+                        folded = None
+                        instruction_static = False
+                values["instruction"] = folded
+                continue
             if target.id in _STATIC_FIELDS:
                 folder.bind_class_prefix(stmt)
                 values[target.id] = _literal(stmt.value, folder, field=target.id)
-                if target.id == "instruction" and folder.partial:
-                    instruction_static = False
         # Detected on the SAME class that carries the task fields, by AST,
         # so a helper module defining an unrelated ``evaluate`` cannot claim
         # the task is scorable. Statically observable and side-effect free.
@@ -356,7 +401,10 @@ def load_static(source: bytes, *, module_name: str) -> TaskDescriptor:
 
     return TaskDescriptor(
         task_id=str(values["id"]),
-        instruction=str(values["instruction"]),
+        # A deferred instruction is None and STAYS None here: ``str(None)``
+        # would fabricate the literal text "None" and hand a consumer exactly
+        # the fake instruction this file exists to refuse.
+        instruction=(None if values["instruction"] is None else str(values["instruction"])),
         config=tuple(config),
         evaluator=values.get("evaluator"),
         related_apps=tuple(str(item) for item in related_apps),

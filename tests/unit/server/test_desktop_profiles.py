@@ -190,7 +190,8 @@ async def test_known_admission_rejection_survives_attach_decoder_and_http_bounda
     assert caught.value.status_code == 409
     assert caught.value.detail == {
         "code": AttachmentUnavailable.code,
-        "message": str(AttachmentUnavailable()),
+        "params": {"error": str(AttachmentUnavailable())},
+        "text": str(AttachmentUnavailable()),
     }
 
 
@@ -208,7 +209,8 @@ async def test_install_specialist_name_collision_is_actionable_conflict(api):
     assert result.status_code == 200
     conflict = await client.post("/v1/desktop/profiles/install", json=mutation(name="scout"))
     assert conflict.status_code == 409
-    assert "name belongs to another agent" in conflict.json()["detail"]
+    # E2a: the refusal is the message envelope; the sentence rides `text`.
+    assert "name belongs to another agent" in conflict.json()["detail"]["text"]
     assert (await client.get("/v1/desktop/profiles/scout")).json()["result"][
         "instructions"
     ] == "Keep my instructions."
@@ -553,7 +555,7 @@ async def test_sync_route_refuses_force_without_confirm_replace(api) -> None:
 
     refused = await client.post("/v1/desktop/profiles/sync", json=mutation(all=True, force=True))
     assert refused.status_code == 422
-    assert "confirm_replace" in refused.json()["detail"]
+    assert "confirm_replace" in refused.json()["detail"]["text"]
 
     confirmed = await client.post(
         "/v1/desktop/profiles/sync", json=mutation(all=True, force=True, confirm_replace=True)
@@ -581,7 +583,7 @@ async def test_sync_route_refuses_name_and_all_together(api) -> None:
     )
 
     assert result.status_code == 422
-    assert "not both" in result.json()["detail"]
+    assert "not both" in result.json()["detail"]["text"]
 
 
 async def test_sync_route_answers_a_name_that_is_not_installed(api) -> None:

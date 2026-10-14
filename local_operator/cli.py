@@ -59,6 +59,9 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -126,6 +129,10 @@ CLI_DESCRIPTION = """
     configuration file is located at ~/.local-operator/config.yml and can be edited directly.
 """
 
+#: RFC §3.1 render point for this slice's copy (the exec verb's help text and
+#: the exec refusals this module prints).
+_t = tr("wire.exec")
+
 
 def build_cli_parser() -> argparse.ArgumentParser:
     """
@@ -138,7 +145,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version
+
+    # argparse help exits before startup owns config repair or locale activation.
+    # Explicit rendering keeps this extraction independent of the global wire
+    # renderer; an EN-only namespace must not un-ship audited locales.
+    help_locale = resolve_help_locale()
 
     # Create parent parser with common arguments
     parent_parser = argparse.ArgumentParser(add_help=False)
@@ -690,8 +703,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         default="127.0.0.1",
         help=(
-            "Host address (default: 127.0.0.1). This API has no authentication; "
-            "use a non-loopback address only behind trusted access controls."
+            "Host address (default: 127.0.0.1). Loopback-only by policy: every "
+            "non-loopback bind is refused. File serving is unclamped on loopback "
+            "connections; reach this API remotely through an explicit tunnel or an "
+            "SSH port-forward."
         ),
     )
     serve_parser.add_argument(
@@ -1090,7 +1105,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Run the session cleanup policy now (use --dry-run to preview)",
         description=(
             "Apply session.cleanup.* from config (each limit overridable below) to the "
-            "session store. Requires session.cleanup.enabled: true unless --force. "
+            "session store, in two classes: your conversations (needs "
+            "session.cleanup.enabled: true unless --force) and delegated subagent/"
+            "background sessions (session.cleanup.delegated.*, on by default). "
             "Every removal is recorded in <config>/sessions/.cleanup-log.jsonl."
         ),
         parents=[parent_parser],
@@ -1133,6 +1150,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="remove directories that never got a transcript (overrides config)",
+    )
+    cleanup_parser.add_argument(
+        "--delegated-max-age-hours",
+        type=_delegated_hours,
+        default=None,
+        metavar="N",
+        help="remove subagent/background sessions idle over N hours, 2-720 (overrides config)",
     )
     cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
@@ -1758,6 +1782,29 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "carrying the macOS key agent — and every other ref is built from source."
         ),
     )
+    # The deliberate-downgrade override for --from-snapshot: without it a target
+    # STRICTLY OLDER than the install the pointer names is refused before any
+    # install work (update.classify_snapshot_downgrade). Named after the flag
+    # the retired legacy installer carried; the deliberate rollback it allows
+    # rides the install marker as `downgrade-allowed`. Alone — on the PyPI
+    # path, the one left once the refresh flags have answered — it is a
+    # refusal: that path only ever installs newer versions.
+    update_parser.add_argument(
+        "--allow-downgrade",
+        dest="allow_downgrade",
+        action="store_true",
+        help=(
+            "Allow --from-snapshot to install a build OLDER than the current install "
+            "(a deliberate rollback; recorded in the install marker). Without "
+            "--from-snapshot it is refused on the PyPI path, which only installs "
+            "newer versions; the refresh flags take precedence."
+        ),
+    )
+    # The isolated verified controller has UNKNOWN/PIP kind. These explicit
+    # destination arguments authorize ONLY its canonical immutable protocol;
+    # ordinary update/install-kind guards are not widened or overridden.
+    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail"):
+        update_parser.add_argument(f"--controller-{name}", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -1766,6 +1813,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "Do not bring the `lop serve` daemons onto the new build; the supervised "
             "daemons are still repaired. Use this only when something else will "
             "start the serves, e.g. a script that owns their launch."
+        ),
+    )
+    # S3b's per-run override of the mesh-roll switch (note §5): the roll is
+    # otherwise queued when this update moves to a newer version and
+    # `network.rollout_on_update` is `auto`. `lop network update` remains
+    # available by hand under either policy; a propagated update never reaches
+    # this flag (the member executor installs directly, not through this verb).
+    update_parser.add_argument(
+        "--no-roll",
+        dest="no_roll",
+        action="store_true",
+        help=(
+            "Do not queue a mesh rollout for this update, whatever "
+            "`network.rollout_on_update` says; `lop network update` still rolls by hand."
         ),
     )
 
@@ -1938,38 +1999,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     exec_parser = subparsers.add_parser(
         "exec",
-        help="Execute a task or goal loop in a persisted session without starting the TUI",
+        help=_t(_wd.exec_help()),
         parents=[parent_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  lop exec 'Review the change' --team release --background\n"
-            "  printf 'Inspect this report' | lop exec --profile reviewer\n"
-            "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n"
-            "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n"
-            "  lop exec --status JOB_ID\n\n"
-            "Resume restores the transcript, team, profile, goal and name first; explicit\n"
-            "startup flags override their own slots. Team and profile may coexist. A loop\n"
-            "runs after the optional initial prompt; --loop N counts continuations only.\n"
-            "Saved loop progress is visible on resume, but iterations never replay automatically.\n"
-            "A goal alone does not run a model. Prompts are literal, not slash commands.\n"
-            "--goal only SETS the objective; unlike the TUI's /goal it does not also\n"
-            "send that text as a message, because the prompt is exec's message channel.\n"
-            "--agent/--agent-id select legacy agent data and are mutually exclusive.\n"
-            "Default non-TTY approvals deny. --control may wait for a supervisor; --yolo\n"
-            "is an explicit override, never implied by --background or --team.\n"
-            "--tools bounds what the run can reach: excluded tools are unreachable.\n"
-            "Foreground events/text use stdout; receipts use stderr. Detached runs log\n"
-            "both streams and print distinct job/session IDs. Use lop --resume SESSION_ID\n"
-            "to view a live run or resume a finished one; exec refuses a live owner."
-        ),
+        epilog=_t(_wd.exec_epilog()),
     )
     exec_parser.add_argument(
         "command",
         type=str,
         nargs="?",
         default=None,
-        help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
+        help=_eh.command().envelope(locale=help_locale)["text"],
     )
     # A SECOND positional must PARSE rather than die inside argparse. Without
     # this, `lop exec "Some Title" "do the work"` — the shape an agent reaches
@@ -1982,50 +2022,41 @@ def build_cli_parser() -> argparse.ArgumentParser:
     exec_parser.add_argument("extra", nargs="*", default=[], help=argparse.SUPPRESS)
     from local_operator.exec_startup import add_startup_arguments
 
-    add_startup_arguments(exec_parser)
+    add_startup_arguments(exec_parser, help_locale=help_locale)
     exec_parser.add_argument(
         "--status",
         metavar="JOB_ID",
-        help="Read a durable background-job status as JSON; does not start a session",
+        help=_eh.status().envelope(locale=help_locale)["text"],
     )
     # --- Additive exec flags (rewrite) ------------------------------------
     exec_parser.add_argument(
         "--background",
         action="store_true",
-        help="Detach the task: spawn a background worker with a log file and exit immediately",
+        help=_eh.background().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help="Emit one JSON line per agent event instead of the final text",
+        help=_eh.json().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--agent-id",
         type=str,
         dest="agent_id",
-        help="ID of the agent to use for this execution (alternative to --agent by name)",
+        help=_eh.agent_id().envelope(locale=help_locale)["text"],
     )
     exec_parser.add_argument(
         "--control",
         action="store_true",
-        help=(
-            "Route approvals and questions to an attached supervisor (may wait). "
-            "Without this flag non-TTY approvals deny; discovery and live attachment "
-            "are available either way. --yolo remains an explicit approval override."
-        ),
+        help=(_eh.control().envelope(locale=help_locale)["text"]),
     )
     exec_parser.add_argument(
         "--supervisor-fd",
         type=int,
         dest="supervisor_fd",
         default=None,
-        help=(
-            "Write this run's operator capability to this inherited descriptor so the "
-            "supervisor holding the other end can APPROVE the cards this run parks "
-            "(stage E). Requires --control; refused with --background. Descriptor "
-            "numbers only — the value never touches argv, the environment or a file."
-        ),
+        help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
 
     # --- Additive auth subcommands (rewrite) -------------------------------
@@ -2162,6 +2193,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_global_flag(parser: argparse.ArgumentParser, flag: str, **kwargs: Any) -> None:
+    """Add one propagated flag unless the subparser already declares it (round 1, B1).
+
+    ONE option string per call, deliberately (round 2, nit): the skip below is
+    all-or-nothing, so a variadic call with a partly-present list would have
+    silently dropped the missing spellings. A single flag cannot half-apply.
+    ``lop network update`` owns its own ``--resume`` (the rollouts verb), and a
+    second declaration is an ``argparse.ArgumentError`` raised while
+    ``build_cli_parser`` runs — which is every `lop` invocation dead at build
+    time. A verb that owns a spelling keeps it; every other subparser still
+    receives the global one (and the recursion below still covers deeper
+    levels), so the propagation's own guarantee is unchanged.
+    """
+    if flag in parser._option_string_actions:
+        return
+    parser.add_argument(flag, **kwargs)
+
+
 def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
     """Re-declare the position-independent global options on every subparser.
 
@@ -2188,7 +2237,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             if id(subparser) in seen:
                 continue
             seen.add(id(subparser))
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--yolo",
                 action="store_true",
                 default=argparse.SUPPRESS,
@@ -2207,7 +2257,8 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                     " without prompting"
                 ),
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--resume",
                 nargs="?",
                 const=RESUME_LATEST,
@@ -2225,21 +2276,24 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
             # answers and where it runs, so silently ignoring them would be
             # worse than the parse error: the run would proceed against the
             # wrong model, in the wrong directory.
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--hosting",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="hosting",
                 help="Hosting platform for this run (e.g. anthropic, openai, openrouter)",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--model",
                 type=str,
                 default=argparse.SUPPRESS,
                 dest="model",
                 help="Model to use for this run",
             )
-            subparser.add_argument(
+            _add_global_flag(
+                subparser,
                 "--run-in",
                 type=str,
                 default=argparse.SUPPRESS,
@@ -2347,9 +2401,14 @@ def credential_delete_command(args: argparse.Namespace) -> int:
 
 def config_create_command() -> int:
     """Create a new configuration file."""
+    from local_operator.config_writer import config_write_lock
+
     base_dir = config_dir()
-    config_manager = ConfigManager(base_dir)
-    config_manager._write_config(vars(config_manager.config))
+    # Read and create under the same config-root lock as settings/policy writes;
+    # a creation command must not flush a snapshot captured before their edit.
+    with config_write_lock(base_dir):
+        config_manager = ConfigManager(base_dir)
+        config_manager._write_config(vars(config_manager.config))
     # Print the path that was actually written, not a hardcoded
     # ~/.local-operator: config_dir() honours LOCAL_OPERATOR_CONFIG_DIR, and
     # config_open_command below already reports the resolved path — naming a
@@ -4598,17 +4657,149 @@ def _cleanup_row(candidate: Any, verb: str) -> str:
     )
 
 
+#: Text rows printed per section before the listing is summarised. A first dry
+#: run on a long-lived store can name 17,000 delegated sessions; ``--json`` has
+#: them all, and the real run's record is ``.cleanup-log.jsonl``.
+_CLEANUP_TEXT_ROWS = 200
+
+
+def _delegated_hours(text: str) -> int:
+    """Argparse type for ``--delegated-max-age-hours``: the registry's own range."""
+    from local_operator.session.cleanup import (
+        MAX_DELEGATED_MAX_AGE_HOURS,
+        MIN_DELEGATED_MAX_AGE_HOURS,
+    )
+
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number of hours") from None
+    if not MIN_DELEGATED_MAX_AGE_HOURS <= value <= MAX_DELEGATED_MAX_AGE_HOURS:
+        raise argparse.ArgumentTypeError(
+            f"max_age_hours must be between {MIN_DELEGATED_MAX_AGE_HOURS} and "
+            f"{MAX_DELEGATED_MAX_AGE_HOURS} (30 days); got {value}"
+        )
+    return value
+
+
+def _print_cleanup_rows(rows: list[Any], verb: str) -> None:
+    for candidate in rows[:_CLEANUP_TEXT_ROWS]:
+        print(_cleanup_row(candidate, verb))
+    if len(rows) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
+
+
+def _print_kept(protected: list[tuple[str, str]]) -> None:
+    for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
+        print(f"  kept         {name}  ({guard})")
+    if len(protected) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(protected) - _CLEANUP_TEXT_ROWS} more kept (--json lists every row)")
+
+
+def _content_class_counts(rows: list[Any]) -> dict[str, int]:
+    """Pads per content class, for the summary line and --json.
+
+    A pad counts once per class it contributed (a pad can carry both a merged
+    tree and stale logs); the order is the rows' fixed class order.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        for name in getattr(row, "classes", ()):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _content_row_text(row: Any, verb: str) -> str:
+    """One content reclaim row: pad, size, classes and their evidence."""
+    title = row.title or "(no title)"
+    if len(title) > 16:
+        title = title[:15] + "…"
+    entries = f"{row.entries} entr{'y' if row.entries == 1 else 'ies'}"
+    tail = f"{row.reason}; {entries}"
+    bundles = getattr(row, "rescue_bundles", ())
+    if len(bundles) > 1:
+        names = ", ".join(os.path.basename(path) for path in bundles)
+        tail += f"; rescue bundles {names}"
+    elif row.rescue_bundle:
+        tail += f"; rescue bundle {os.path.basename(row.rescue_bundle)}"
+    elif row.method == "worktree-remove":
+        tail += "; worktree remove"
+    return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
+
+
+def _print_content(delegated: Any, verb: str) -> None:
+    """The scratchpad-content block under the delegated section.
+
+    The summary names the pads, the bytes and the per-class counts; the rows
+    name each pad's classes and entry count; the ``content kept`` rows carry
+    the reasons the pass DECLINED (unmerged/dirty trees, unreadable subtrees,
+    failed rescue bundles), so the dry run audits both directions. Capped like
+    the other listings; ``--json`` carries every row.
+    """
+    skipped = getattr(delegated, "content_skipped", None)
+    if skipped == "disabled":
+        print(
+            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
+            "is off; --force runs it once)"
+        )
+        return
+    if skipped == "disabled during the pass":
+        print("  scratchpad content: switch turned off during the pass (batched stop)")
+    rows = list(getattr(delegated, "content", []))
+    kept = list(getattr(delegated, "content_kept", []))
+    classes = _content_class_counts(rows)
+    parts = ", ".join(f"{count} {name}" for name, count in classes.items())
+    low = getattr(delegated, "content_remaining", 0)
+    low_note = f"; {low} pad(s) not reached this pass" if low else ""
+    size = _format_bytes(sum(row.bytes for row in rows))
+    paren = f" ({parts})" if parts else ""
+    print(f"  scratchpad content: {verb} {len(rows)} pad(s), ~{size}{paren}{low_note}")
+    for row in rows[:_CLEANUP_TEXT_ROWS]:
+        print(_content_row_text(row, verb))
+    if len(rows) > _CLEANUP_TEXT_ROWS:
+        print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
+    for name, reason in kept[:_CLEANUP_TEXT_ROWS]:
+        print(f"  content kept {name}  ({reason})")
+    if len(kept) > _CLEANUP_TEXT_ROWS:
+        print(
+            f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
+            "(--json lists every row)"
+        )
+
+
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
+    TWO CLASSES, one command (``session/delegated_retention.py`` has the why):
+    "Your conversations" (what the sidebar lists; the five ``session.cleanup.*``
+    limits, OFF by default) and "Delegated work" (subagent and background
+    sessions; ``session.cleanup.delegated.*``, ON by default). Each prints its own
+    section with its policy line, rows, kept list and totals.
+
     Order of operations for a real run is LIST, CONFIRM, REMOVE — never the
     reverse (UX U2). The listing is the dry run over the same policy, so what
-    the user confirms is exactly what goes.
+    the user confirms is exactly what goes: the parent class applies its previewed
+    plan, and the delegated class re-runs with ``only=<previewed names>`` at the
+    preview's own clock.
 
-    Exit codes: 0 ran (or dry run); 1 nothing to apply (no limits); 2 refused
-    (switch off without ``--force``, or confirmation declined); 3 ran with
-    errors. ``--json`` always emits a JSON object on stdout, whatever the
-    outcome, and carries ``enabled`` so a script can see the switch state.
+    The delegated section also carries the scratchpad-CONTENT block (the
+    carve-out in ``session/delegated_retention.py``): the pads it would reclaim
+    (stale output, build shapes, merged-clean git trees) and the ``content
+    kept`` reasons for what it declines, so the operator can audit both
+    directions. That phase is gated by ``session.cleanup.delegated.scratchpad.
+    enabled`` (default on; ``--force`` runs it once when off), and content
+    reclaims are the only reason a run with no session rows still proceeds to
+    confirmation — with its own confirmation sentence.
+
+    A class runs when its switch is on (or ``--force``); the parent class also
+    needs a limit. A dry run lists both whatever the switches say and notes it.
+
+    Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
+    delegated cleanup off); 2 refused (parent switch off without ``--force`` and
+    nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
+    always emits a JSON object on stdout, whatever the outcome; its pre-existing
+    keys now cover BOTH classes (rows carry ``origin``) and ``parent`` /
+    ``delegated`` hold the per-class detail.
     """
     import dataclasses
     import json as _json
@@ -4620,6 +4811,11 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         policy_from_config,
         run_cleanup,
     )
+    from local_operator.session.delegated_retention import (
+        UNBOUNDED,
+        DelegatedResult,
+        run_delegated_pass,
+    )
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
@@ -4630,6 +4826,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             ("max_inactive_days", args.max_inactive_days),
             ("max_total_bytes", args.max_total_bytes),
             ("remove_empty", args.remove_empty),
+            ("delegated_max_age_hours", getattr(args, "delegated_max_age_hours", None)),
         )
         if value is not None
     }
@@ -4639,95 +4836,238 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
         "or pass --force to run once"
     )
+    force = bool(args.force)
+    parent_runs = policy.has_any_limit and (policy.enabled or force)
+    delegated_runs = policy.delegated_enabled or force
 
-    def emit_json(result: CleanupResult, *, outcome: str, confirmed: bool | None = None) -> None:
-        print(
-            _json.dumps(
-                {
-                    "outcome": outcome,
-                    "enabled": policy.enabled,
-                    "forced": bool(args.force),
-                    "dry_run": result.dry_run,
-                    "scanned": result.scanned,
-                    "removed": [dataclasses.asdict(c) for c in result.removed],
-                    "protected": [
-                        {"session": name, "guard": guard} for name, guard in result.protected
+    def emit_json(
+        parent: CleanupResult,
+        delegated: CleanupResult | None,
+        *,
+        outcome: str,
+        confirmed: bool | None = None,
+    ) -> None:
+        both = [parent] + ([delegated] if delegated is not None else [])
+
+        # ``scanned`` is ONE population, every directory once (review F3):
+        # ``parent.scanned`` counts the parent class and ``delegated.scanned``
+        # the WHOLE store, so summing them double-counted every delegated
+        # directory (an 18-directory store reported 33). The delegated figure is
+        # the whole-store count whenever its pass scanned; when it did not (an
+        # early refusal, or an apply result that re-scanned nothing) the class
+        # counts stand in — still one count per directory, never two.
+        if delegated is None:
+            scanned = parent.scanned
+        elif delegated.scanned:
+            scanned = delegated.scanned
+        else:
+            scanned = parent.scanned + getattr(delegated, "delegated_total", 0)
+
+        def klass(result: CleanupResult) -> dict[str, Any]:
+            return {
+                "scanned": result.scanned,
+                "removed": [dataclasses.asdict(c) for c in result.removed],
+                "protected": [{"session": n, "guard": g} for n, g in result.protected],
+                "errors": result.errors,
+                "skipped": result.skipped,
+            }
+
+        payload: dict[str, Any] = {
+            "outcome": outcome,
+            "enabled": policy.enabled,
+            "forced": force,
+            "dry_run": parent.dry_run,
+            "scanned": scanned,
+            "removed": [dataclasses.asdict(c) for r in both for c in r.removed],
+            "protected": [{"session": n, "guard": g} for r in both for n, g in r.protected],
+            "errors": sum(r.errors for r in both),
+            "skipped": parent.skipped,
+            "confirmed": confirmed,
+            "record": str(record_path),
+            "parent": klass(parent),
+            "delegated": None,
+        }
+        if delegated is not None:
+            detail = klass(delegated)
+            detail.update(
+                enabled=policy.delegated_enabled,
+                max_age_hours=getattr(delegated, "hours", policy.delegated_max_age_hours),
+                within_window=getattr(delegated, "within_window", 0),
+                remaining=getattr(delegated, "remaining", 0),
+                scratchpad_enabled=policy.delegated_scratchpad_enabled,
+                scratchpad={
+                    "enabled": policy.delegated_scratchpad_enabled,
+                    "reclaimed": [
+                        dataclasses.asdict(row) for row in getattr(delegated, "content", [])
                     ],
-                    "errors": result.errors,
-                    "skipped": result.skipped,
-                    "confirmed": confirmed,
-                    "record": str(record_path),
+                    "kept": [
+                        {"session": name, "reason": reason}
+                        for name, reason in getattr(delegated, "content_kept", [])
+                    ],
+                    "classes": _content_class_counts(getattr(delegated, "content", [])),
+                    "bytes": sum(row.bytes for row in getattr(delegated, "content", [])),
+                    "remaining": getattr(delegated, "content_remaining", 0),
+                    "skipped": getattr(delegated, "content_skipped", None),
                 },
-                indent=2,
             )
-        )
+            payload["delegated"] = detail
+        print(_json.dumps(payload, indent=2))
 
-    if not policy.has_any_limit:
-        message = (
-            "no cleanup limits configured: set session.cleanup.* in /settings or pass "
-            "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
-        )
-        if not policy.enabled:
-            message += f"\n{switch_hint}"
-        if args.json:
-            emit_json(CleanupResult(skipped="no limits configured"), outcome="nothing-to-do")
-        else:
-            print(message, file=sys.stderr)
-        return 1
-
-    if not policy.enabled and not args.force and not args.dry_run:
-        if args.json:
-            emit_json(CleanupResult(skipped="disabled"), outcome="refused")
-        else:
-            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
-            print("preview what the limits would remove with --dry-run", file=sys.stderr)
-        return 2
+    if not parent_runs and not delegated_runs:
+        if not policy.has_any_limit:
+            message = (
+                "no cleanup limits configured and delegated cleanup is off: set "
+                "session.cleanup.* in /settings or pass "
+                "--max-sessions/--max-inactive-days/--max-total-bytes/--remove-empty"
+            )
+            if not policy.enabled:
+                message += f"\n{switch_hint}"
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="no limits configured"), None, outcome="nothing-to-do"
+                )
+            else:
+                print(message, file=sys.stderr)
+            if not args.dry_run:
+                return 1
+        elif not args.dry_run:
+            if args.json:
+                emit_json(CleanupResult(skipped="disabled"), None, outcome="refused")
+            else:
+                print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+                print("preview what the limits would remove with --dry-run", file=sys.stderr)
+            return 2
 
     # The LISTING is always a dry run first, so a real run shows the user the
-    # same rows before anything is removed.
-    preview = run_cleanup(root, policy, dry_run=True, force=bool(args.force), actor="cli")
-    policy_line = (
+    # same rows before anything is removed. Both previews share ONE clock.
+    moment = time.time()
+    # ``file_logging`` for the preview too: every scratchpad-git keep is a
+    # WARNING by design (one line per kept session, for the log), and on a first
+    # dry run those would interleave with the listing that already names each
+    # one under "kept".
+    with file_logging():
+        if policy.has_any_limit:
+            parent_preview = run_cleanup(
+                root, policy, dry_run=True, force=force, actor="cli", now=moment
+            )
+        else:
+            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
+        delegated_preview = run_delegated_pass(
+            root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment
+        )
+    parent_policy_line = (
         f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
         f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
         f"remove_empty={policy.remove_empty}"
+        if policy.has_any_limit
+        else "policy: off (no limits configured)"
     )
+    delegated_policy_line = (
+        f"policy: {'on' if policy.delegated_enabled else 'OFF'}, remove delegated sessions idle "
+        f"over {delegated_preview.hours}h (parent still active, open project, running, armed "
+        "wake/monitor or unpushed git work keeps them)"
+    )
+
+    def sections(
+        verb: str,
+        parent: CleanupResult,
+        delegated: DelegatedResult,
+        parent_runs: bool,
+        delegated_runs: bool,
+    ) -> None:
+        # A class the run will NOT actually execute renders its rows as
+        # "would remove" with the off-note a dry run prints (review F1): showing
+        # "will remove" for a class whose switch is off promised rows the run
+        # then left on disk — a real run could print "will remove 3" and then
+        # "nothing to remove" in the same output.
+        parent_verb = verb if parent_runs else "would remove"
+        delegated_verb = verb if delegated_runs else "would remove"
+        print("== Your conversations (parent sessions) ==")
+        print(parent_policy_line)
+        if parent.skipped == "no limits configured":
+            print("parent class: off")
+        else:
+            if not policy.enabled and parent_verb == "would remove":
+                print(f"note: {switch_hint}; this is a preview only")
+            print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
+            _print_cleanup_rows(parent.removed, parent_verb)
+            _print_kept(parent.protected)
+        print()
+        print("== Delegated work (subagents and background sessions) ==")
+        print(delegated_policy_line)
+        if delegated.skipped and delegated.skipped.startswith("skipped:"):
+            print(f"{delegated.skipped} (nothing removed; fail-closed)")
+        else:
+            if not policy.delegated_enabled and delegated_verb == "would remove":
+                print("note: delegated cleanup is off in config; this is a preview only")
+            print(
+                f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
+                f"newer than {delegated.hours}h (kept); {delegated_verb} {len(delegated.removed)}"
+            )
+            _print_cleanup_rows(delegated.removed, delegated_verb)
+            _print_kept(delegated.protected)
+            if delegated_runs:
+                content_verb = (
+                    "would reclaim" if delegated_verb == "would remove" else "will reclaim"
+                )
+                _print_content(delegated, content_verb)
 
     if args.dry_run:
         if args.json:
-            emit_json(preview, outcome="dry-run")
+            emit_json(parent_preview, delegated_preview, outcome="dry-run")
             return 0
-        print(policy_line)
-        if not policy.enabled:
-            print(f"note: {switch_hint}; this is a preview only")
-        print(f"scanned {preview.scanned} sessions; would remove {len(preview.removed)}")
-        for candidate in preview.removed:
-            print(_cleanup_row(candidate, "would remove"))
-        for name, guard in preview.protected:
-            print(f"  kept         {name}  ({guard})")
+        sections("would remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
     if not args.json:
-        print(policy_line)
-        if not policy.enabled:
-            print(f"WARNING: {switch_hint}; running because --force was given")
-        print(f"scanned {preview.scanned} sessions; about to remove {len(preview.removed)}")
-        for candidate in preview.removed:
-            print(_cleanup_row(candidate, "will remove"))
-        for name, guard in preview.protected:
-            print(f"  kept         {name}  ({guard})")
-    if not preview.removed:
+        # A non-running class states it in its own section ("would remove" + the
+        # off-note); no separate "not run" line beside it (review F1).
+        sections("will remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
+    parent_rows = len(parent_preview.removed) if parent_runs else 0
+    delegated_rows = len(delegated_preview.removed) if delegated_runs else 0
+    # Content reclaims the run would perform: only when the class and the
+    # content switch both run (or --force), mirroring the pass's own gate.
+    content_rows = (
+        len(delegated_preview.content)
+        if delegated_runs and (policy.delegated_scratchpad_enabled or force)
+        else 0
+    )
+    if policy.has_any_limit and not parent_runs and not delegated_rows and not content_rows:
+        # The limits are configured but their switch is off, and the other class
+        # has nothing to do: that is a REFUSAL, not "nothing to remove" — the
+        # reading that made a user who saw "limits set, nothing happens" run
+        # with --force on a store they had meant to protect (QA Q1 of #645).
         if args.json:
-            emit_json(preview, outcome="nothing-to-do")
+            emit_json(parent_preview, delegated_preview, outcome="refused")
+        else:
+            print(f"refusing to remove sessions: {switch_hint}", file=sys.stderr)
+            print("preview what the limits would remove with --dry-run", file=sys.stderr)
+        return 2
+    if not parent_rows and not delegated_rows and not content_rows:
+        if args.json:
+            emit_json(parent_preview, delegated_preview, outcome="nothing-to-do")
         else:
             print("nothing to remove")
         return 0
 
     confirmed: bool | None = None
+    total = parent_rows + delegated_rows
+    if total and content_rows:
+        prompt = (
+            f"remove {total} session(s) and reclaim scratchpad content from "
+            f"{content_rows} session(s)? type 'yes' to confirm: "
+        )
+    elif total:
+        prompt = f"remove {total} session(s)? type 'yes' to confirm: "
+    else:
+        prompt = (
+            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+        )
     if not args.yes:
         if not sys.stdin.isatty():
             if args.json:
-                emit_json(preview, outcome="refused", confirmed=False)
+                emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
                 print(
                     "refusing: not a terminal and --yes was not given, so nothing was removed",
@@ -4735,13 +5075,13 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 )
             return 2
         try:
-            answer = input(f"remove {len(preview.removed)} session(s)? type 'yes' to confirm: ")
+            answer = input(prompt)
         except (EOFError, KeyboardInterrupt):
             answer = ""
         confirmed = answer.strip().lower() == "yes"
         if not confirmed:
             if args.json:
-                emit_json(preview, outcome="refused", confirmed=False)
+                emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
                 print("not confirmed; nothing was removed")
             return 2
@@ -4752,19 +5092,41 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     # ``file_logging`` detaches the console handlers for the block and puts
     # them back afterwards. ``apply_cleanup(preview)`` removes EXACTLY the
     # rows the user just confirmed — a second scan could rank a session
-    # created meanwhile and take one shown as kept (review round 2, R2-2).
+    # created meanwhile and take one shown as kept (review round 2, R2-2). The
+    # delegated class gets the same guarantee from ``only=`` + the preview clock.
     with file_logging():
-        result = apply_cleanup(root, preview, actor="cli")
+        parent_result = (
+            apply_cleanup(root, parent_preview, actor="cli")
+            if parent_rows
+            else CleanupResult(skipped=parent_preview.skipped)
+        )
+        delegated_result = (
+            run_delegated_pass(
+                root,
+                lambda: policy,
+                force=force,
+                actor="cli",
+                now=moment,
+                budget_s=UNBOUNDED,
+                only=[c.session for c in delegated_preview.removed],
+                content_only=[row.session for row in delegated_preview.content],
+            )
+            if delegated_rows or content_rows
+            else DelegatedResult()
+        )
+    errors = parent_result.errors + delegated_result.errors
     if args.json:
-        emit_json(result, outcome="removed", confirmed=confirmed)
-        return 3 if result.errors else 0
-    print(f"removed {len(result.removed)} session(s)")
-    for candidate in result.removed:
-        print(_cleanup_row(candidate, "removed"))
-    if result.errors:
-        print(f"  {result.errors} error(s); see the log", file=sys.stderr)
+        emit_json(parent_result, delegated_result, outcome="removed", confirmed=confirmed)
+        return 3 if errors else 0
+    removed = parent_result.removed + delegated_result.removed
+    print(f"removed {len(removed)} session(s)")
+    _print_cleanup_rows(removed, "removed")
+    if delegated_result.content:
+        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+    if errors:
+        print(f"  {errors} error(s); see the log", file=sys.stderr)
     print(f"record: {record_path}")
-    return 3 if result.errors else 0
+    return 3 if errors else 0
 
 
 def sessions_reclaim_command(args: argparse.Namespace) -> int:
@@ -9298,6 +9660,60 @@ def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
     return 1
 
 
+def _serve_bind_is_loopback_only(host: str) -> bool:
+    """Whether ``host`` may be a serve bind: loopback-only, strictly (RFC §3.1).
+
+    Accepts ``127.0.0.0/8``, ``::1``, ``localhost``, and a NAME only when every
+    address it resolves to is loopback -- a name that resolves anywhere else, or
+    nowhere, is refused. Everything the answer depends on lives in one spelling:
+    the literal half is the per-connection gate's own predicate
+    (:func:`~local_operator.server.utils.static_roots.is_loopback_host`), so the
+    bind policy and the request policy cannot drift apart.
+
+    There is deliberately NO override: the file server serves unclamped on
+    loopback connections, so the listener itself must never be reachable beyond
+    them (no CLI flag re-admits a wide bind; a test pins that).
+    """
+    from local_operator.server.utils.static_roots import is_loopback_host
+
+    name = host.strip().lower()
+    if not name:
+        return False
+    if is_loopback_host(name):
+        return True
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return False
+    # ``str(...)``: getaddrinfo's host part is typed ``str | int`` by the union of
+    # sockaddr shapes; a non-string would not be loopback anyway (fail-closed).
+    addresses = {str(info[4][0]) for info in infos}
+    if not addresses:
+        return False
+    return all(is_loopback_host(address) for address in addresses)
+
+
+def _refuse_non_loopback_bind(host: str, port: int) -> int:
+    """Report a serve bind this process refuses by POLICY, naming the remedy.
+
+    Same shape as :func:`_refuse_serve_bind` (exit 1, the address named),
+    because to the operator it is the same class of problem: a listener that
+    will not exist. The difference is that no spelling of this address would
+    have worked -- the policy is strict, and the remedy is not a flag but a
+    different path to the server: bind loopback, then reach it through an
+    explicit tunnel or an SSH port-forward.
+    """
+    # Brackets for a v6 literal so the address stays unambiguous (``:::1111``).
+    display = f"[{host}]" if ":" in host else host
+    print(
+        f"\n\033[1;31mError: cannot bind http://{display}:{port}: the serve API is "
+        "loopback-only by policy; bind 127.0.0.1 (or ::1 / localhost) and reach "
+        "it through an explicit tunnel or an SSH port-forward.\033[0m",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def adopt_serve_socket(fd: int, host: str) -> socket.socket:
     """Take over an already-bound listener handed across ``execve``.
 
@@ -9343,6 +9759,10 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
+    The bind address is refused unless it is loopback-only, with no override
+    flag (RFC §3.1, :func:`_serve_bind_is_loopback_only`) -- for the fresh bind,
+    the ``--reload`` probe, and an adopted ``--listener-fd`` alike.
+
     ``uvicorn`` is imported HERE, not at module scope: the HTTP facade lives
     behind the ``server`` extra, so a default install (and every non-server
     entry point) must be able to ``import local_operator.cli`` without
@@ -9368,6 +9788,43 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     depends on, and the identity check a discovery does (``/health``'s
     ``instance_id``, never the record's port) is what admits a candidate.
     """
+    # STRICT bind policy, before anything binds or adopts (RFC §3.1): the serve
+    # API is loopback-only, with no override flag -- the file server answers
+    # unclamped on loopback connections, so the listener must never be reachable
+    # beyond them. Covers the fresh bind, the --reload probe, and the
+    # --listener-fd adopt (whose socket is verified again below).
+    if not _serve_bind_is_loopback_only(host):
+        return _refuse_non_loopback_bind(host, port)
+
+    # A DAEMON IS A HOSTING PLANE, NOT A CHAT AN AGENT OPENED. This process is
+    # about to become the ``lop serve`` daemon the operator's front ends (the
+    # desktop app's backend, the phone relay's child, the TUI server) talk to,
+    # and IT mints the sessions for the operator's OWN conversations through the
+    # shared composition root. The ``bash`` tool stamps every command an agent
+    # runs with the agent-shell markers, and when such a shell started this
+    # daemon those markers ride along in ``os.environ`` — which is what made
+    # :func:`local_operator.agent_shell.agent_shell_opened_run` true at
+    # session-build time, stamping the operator's New Chat sessions
+    # ``origin.json = {"origin": "agent-shell"}`` and hiding them from the
+    # desktop sidebar, the phone list and the ``/resume`` picker.
+    #
+    # The markers describe the COMMAND THAT STARTED THIS PROCESS; a long-lived
+    # server is not that command, and the sessions it creates are the operator's
+    # gestures, so the claim must not survive into them. Drawn here, at the SERVE
+    # entry point, because a process cannot un-inherit an environment variable
+    # any later — the daemon's own ``dict(os.environ)`` spawns (the mobile relay
+    # and the runtime launcher) would carry the markers on.
+    #
+    # SERVE ONLY. ``lop exec``, ``--workstream`` and the QA escape hatch stamp
+    # exactly as before: those ARE commands an agent's shell ran, and the whole
+    # point of the guard and its stamp is to keep their sessions out of the
+    # operator's list. See :func:`agent_shell.drop_agent_shell_marker_from_environ`
+    # for why all THREE names go (the escape hatch included) and why the removal
+    # is in place rather than a returned copy.
+    from local_operator.agent_shell import drop_agent_shell_marker_from_environ
+
+    drop_agent_shell_marker_from_environ()
+
     try:
         import uvicorn
     except ImportError:
@@ -9404,6 +9861,21 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
             listener = adopt_serve_socket(listener_fd, host)
         except OSError as exc:
             print(f"--listener-fd {listener_fd} could not be adopted: {exc}", file=sys.stderr)
+            return 1
+        # The host ARGUMENT passed the policy above; verify the socket's REAL
+        # bound address too. Adopting is the one path where the argument is not
+        # the truth -- the descriptor was bound by a previous process image,
+        # possibly an older build -- and "no override path" (§3.1) must hold for
+        # the address actually served on, not for the spelling that was asked
+        # for. Closed on refusal: an unadopted wide listener must not sit open.
+        bound_host = str(listener.getsockname()[0])
+        if not _serve_bind_is_loopback_only(bound_host):
+            listener.close()
+            print(
+                f"\n\033[1;31mError: cannot adopt a listener bound to {bound_host}: "
+                "the serve API is loopback-only by policy.\033[0m",
+                file=sys.stderr,
+            )
             return 1
         resolved_port = listener.getsockname()[1]
     elif not reload:
@@ -9457,6 +9929,17 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # Retain the Server object so a ready-successor handoff can pause/resume
+        # ACCEPTORS on it without a kill: the listener socket lives in this frame
+        # and the handoff runs in the lifespan's loop, so app.state is the one
+        # channel that reaches both. The owner holds a DUP of the listener, so
+        # nothing here can close the bound socket the way a forced restart would.
+        from local_operator import service_handoff
+
+        server = uvicorn.Server(config)
+        asgi_app.state.listener_owner = service_handoff.ListenerOwner(
+            asgi_app, servers=[], listener=listener
+        )
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -9464,7 +9947,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         # those windows are exactly where a traceback would otherwise reach the
         # operator instead of a plain exit.
         try:
-            uvicorn.Server(config).run(sockets=[listener])
+            server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
     else:
@@ -14366,6 +14849,24 @@ def main() -> int:
                 return invalid
             return mcp_command(args)
         elif args.subcommand == "update":
+            is_controller = (
+                getattr(args, "controller_root", None) is not None
+                or getattr(args, "controller_tail", None) is not None
+            )
+            if is_controller:
+                from local_operator.update_bootstrap import (
+                    BootstrapError,
+                    controller,
+                    controller_tail,
+                )
+
+                try:
+                    if getattr(args, "controller_root", None) is not None:
+                        return controller(args)
+                    return controller_tail(args)
+                except (BootstrapError, OSError, ValueError) as exc:
+                    print(f"rolling update: {exc}", file=sys.stderr)
+                    return 1
             # Lazy: ``update`` imports httpx. ``import local_operator.cli``
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command
@@ -14377,6 +14878,8 @@ def main() -> int:
                 refresh_mobile=bool(getattr(args, "refresh_mobile", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
+                allow_downgrade=bool(getattr(args, "allow_downgrade", False)),
+                roll=not bool(getattr(args, "no_roll", False)),
             )
         elif args.subcommand == "services":
             # Lazy for the same reason as ``update``: this pulls the serve
@@ -14543,9 +15046,15 @@ def main() -> int:
                     # siblings all use, which it was alone in omitting.
                     from local_operator.exec_mode import JOBS_FILE, logs_dir
 
+                    no_job = _t(
+                        _wd.no_exec_job(
+                            job_id=repr(args.status),
+                            jobs_path=str(logs_dir() / JOBS_FILE),
+                        )
+                    )
                     print(
-                        f"exec failed: No exec job {args.status!r}; job IDs are printed "
-                        f"by --background and recorded in {logs_dir() / JOBS_FILE}",
+                        # i18n: ignore stable prefix; payload rendered from wire.exec
+                        f"exec failed: {no_job}",
                         file=sys.stderr,
                     )
                     return 1
@@ -14568,7 +15077,11 @@ def main() -> int:
             # (docs/EXEC.md) — deliberately not named to the model in the text.
             refusal = exec_session_refusal()
             if refusal is not None:
-                print(f"exec failed: {refusal}", file=sys.stderr)
+                print(
+                    # i18n: ignore stable prefix + dynamic payload
+                    f"exec failed: {refusal}",
+                    file=sys.stderr,
+                )
                 return 1
             # ``--output-schema`` is absolutised HERE, before the optional
             # ``--background`` process boundary, because the detached worker

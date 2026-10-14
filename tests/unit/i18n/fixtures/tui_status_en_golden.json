@@ -1,0 +1,9 @@
+{
+  "tui.status.agents": "{count, plural, one {# agent} other {# agents}}",
+  "tui.status.band.starting": "starting…",
+  "tui.status.band.working": "working",
+  "tui.status.jobs": "{count, plural, one {# job} other {# jobs}}",
+  "tui.status.model.connecting": "connecting…",
+  "tui.status.model.setup": "setup",
+  "tui.status.tunnel.parked": "remote access off"
+}

@@ -1279,18 +1279,29 @@ def test_an_unanswered_read_carries_its_age_and_the_retry() -> None:
 def test_a_status_read_asks_for_the_pass_it_reports(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`status` must not answer from the last cadence tick: it asks for a read.
+    """`status` must not answer from the last completed pass: it asks for a read.
 
-    With the background cadence parked well past this test's lifetime, the only
-    pass that can complete between the dial and the read is the one the read asks
-    for (``RelayServer._fresh_membership_read``); a `status` that merely read
-    ``_membership_reports`` would keep reporting the pre-dial pass, whose table
-    never saw this link.
+    The discriminator is the COMPLETION SEQUENCE, not the emptiness of the
+    cache: a `status` that merely read ``_membership_reports`` would leave
+    ``_membership_seq`` untouched while claiming a fresh row, so the refresh
+    read must bump it and the plain read must not.
+
+    A blank baseline cannot be demanded. The admit-time ``contact_peers`` pass
+    starts on a handshake thread of its own once the joiner's result frame is
+    sent and completes whenever it gets to run — publishing a pass that answers
+    the link. The old version captured `before` immediately after the dial and
+    asserted an empty table; on a starved runner that pass landed first and the
+    assertion failed on state that was merely later (CI shard 4, 2026-10-12;
+    causally reproduced by delaying the admit pass past the dial). So the
+    fixture now QUIESCES every unprompted writer (the sibling test below
+    carries the full derivation of each wait), then FORCES the completed pass
+    it asserts against, and proves the freshness contract structurally.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
     a = _make(devices, "a", mode=HUB)
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
@@ -1298,14 +1309,50 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
         return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
 
-    # Before the read asks: the last completed pass predates the link, so b is not
-    # in `answered` — there is no fresh table for the read to lean on yet.
-    before = _row(a.server.status())["membership"]["table"]  # noqa: SLF001
-    assert before["answered"] == [], before
-    assert before["complete"] is False
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
 
-    # The read asks, and the pass it asked for lands inside the bound.
+    # QUIESCE EVERY UNPROMPTED WRITER BEFORE THE BASELINE IS TAKEN: a's
+    # establishment pull for the inbound link, the admit-time contact_peers
+    # pass, and any inbound handshake still returning (each stage's derivation
+    # lives in the sibling test below). Afterwards the only publisher left is
+    # a pass this fixture or the read itself runs — the cadence is parked for
+    # the whole test lifetime.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+    ), "a's admit-time contact_peers pass never completed"
+
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
+    # THE BASELINE, made deterministic instead of assumed: one completed pass
+    # that really answers the link. The due window is re-opened first so this
+    # pass enters the pull rather than answering from the not-due gate.
+    a_link.member_pulled_at = 0.0
+    baseline = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
+    assert baseline.answered == [b.device_id], baseline
+    seq_before = a.server._membership_seq  # noqa: SLF001
+
+    # Plain `status` reports the completed pass and asks NOTHING: the sequence
+    # is the receipt — a cached answer that never asked cannot have bumped it.
+    before = _row(a.server.status())["membership"]["table"]  # noqa: SLF001
+    assert before["answered"] == [b.device_id], before
+    assert before["complete"] is True, before
+    assert a.server._membership_seq == seq_before, "a plain status ran a pass"  # noqa: SLF001
+
+    # The read asks, and the pass it asked for is the one it reports: the
+    # completion sequence moves, and the table is the pass that moved it.
     after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
+    assert (
+        a.server._membership_seq > seq_before
+    ), "the read reported a cached table without asking"  # noqa: SLF001
     assert after["answered"] == [b.device_id], after
     assert after["complete"] is True
     assert isinstance(after["oldest_answer_age_s"], float), after
@@ -1326,19 +1373,75 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     a = _make(devices, "a", mode=HUB)
     b = _make(devices, "b", mode=HUB)
     record = _init_network(a.server)
+    # THE BASELINE FOR THE SECOND WAIT BELOW, taken BEFORE the join: a's admit-time
+    # ``contact_peers`` pass starts on a handshake thread of its own once the joiner's
+    # result frame is sent, and may still be in flight when this test is already past
+    # the dial.
+    admit_seq = a.server._membership_seq  # noqa: SLF001 — "no pass completed yet"
     assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
     link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
     assert link is not None, reason
 
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
+    assert a_link is not None
+
+    # LET a's OWN ESTABLISHMENT PULL SETTLE BEFORE THE DUE WINDOW IS ARMED. b's dial
+    # returns when b is satisfied, but a's listener side runs its own ``net_member_list``
+    # pull for this link on a handshake thread of its own (``register_link``), and that
+    # pull STAMPS ``member_pulled_at`` when its answer lands. Armed too early, the arm
+    # below (``= 0.0``) is overwritten by that late stamp, the link reads as pulled
+    # moments ago, the kicked pass finds it NOT DUE and answers from the cadence
+    # without ever entering ``_pull_members`` — "the kicked pass never entered the
+    # pull" (CI shards 2026-10-09/10; the margin between the two threads is ~1 ms on a
+    # quiet host, measured, and a starved runner turns it into a coin flip). The stamp
+    # is the event: it is written exactly once per establishment pull, so waiting for
+    # it leaves no other writer racing the arm.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+
+    # AND LET THE ADMIT-TIME PASS COMPLETE TOO, or one writer the test does not
+    # control can still restamp the link behind the arm below (agent review round 1,
+    # MINOR — the residual behind QA round 1's one green miss): the same listener
+    # runs a ``contact_peers`` pass after sending the result frame, and starved
+    # across the dial it reads the REPLACEMENT link while that link is due
+    # (``member_pulled_at == 0.0``), pulling it: "a second stamp on the same link",
+    # landing after the arm and reinstating the not-due skip. The pass bumps
+    # ``_membership_seq`` exactly once, at completion, after every pull it made has
+    # stamped, so waiting for the bump leaves no unprompted pass in flight when the
+    # due window is armed.
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0
+    ), "a's admit-time contact_peers pass never completed"
+
+    # AND NO INBOUND HANDSHAKE MAY STILL BE IN FLIGHT EITHER, closing the sibling
+    # shape a probe for this change found: the establishment wait above can observe
+    # the ADMIT pass's restamp first while ``register_link``'s own establishment
+    # pull is still in flight — and THAT pull's stamp can then land behind the arm
+    # below, the same not-due skip from the other side. A ``_handshake_slots`` slot
+    # is the right signal because it is acquired once per inbound connection
+    # (``_accept_loop``) and released only in ``_handshake_inbound``'s ``finally`` —
+    # i.e. when the WHOLE inbound work returns: ``register_link``'s establishment
+    # pull (the stamp) and a pair listener's ``contact_peers`` (the admit restamp)
+    # included — so "all slots free" is exactly "no unprompted inbound writer can
+    # still stamp this link". The two inbound connections on a here are the join's
+    # and the dial's. ``_value`` is read because the semaphore exposes nothing else,
+    # and is only ever compared against the cap that built it.
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
     # A completed pass first: the fallback must BE this one, so make it answer with
-    # b's table (a real pull — the link is up).
+    # b's table (a real pull — the link is up, and the zero makes it due).
+    a_link.member_pulled_at = 0.0
     first = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
     assert first.answered == [b.device_id], first
 
     # Make the NEXT pull hang, and re-open the link's due window so the pass the
     # read triggers actually enters the hung pull.
-    a_link = a.server._link_for(b.device_id)  # noqa: SLF001 — the fixture's link
-    assert a_link is not None
     a_link.member_pulled_at = 0.0
     release = threading.Event()
 
@@ -1373,6 +1476,92 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
         entered.is_set, timeout_s=10.0
     ), "the kicked pass never entered the pull"
     assert inflight, "the read waited the hung pass out instead of returning with it in flight"
+
+
+def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounded read whose kicked pass is still running must SAY SO.
+
+    The last completed pass below FAILED ("no table came back"), while the peer
+    is reachable on the live probe. Re-presenting that failure headline beside
+    `peers` saying reachable reads as a contradiction: the truth at the moment
+    the bounded wait expires is that a NEW read is in flight, neither verified
+    nor failed. After the pull is released, the next read reports verified.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 30.0)
+    a = _make(devices, "a", mode=HUB)
+    b = _make(devices, "b", mode=HUB)
+    record = _init_network(a.server)
+    admit_seq = a.server._membership_seq  # noqa: SLF001
+    assert _join(b, inviter=a, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    link, reason = b.server.dial(record.network_id, host=f"{a.host}:{a.port}", epoch=1)
+    assert link is not None, reason
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001
+    assert a_link is not None
+    # Quiesce unprompted writers (same derivation as the hung-pass sibling):
+    # establishment stamp, admit-time pass, and every inbound handshake.
+    assert net_fixtures.wait_for(
+        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+    ), "a's establishment pull never stamped the link"
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+    ), "a's admit-time contact_peers pass never completed"
+
+    def _all_inbound_done() -> bool:
+        return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
+
+    assert net_fixtures.wait_for(
+        _all_inbound_done, timeout_s=10.0
+    ), "an inbound handshake can still restamp the link"
+
+    def _row(payload: dict[str, Any]) -> dict[str, Any]:
+        return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
+
+    # The last COMPLETED pass fails: its headline is the stale verdict.
+    monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    a_link.member_pulled_at = 0.0
+    failed = a.server.refresh_membership()[record.network_id]  # noqa: SLF001
+    assert failed.answered == [], failed
+    assert "no table came back" in failed.sentence(), failed.sentence()
+
+    # The next pull blocks past the bounded status wait, then really answers.
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked(link: Any) -> str:
+        entered.set()
+        release.wait(10.0)
+        return relay.RelayServer._pull_members(a.server, link)  # noqa: SLF001
+
+    monkeypatch.setattr(a.server, "_pull_members", _blocked)
+    a_link.member_pulled_at = 0.0
+    seq_before = a.server._membership_seq  # noqa: SLF001
+    try:
+        payload = a.server.status(refresh=True)  # noqa: SLF001
+        inflight = a.server._membership_seq == seq_before  # noqa: SLF001
+        peers = a.server.peer_status()  # noqa: SLF001
+    finally:
+        release.set()
+    assert entered.is_set(), "the kicked pass never entered the pull"
+    assert inflight, "the read waited the blocked pull out instead of returning bounded"
+    assert peers and peers[0]["reachable"] is True, peers
+    row = _row(payload)
+    table = row["membership"]["table"]
+    sentence = table["sentence"]
+    assert "table read still running" in sentence, sentence
+    assert "retrying" in sentence, sentence
+    assert "no table came back" not in sentence, sentence
+    assert "members verified" not in sentence, sentence
+    assert "still running" in relay.membership_marker(row), relay.membership_marker(row)
+
+    # After the pull lands, the next read is the verified completed pass.
+    assert net_fixtures.wait_for(
+        lambda: a.server._membership_seq > seq_before, timeout_s=10.0  # noqa: SLF001
+    ), "the blocked pass never completed after release"
+    after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
+    assert after["complete"] is True, after
+    assert "verified with all 1 peer(s)" in after["sentence"], after["sentence"]
 
 
 def test_a_row_no_read_has_fed_says_so_on_every_surface(

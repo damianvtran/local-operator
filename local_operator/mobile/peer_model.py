@@ -16,8 +16,11 @@ import this without dragging the model graph into its own import time.
 
 from __future__ import annotations
 
+import asyncio
 import os
-from contextlib import closing
+import weakref
+from contextlib import asynccontextmanager, closing
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -79,6 +82,66 @@ def validate_peer_selection(provider: str, model_id: str) -> "ModelSpec":
             ) from error
 
     return validate_model_selection(provider, model_id, usable=usable)
+
+
+# Cache within one launch/resume only: credentials/catalogue can change between
+# runs. Workers read model data; policy, jobs and lineage stay on the owner loop.
+_SUBAGENT_SELECTIONS: ContextVar[tuple[Any, dict[str, Any]] | None] = ContextVar(
+    "validated_subagent_selections", default=None
+)
+
+
+def validate_subagent_selection(provider: str, model_id: str) -> "ModelSpec":
+    """Use worker-prepared results, preserving synchronous non-tool callers."""
+    selector = f"{provider}/{model_id}"
+    scope = _SUBAGENT_SELECTIONS.get()
+    # Child runner tasks copy ContextVars at registration. They must not
+    # mistake the parent's finished validation scope for their own operation.
+    try:
+        owner = asyncio.current_task()
+    except RuntimeError:
+        owner = None
+    prepared = scope[1] if scope is not None and scope[0]() is owner and owner is not None else None
+    if prepared is not None:
+        if selector not in prepared:
+            # Never fall back to blocking the loop if lineage changes during
+            # validation. Nothing has registered yet, so a retry is safe.
+            raise ValueError("subagent selection changed during validation; retry the operation")
+        result = prepared[selector]
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return validate_peer_selection(provider, model_id)
+
+
+@asynccontextmanager
+async def prepared_subagent_selections(selectors: list[str]):
+    """Offload metadata/credential reads without moving registration to a worker.
+
+    Retain refusals individually: an ancestor's broken pin may use its recorded
+    label, whereas the child's own broken selector must fail before registration.
+    Cancellation cannot launch work; the worker holds no session/job mutations.
+    """
+
+    def prepare() -> dict[str, Any]:
+        results: dict[str, Any] = {}
+        for selector in dict.fromkeys(selectors):
+            provider, _, model_id = selector.partition("/")
+            try:
+                results[selector] = validate_peer_selection(provider, model_id)
+            except Exception as error:  # noqa: BLE001 — replay at the strict/lenient seam
+                results[selector] = error
+        return results
+
+    prepared = await asyncio.to_thread(prepare) if selectors else {}
+    owner = asyncio.current_task()
+    assert owner is not None
+    # A copied context must not retain its parent's completed tool task.
+    token = _SUBAGENT_SELECTIONS.set((weakref.ref(owner), prepared))
+    try:
+        yield
+    finally:
+        _SUBAGENT_SELECTIONS.reset(token)
 
 
 def normalise_pair(provider: str, model_id: str) -> tuple[str, str]:

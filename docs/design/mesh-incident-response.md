@@ -205,7 +205,7 @@ must say so in as many words, because that is what a person will assume:
 > `Panicked network 'home-net'. Links are closed and this device will refuse peer traffic until you re-admit it with 'lop network trust home-net --active'. Sessions running on other devices are NOT stopped — they keep running and will be unreachable to you.`
 
 A verb that both severs trust *and* reaches into a peer to kill processes has to
-be authenticated by exactly the channel the operator has just [redacted]
+be authenticated by exactly the channel the operator has just declared
 untrustworthy, so it cannot be both safe and useful. Stopping a remote session is
 `lop stop --peer <device> …`, issued *before* the panic if that is what the
 operator wants.
@@ -651,7 +651,7 @@ emission points.
 | `panic_undelivered` | one peer's deadline/attempt failed | `{outcome}` — `unacked \| failed` |
 | `panic_broadcast_result` | the fan-out finished | `{sent, acked, unacked, failed, duration_ms}` |
 | `member_role_changed` | a role is edited | `{role_before, role_after}` |
-| `credential_placement_[redacted]` | an owner declares ownership or changes holders | `{key, kind, scope?, replicate}` |
+| `credential_placement_declared` | an owner declares ownership or changes holders | `{key, kind, scope?, replicate}` |
 | `credential_grant` | a grant was served | `{key, credential_kind, refreshed, grant_id, token_ttl_s, latency_ms, act, sub}` |
 | `credential_grant_refused` | a grant was refused | `{key, cause}` |
 | `credential_refresh` | the **owner** POSTed to the IdP | `{key, credential_kind, duration_ms, ok, act}` |

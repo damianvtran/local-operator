@@ -87,7 +87,7 @@ async def test_get_job_status_not_found(test_app_client, mock_job_manager):
 
     assert response.status_code == 404
     data = response.json()
-    assert f'Job with ID "{job_id}" not found' in data.get("detail", "")
+    assert f'Job with ID "{job_id}" not found' in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -101,7 +101,7 @@ async def test_get_job_status_error(test_app_client, mock_job_manager):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Internal Server Error" in data.get("detail", "")
+    assert "Internal Server Error" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_list_jobs_error(test_app_client, mock_job_manager):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Internal Server Error" in data.get("detail", "")
+    assert "Internal Server Error" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -208,7 +208,7 @@ async def test_cancel_job_not_found(test_app_client, mock_job_manager):
 
     assert response.status_code == 404
     data = response.json()
-    assert f'Job with ID "{job_id}" not found' in data.get("detail", "")
+    assert f'Job with ID "{job_id}" not found' in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,7 @@ async def test_cancel_job_cannot_cancel(test_app_client, mock_job_manager, sampl
 
     assert response.status_code == 400
     data = response.json()
-    assert f"Job {job_id} cannot be cancelled" in data.get("detail", "")
+    assert f"Job {job_id} cannot be cancelled" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_cancel_job_error(test_app_client, mock_job_manager, sample_job):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Internal Server Error" in data.get("detail", "")
+    assert "Internal Server Error" in data["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -279,4 +279,4 @@ async def test_cleanup_jobs_error(test_app_client, mock_job_manager):
 
     assert response.status_code == 500
     data = response.json()
-    assert "Internal Server Error" in data.get("detail", "")
+    assert "Internal Server Error" in data["detail"]["text"]

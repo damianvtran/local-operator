@@ -3373,6 +3373,24 @@ class Editor(TextArea):
                     event.stop()
                     event.prevent_default()
                     return
+                if key == "tab":
+                    # A COMPLETION KEY WITH NOTHING TO COMPLETE IS A NO-OP
+                    # (UX review round 1, U1) — the open-list twin of the
+                    # latched-Esc guard below, and the same defect class: with
+                    # zero matches the branches above do not fire and Tab fell
+                    # through to ``TextArea``, inserting four spaces INTO the
+                    # query (`/model -` became `/model -    `) while the footer
+                    # still invited finishing the word. The miss state is not
+                    # exotic — it is where a user types a model they cannot yet
+                    # see, and where the feature's own primary path (finish the
+                    # word, then Enter) lives, so the first Tab there must not
+                    # edit the command. Tab ONLY: Enter still submits, because
+                    # with no row to act on the buffer is a complete command the
+                    # user means to run (`/model --all` is exactly this shape),
+                    # and swallowing Enter would strand it.
+                    event.stop()
+                    event.prevent_default()
+                    return
         if key == "tab" and self._latched_picker_at_caret():
             # A COMPLETION KEY WITH A LATCHED ESC IS A NO-OP, not a tab (UX
             # review round 3, U13). Esc hides the list but leaves the token in

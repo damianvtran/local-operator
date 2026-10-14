@@ -100,7 +100,6 @@ from local_operator.harness.secret_sinks import refusal_text as _secret_sink_ref
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
     configured_effort_tiers,
-    depth_closed_the_tier_choice,
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
@@ -110,6 +109,7 @@ from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    QUIET_TURN_KEY,
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
@@ -169,9 +169,12 @@ from local_operator.redaction_shapes import (
     stream_hold_window,
 )
 from local_operator.scratchpad import (
+    SCRATCHPAD_BUDGET_SCAN_ENTRIES,
+    SCRATCHPAD_ELSEWHERE_SHORT,
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
+    SCRATCHPAD_TOTAL_BUDGET_BYTES,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadContentError,
     ScratchpadPathError,
@@ -180,6 +183,8 @@ from local_operator.scratchpad import (
     parse_scratchpad_url,
     scratchpad_dir_of,
     scratchpad_env_injection,
+    scratchpad_footprint,
+    scratchpad_refusal,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
@@ -4056,7 +4061,13 @@ async def execute_bash(
         temp = confinement.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
-    env = shell_env.child_environment(injections=injections)
+    env = shell_env.child_environment(
+        # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
+        # the model's own command must not read ambient credentials out of its
+        # environment. Ordinary sessions keep the process's configured policy.
+        shell_env.policy_for_confinement(None if confinement is None else confinement.root),
+        injections=injections,
+    )
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
@@ -4801,6 +4812,21 @@ async def execute_bash(
         # whose completion auto-delivers when the session is idle. A REAL
         # abort (Ctrl+C, jobs cancel) still kills: that is a stop, not a
         # redirect.
+        if context is not None and context.monitor_check:
+            # EXCEPT a monitor check: it is UNATTENDED, so no steer may
+            # interrupt it and a cancel here is teardown or the scheduler's
+            # deadline. The detach branch below cannot tell those from a
+            # steer and would return a "job … steering interrupted" NOTICE
+            # as the call's result — the scheduler records it as the check's
+            # OUTPUT and adopts it as the diff baseline (measured live: m28's
+            # post-restart delta ran against exactly that notice text), and
+            # the detached command outlives the check with no consumer. Kill
+            # and let the cancel propagate: the check path turns a deadline
+            # into a failed check and a teardown into a cancelled task,
+            # never into output.
+            _kill()
+            _reap_synchronously()
+            raise
         if signal is not None and signal.aborted:
             _kill()
             raise
@@ -5036,10 +5062,19 @@ async def execute_bash(
     if scratch:
         parts.insert(insert_at, scratch)
         insert_at += 1
-    # The missing-tool advisory rides the same head window and RANKS BELOW the two
-    # above by inclusion only, not by importance: a secret already in the
-    # transcript outranks it, the scratch nudge is a destination for a file that
-    # was just written, and this one is a next-step. On the ordinary command it
+    # The pad audit rides the same head window, ranked below the scratch nudge:
+    # the nudge is a destination for a file that was just written, while this
+    # line reports the pad state a command that NAMED the pad left behind (see
+    # ``_bash_pad_write_check``). It costs nothing when it does not fire, which
+    # is the ordinary command.
+    pad_write = _bash_pad_write_check(params.command, context)
+    if pad_write:
+        parts.insert(insert_at, pad_write)
+        insert_at += 1
+    # The missing-tool advisory rides the same head window and RANKS BELOW the
+    # advisories above by inclusion only, not by importance: a secret already in
+    # the transcript outranks it, the scratch nudge is a destination for a file
+    # that was just written, and this one is a next-step. On the ordinary command it
     # costs one empty-string check, because the trigger is a shell's own line in
     # stderr and nothing else.
     #
@@ -5494,6 +5529,130 @@ def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
         )
         return "\n".join(head_lines)
     return ""
+
+
+#: How many ancestors :func:`_internal_url_for_path` may climb looking for a
+#: ``SKILL.md``/``GUIDE.md`` body (R5). The resource layout is shallow
+#: (``<root>/<name>/...``, grouped libraries add a level or two); sixteen
+#: covers every real layout with margin while bounding the per-read stat
+#: cost and the stray-ancestor shaping surface. See that function's docstring.
+_INTERNAL_URL_ANCESTOR_LIMIT = 16
+
+
+def _internal_url_for_path(path: Path) -> str | None:
+    """The ``skill://``/``guide://`` URL a filesystem path IS, or ``None``.
+
+    WHY THIS EXISTS (Fix A, measured 2026-10): the internal-URL branch shapes
+    an 82 KB skill to ~7 KB (head + complete heading outline), but the same
+    bytes reached by their on-disk path bypassed shaping entirely. The file
+    path is the instinctive spelling — transcripts show agents reading
+    ``~/.claude/skills/<name>/SKILL.md`` directly after a shaped
+    ``skill://`` read, paying the 8 KiB clamp instead of the outline and,
+    worse, losing the outline's guarantee that every operative heading stays
+    visible. Deriving the URL here lets the filesystem branch reuse the
+    internal shape instead of growing a second one.
+
+    The name comes from the body file's own frontmatter (``name:``) when it
+    declares one, falling back to the resource directory name — the same
+    fallback discovery uses. An ancestor walk bounded to
+    :data:`_INTERNAL_URL_ANCESTOR_LIMIT` levels finds the body file for a
+    reference file; reference files map to ``<url>/<relative path>`` so the
+    shaped footer advertises the same expansion the resolver would serve.
+
+    WHY the bound (R5): the resource layout is ``<root>/<name>/...`` — a
+    body file lives in the resource directory itself or a shallow grouping
+    parent, never arbitrarily deep. An unbounded walk to ``/`` would pay two
+    stats per level on every qualifying read and, worse, let a stray
+    ``SKILL.md``/``GUIDE.md`` in any distant ancestor (home dir, repo root)
+    silently shape — and skill/guide-exempt — an unrelated ``.md`` read
+    beneath it. Sixteen levels covers grouped libraries
+    (``<root>/<group>/<name>/references/...``) with wide margin while keeping
+    that stray-ancestor surface small; it does not eliminate it, so callers
+    must not treat a hit as proof of membership — only as the naming the
+    on-disk layout claims.
+
+    WHY case-insensitive matching (R3): detection folds case, so the body
+    file actually FOUND on disk (its real path, exactly as listed) is the
+    file whose frontmatter is read. Reconstructing a name — the old
+    ``body_file.upper()`` — opens ``SKILL.MD`` for an on-disk ``skill.md``:
+    that resolves only on case-insensitive filesystems and silently loses
+    the declared ``name:`` (and, for a reference, the whole resource) on
+    case-sensitive ones such as Linux CI. Ancestor probing is likewise
+    case-insensitive, listing each ancestor once instead of probing
+    exact-case names.
+
+    CONSTRAINT: this only NAMES the document for shaping and for the
+    pruning exemption (``skill://`` and ``guide://`` are both exempt — see
+    ``compaction/pruning.py:_is_prunable``). The result still carries
+    ``details['path']`` (the real path compaction supersedes on);
+    ``url`` is additive.
+    """
+    name_folded = path.name.casefold()
+    body_kind = (
+        "skill" if name_folded == "skill.md" else "guide" if name_folded == "guide.md" else None
+    )
+    body_path: Path | None = None
+    resource_dir: Path | None = None
+    scheme: str | None = None
+    if body_kind is not None:
+        # The file itself is the body: read ITS frontmatter, by its real path.
+        body_path = path
+        resource_dir = path.parent
+        scheme = body_kind
+    else:
+        # A reference file: its resource is the nearest ancestor holding a
+        # body file. One directory listing per level (bounded above) finds
+        # either kind case-insensitively and yields the body's real path.
+        for ancestor in list(path.parents)[:_INTERNAL_URL_ANCESTOR_LIMIT]:
+            try:
+                entries = list(ancestor.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                folded = entry.name.casefold()
+                if folded not in ("skill.md", "guide.md"):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                body_path = entry
+                resource_dir = ancestor
+                scheme = "skill" if folded == "skill.md" else "guide"
+                break
+            if body_path is not None:
+                break
+        if body_path is None or resource_dir is None or scheme is None:
+            return None
+    assert body_path is not None and resource_dir is not None and scheme is not None
+    declared: str | None = None
+    try:
+        head = body_path.read_bytes()[:4096].decode("utf-8", errors="replace")
+    except OSError:
+        head = ""
+    if head.startswith("---"):
+        for line in head.splitlines()[1:]:
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "name" and value.strip():
+                declared = value.strip().strip('"').strip("'")
+                break
+    resource_name = declared or resource_dir.name
+    if not resource_name:
+        return None
+    url = f"{scheme}://{resource_name}"
+    if path.parent != resource_dir:
+        try:
+            url += "/" + path.relative_to(resource_dir).as_posix()
+        except ValueError:
+            return None
+    elif body_kind is None:
+        # A sibling of the body file (same directory, different file): it is
+        # part of the resource but is not the body itself.
+        url += f"/{path.name}"
+    return url
 
 
 def _shape_internal_document(
@@ -6943,17 +7102,22 @@ def _temp_scratch_line(
     the clause is visible only when the whole line fits anyway.
 
     KNOWN LIMIT, recorded here because this is the one builder all the advisories
-    share (design review round 1, D1). The line is rendered in a TUI card whose
-    lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
-    behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
-    so the REMEDY is what gets clipped below ~52 columns, and the whole remedy
-    needs ~73. That bound is not this line's: the ``write``/``edit`` line has the
-    same prologue, so the identical edge already applied to it before this
-    change, which is why the wording (approved in #1374, with a cell-pinning
-    test) is not re-opened for it. Two things keep it a display matter only: the
-    MODEL is unaffected — the tool result carries the full line, and the card
-    clips a rendering of it, never the text the model reads — and the fix, if
-    the edge ever matters, is a shorter prologue rather than a shorter remedy.
+    share (design review round 1, D1; refreshed when the card's carve-out
+    landed, review round 2). The line is rendered in a TUI card whose lane body
+    budget is ``width - 8`` cells, and the remedy starts at cell 38 — behind the
+    fixed ``[scratch] `` tag and ``Your own scratch belongs in `` — so the
+    REMEDY is what used to get clipped below ~52 columns, and the whole remedy
+    needs ~73. The carve-out retired that cut for this family: a ``[scratch]``-led
+    line now WRAPS under the card's advisory budget — ``REASON_MAX_ROWS`` rows
+    and ``REASON_MAX_CELLS`` cells, the reason block's own pair, measured at
+    three rows for the shipped nudge sentence at 80 columns — and below the
+    width where the budget binds the card ends the block with its ``… N more
+    lines`` marker, never a mid-sentence crop. Two things keep any remaining
+    narrow-width case a display matter only: the MODEL is unaffected — the tool
+    result carries the full line, and the card paints a rendering of it, never
+    the text the model reads — and the fix, if the edge ever matters, is a
+    shorter prologue rather than a shorter remedy. The wording itself (approved
+    in #1374, with a cell-pinning test) is not re-opened by any of this.
     """
     subject = (
         f"writing directly under {resolved} puts scratch in {trap}"
@@ -7391,14 +7555,320 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
     return ""
 
 
-def _bash_created_paths(command: str) -> Iterator[str]:
-    """The candidate paths ``command`` creates, in the order the shell meets them.
+def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
+    """One ``[scratch]`` line when ``command`` NAMED the pad and left it in a
+    state its write tools refuse, else ``""``.
+
+    The shell is the channel the pad's content policy could not reach: ``write``
+    and ``edit`` refuse this material BEFORE it lands, while a command's bytes
+    are already on disk by the time any check can run — so this channel reports
+    AFTER the fact, appends ONE line to the tool result, and never undoes. It
+    exists because the measured bypass was the loud one: pads taken from
+    kilobytes to multiple gigabytes by ``cp``/package builds that nothing on the
+    result ever mentioned.
+
+    Contract, all of it load-bearing:
+
+    * THE MENTION GATE is the no-latency guarantee. This runs on every bash
+      result, so a command that does not NAME the pad returns ``""`` after
+      pure string work — ZERO filesystem calls. ``_command_names_pad`` owns the
+      spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
+      path, and the home spellings (``~/…``/``$HOME/…``/``${HOME}/…``) the
+      scan has always resolved but the gate could not reach — review round 1,
+      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. A
+      command that reaches the pad through an alias spelling of the store
+      (``/tmp`` against ``/private/tmp``) is a MISS, deliberately: resolving
+      the alias here would cost a syscall on every command to serve a spelling
+      nothing writes.
+    * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
+      parts are a refused segment or whose leaf carries a refused suffix gets
+      the sentence the write tools raise, ``[scratch]``-tagged (see
+      ``scratchpad.scratchpad_refusal``). The leaf is judged by the SUFFIX rule
+      and never the segment rule for the reason the write path judges the same
+      way: a token at a leaf is a file TYPE (``build.log``, ``out.json`` are
+      ordinary scratch), so segment-shaped leaves stay allowed — which also
+      means a bare ``mkdir $LOCAL_OPERATOR_SCRATCHPAD/node_modules`` draws no
+      line, because nothing distinguishes that target from a file of the same
+      name, and the file is allowed.
+    * A COPY/MOVE whose destination is a DIRECTORY creates ``dst/basename(src)``
+      — a name no operand spells — so each source's derived child is judged by
+      the same parent-segment + leaf-suffix rule before the budget arm is
+      reached: ``cp x.tar.gz "$PAD/"`` is the ordinary way to copy into the pad
+      and was the whole silent class before (review round 1, F2). The
+      derivation runs when the destination resolves to the pad root or an
+      existing directory — a trailing-slash destination that does NOT exist is
+      skipped because the copy failed there and created nothing — and a
+      derived child that is itself a refused SEGMENT-shaped leaf stays silent
+      exactly like the bare ``mkdir`` above: a copied tree and a file of the
+      same name are indistinguishable, and the file is allowed. The derivation
+      judges the NAME the copy would create, not what the copy did create
+      (review round 2, R2-3): source existence is deliberately not checked — a
+      stat per source on every pad-naming command is latency the mention gate
+      exists to avoid — so a copy that FAILED (a missing source, an unmatched
+      glob) still reports the refused name it would have created; the GUIDE
+      says the same in one clause. A destination that cannot be judged a
+      directory, or a derived child that cannot be resolved (EACCES,
+      ENAMETOOLONG, a symlink loop on 3.12/3.13), is SKIPPED: the MISS
+      direction, never a crash and never a line about an unjudgeable name
+      (review round 2, R2-1).
+    * BUDGET arm: ONE bounded walk (``scratchpad.scratchpad_footprint``) — over
+      budget or past the entry cap, one line. At most ONE line from THIS AUDIT
+      per result: a shape hit returns without walking, because it attributes
+      the change to THIS command while the budget line reports pad state. A
+      result can still carry a SECOND ``[scratch]`` line — the temp/scratch-dir
+      nudge above is a different advisory with its own single-line rule and
+      its own remedy, and a command that creates under a temp root AND
+      overfills the pad earns both (measured; kept, because collapsing them
+      would have to pick one of two traps to name).
+    * NOT a ``background: true`` call — the deliberate gap ``_bash_scratch_hint``
+      documents one level up: a detached command settles through
+      ``_detach_to_job``, whose job result is assembled on its own path and
+      never reaches the advisory insert below. Inherited unchanged.
+    """
+    if not command:
+        return ""
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return ""
+    if not _command_names_pad(command, pad):
+        return ""
+    for candidate, sources in _bash_created_entries(command):
+        target = _pad_target(candidate, pad)
+        if target is None:
+            continue
+        clause = scratchpad_refusal(target, pad)
+        if clause is not None:
+            return f"[scratch] {clause}"
+        if not sources:
+            continue
+        try:
+            directory = target == pad or target.is_dir()
+        except (OSError, RuntimeError):
+            # A destination this scan cannot judge is a MISS, never a crash:
+            # ``is_dir`` re-raises PermissionError/ENAMETOOLONG on 3.12/3.13
+            # (it returns False on 3.14), and an uncaught raise would settle
+            # the whole bash result as a tool failure — losing the command's
+            # exit code and streams over an advisory that exists to REPORT
+            # (review round 2, R2-1).
+            continue
+        if not directory:
+            continue
+        for source in sources:
+            name = Path(source).name
+            if name in ("", ".", ".."):
+                continue
+            try:
+                derived = (target / name).resolve()
+            except (OSError, RuntimeError):
+                # The same guard for the derived child: ``resolve`` raises
+                # RuntimeError for a symlink loop on 3.12/3.13, and an
+                # unreadable component raises OSError — skip that source, the
+                # MISS direction, never a line about a name it could not read
+                # (review round 2, R2-1).
+                continue
+            clause = scratchpad_refusal(derived, pad)
+            if clause is not None:
+                return f"[scratch] {clause}"
+    return _pad_budget_line(pad)
+
+
+def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
+    """The pad audit for one ``eval`` cell: ``_pad_budget_line`` when ``code``
+    names the pad, else ``""``.
+
+    BUDGET arm only, and that is the whole difference from the shell: Python
+    creations cannot be attributed the way a command's creating positions can,
+    and a line about a name the cell may never have touched would be worse than
+    the miss. What IS reportable is pad state, and this channel needs it most —
+    a cell writes bytes through plain Python (``open``, ``shutil``, a library)
+    with no tool-level refusal anywhere in the path.
+
+    The gate mirrors ``_bash_pad_write_check``'s no-latency guarantee: the
+    pad's exported variable NAME (``LOCAL_OPERATOR_SCRATCHPAD``, bare — Python
+    reaches the value through ``os.environ``/``getenv`` string spellings, not a
+    shell's ``$`` expansion) or the literal pad path, and nothing else, so a
+    cell that never mentions the pad costs ZERO filesystem calls.
+
+    The background path is the same deliberate gap the shell channel has:
+    ``_run_in_background`` settles through ``_background_summary``, which
+    assembles its own result text and never reaches ``_build_render_result``,
+    so a detached cell gets no line. The CRASH/ABORT/TIMEOUT returns share the
+    shape for the same reason (review round 1, F5): those three return
+    ``_lost_state_error``/``_error`` for a kernel killed mid-run, a fatal
+    signal or a timeout BEFORE ``_render`` runs, so a cell that over-filled the
+    pad and then crashed, timed out or was aborted carries no line either.
+    Kept as a miss rather than routed through three more return paths: those
+    results already LEAD the body with the state loss or the crash, a pad line
+    beside them would rank below both, and one next-to-nothing line for the one
+    cell shape that least needs pad advice is not worth three more call sites
+    to keep honest.
+    """
+    if not code:
+        return ""
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return ""
+    if SCRATCHPAD_PATH_ENV not in code and str(pad) not in code:
+        return ""
+    return _pad_budget_line(pad)
+
+
+#: One MiB in bytes, for the budget line's DISPLAY only. The policy thresholds
+#: stay exact bytes at the walk's own comparisons; only the rendered sentence is
+#: scaled, because ``268,435,456`` costs 13 cells of a card row where ``256 MiB``
+#: costs 7 — cells the remedy needs inside the crop (design review round 1, D1/D2).
+_PAD_MIB = 1024 * 1024
+
+
+def _pad_size_text(value: int, *, attributive: bool = False) -> str:
+    """``value`` in the unit its reader parses without dividing.
+
+    MiB once the value is at least one — FLOORED, so a ``≥`` claim never
+    overstates the walk's lower bound — and bytes below that, which is where a
+    test-scale pad lives and where ``0 MiB`` would be a worse sentence than the
+    number itself. ``attributive`` spells the bytes arm as the noun modifier
+    (``8,191-byte``) that "over its ___ budget" needs; the MiB arm needs no
+    separator (``256 MiB budget``).
+    """
+    if value >= _PAD_MIB:
+        return f"{value // _PAD_MIB:,} MiB"
+    return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+
+
+def _pad_budget_line(pad: Path) -> str:
+    """The ``[scratch]`` line when ``pad`` is over its byte budget or its
+    entry cap, else ``""`` — the BUDGET arm every pad-audit channel shares.
+
+    One bounded walk, and the line carries the write path's own thresholds (the
+    walk reads the same constants and the same comparisons, so the sentence and
+    the refusal cannot disagree about when the policy bites) — but NOT the
+    refusal's long tail. This line's audience is a TUI card that crops per line
+    at the frame's measure, so the remedy is :data:`SCRATCHPAD_ELSEWHERE_SHORT`,
+    and it starts inside the first standard width rather than past it (design
+    review round 1, D1; the measured prologue is 65 cells, not 143). The claim
+    about writes is the write path's ACTUAL rule: a write is refused when it
+    would leave the pad over the budget, so a shrinking overwrite that brings
+    it back under is still accepted — "writes that add are refused" is the
+    precise half, where the earlier "refuse further writes" overstated it
+    (review round 1, F3).
+    """
+    held, over_budget, too_wide = scratchpad_footprint(pad)
+    if over_budget:
+        return (
+            f"[scratch] The pad now holds ≥{_pad_size_text(held)}, over its "
+            f"{_pad_size_text(SCRATCHPAD_TOTAL_BUDGET_BYTES, attributive=True)} budget — "
+            f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
+        )
+    if too_wide:
+        return (
+            f"[scratch] The pad holds {SCRATCHPAD_BUDGET_SCAN_ENTRIES:,}+ entries — "
+            f"a tree rather than a pad; {SCRATCHPAD_ELSEWHERE_SHORT}."
+        )
+    return ""
+
+
+def _expand_scratchpad_spellings(text: str, pad: Path) -> str:
+    """``text`` with the shell's two ``$LOCAL_OPERATOR_SCRATCHPAD`` spellings
+    expanded to the pad path.
+
+    Mirrors :func:`_expand_tmpdir_spellings` — the ``${…}`` spelling first, the
+    ordering that helper's comment states — and exists so the gate and the shape
+    arm resolve the COMMON spelling of a pad target
+    (``$LOCAL_OPERATOR_SCRATCHPAD/ui-copy``) exactly as its absolute spelling.
+    Pure string work: this is one half of the no-latency gate.
+    """
+    for spelling in (f"${{{SCRATCHPAD_PATH_ENV}}}", f"${SCRATCHPAD_PATH_ENV}"):
+        text = text.replace(spelling, str(pad))
+    return text
+
+
+def _command_names_pad(command: str, pad: Path) -> bool:
+    """Whether ``command`` NAMES the pad, in any spelling the scan accepts.
+
+    Pure string work, because this is the gate half of
+    ``_bash_pad_write_check``'s no-latency guarantee: the check runs on every
+    bash result, so a command that does not name the pad must return after
+    string compares and ZERO filesystem calls. Four spelling families, each of
+    which the scan downstream resolves to the same target: the two
+    ``$LOCAL_OPERATOR_SCRATCHPAD`` forms and the literal path
+    (:func:`_expand_scratchpad_spellings`), plus the shell's HOME spellings —
+    ``~/…``, ``$HOME/…``, ``${HOME}/…`` — which :func:`_pad_target` has always
+    expanded but the gate could not see, so the same target fired spelled
+    absolutely and went silent spelled through the home directory (review
+    round 1, F1: the same asymmetry the temp nudge's v0.62.3 fix closed for its
+    arm).
+
+    The home spelling is matched as a SUBSTRING of the raw command, the way
+    ``_expand_tmpdir_spellings`` matches ``$TMPDIR``: quoting is not visible
+    here (``'~/x'`` is a literal name to the shell and counts anyway — the same
+    eager edge the nudge documents), and a ``~`` in a non-leading position can
+    at worst trigger one scan for a command that likely spelled its way toward
+    the pad. It can never make a pad-naming command quieter, which is the
+    direction that would hide a write.
+    """
+    text = _expand_scratchpad_spellings(command, pad)
+    if str(pad) in text:
+        return True
+    try:
+        relative = pad.relative_to(Path.home())
+    except (RuntimeError, ValueError):
+        # No home to name, or a store outside it: the spellings that need one
+        # cannot reach THIS pad, and the families above have already answered.
+        return False
+    if not relative.parts:
+        return False
+    tail = relative.as_posix()
+    return any(f"{spelling}{tail}" in text for spelling in ("~/", "$HOME/", "${HOME}/"))
+
+
+def _pad_target(candidate: str, pad: Path) -> Path | None:
+    """``candidate`` expanded and resolved when it can NAME a path, else ``None``.
+
+    The pad audit's naming step, the sibling of :func:`_temp_root_target` and
+    :func:`_scratch_dir_target` and sharing their refusals: a relative path and
+    anything carrying a scheme are not guessed at (this scan has no working
+    directory), and the two pad spellings, ``$TMPDIR`` and a leading ``~`` are
+    expanded first so the shell's ordinary way of writing the target reaches the
+    scan as its absolute spelling does. Whether the path is INSIDE the pad is
+    asked by ``scratchpad.scratchpad_refusal`` (which owns the symlinked-root
+    second attempt), so this helper stays pure spelling and its name promises
+    nothing about containment.
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``:
+    the caller skips the candidate, a MISS, never a crash (review round 2,
+    R2-1).
+    """
+    text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
+    text = _expand_scratchpad_spellings(text, pad)
+    if not text or "://" in text:
+        return None
+    if not text.startswith("/"):
+        return None
+    try:
+        return Path(text.rstrip("/") or "/").resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
+        return None
+
+
+def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """The candidate paths ``command`` creates, in the order the shell meets
+    them, each with the SOURCE operands a copy or move reads from.
 
     A structural walk over the token stream rather than a pattern match, because
     "is this token CREATED" is a fact about its position — an operand of a
     creating command, or a redirect target — and not about how the path is
     spelled. Quoted and backslash-escaped text has already been dequoted by the
     scanner, so ``> "/tmp/x.log"`` yields the same token as ``> /tmp/x.log``.
+
+    The second element is empty for every creation that is not a copy: ``cp``
+    and ``mv`` create ONLY their destination operand, but the name they create
+    can be the SOURCE's basename UNDER a directory destination (``cp x "$PAD/"``
+    creates ``$PAD/x``), so the pad audit needs the sources beside the
+    destination (review round 1, F2). ``_bash_created_paths`` hands the nudge
+    the same candidate stream it always had — the temp arm's targets cannot be
+    derived from a source this way — so the richer shape exists for the pad
+    audit alone.
     """
     tokens = _bash_tokens(_strip_heredoc_bodies(command))
     index = 0
@@ -7408,7 +7878,7 @@ def _bash_created_paths(command: str) -> Iterator[str]:
         index += 1
         if kind == "redir":
             if index < len(tokens) and tokens[index][0] == "word":
-                yield tokens[index][1]
+                yield tokens[index][1], ()
                 index += 1
             continue
         if kind == "op":
@@ -7436,11 +7906,28 @@ def _bash_created_paths(command: str) -> Iterator[str]:
                 operands.append(tokens[index][1])
             index += 1
         if mode == "last":
-            operands = operands[-1:]
+            if operands:
+                yield operands[-1], tuple(operands[:-1])
         elif mode == "template":
-            operands = [operand for operand in operands if "X" in operand]
-        yield from operands
+            for operand in operands:
+                if "X" in operand:
+                    yield operand, ()
+        else:
+            for operand in operands:
+                yield operand, ()
         at_command = False
+
+
+def _bash_created_paths(command: str) -> Iterator[str]:
+    """The candidate paths alone — the nudge's view of
+    :func:`_bash_created_entries`.
+
+    Kept as its own name because the temp arm's contract has always been "the
+    paths to scan", and neither of its predicates reads a destination/source
+    split; the walk and its ordering rules live with the entries.
+    """
+    for candidate, _sources in _bash_created_entries(command):
+        yield candidate
 
 
 def _skip_prefix_operands(
@@ -7558,6 +8045,11 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     What is left alone is a RELATIVE path and anything carrying a scheme: neither
     names a temp-root target, and the scan has no cwd to resolve the relative one
     against.
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``:
+    the caller moves on, a MISS, never a crash of the result being nudged
+    (review round 2, R2-1).
     """
     text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
@@ -7566,7 +8058,7 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
         return None
     try:
         resolved = Path(text.rstrip("/") or "/").resolve()
-    except OSError:  # pragma: no cover - a path that cannot be resolved
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
         return None
     return resolved if resolved.parent in roots else None
 
@@ -7595,6 +8087,11 @@ def _scratch_dir_target(
     (an absolute path handed to a subagent) is the one they both catch. The GUIDE
     states this, because it is the copy an agent reads before choosing where to
     write (round 1, R4).
+
+    A path the OS cannot resolve — EACCES, ENAMETOOLONG, or a symlink loop
+    (``resolve`` raises ``RuntimeError`` for a loop on 3.12/3.13) — is ``None``
+    for the same reason its sibling refuses one: the caller moves on, a MISS,
+    never a crash (review round 2, R2-1).
     """
     text = _expand_home_spellings(_expand_tmpdir_spellings(candidate.strip()))
     if not text or "://" in text:
@@ -7603,7 +8100,7 @@ def _scratch_dir_target(
         return None
     try:
         resolved = Path(text.rstrip("/") or "/").resolve()
-    except OSError:  # pragma: no cover - a path that cannot be resolved
+    except (OSError, RuntimeError):  # pragma: no cover - a path the OS cannot resolve
         return None
     return resolved if _in_scratch_named_dir(resolved, scratchpad_root, temp_roots) else None
 
@@ -8172,6 +8669,29 @@ async def _read_path(
     # full pass to break lines, and the same loop renders the TUI. Keep the
     # source beside the lines for the structural-summary path below.
     text, lines = await asyncio.to_thread(_decode_text_lines, data)
+
+    # A skill/guide file read by its ON-DISK path gets the internal shape,
+    # not the plain 8 KiB clamp (Fix A; see _internal_url_for_path). Only a
+    # whole-file, non-raw read qualifies — a range or raw=true is the
+    # caller explicitly asking for exact bytes, and shaping it would break
+    # the expansion calls the shaped footer itself advertises. The shaped
+    # body spills the full text, so nothing becomes unreachable: the footer
+    # names a range into the spill handle, exactly like a skill:// read.
+    if not params.range and not params.raw:
+        internal_url = _internal_url_for_path(path)
+        if internal_url is not None:
+            body, spill_details = _shape_internal_document(text, internal_url, context)
+            if spill_details is not None or body != text:
+                return _text(
+                    tool_call_id,
+                    "read",
+                    body,
+                    details={
+                        "path": str(path),
+                        "url": internal_url,
+                        **(spill_details or {}),
+                    },
+                )
 
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
@@ -9325,6 +9845,9 @@ async def execute_edit(
     is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
@@ -9522,7 +10045,13 @@ def _edit_file_result_locked(
     if current != original:
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    return total_replacements, _diff_details(str(path), original, current)
+    details = _diff_details(str(path), original, current)
+    introduced = _marker_introduced(original, current)
+    if introduced:
+        # Carried in ``details`` (the file tools' existing structured channel) so the
+        # thread function keeps its return shape; ``execute_edit`` turns it into the note.
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return total_replacements, details
 
 
 def build_edit_tool() -> AgentTool:
@@ -9601,6 +10130,11 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
+#: Scratch key on the edit/write ``details`` dict carrying the marker-introduction count
+#: from the worker thread to the coroutine that words the receipt. Popped before the
+#: result is built, so it never reaches the persisted details or a renderer.
+_MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
+
 
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """The write/edit tool-result details: line counts + a rendered unified diff.
@@ -9625,6 +10159,50 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if len(diff) > _DIFF_DETAILS_CAP_LINES:
         diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
     return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+
+
+def _marker_introduced(before: str, after: str) -> int:
+    """How many MORE redaction markers ``after`` holds than ``before`` did.
+
+    **Why this exists (2026-10-09, session ``565245718d90``).** ``edit`` and ``write``
+    write exactly the bytes they are handed, and that is an invariant, not a gap: the
+    harness must never alter what a tool writes. But the model only ever SEES the masked
+    form of a symbol the credential shapes misjudged (tool results, and its own earlier
+    calls, which history stores scrubbed), so a model that copies what it saw hands the
+    writer the MARKER and the writer faithfully puts it in source. The shape rule that
+    manufactured those markers is fixed at the source; this is the net under it for the
+    next misjudgement, and the only layer that can see both halves: the file before, and
+    the text about to replace it.
+
+    A COUNT comparison, not a membership test, because a file may legitimately contain
+    the marker already (this module's own tests, a transcript fixture, documentation of
+    the redactor) and an edit that merely leaves it in place, or removes one, introduced
+    nothing. The result is advisory only: the caller appends a note and never refuses or
+    rewrites, because a document that is ABOUT the marker is a legitimate write.
+
+    **Net-zero swaps are invisible, by construction.** An edit that removes one marker
+    and adds another (a fixture's legitimate marker replaced by a copied mask) leaves the
+    count unchanged and so says nothing. Telling the two apart needs the positions of the
+    markers, not their number, and the note is an advisory net under the root fix rather
+    than a guarantee; the cheap, stable signal is kept over a fragile one.
+    """
+    return max(0, after.count(REDACTION_MARKER) - before.count(REDACTION_MARKER))
+
+
+def _marker_introduced_note(count: int) -> str:
+    """The line appended to an edit/write receipt when it put the marker into a file.
+
+    Phrased for the model that wrote it: it cannot tell the mask from source text, which
+    is the whole defect. It is told what the string is, that the intended text is
+    unknown to the harness, and what to do; nothing is claimed about WHICH symbol it was
+    because the harness cannot know (the real text is exactly what the mask hid).
+    """
+    return (
+        f"Note: this write put {count} redaction marker(s) ({REDACTION_MARKER}) into the file. "
+        "That string is the harness's mask for text it hid from you, not source: if you meant "
+        "to write the original text, recover it (git diff, the original file) and edit it "
+        "back; if the marker is intentional (docs, a fixture), ignore this note."
+    )
 
 
 @_guard("write")
@@ -9699,6 +10277,9 @@ async def execute_write(
         " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
     )
     text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
+    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
+    if introduced:
+        text = f"{text}\n{_marker_introduced_note(introduced)}"
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
@@ -9734,7 +10315,11 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return existed, _diff_details(str(path), previous, content)
+    details = _diff_details(str(path), previous, content)
+    introduced = _marker_introduced(previous, content)
+    if introduced:
+        details[_MARKER_INTRODUCED_KEY] = introduced
+    return existed, details
 
 
 def build_write_tool() -> AgentTool:
@@ -10451,11 +11036,11 @@ def _contained(path: Path, confinement: ToolConfinement | None) -> bool:
 
     WHY RESOLUTION AND NOT ``lstat``: a symlink is a name INSIDE the root whose
     target is somewhere else, and every sibling reader (``read``, ``write``,
-    ``edit``, ``grep``, the shell) judges the [redacted] target -- so this must
+    ``edit``, ``grep``, the shell) judges the RESOLVED target -- so this must
     too, or ``glob`` becomes the one reader with a different rule (review
     round 1, R-1: ``linkapp/**/*`` through a root symlink listed 500 of 1335
     entries of the gated apparatus tree; ``linkapp/*`` listed its three top
-    directories). Fail-closed: a path that cannot be [redacted] cannot be shown
+    directories). Fail-closed: a path that cannot be resolved cannot be shown
     to be inside. ``confinement is None`` is the free-session default and keeps
     the old behaviour byte for byte.
     """
@@ -11660,11 +12245,25 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
     """Copies of the ``pending`` items for ``session_id`` (``[]`` when there
     are none, or the id is unknown).
 
-    THE single definition of "open" that the session's continuation guardrail
-    (``Session._todo_continuation``) fires on, so the tool and the guardrail
-    cannot disagree about whether a turn may end. ``blocked`` is excluded on
-    purpose: it is the escape hatch that lets a model stop honestly instead of
-    marking work done it did not do, and nudging it would defeat that.
+    The pending SUBSET of the work the session's continuation guardrail
+    (``Session._todo_continuation``) reconciles at the yield boundary: work that
+    must not be silently left running, because a model that stops with it in
+    hand has neither done it nor said why not. THE single definition of
+    "pending", so the tool and the guardrail cannot disagree about what still
+    demands work.
+
+    ``blocked`` is deliberately NOT here, and that is not an exemption from the
+    guardrail any more: blocked work is unfinished and is reconciled at the same
+    boundary through :func:`blocked_todos`, which the guardrail ALSO draws on.
+    The split is about what the two groups demand. A pending item may not be left
+    running, so the guardrail nudges the model back to work. A blocked item may
+    legitimately end a turn — it is the escape hatch that lets a model stop
+    honestly instead of marking work done it did not do — but stopping on it is
+    now ACCOUNTED for rather than merely permitted: the model must say whether
+    the condition still holds and that something is watching it. Keeping the two
+    groups in separate functions is what lets the reminder state the two
+    obligations separately; folding blocked into this function would restore the
+    old behaviour of pushing a blocked model to invent progress.
 
     Mirrors only the SESSION-ID branch of :func:`_todo_store_and_key`. A host
     that attaches its own store to ``ToolContext.todos`` (harness/types.py:449;
@@ -11675,8 +12274,9 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
 
     Pending items are flattened across ALL phases (phase-then-item order): the
     guardrail asks "is there open work?", and a phase boundary does not change
-    the answer. The returned dicts are plain item dicts (no phase key), so
-    ``_todo_reminder_text`` needs no change.
+    the answer. The returned dicts are plain item dicts (no phase key), which is
+    the shape ``_todo_reminder_text`` renders (it takes the blocked list
+    alongside this one and formats each group itself).
     """
     raw = TODO_STORE.get(session_id)
     if not raw:
@@ -11686,6 +12286,42 @@ def open_todos(session_id: str) -> list[dict[str, str]]:
         for phase in _as_phases(raw)
         for item in phase["items"]
         if item.get("status") == "pending"
+    ]
+
+
+def blocked_todos(session_id: str) -> list[dict[str, str]]:
+    """Copies of the ``blocked`` items for ``session_id`` (``[]`` when there
+    are none, or the id is unknown).
+
+    :func:`open_todos`'s mirror — same store branch, same copy semantics, same
+    phase flattening (read its docstring for the host-attached
+    ``ToolContext.todos`` caveat and the plain-item-dict shape) — over the
+    ``blocked`` status instead of ``pending``.
+
+    The second half of the guardrail's work set: ``Session._todo_continuation``
+    reconciles pending AND blocked at the yield boundary. Blocked items are
+    unfinished work parked on a user decision or an external service, and a
+    model that ends a turn on one may still stop honestly — but it must ACCOUNT
+    for it. A blocked item nothing is watching is how a session ended turns for
+    ~14 hours over six parked items while the pending-only guardrail saw an
+    empty list and let every yield stand.
+
+    A separate function rather than a status parameter on :func:`open_todos`
+    because the two feed DIFFERENT obligations in the reminder: pending items
+    are work to resume or resolve, blocked items are conditions to re-check and
+    to arm something for. Keeping them apart is what lets the reminder state the
+    two obligations separately; folding blocked into ``open_todos`` would push a
+    blocked model to invent progress, which is the behaviour that function
+    exists to prevent.
+    """
+    raw = TODO_STORE.get(session_id)
+    if not raw:
+        return []
+    return [
+        dict(item)
+        for phase in _as_phases(raw)
+        for item in phase["items"]
+        if item.get("status") == "blocked"
     ]
 
 
@@ -11750,8 +12386,9 @@ def restore_todos(session_id: str, phases: list[dict[str, Any]]) -> None:
     ]
 
 
-def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
-    """``(phase_name, text, status)`` for EVERY item, phase-then-item order.
+def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str, str], ...]:
+    """``(phase_name, text, status, reason)`` for EVERY item, phase-then-item
+    order.
 
     What the guardrail's no-progress latch compares between two yields. The
     FULL list, not the pending subsequence: an item moving from ``done`` to
@@ -11760,6 +12397,17 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     tuple because with phases a rename or an item moving between phases is also
     movement the model made — a 2-tuple would be blind to it and read a list
     that changed as stuck.
+
+    The REASON rides in for the same reason, one status over: ``block`` on an
+    item that is already blocked rewrites ``reason`` in place and leaves the
+    status alone (``builtin.py``, the ``block`` arm), and the reminder RENDERS
+    that reason as the condition the model is asked to re-check. A latch blind
+    to it would call a re-blocked item unmoved, so ``_todo_reminder_text`` would
+    keep asserting the old condition and ``_live_todo_reminders`` would never
+    expire it — a stale claim the model has no way to correct. ``or ""`` because
+    a missing key and an empty string are the same fact (no reason recorded), and
+    two spellings of one fact must not read as movement; every item that is not
+    blocked therefore contributes ``""``.
 
     CROSS-FILE COUPLING (design §5.3): the arity of this tuple is mirrored by
     ``session.py:_stamped_todo_fingerprint``, which filters the stamped copy to
@@ -11775,7 +12423,12 @@ def todo_fingerprint(session_id: str) -> tuple[tuple[str, str, str], ...]:
     if not raw:
         return ()
     return tuple(
-        (str(phase["name"]), str(item.get("text", "")), str(item.get("status", "pending")))
+        (
+            str(phase["name"]),
+            str(item.get("text", "")),
+            str(item.get("status", "pending")),
+            str(item.get("reason") or ""),
+        )
         for phase in _as_phases(raw)
         for item in phase["items"]
     )
@@ -12201,6 +12854,27 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
     return f"next at {due}{every}{fired}"
 
 
+def _pending_wake_ids(scheduler: WakeSchedulerProtocol) -> frozenset[str]:
+    """The handles the scheduler is holding for a successor, or the empty set.
+
+    A probed OPTIONAL capability (``WakeSchedulerProtocol`` documents it): a host
+    without a live reservation concept simply cannot answer, and "no pending" is
+    the honest reading of that — never a fabricated phase. Failure is swallowed
+    the same way: an unreadable phase must not cost the model its listing.
+    """
+    probe = getattr(scheduler, "pending_ids", None)
+    if not callable(probe):
+        return frozenset()
+    # ``getattr`` erases the capability's type; the ``cast`` names what the probe
+    # returns so ``frozenset(...)`` type-checks. Runtime behaviour is unchanged.
+    probe = cast("Callable[[], Iterable[str]]", probe)
+    try:
+        return frozenset(probe())
+    except Exception:  # noqa: BLE001 — a listing must survive a broken phase probe
+        logger.debug("wake pending_ids probe failed; listing rows as ordinary", exc_info=True)
+        return frozenset()
+
+
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
     # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
     # 5): one shared filter with the panel and the CLI
@@ -12217,7 +12891,19 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
             useless=True,
             details={"useless": True},
         )
-    lines = [f'- {s.id}: "{s.message}" {_wake_due_label(s)}' for s in schedules]
+    # Pending handles render EXPLICITLY, not as an imminent fire. A held row is a
+    # schedule this runtime still owns for a successor to run (a departing fire
+    # reserved its occurrence); the timer here will NOT fire it, so "next at
+    # <soon>" would promise a delivery that is not coming from this list. The
+    # capability is probed, not required: a scheduler that cannot report a live
+    # reservation (a snapshot facade, a reduced host) yields the empty set and
+    # every row reads as ordinary.
+    pending = _pending_wake_ids(scheduler)
+    lines = [
+        f'- {s.id}: "{s.message}" '
+        + ("awaiting runtime handover" if s.id in pending else _wake_due_label(s))
+        for s in schedules
+    ]
     return _text(tool_call_id, "wake", f"{len(schedules)} wake schedule(s):\n" + "\n".join(lines))
 
 
@@ -13037,6 +13723,10 @@ class SendParams(BaseModel):
         default=None,
         description="The message body; it lands in the peer's transcript as an inbound card.",
     )
+    repeat: bool = Field(
+        default=False,
+        description=("Repeat a confirmed same-turn send only on explicit user request."),
+    )
     model: str | None = Field(
         default=None,
         description=(
@@ -13464,6 +14154,12 @@ async def _execute_send_peer(
     return _text(tool_call_id, "send", text, details=details)
 
 
+# A pathological attention turn must not retain every unique payload forever.
+# Capacity/size overflow falls back to actual sends, never a delivery refusal.
+_CONFIRMED_SEND_CACHE_MAX_ENTRIES = 64
+_CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES = 16 * 1024
+
+
 @_guard("send")
 async def execute_send(
     tool_call_id: str,
@@ -13672,9 +14368,51 @@ async def execute_send(
         return _error(tool_call_id, "send", body_error)
 
     mode = "steer" if params.now else "mailbox"
+    target_sid = record.session_id if record is not None else cold_session_id
+    receipt_key = None
+    if (
+        context is not None
+        and context.send_turn_id
+        and context.session_id.strip()
+        and target_sid.strip()
+        and not params.repeat
+    ):
+        # Resolve WHO before lookup: raw names/pids can refer to different
+        # sessions. Exact body and effective mode are intent, not fuzzy matches.
+        # Patience is also an act; changing it must not silently reuse an old wait.
+        receipt_key = (
+            context.send_turn_id,
+            context.session_id or "",
+            target_sid,
+            message,
+            mode,
+            bool(params.wake) if not params.now else False,
+            patience_ms,
+        )
+        previous = context.confirmed_send_receipts.get(receipt_key)
+        if previous is not None:
+            return _text(
+                tool_call_id,
+                "send",
+                "duplicate suppressed — no new delivery, wake or patience wait. "
+                f"Original confirmed receipt: {previous.text}",
+                details={
+                    # Historical proof is not this call's delivery/wake outcome.
+                    # Current-result consumers must never promote it to a new act.
+                    "original_receipt": {
+                        "text": previous.text,
+                        "details": previous.model_copy(deep=True).details or {},
+                    },
+                    "duplicate_suppressed": True,
+                    "original_tool_call_id": previous.tool_call_id,
+                },
+            )
     sender = await _send_sender_identity(context)
 
-    from local_operator.mobile.peer_send import deliver_peer_message_outcome
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        deliver_peer_message_outcome,
+    )
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
@@ -13775,7 +14513,29 @@ async def execute_send(
         clause += exact_ignored_clause(len(exact_ignored), *exact_field)
     if outcome.is_error:
         return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
-    return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    result = _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    # Only the confirmed state is reusable. Partial/uncertain receipts and
+    # refusals must allow a real retry; model switches and mesh calls bypass
+    # this local boundary entirely. Send is exclusive in the tool executor.
+    if (
+        receipt_key is not None
+        and context is not None
+        and outcome.state == DELIVERY_DELIVERED
+        and len(context.confirmed_send_receipts) < _CONFIRMED_SEND_CACHE_MAX_ENTRIES
+        and len(message) + len(result.text) <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES
+    ):
+        try:
+            entry_bytes = len(message.encode("utf-8")) + len(
+                result.model_dump_json().encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            # Receipt reuse is optional; serialization must never turn an
+            # already confirmed delivery into a reported failure.
+            pass
+        else:
+            if entry_bytes <= _CONFIRMED_SEND_CACHE_MAX_ENTRY_BYTES:
+                context.confirmed_send_receipts[receipt_key] = result.model_copy(deep=True)
+    return result
 
 
 async def _arm_send_patience(
@@ -16449,10 +17209,22 @@ def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[
             ("--name", params.name),
             ("--team", params.team),
             ("--profile", params.profile),
-            ("--model", params.model),
         ):
             if value and value.strip():
                 argv += [flag, value.strip()]
+        model = (params.model or "").strip()
+        if model:
+            # The CLI takes hosting separately. Leaving a qualified selector in
+            # --model pairs it with the configured provider; split only once so
+            # aggregator model IDs keep their own vendor/model slash. Bare IDs
+            # intentionally retain the configured hosting, unlike remote spawns.
+            from local_operator.providers.failover import parse_selector
+
+            provider, model_id = parse_selector(model)
+            if "/" in model:
+                argv += ["--hosting", provider.strip(), "--model", model_id.strip()]
+            else:
+                argv += ["--model", model]
     argv.append("--")
     argv.append(params.prompt or "")
     return argv
@@ -17699,6 +18471,151 @@ def build_read_variable_tool() -> AgentTool:
         concurrency="shared",
         interruptible=False,
         execute=execute_read_variable,
+    )
+
+
+# ---------------------------------------------------------------------------
+# setting — read and write one /settings registry row
+# ---------------------------------------------------------------------------
+
+#: The tool's ops. Two, deliberately: "reset to the registry default" is
+#: expressed as a SET (language's tri-state `auto` included) — a third op would
+#: be a second spelling of the same write, and the registry's own validation is
+#: what decides whether a value is legal. Nothing here re-spells it.
+SETTING_OPS = ("get", "set")
+
+
+class SettingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["get", "set"] = Field(
+        description="'get' reads one setting; 'set' writes it (validated by the registry)."
+    )
+    key: str = Field(
+        description="Registry key, as `/settings` and `lop config list` show it, e.g. 'language'."
+    )
+    value: Any = Field(
+        default=None,
+        description=(
+            "The value to write (op='set' only); the row's kind decides its type — "
+            '`true`, 42, or a string like "fr".'
+        ),
+    )
+
+
+async def execute_setting(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Read or write ONE settings-registry row; the sanctioned agent write path.
+
+    THE SEAM, NOT THE FACADE: this tool never touches ``settings_io`` — it calls
+    ``local_operator.settings_control``, whose every write is UNATTRIBUTED
+    (``notify=False``). That is an approval-boundary requirement, not a
+    layering preference: ``source="local"`` means "a write the operator made
+    through the facade in the process holding the gate"
+    (``harness.approval.loosening_is_authorised``), and this tool can execute
+    inside processes that hold a live gate (the embedded TUI, ``lop exec``) —
+    a notified write from here would let the gated party mint that attribution
+    and loosen the gate that constrains it. Unattributed, the write is what it
+    factually is — a file edit on the agent's behalf: it may tighten a live
+    gate and may never loosen one, and every observer (the process's own
+    ConfigWatcher on its next poll, the machine-wide desktop feed, clients
+    re-reading ``GET /v1/capabilities``) sees exactly that.
+
+    EVERYTHING ELSE IS STILL THE ONE FUNNEL: ``settings_control.apply`` calls
+    ``settings_io.write_setting`` — the function the TUI's /settings page, the
+    desktop's ``PATCH /v1/settings`` and ``lop config edit`` all pass through —
+    so registry validation, the sub-mapping merge rule, the clear-to-unset
+    gesture and the cascade contract are the same ones every other origin
+    gets. A tool-local re-spelling of any of those is how a second truth is
+    born, and the user's language must have exactly one.
+
+    Runs in whatever process executes the turn (a server turn's child process
+    included): the write is a FILE write, and every live observer sees it from
+    the file, exactly as it sees a hand edit.
+    """
+    try:
+        params = SettingParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "setting", exc)
+    from local_operator import settings_control
+
+    manager = ConfigManager(config_dir())
+    setting = settings_control.resolve(params.key.strip())
+    if setting is None:
+        return _error(
+            tool_call_id,
+            "setting",
+            f"Unknown setting key: {params.key!r}. Keys are the strings /settings "
+            "and `lop config list` show (for example 'language').",
+        )
+    if params.op == "get":
+        value = settings_control.read(manager, setting)
+        return _text(
+            tool_call_id,
+            "setting",
+            json.dumps(
+                {
+                    "key": setting.key,
+                    "value": value,
+                    "is_default": settings_control.is_default(manager, setting),
+                },
+                ensure_ascii=False,
+            ),
+            details={"key": setting.key},
+        )
+    try:
+        # The seam owns the route-mirror semantics (cascade refusal, the
+        # clear-to-unset arm, the readability guard) and the unattributed
+        # write; its refusals arrive as ValueError/ConfigUnreadableError and
+        # are surfaced verbatim below.
+        settings_control.apply(manager, setting, params.value)
+    except settings_control.ConfigUnreadableError:
+        return _error(
+            tool_call_id,
+            "setting",
+            "The configuration file cannot be read. Repair it before saving.",
+        )
+    except ValueError as exc:
+        # The registry's / the contract's own refusal, verbatim: the sentence
+        # the /settings page shows for the same input, never a paraphrase.
+        return _error(tool_call_id, "setting", str(exc))
+    value = settings_control.read(manager, setting)
+    return _text(
+        tool_call_id,
+        "setting",
+        json.dumps(
+            {
+                "key": setting.key,
+                "value": value,
+                "is_default": settings_control.is_default(manager, setting),
+            },
+            ensure_ascii=False,
+        ),
+        details={"key": setting.key},
+    )
+
+
+def build_setting_tool() -> AgentTool:
+    return AgentTool(
+        name="setting",
+        label="Setting",
+        description=(
+            "Read or change one setting from the /settings registry by key "
+            "(e.g. 'language'); writes are validated by the same registry, and "
+            "surfaces observe the change live. See `read tool://setting`."
+        ),
+        parameters=SettingParams.model_json_schema(),
+        approval_tier="write",
+        # Two settings writes on one config.yml are a read-modify-write race;
+        # exclusive serializes them (the edit tool's stated reason, verbatim).
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_setting,
     )
 
 
@@ -19631,6 +20548,34 @@ def _surface_host_or_first(pinned: str, *, ui: bool) -> str:
     return HOST_UI_PREFIX if ui else HOST_BRIDGE_PREFIX
 
 
+def _pinned_host_for_access(context: ToolContext | None) -> str:
+    """The host a surface-free access action must use, or "" for none.
+
+    A fresh `open` that failed with origin-not-allowed is the ordinary reason
+    `request_access`/`await_access`/`cancel_access` arrive with no minted tab:
+    the operator has to approve the origin the open was refused on. The decision
+    of WHICH host that open was targeted at is durable
+    (`resource.pinned_host()`), and the approval must be raised on THAT host —
+    not re-picked from availability, which can land the prompt on a different
+    peer than the one the refused navigation belongs to (review R2 code GCP
+    neighbour: approval routing before tab creation).
+
+    Why the durable pin and not availability: a refused fresh navigation saves
+    its actual transport in `pending_access_host`; a resumed/refused owned scope
+    also carries its host in the record. Availability cannot choose which jar
+    owes an approval, and never confers ownership of a foreign tab.
+    `_surface_host_or_first` still handles the no-pin case, so a session with
+    no durable host keeps the availability order.
+    """
+    resource = getattr(getattr(context, "browser", None), "resource", None)
+    if resource is None:
+        return ""
+    try:
+        return resource.pinned_host()
+    except (AttributeError, RuntimeError):
+        return ""
+
+
 def _non_cmux_host_hint(*, ui: bool, bridge: bool) -> str:
     """Which non-cmux host to use, and how to reach it — ONE spelling.
 
@@ -19820,7 +20765,8 @@ def _backend_unavailable_result(tool_call_id: str, backend: str) -> ToolResult:
     remedy = {
         "ui": (
             "the Local Operator desktop app's browser tab is not reachable right now — "
-            "open a browser tab in the desktop app (or restart it), then retry"
+            "check Browser in the desktop app; if it offers Try again, use that, "
+            "then retry this tool. A missing ready host does not mean the app is closed"
         ),
         "extension": (
             "the paired Local Operator browser extension is not reachable right now — "
@@ -20036,6 +20982,17 @@ async def _bridge_open(
             client=client,
         )
     if problem is not None:
+        resource = getattr(state, "resource", None)
+        if (
+            resource is not None
+            and created_new
+            and not adopting
+            and (problem.details or {}).get("error_code") == "origin_not_allowed"
+        ):
+            # An approval obligation exists even when no tab was minted. Keep
+            # its actual transport across recovery/resume; this is routing
+            # metadata, NOT a capability or permission grant.
+            resource.record["pending_access_host"] = prefix
         pending = (problem.details or {}).pop("cleanup_surface", "")
         if isinstance(pending, str) and NON_CMUX_SURFACE_HANDLE_RE.fullmatch(pending):
             state.surface_id = pending
@@ -20049,6 +21006,9 @@ async def _bridge_open(
             f"{_host_label(prefix)} opened a tab but returned no valid handle",
         )
     state.surface_id = surface
+    resource = getattr(state, "resource", None)
+    if resource is not None:
+        resource.record.pop("pending_access_host", None)
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
     # Name the host that actually served the open (§16.1): the caller must be
@@ -22134,6 +23094,20 @@ async def execute_browser(
         # and of the session's own RECORD first, which is the one answer a
         # resumed session has (see `_ownership_lane_host`).
         lane_host = await _ownership_lane_host(state, resource)
+        # A fresh explicit navigation must reconcile on the host it will dial,
+        # not the availability-first peer. Held/adopted capabilities still win;
+        # an unavailable or invalid hint is refused by the normal dispatcher.
+        hinted = str(args.get("backend", "")).strip().lower()
+        if (
+            str(args.get("action", "")).strip().lower() == "open"
+            and not state.surface_id
+            and not str(args.get("tab", "")).strip()
+            and not resource.pinned_host()
+        ):
+            if hinted == "extension" and await bridge_browser_reachable():
+                lane_host = HOST_BRIDGE_PREFIX
+            elif hinted == "ui" and await ui_browser_reachable():
+                lane_host = HOST_UI_PREFIX
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
@@ -22164,9 +23138,8 @@ async def execute_browser(
     async with resource.lock:
         try:
             resource.initialize()
-            if not resource.recovered:
-                await resource.recover()
-                state.surface_id = str(resource.record.get("surface_id", ""))
+            await resource.ensure_recovered()
+            state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
             # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
             # here used to render a recovery timeout as the bare daemon message
@@ -22294,6 +23267,8 @@ async def execute_browser(
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
+                if action == "cancel_access" and not result.is_error:
+                    resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
                 elif access_state and resource.record.get("retention") == "pending site approval":
@@ -22407,7 +23382,7 @@ async def _execute_browser(
     # permission model at all, so it degrades with the same typed error as
     # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
-        pinned = _host_of_surface(state.surface_id)
+        pinned = _host_of_surface(state.surface_id) or _pinned_host_for_access(context)
         if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
@@ -22919,6 +23894,8 @@ CONSOLE_SURFACE_PREFIX = "con:"
 #: and parameter docs use it.
 CONSOLE_ACTIONS: tuple[str, ...] = (
     "list",
+    "resources",
+    "cleanup",
     "create",
     "status",
     "read",
@@ -22933,7 +23910,7 @@ CONSOLE_ACTIONS: tuple[str, ...] = (
 #: The methods whose approval tier is `read`; every other console method is
 #: `exec` (§11.1). A frozenset rather than a list because the question asked of it
 #: is membership only, and the tier hook runs per call.
-CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot"})
+CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot", "resources"})
 
 #: Guard on a scrollback window. The app clamps further; this bounds what ONE
 #: tool result can carry, because a paged read that returns 5,000 lines costs more
@@ -23050,7 +24027,7 @@ class ConsoleParams(BaseModel):
     surface: str = Field(
         default="",
         description="The handle from 'list'/'create' (e.g. 'con:1:9f2a'); required for every "
-        "method but 'list'/'create'.",
+        "method but 'list'/'create'/'resources'/'cleanup'.",
     )
     cwd: str = Field(
         default="", description="'create': the working directory (default: the user's home)."
@@ -23149,6 +24126,12 @@ def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[s
         if params.rows is not None:
             target["rows"] = params.rows
 
+    if method == "resources":
+        return {}, ""
+    if method == "cleanup":
+        # Cleanup is owner-scoped, completed-only and preserves retained files.
+        # Never accept a caller-supplied owner or let turn-end imply a kill.
+        return {"session_id": session_id}, ""
     if method == "list":
         # The session filter is the CALLER's own session, always. It is not a
         # parameter: a surface belongs to the session that created it, another
@@ -23373,7 +24356,10 @@ def build_console_tool(context: ToolContext | None) -> AgentTool | None:
             "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
             "ordinary commands: `bash` returns output directly. The surface handle names this "
             "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
-            "asking them to repeat their output. Playbook: `guide://console`."
+            "asking them to repeat their output. `resources` gives aggregate capacity; `cleanup` "
+            "releases only this owner's completed surfaces, preserving retained logs. "
+            "After exit, read/status acknowledges completion for protected cleanup. "
+            "Never close live idle/auth/REPL work at turn end. Playbook: `guide://console`."
         ),
         parameters=ConsoleParams.model_json_schema(),
         # The tool's tier is the HIGHEST of its ops (create/input/keys/resize/
@@ -23549,6 +24535,12 @@ def _console_status_text(result: dict[str, Any]) -> str:
         lines.append(f"idle: {float(idle) / 1000:.1f}s since the last output")
     elif result.get("last_output_at") or result.get("last_activity"):
         lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        lines.append(
+            f"grid degraded: {dropped_grid} parser bytes omitted under resource "
+            "pressure; retained history may contain them"
+        )
     if result.get("cursor") is not None:
         lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
@@ -23587,6 +24579,9 @@ def _console_read_text(result: dict[str, Any]) -> str:
         footer.append(f"cursor {_console_cursor_text(cursor)}")
     if result.get("truncated"):
         footer.append("truncated by the app")
+    dropped_grid = result.get("dropped_grid_bytes")
+    if isinstance(dropped_grid, int) and not isinstance(dropped_grid, bool) and dropped_grid > 0:
+        footer.append(f"grid degraded: {dropped_grid} parser bytes omitted under resource pressure")
     if result.get("live") is False:
         footer.append("not live: this is the retained history of a surface whose app has gone")
     tail = " [stdout and stderr are one pty stream]"
@@ -23819,7 +24814,7 @@ async def execute_console(
             f"{', '.join(CONSOLE_ACTIONS)})",
         )
     surface = params.surface.strip()
-    if method not in ("list", "create"):
+    if method not in ("list", "create", "resources", "cleanup"):
         if not surface:
             return _error(
                 tool_call_id,
@@ -23830,7 +24825,7 @@ async def execute_console(
         if refusal:
             return _error(tool_call_id, "console", refusal)
     session_id = str(getattr(context, "session_id", "") or "").strip()
-    if method in ("list", "create") and not session_id:
+    if method in ("list", "create", "cleanup") and not session_id:
         # A surface is keyed by the session that owns it, so a create with no
         # session would make a surface nobody can list or read. Names the reason
         # rather than sending an empty id the app would have to guess about.
@@ -23841,6 +24836,10 @@ async def execute_console(
             "run the call from a session rather than from a bare tool context.",
         )
     wire, problem = _console_wire_params(params, session_id)
+    # Additive identity for the shared lifecycle fence. Older hosts ignore it;
+    # current hosts refuse a different owner before reading/signalling a surface.
+    if "surface" in wire and session_id:
+        wire["session_id"] = session_id
     if problem:
         return _error(tool_call_id, "console", problem)
     if method == "input":
@@ -23853,6 +24852,7 @@ async def execute_console(
         CONSOLE_ABSENT_COPY,
         CONSOLE_FEATURE_OFF_COPY,
         ConsoleHostClient,
+        aggregate_console_metrics,
         console_error_text,
     )
     from local_operator.ui_console.state import Liveness
@@ -23868,6 +24868,17 @@ async def execute_console(
         return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
 
     client = ConsoleHostClient()
+    if (
+        method in ("resources", "cleanup")
+        and f"console_{method}" not in client.capabilities().methods
+    ):
+        return _error(
+            tool_call_id,
+            "console",
+            "This desktop app does not support console capacity/cleanup methods yet. "
+            "Update the desktop app; its existing console methods remain available. "
+            "No global listing or automatic close was attempted.",
+        )
     try:
         result = await client.call(f"console_{method}", wire)
     except BridgeUnreachable as exc:
@@ -23875,6 +24886,25 @@ async def execute_console(
     except BridgeError as exc:
         return _error(tool_call_id, "console", console_error_text(exc))
 
+    if method in ("resources", "cleanup"):
+        # New host methods are additive. Older hosts return unsupported_method
+        # through the existing typed error path; never substitute a global list.
+        if method == "resources":
+            projected = aggregate_console_metrics(result)
+        else:
+            projected = {
+                key: value
+                for key in ("released", "protected", "running")
+                if isinstance(value := result.get(key), int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+        return _text(
+            tool_call_id,
+            "console",
+            json.dumps(projected, separators=(",", ":")),
+            details=projected,
+        )
     if method == "list":
         surfaces = result.get("surfaces") if isinstance(result, dict) else None
         return _text(
@@ -24004,12 +25034,6 @@ ADVERTISED_EFFORT_KEY = "advertised_effort"
 #: the members it advertises.
 ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
 
-#: Key carrying how many delegation hops sit above the session that is calling
-#: ``task``/``agent`` (0 = the top-level session). See
-#: :func:`~local_operator.harness.subagent.model_may_choose_tier` for why the
-#: depth, and not only ``subagents.model_choice``, decides who may pick a tier.
-ADVERTISED_DELEGATION_DEPTH_KEY = "advertised_delegation_depth"
-
 #: Key carrying the ``provider/model`` label of the SESSION that built the tool.
 #:
 #: The third piece of build-time provenance, published beside the two above and
@@ -24087,19 +25111,6 @@ _ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
 #: inventing a model.
 _ADVERTISED_SESSION_MODEL: ContextVar[str] = ContextVar("advertised_session_model", default="")
 
-#: The delegation depth of the session executing the tool, published by
-#: :func:`_with_advertised_effort` beside the records above.
-#:
-#: This is the BUILD-time half; :func:`effort_validation_context` takes the larger
-#: of it and the depth of the ``ToolContext`` the call arrives with (rebuilt
-#: every turn from the live session). A child's ``task`` tool is first built by
-#: the session constructor, BEFORE ``_build_child_session`` stamps the child's
-#: depth, so a tool object can briefly carry a depth-0 schema; reading the
-#: call's own context is what keeps the gate closed for that window, for any
-#: host that forgets to rebuild, and for a direct executor call that never went
-#: through the wrapper at all.
-_ADVERTISED_DELEGATION_DEPTH: ContextVar[int] = ContextVar("advertised_delegation_depth", default=0)
-
 
 def _with_advertised_effort(
     executor: ToolExecutor,
@@ -24107,7 +25118,6 @@ def _with_advertised_effort(
     *,
     model_choice: bool,
     session_model_label: str = "",
-    delegation_depth: int = 0,
 ) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
@@ -24124,9 +25134,6 @@ def _with_advertised_effort(
     reason — it is the label the schema description was rendered from, and the
     refusal copy must name the SAME model the enum promised, not whatever the
     session has become by the time a stale tool is invoked.
-
-    ``delegation_depth`` is the depth the tool was built at; the call's own
-    ``ToolContext`` can only RAISE it (see :func:`effort_validation_context`).
     """
     advertised = advertised_effort_members(parameters)
 
@@ -24140,39 +25147,24 @@ def _with_advertised_effort(
         token = _ADVERTISED_EFFORT.set(advertised)
         choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
         label_token = _ADVERTISED_SESSION_MODEL.set(session_model_label)
-        depth_token = _ADVERTISED_DELEGATION_DEPTH.set(delegation_depth)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
             _ADVERTISED_MODEL_CHOICE.reset(choice_token)
             _ADVERTISED_SESSION_MODEL.reset(label_token)
-            _ADVERTISED_DELEGATION_DEPTH.reset(depth_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
     return wrapper
 
 
-def effort_validation_context(tool_context: ToolContext | None = None) -> dict[str, Any]:
-    """Validation context carrying the advertised ``effort`` members and policy.
-
-    ``tool_context`` is the context the executor was called with. Its
-    ``delegation_depth`` can only RAISE the published build-time depth, never
-    lower it: a depth recorded by either side is evidence the caller is a
-    subagent, and the gate is closed by the larger of the two.
-    """
-    call_depth = getattr(tool_context, "delegation_depth", 0) if tool_context is not None else 0
-    # ``type(...) is int``, not ``isinstance``: a bool is an int, and ``True``
-    # would count as depth 1. Harmless (the depth can only be raised) but it
-    # would make the gate's answer depend on a value that is not a depth.
+def effort_validation_context() -> dict[str, Any]:
+    """Validation context carrying the advertised ``effort`` members and policy."""
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
         SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
-        ADVERTISED_DELEGATION_DEPTH_KEY: max(
-            _ADVERTISED_DELEGATION_DEPTH.get(), call_depth if type(call_depth) is int else 0
-        ),
     }
 
 
@@ -24201,13 +25193,6 @@ def _advertised_model_choice(info: ValidationInfo) -> bool | None:
         return None
     choice = context.get(ADVERTISED_MODEL_CHOICE_KEY)
     return choice if isinstance(choice, bool) else None
-
-
-def _delegation_depth(info: ValidationInfo) -> int:
-    """Hops above the calling session; ``0`` when unrecorded (an operator-side caller)."""
-    context = info.context if isinstance(info.context, dict) else None
-    depth = context.get(ADVERTISED_DELEGATION_DEPTH_KEY) if context else None
-    return depth if type(depth) is int and depth > 0 else 0
 
 
 def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
@@ -24351,38 +25336,6 @@ def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = 
     )
 
 
-def _nested_task_rejection(tier: str) -> str:
-    """The ``task`` refusal for a tier chosen by a session that is itself a subagent.
-
-    Wording is NOT the ``operator`` arm's: that one names ``subagents.model_choice``
-    as the remedy, and at depth >= 1 the key is not what refuses
-    (``model_choice=model`` is exactly the config the incident ran under), so
-    sending the delegating model to "the operator's setting" would be false and
-    would invite it to retry differently. The remedy is simply to omit the
-    field: a nested child inherits the model THIS session is running on.
-    Short and remedy-first for the same card-truncation reason the operator
-    arm documents.
-    """
-    return (
-        f"Relaunch without 'effort' (got '{tier}'): subagents of a subagent "
-        "inherit this session's model; only the top-level session may pick a tier."
-    )
-
-
-def _nested_pin_rejection(tier: str) -> str:
-    """The ``agent`` create/update refusal for a role pin written by a subagent.
-
-    A pin written below the top level would be picked up by every later launch
-    of that role, nested or not, so allowing it would re-open the leak through
-    the registry. Pins stay the operator's (profile editor) or the top-level
-    session's call.
-    """
-    return (
-        f"A subagent cannot pin a role to a model tier (got '{tier}'): only the "
-        "top-level session may. Omit 'effort', or pass 'inherit' to clear a pin."
-    )
-
-
 def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exception | None:
     """Refuse an ``effort`` the operator has not delegated to the model, or ``None``.
 
@@ -24404,44 +25357,18 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     ``AgentParams`` for an operator's own edit). That is an operator-side
     caller, so it is ALLOWED: the key gates a model's choice, never the
     operator's, and an absent context cannot be evidence of a model at all.
-
-    **Depth >= 1 follows the same split, on purpose.** A subagent's tool is built
-    with ``model_choice=False`` (``model_may_choose_tier(depth)``), so the field
-    was never offered and any tier it sends is invented: a ``ValueError``, the
-    model's fault, exactly as under ``model_choice=operator``. Refusing (rather
-    than silently dropping the tier and inheriting) is also the consistent
-    choice: a dropped ``effort`` would let the model believe its ``hi`` scouts
-    ran on ``hi`` and report them as such, which is the misattribution the
-    operator arm's refusal exists to prevent. The only departure is the copy
-    (:func:`_nested_task_rejection`), which cannot point at
-    ``subagents.model_choice`` because that key is not what refuses.
     """
-    depth = _delegation_depth(info)
-    if model_may_choose_tier(depth):
+    if model_may_choose_tier():
         return None
     advertised_choice = _advertised_model_choice(info)
-    if advertised_choice is None and depth == 0:
+    if advertised_choice is None:
         return None
     label = _advertised_session_model(info)
-    if depth_closed_the_tier_choice(depth):
-        # Below the top, under ``model_choice=model``, the refusal is about WHO
-        # is asking, not the key, so the operator-arm copy (which names
-        # ``subagents.model_choice`` as the remedy) would send the model to a
-        # setting that is not the cause. Under ``operator`` the key IS the cause
-        # at every depth, so the operator-arm copy below is the true one.
-        message = _nested_pin_rejection(value) if pin else _nested_task_rejection(value)
-    else:
-        message = (
-            _operator_choice_pin_rejection(value, label)
-            if pin
-            else _operator_choice_task_rejection(value, label)
-        )
-    if advertised_choice is None:
-        # Only reachable at depth >= 1 (above, an unrecorded build at depth 0 is
-        # an operator-side caller and returned). A real ToolContext says the
-        # caller is a subagent, so the refusal stands, but with no record of
-        # what the model was shown it is not billed to the model's accuracy.
-        return EnvironmentDependentRejectionError(message)
+    message = (
+        _operator_choice_pin_rejection(value, label)
+        if pin
+        else _operator_choice_task_rejection(value, label)
+    )
     if advertised_choice and value in (_advertised_effort(info) or frozenset()):
         return EnvironmentDependentRejectionError(message)
     return ValueError(message)
@@ -24648,7 +25575,7 @@ def _effort_tier_field_description(session_model_label: str | None = None) -> st
     return (
         "Swaps this child's MODEL (not its reasoning level): "
         f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}. "
-        "Omit to inherit this session's model and reasoning effort."
+        "Omit to keep role defaults; model=inherit skips role pins."
     )
 
 
@@ -24658,21 +25585,11 @@ def _effort_tier_field_description(session_model_label: str | None = None) -> st
 #: a model asked to explain the refusal) can find the switch that changes it.
 _OPERATOR_CHOICE_EFFORT_SENTENCE = (
     "No effort tiers are yours to choose (subagents.model_choice=operator): "
-    "children inherit this session's model — do not pass 'effort'."
-)
-
-#: The same sentence for a session that is itself a subagent. It cannot reuse the
-#: one above: that names ``subagents.model_choice=operator``, which is false at
-#: depth >= 1 under ``model_choice=model`` (the config the nested-tier incident
-#: ran under), and a description that blames a setting the operator never set
-#: sends the model hunting for a switch instead of omitting the field.
-_NESTED_EFFORT_SENTENCE = (
-    "No effort tiers are yours to choose (you are a subagent; only the top-level "
-    "session picks tiers): children inherit this session's model — do not pass 'effort'."
+    "omit effort; model=inherit bypasses role pins."
 )
 
 
-def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str:
+def _task_tool_description(model_choice: bool) -> str:
     """The ``task`` tool description, with the effort sentence matching the schema.
 
     A model told "effort picks a configured model tier" while no tier is
@@ -24680,33 +25597,24 @@ def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str
     say which state it is in. One sentence either way — prompt text is paid on
     every turn. ``model_choice`` is the flag the accompanying schema was
     rendered from, passed in rather than re-read so the description and the
-    schema cannot disagree about which arm they are in. The one live read is
-    ``configured_effort_tiers()`` (the tier list) and, for a subagent,
-    :func:`~local_operator.harness.subagent.depth_closed_the_tier_choice`
-    (which reads ``subagents.model_choice``): both are consulted only to pick
-    WORDING within the arm the flag already fixed, never to change the arm.
+    schema cannot disagree about which arm they are in.
     """
     if not model_choice:
         # The whole field is gone from this schema, so the description is the
         # only place left to say so — and it must, or a model that remembers
         # `effort` from another session's prompt has nothing telling it no.
-        effort = (
-            _NESTED_EFFORT_SENTENCE
-            if depth_closed_the_tier_choice(delegation_depth)
-            else _OPERATOR_CHOICE_EFFORT_SENTENCE
-        )
+        effort = _OPERATOR_CHOICE_EFFORT_SENTENCE
     else:
         tiers = configured_effort_tiers()
         if tiers:
             effort = (
-                "Omit 'effort' to inherit this session's model and reasoning effort, "
+                "Omit effort to keep role defaults, "
                 "or set it to one of the configured tiers the schema lists."
             )
         else:
             effort = (
-                "No effort tiers are configured (subagents.models), so every child "
-                "inherits this session's model and reasoning effort; do not pass "
-                "'effort'."
+                "No effort tiers are configured (subagents.models); omit effort. "
+                "Use model=inherit to bypass role pins."
             )
     # ``team:<name>`` is documented ONCE, on TaskItem.agent's description
     # below: both ride this same tool schema on every request (and the
@@ -24722,6 +25630,43 @@ def _task_tool_description(model_choice: bool, delegation_depth: int = 0) -> str
         "designer, scout — see the `agent` tool). "
         f"{effort}"
     )
+
+
+def _validate_task_model(value: str | None) -> str | None:
+    """A per-run pick never changes the operator's profiles or model defaults."""
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "inherit":
+        # Inheritance spends only the parent's already-selected model; unlike
+        # exact swaps it is safe under the operator-only model-choice policy.
+        return value
+    if not model_may_choose_tier():
+        error = (
+            EnvironmentDependentRejectionError
+            if _ADVERTISED_MODEL_CHOICE.get() is True
+            else ValueError
+        )
+        raise error(
+            "specific task models require subagents.model_choice=model; use model='inherit'"
+        )
+    provider, separator, model_id = value.partition("/")
+    if not separator or not provider or not model_id or any(c.isspace() for c in value):
+        raise ValueError("model must be 'inherit' or <provider>/<model-id>")
+    return value
+
+
+def _advertise_task_model(parameters: dict[str, Any], model_choice: bool) -> dict[str, Any]:
+    """Operator mode offers only inheritance, not arbitrary cost escalation."""
+    for schema in [parameters, *parameters.get("$defs", {}).values()]:
+        field = schema.get("properties", {}).get("model")
+        if field is not None and not model_choice:
+            field["anyOf"] = [{"type": "string", "enum": ["inherit"]}, {"type": "null"}]
+            field["description"] = (
+                "Omit to keep role/tier defaults. 'inherit' follows the parent, "
+                "skipping role pins. Exact models require subagents.model_choice=model."
+            )
+    return parameters
 
 
 class TaskItem(BaseModel):
@@ -24781,6 +25726,35 @@ class TaskItem(BaseModel):
     # shows and `lop config edit` does not take. Two spellings for one key in
     # one file is how the next reader learns the wrong one.
     effort: str | None = Field(default=None)
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _raw_model_conflict(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("model") is not None
+            and value.get("effort") is not None
+        ):
+            raise ValueError("pass either model or effort, not both")
+        return value
+
+    @model_validator(mode="after")
+    def _exclusive_model_choice(self) -> "TaskItem":
+        if self.model is not None and self.effort is not None:
+            raise ValueError("pass either model or effort, not both")
+        return self
 
     @field_validator("effort")
     @classmethod
@@ -24813,6 +25787,18 @@ class TaskParams(BaseModel):
     # description: the rendered one replaces it on every build path, and the
     # fallback it used to carry spelled the key a second way.
     effort: str | None = Field(default=None)
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
 
     @field_validator("effort")
     @classmethod
@@ -24835,20 +25821,33 @@ class TaskParams(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _raw_model_conflict(cls, value: Any) -> Any:
+        if (
+            isinstance(value, dict)
+            and value.get("model") is not None
+            and value.get("effort") is not None
+        ):
+            raise ValueError("pass either model or effort, not both")
+        return value
+
     @model_validator(mode="after")
     def _one_form(self) -> "TaskParams":
         """Single form xor batch form, whole — the pydantic voice keeps the
         'invalid arguments' contract for a half-supplied call."""
+        if self.model is not None and self.effort is not None:
+            raise ValueError("pass either model or effort, not both")
         if (self.label is None) != (self.prompt is None):
             raise ValueError("single-task form needs both label and prompt")
         single = self.label is not None
         if single and self.tasks:
             raise ValueError("pass either 'tasks' (batch) or label/prompt, not both")
-        if not single and (self.agent or self.effort):
+        if not single and (self.agent or self.effort or self.model):
             # Silently ignoring these would be worse than refusing: the caller
             # believes it asked for a role, and every child in the batch would
             # run without one.
-            raise ValueError("in the batch form, set 'agent'/'effort' on each tasks[] item")
+            raise ValueError("in the batch form, set 'agent'/'effort'/'model' on each tasks[] item")
         if not single and not self.tasks:
             raise ValueError("nothing to launch: pass 'tasks' or label/prompt")
         if not single and not self.context.strip() and len(self.tasks) == 1:
@@ -25457,7 +26456,7 @@ async def execute_task(
     between children.
     """
     try:
-        params = TaskParams.model_validate(args, context=effort_validation_context(context))
+        params = TaskParams.model_validate(args, context=effort_validation_context())
     except ValidationError as exc:
         return _validation_error(tool_call_id, "task", exc)
 
@@ -25479,6 +26478,7 @@ async def execute_task(
                 prompt=params.prompt,
                 agent=params.agent or "task",
                 effort=params.effort,
+                model=params.model,
             )
         )
 
@@ -25491,7 +26491,16 @@ async def execute_task(
     failures: list[str] = []
     for item in items:
         try:
-            job_id = launcher(item.label, _full_prompt(item), agent=item.agent, effort=item.effort)
+            if item.model is not None and item.effort is not None:
+                raise ValueError("pass either model or effort, not both")
+            options: dict[str, Any] = {"agent": item.agent, "effort": item.effort}
+            if item.model is not None:
+                options["model"] = item.model
+            from local_operator.mobile.peer_model import prepared_subagent_selections
+
+            selectors = [item.model] if item.model is not None and item.model != "inherit" else []
+            async with prepared_subagent_selections(selectors):
+                job_id = launcher(item.label, _full_prompt(item), **options)
         except Exception as exc:  # noqa: BLE001 — engine failure surfaces as an error result
             # An unavailable tier is the one launch failure the model is
             # tempted to "fix" by retrying at another tier, which is how a
@@ -25524,12 +26533,25 @@ async def execute_task(
                 # ``run_subagent``), and it covers a ROLE PIN the arguments do
                 # not mention at all.
                 "model": _job_model_label(context, job_id),
+                "model_selection_source": (
+                    str(getattr(context.jobs.get(job_id), "model_selection_source", "") or "")
+                    if context and context.jobs
+                    else ""
+                ),
             }
         )
     if not launched:
         detail = failures[0] if failures else "no tasks to launch"
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
-    lines = [_launched_line(entry, context) for entry in launched]
+    lines = [
+        _launched_line(entry, context)
+        + (
+            f" [selection: {entry['model_selection_source']}]"
+            if entry.get("model_selection_source")
+            else ""
+        )
+        for entry in launched
+    ]
     body = (
         f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
         + "\n".join(lines)
@@ -25551,21 +26573,18 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     # ONE read of the policy per build, handed to the schema renderer, the
     # description and the validator's wrapper, so the three cannot disagree
     # about which arm this tool instance is in.
-    # The depth is part of the policy, not an afterthought to it: a subagent's
-    # tool is built with the tier field REMOVED even under ``model_choice=model``
-    # (see ``model_may_choose_tier`` for the incident).
-    depth = context.delegation_depth
-    model_choice = model_may_choose_tier(depth)
+    model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
         description=_effort_tier_field_description(context.session_model_label),
         model_choice=model_choice,
     )
+    parameters = _advertise_task_model(parameters, model_choice)
     return AgentTool(
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=_task_tool_description(model_choice, depth),
+        description=_task_tool_description(model_choice),
         parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
@@ -25577,7 +26596,6 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
             parameters,
             model_choice=model_choice,
             session_model_label=context.session_model_label,
-            delegation_depth=depth,
         ),
     )
 
@@ -26335,6 +27353,11 @@ async def execute_jobs(
             # actually stop something:
             #   * a bash/eval row has no comms record, so a stamp would invent an
             #     actor for a job that never had one;
+            #   * a video row likewise has no comms record (its durable state is
+            #     the ``video_job_v1`` transcript record, never the subagent
+            #     roster), and the manager's cancel still reaches it through the
+            #     runner's bounded provider cancel — so the type gate below is
+            #     deliberately left covering ``task`` only;
             #   * a row that is ALREADY settled is the tool's own normal
             #     "was not cancelled" outcome, not an error — stamping it put
             #     `stopped by jobs-tool` on a COMPLETED child (design/QA round 1, Q1,
@@ -26496,7 +27519,7 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
         name="jobs",
         label="List jobs",
         description=(
-            "Inspect background jobs (task/bash). op='list' shows every "
+            "Inspect background jobs (task/bash/video). op='list' shows every "
             "running and recently-settled job with its id, status and age — "
             "'up' is how long a running job has been going, 'wait' is how long "
             "a parked one has been waiting for a slot, 'ago' is how long since "
@@ -26633,6 +27656,19 @@ def _coerce_hub_to(value: Any) -> Any:
 
 
 class HubParams(BaseModel):
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
+            "provider/model-id pins this run. Never combine with effort."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def _model_is_allowed(cls, value: str | None) -> str | None:
+        return _validate_task_model(value)
+
     """Parent-side hub arguments."""
 
     model_config = ConfigDict(extra="forbid")
@@ -27179,6 +28215,8 @@ async def _execute_hub_parent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
+    if params.model is not None and params.op != "resume":
+        return _error(tool_call_id, "hub", "model is only valid for op='resume'")
     if params.op == "list":
         return _hub_list(tool_call_id, comms, scope, context)
 
@@ -27266,7 +28304,12 @@ async def _execute_hub_parent(
         previous_models = {job_id: _previous_model(comms, job_id) for job_id in ids}
         resumed: list[tuple[str, str | None, str | None]] = [
             # (resumed-from id, new job id, error)
-            (job_id, *comms.resume(job_id, message))
+            (
+                job_id,
+                *await comms.resume_async(
+                    job_id, message, **({"model": params.model} if params.model is not None else {})
+                ),
+            )
             for job_id in ids
         ]
         session_model = str(getattr(context, "session_model_label", "") or "")
@@ -27291,6 +28334,12 @@ async def _execute_hub_parent(
                         new_job_id,
                         previous_models.get(from_id, ""),
                         session_model,
+                    )
+                    + (
+                        " [selection: "
+                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
+                        if getattr(comms.job(new_job_id), "model_selection_source", "")
+                        else ""
                     )
                 )
             else:
@@ -27347,7 +28396,35 @@ async def _execute_hub_parent(
         if deliveries
         else f"{params.op}: nothing to do"
     )
-    lines = [header, *_hub_receipt_lines(deliveries), *(f"- {error}" for error in errors)]
+    receipt_lines = _hub_receipt_lines(deliveries)
+    delivery_states = []
+    if params.op == "send" and callable(getattr(comms, "roster_pass", None)):
+        # Queue acceptance is not execution: a settled child can retain its
+        # aside queue. Read the existing lifecycle/alias authority once rather
+        # than inventing liveness from a receipt or starting a new actor.
+        snapshot = comms.roster_pass()
+        for index, delivery in enumerate(deliveries):
+            node = snapshot.node_for(delivery.job_id)
+            if node is not None and node.status in {
+                "completed",
+                "paused",
+                "failed",
+                "cancelled",
+                "gone",
+                "interrupted",
+            }:
+                accepted = (
+                    "queued for next resume" if delivery.outcome != "failed" else "delivery refused"
+                )
+                receipt_lines[index] = (
+                    f"- {delivery.label} ({node.job_id}): child is {node.status}; {accepted}; "
+                    "not running — no work started. Resume existing history explicitly with "
+                    f"hub op='resume' to='{node.job_id}' and the work message."
+                )
+                delivery_states.append(
+                    {"job_id": node.job_id, "status": node.status, "resume_required": True}
+                )
+    lines = [header, *receipt_lines, *(f"- {error}" for error in errors)]
     return _text(
         tool_call_id,
         "hub",
@@ -27356,6 +28433,7 @@ async def _execute_hub_parent(
             "op": params.op,
             "job_ids": ids,
             "acted": len(acted),
+            **({"delivery_states": delivery_states} if delivery_states else {}),
             # Mirrored into details as well as the flag: every other useless
             # site in this module carries the key, and compaction's pruning
             # pass reads it from there.
@@ -27416,7 +28494,9 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
                 else ""
             )
         ),
-        parameters=_lead_hub_schema() if leads else HubParams.model_json_schema(),
+        parameters=_advertise_task_model(
+            _lead_hub_schema() if leads else HubParams.model_json_schema(), model_may_choose_tier()
+        ),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
         # autonomous work. The gate is per TOOL, not per op, so the tier is
         # the highest any op needs — 'resume' starts a child session, which is
@@ -28105,4 +29185,173 @@ async def execute_ask_withdraw(
         "ask_withdraw",
         str(outcome.get("text") or ""),
         details=dict(outcome.get("details") or {}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# no_reply (design docs/design/quiet-turns.md §4)
+# ---------------------------------------------------------------------------
+#
+# Why this tool exists: the prompt has always told the model "a wake or monitor
+# turn that finds nothing needing action ... end it with no reply, and don't
+# notify", but no mechanism existed to perform that act, so models wrote filler
+# text instead — `(no action needed)` was measured 143 times in one week in a
+# single session, 88 of them directly after a tool result. The affirmative act
+# is a TOOL CALL rather than a text sentinel or an empty reply: text streams to
+# every surface before it can be recognised (Hermes needed a stream filter for
+# exactly that), and an empty reply is indistinguishable from the provider
+# glitches this fleet measured (68 ``error``+empty stops in the same scan), so
+# a sentinel would either flash `NO_REPLY` on screen or silence real failures.
+#
+# The result is "Quiet." with ``useless=True`` (the prune pass blanks its
+# content) plus ``QUIET_TURN_KEY`` in ``details`` — the marker the loop's
+# batch-end check and the session's quiet predicate read. ``details`` is never
+# sent to providers, the same carrier as ``OUTPUT_LIMIT_KEY``.
+#
+# Availability (AGENTS.md footprint ladder, rung 3): the builder returns None
+# wherever the session has no quiet-end door (``ToolContext.quiet_end`` — None
+# for subagent children, one-shot hosts, output-contract sessions and under
+# the kill switch; see ``Session._quiet_end_callable``), and the schema is
+# DEFERRED (``tools/deferral.py``) so even the sessions that hold the tool pay
+# no per-request schema cost until it is activated — it has no arguments, so
+# no schema is needed to form its call. Appended at the END of
+# TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason the
+# sessions/monitor/ask_withdraw rows state.
+
+#: The kill switch: ``LOP_NO_REPLY=0`` (or false/no/off, case- and
+#: whitespace-insensitively) removes the tool — env only, no config key
+#: (docs/design/quiet-turns.md §10). Same direction and typo discipline as
+#: ``asks/policy.py``'s ``LOP_ASK_GATE`` read, deliberately: only an explicit
+#: off value turns it off, because a typo must not silently unbuild a working
+#: mechanism while looking like a deliberate switch. Read from the environment
+#: ONCE, at import; a test that needs the other mode monkeypatches this
+#: attribute (``builtin.NO_REPLY_ENABLED``) or sets the env var before import.
+NO_REPLY_ENABLED: bool = os.environ.get("LOP_NO_REPLY", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def no_reply_enabled() -> bool:
+    """Whether this process may end turns quietly (``LOP_NO_REPLY``, default on).
+
+    The same function-not-attribute convention as ``asks/policy.py``'s
+    ``gate_enabled``, for the same reason: monkeypatching ``NO_REPLY_ENABLED``
+    must take effect on every path at once (the session binding is the only
+    reader).
+    """
+    return NO_REPLY_ENABLED
+
+
+class NoReplyParams(BaseModel):
+    """No fields by design: the call's whole content is its existence.
+
+    A ``reason`` field was considered and rejected (docs §4): a reason can only
+    live in the call's persisted arguments, which are re-billed on every later
+    request, and the trigger row beside the call already says why. The ``i``
+    intent property this schema ends up with is injected by ``create_tools``
+    (``apply_intent_schema``) — not declared here — and the loop lifts it off
+    before validation (``INTENT_FIELD`` pop), so a model-supplied call arrives
+    as ``{}``. ``extra="forbid"`` is what keeps "only the injected ``i`` is
+    accepted" true at the tool boundary: any other key is a validation error
+    rather than a silently ignored field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+#: The description is where the acknowledgement ban lives rather than in
+#: ``system.md`` (review R6): the schema is deferred, so this text is unbilled
+#: until the tool is activated, while the system prompt is paid on EVERY
+#: request of every session — including the children that can never call it.
+_NO_REPLY_DESCRIPTION = (
+    "End this turn silently when a peer message, wake, monitor or job result "
+    "needs no reply and no action. Nothing is shown or notified — never answer "
+    "an acknowledgement with an acknowledgement, and never write filler such "
+    "as '(no action needed)'. Refused if the user asked something or the "
+    "wake/monitor asked to notify."
+)
+
+
+def build_no_reply_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: present only where the session can END QUIET.
+
+    Gated on the ``quiet_end`` callable ALONE, the one-fact rule
+    ``build_ask_withdraw_tool`` follows with the queue door: its presence IS
+    "this session may end a turn quietly", and the session binds it to ``None``
+    exactly where a quiet end could not be honoured (subagent children whose
+    final text a parent's ``wait`` reads, one-shot/headless hosts whose product
+    IS the final text, output-contract sessions whose gate would read silence
+    as a missing response, and the ``LOP_NO_REPLY=0`` kill switch). Absent, not
+    merely inert, in those sessions — footprint rung 3.
+
+    ``approval_tier="read"`` for the same reason ``todo`` and
+    ``ask_withdraw`` take it: the call touches nothing outside the session's
+    own turn — no writes, no world state — so an approval prompt would put a
+    question in front of the operator about the absence of one. ``exclusive``
+    and ``interruptible=False`` like ``patience``: the call settles the batch's
+    shape (whether the turn ends), so letting it run beside a sibling whose
+    result must still be fed back is exactly the interleaving the loop's
+    LAST-result rule (review R8) rules out.
+    """
+    if getattr(context, "quiet_end", None) is None:
+        return None
+    return AgentTool(
+        name="no_reply",
+        label="No reply",
+        description=_NO_REPLY_DESCRIPTION,
+        parameters=NoReplyParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_no_reply,
+    )
+
+
+@_guard("no_reply")
+async def execute_no_reply(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """End the turn quietly, or refuse with the sentence the model must act on.
+
+    The refusal decision is the session's own (``quiet_end`` returns the
+    sentence when a person asked this turn, when a user message sits queued but
+    unconsumed, or when the wake/monitor delivery asked to notify —
+    docs/design/quiet-turns.md §4's denylist). A refusal comes back as an
+    ``is_error`` result and NO marker, so the loop does not end the turn and the
+    model writes the text; this method never coerces silence either way.
+    """
+    try:
+        NoReplyParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "no_reply", exc)
+    quiet_end = getattr(context, "quiet_end", None) if context is not None else None
+    if quiet_end is None:
+        # Unreachable through the advertised tool (the builder above refuses to
+        # create it without the door), so this is a host wiring fault and is
+        # reported as one — never as a quiet end, which would tell the model its
+        # turn ended when the loop is still going to ask it for text.
+        return _error(
+            tool_call_id,
+            "no_reply",
+            "this host has no quiet-end door wired into this session — the turn "
+            "is not over; answer in text instead.",
+        )
+    refusal = await quiet_end()
+    if refusal:
+        return _error(tool_call_id, "no_reply", refusal)
+    return _text(
+        tool_call_id,
+        "no_reply",
+        "Quiet.",
+        # ``useless`` so the prune pass blanks the content later; the marker
+        # rides ``details``, which never reaches a provider.
+        useless=True,
+        details={QUIET_TURN_KEY: True},
     )

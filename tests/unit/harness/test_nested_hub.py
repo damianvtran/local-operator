@@ -208,14 +208,21 @@ def context_for(comms: SubagentComms, job_id: str | None, *, may_delegate: bool)
     return ToolContext(cwd=".", subagent_comms=comms, job_id=job_id, may_delegate=may_delegate)
 
 
-def test_a_delegating_child_gets_the_parent_shape_and_others_keep_messages(tmp_path):
-    """Who gets which hub, and the two schemas that must not move.
+@pytest.mark.parametrize("model_choice", ["operator", "model"])
+def test_a_delegating_child_gets_the_parent_shape_and_others_keep_messages(
+    tmp_path, monkeypatch, model_choice
+):
+    """Role scoping stays stable while the parent model field follows policy.
 
-    The message-only child tool and the TOP session's parent tool are
-    cache-prefix strings: both are asserted byte-identical to the schema their
-    params model renders, so the lead's variant cannot leak into either
-    (BEN-7-D5 addendum, manager ruling 2026-09-26).
+    The raw params schema accepts exact selectors, but the advertised operator
+    arm deliberately narrows that field to inherit. Compare the unchanged
+    parent shape byte-for-byte separately from that one policy-sensitive field;
+    the message-only worker must still get no parent controls at all.
     """
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "config.yml").write_text(f"values:\n  subagents:\n    model_choice: {model_choice}\n")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     comms, _root, _lead, _worker = tree(tmp_path)
     lead_tool = build_hub_tool(context_for(comms, "lead", may_delegate=True))
     worker_tool = build_hub_tool(context_for(comms, "w", may_delegate=False))
@@ -223,7 +230,22 @@ def test_a_delegating_child_gets_the_parent_shape_and_others_keep_messages(tmp_p
     assert lead_tool is not None and worker_tool is not None and top_tool is not None
 
     assert worker_tool.parameters == HubChildParams.model_json_schema()
-    assert top_tool.parameters == HubParams.model_json_schema()
+    advertised = json.loads(json.dumps(top_tool.parameters))
+    raw = HubParams.model_json_schema()
+    model_field = advertised["properties"].pop("model")
+    raw_model = raw["properties"].pop("model")
+    assert advertised == raw
+    assert "model" not in top_tool.parameters.get("required", [])
+    assert lead_tool.parameters["properties"]["model"] == model_field
+    if model_choice == "model":
+        assert model_field == raw_model
+    else:
+        assert model_field["anyOf"] == [{"type": "string", "enum": ["inherit"]}, {"type": "null"}]
+        assert "Exact models require subagents.model_choice=model" in model_field["description"]
+        # Only the selector menu and its policy-aware help may change.
+        assert {k: v for k, v in model_field.items() if k not in ("anyOf", "description")} == {
+            k: v for k, v in raw_model.items() if k not in ("anyOf", "description")
+        }
 
     # The lead's variant: the parent's ops, with ``op`` optional so its own
     # reply validates, and ``to`` naming the parent.

@@ -43,7 +43,7 @@ from local_operator.ansi import strip_control_sequences
 from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
-from local_operator.tui.costs import job_cost
+from local_operator.tui.costs import SubtreeComponents, subtree_components, subtree_cost
 from local_operator.tui.widgets.status_line import context_spelling, format_cost
 from local_operator.tui.widgets.tool_card import (
     clean_intent,
@@ -310,6 +310,12 @@ LABEL_FLOOR = 12
 #: and one digit, appended to the LABEL rather than given a column of its own:
 #: it is a property of the name (see :func:`_lay_out`), and a second column
 #: would re-solve a layout that already has a ladder for the label.
+#:
+#: A row carrying this mark shows its WHOLE subtree's spend in its cost cell (its
+#: own calls plus every nested child, running or settled), so the rows on a page
+#: add up to the footer's subagent total; the context and elapsed cells stay the
+#: row's own. No separate glyph says so — the trailing ``+`` already means "lower
+#: bound" and this mark already means "there is a level below".
 CHILDREN_MARKER = "⊞"
 
 #: The widest a SCOPE label may be before the header truncates it with `…`.
@@ -561,7 +567,9 @@ class JobStats:
     billed: bool = False
 
 
-def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
+def job_stats(
+    job: Any, *, default_model_label: str = "", subtree: SubtreeComponents | None = None
+) -> JobStats:
     """One task job's model/usage/cost facts, read defensively.
 
     ``default_model_label`` is the PARENT's label. A child launched with no
@@ -577,8 +585,18 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     reports what it was billed for. Same precedence the parent's band uses
     (``tui/events.py``), so one number cannot mean two things four rows apart.
 
-    Never raises, and the money is never computed here: :func:`costs.job_cost`
-    is the app's ONE pricing path and this function only reads it.
+    Never raises, and the money is never computed here: :func:`costs.subtree_cost`
+    is the app's ONE pricing path and this function only reads it. The figure is
+    the row's WHOLE subtree (its own calls, settled descendants and the live
+    child manager) because that is what the session footer adds up; a parent
+    row that showed only its own cents while its scouts spent dollars made the
+    rows contradict the total.
+
+    ``subtree`` is that subtree already gathered. The gather reads the live job
+    manager, whose accounting cache is not thread-safe, so the panel does it on
+    the loop (:meth:`SubagentPanel._read_stats`) and hands the detached result to
+    the worker that prices it; omitted, it is gathered here, which is right for a
+    caller already on the loop.
 
     Neither is the context WINDOW resolved here, and that is a correctness
     requirement rather than tidiness. This runs on the paint path, off a
@@ -624,7 +642,14 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
             cost = getattr(job, "direct_cost", None)
             partial = knowledge in {"partial", "floor"}
         else:
-            cost = job_cost(job, default_model_label=default_model_label or None)
+            gathered = subtree if subtree is not None else subtree_components(job)
+            cost, partial = subtree_cost(
+                gathered, default_model_label=model_label or default_model_label or None
+            )
+            # A parent that has reported nothing itself but whose children have
+            # is billed: its row must read ``$—`` when they are unpriceable, not
+            # nothing.
+            billed = billed or bool(gathered.components)
     except Exception:
         # A job the panel cannot read is a row with fewer numbers on it, never
         # a broken frame: this is observability, and it runs against embedder
@@ -1550,6 +1575,30 @@ def _paused_ids(session: Any) -> set[str]:
     return paused_child_ids(getattr(session, "_subagent_comms", None))
 
 
+def _job_id(job: Any) -> str:
+    """One job's ``id`` as a string, or a blank when its host refuses to hand it over.
+
+    NEVER raises, for :func:`row_facts`'s reason: a ``getattr`` default only
+    covers a MISSING attribute, and the hosts this widget survives -- embedders
+    and replayed ledgers whose job objects are not ``AsyncJob`` -- hand it
+    properties that RAISE, on paths (``sync``, the 1 Hz tick) where an escape is
+    an unhandled Textual message-handler exception: the whole app, for a status
+    row (post-merge review of #2189, F-3).
+
+    The failure is logged, not swallowed, and the fallback is the value the
+    ledger already means by "no id": ``_sync_rows`` skips such a job exactly as
+    it skips an empty id, and :func:`summary_counts` still reads the rest of the
+    job through :func:`row_facts` -- so the counts stay truthful and the
+    degraded, nameless presentation is what remains visible, never a crash and
+    never a fabricated row.
+    """
+    try:
+        return str(getattr(job, "id", "") or "")
+    except Exception:  # noqa: BLE001 — a job the panel cannot read may not take the app down
+        logger.warning("reading a subagent job id failed", exc_info=True)
+        return ""
+
+
 def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -> SummaryCounts:
     """Bucket task jobs by the state the row vocabulary already names.
 
@@ -1557,11 +1606,13 @@ def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -
     queued child counts as queued here exactly as its row would glyph it (a
     queued job's ``status`` is still ``running``; see :func:`status_glyph`).
     Restored rows arrive as ``interrupted``/``completed`` and bucket there.
+    The id read is :func:`_job_id`'s: a host whose ``id`` raises counts by its
+    readable fields instead of taking the tick down with it (review F-3).
     """
     counts = dict.fromkeys(SummaryCounts._fields, 0)
     paused_ids = paused_ids or set()
     for job in jobs:
-        job_id = str(getattr(job, "id", "") or "")
+        job_id = _job_id(job)
         facts = row_facts(job, fallback_id="", current=False, paused=job_id in paused_ids)
         if facts.paused and facts.status != "running":
             counts["paused"] += 1
@@ -2556,7 +2607,7 @@ class SubagentPanel(Container):
         # that empties keeps the last resolver for the rows that remain.
         self._role_display = role_display
         task_jobs = [job for job in job_rows if getattr(job, "type", "") == "task"]
-        selected_id = str(getattr(selected_job, "id", "") or "")
+        selected_id = _job_id(selected_job)
         self._selected_job_id = selected_id
         # Stripped for the same reason a row's label is: this text is
         # model-authored and reaches a header that is painted as-is.
@@ -2588,7 +2639,7 @@ class SubagentPanel(Container):
         # NOT an unconditional `True`: the 1 Hz poll lands here every second,
         # and un-hiding on each tick would make `hidden` last one second.
         self.display = self._density is not Density.HIDDEN
-        self._jobs_by_id = {str(getattr(job, "id", "") or ""): job for job in task_jobs}
+        self._jobs_by_id = {_job_id(job): job for job in task_jobs}
         self._paused_ids = _paused_ids(session)
         changed = self._sync_rows(task_jobs)
         self._apply_visibility()
@@ -2662,7 +2713,7 @@ class SubagentPanel(Container):
         seen: set[str] = set()
         order: list[str] = []
         for job in jobs:
-            job_id = str(getattr(job, "id", "") or "")
+            job_id = _job_id(job)
             if not job_id:
                 continue
             seen.add(job_id)
@@ -2828,9 +2879,18 @@ class SubagentPanel(Container):
             return
         self._stats_pending.add(job_id)
         label = self._model_label
+        # Gathered HERE, on the loop that owns the live job managers, and priced
+        # on the worker: the worker exists because pricing a cold model can touch
+        # the network, while the gather reads a manager cache that is written
+        # without a lock (it is the same cache the footer total reads).
+        # A row the runtime already priced (``direct_cost_knowledge`` set: a
+        # follower's frozen row) is never repriced here, so it gathers nothing.
+        gathered = (
+            subtree_components(job) if getattr(job, "direct_cost_knowledge", None) is None else None
+        )
 
         def read() -> None:
-            stats = job_stats(job, default_model_label=label)
+            stats = job_stats(job, default_model_label=label, subtree=gathered)
             self.app.call_from_thread(self._stats_read, job_id, stats)
 
         try:
@@ -2841,7 +2901,7 @@ class SubagentPanel(Container):
             # No app to run a worker on (an unmounted panel in a unit test).
             # Read inline: there is no UI thread to protect.
             self._stats_pending.discard(job_id)
-            self._stats[job_id] = job_stats(job, default_model_label=label)
+            self._stats[job_id] = job_stats(job, default_model_label=label, subtree=gathered)
 
     def _stats_read(self, job_id: str, stats: JobStats) -> None:
         """Land an off-thread reading and let the next tick paint it."""
@@ -2977,19 +3037,34 @@ class SubagentPanel(Container):
         key at the moment it moves the counts.
         """
         jobs = list(self._jobs_by_id.values())
-        key = tuple(
-            (
+        key = tuple(self._job_key(job) for job in jobs)
+        if self._summary_counts_key != key:
+            self._summary_counts_key = key
+            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
+        return self._summary_counts_value
+
+    def _job_key(self, job: Any) -> tuple[Any, ...]:
+        """One ledger job's contribution to the summary cache key. NEVER raises.
+
+        Guarded whole, like :func:`row_facts` and for the same reason: a
+        ``getattr`` default only covers a MISSING attribute, and the hosts this
+        widget has to survive — embedders and replayed ledgers whose job
+        objects are not ``AsyncJob`` — hand it properties that RAISE. This key
+        is read from every ``sync`` AND every 1 Hz tick, so an escape from here
+        is an unhandled Textual message-handler exception: the whole app, for a
+        status row. The fallback values are the ones :func:`row_facts` returns
+        for the same job (running, not queued, not paused), so the key still
+        names the fields the counts were derived from.
+        """
+        try:
+            return (
                 id(job),
                 getattr(job, "status", ""),
                 bool(getattr(job, "queued", False)),
                 str(getattr(job, "id", "") or "") in self._paused_ids,
             )
-            for job in jobs
-        )
-        if self._summary_counts_key != key:
-            self._summary_counts_key = key
-            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
-        return self._summary_counts_value
+        except Exception:  # noqa: BLE001 — a job the panel cannot read may not take the app down
+            return (id(job), "running", False, False)
 
     def _ledger_has_running(self) -> bool:
         """Whether any child is live, read from the LEDGER not the rows.

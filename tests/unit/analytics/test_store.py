@@ -332,6 +332,13 @@ def test_recording_degrades_when_cost_columns_absent(tmp_path):
     # named them would still return record_batch == 1.
     conn = store._connect()
     assert conn is not None
+    # The view references ``cost_micro``, so SQLite refuses the ALTER while it
+    # exists (``error in view spend_all after drop column``). Drop it first:
+    # no production path drops these columns, this fixture is simulating a
+    # pre-column database, and a reader's next connect re-creates the view
+    # through ``_recreate_spend_all_view``'s definition guard (round-3 review,
+    # R3-1 — the one carried deterministic red).
+    conn.execute("DROP VIEW IF EXISTS spend_all")
     conn.execute("ALTER TABLE calls DROP COLUMN cost_micro")
     conn.execute("ALTER TABLE calls DROP COLUMN cost_known")
     conn.commit()

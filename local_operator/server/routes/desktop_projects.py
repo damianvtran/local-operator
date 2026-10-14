@@ -44,8 +44,11 @@ create body is the design's frozen contract for the UI repo (§4.1).
 
 **Status codes.** 404 unknown key; 409 a free-name conflict or a row written by
 a newer build (the write guard); 422 a body or value the store refuses (the
-same sentence the tool receives, via ``projects.readable_error``); 503 the
-store lock timed out, which is retryable.
+same sentence the tool receives, via ``projects.readable_error``), with
+``project_done_incomplete`` (plus the ``incomplete`` milestone names) for the
+one refusal that has a deliberate way through — ``PATCH`` with ``status: done``
+over open milestones, resent with ``force_done: true``; 503 the store lock
+timed out, which is retryable.
 
 **One route talks to other sessions.** ``POST .../{key}/request-update`` is the
 single exception to the rule below: it hands each linked session one check-in
@@ -64,15 +67,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.projects import (
     MilestoneEdit,
     Project,
+    ProjectDoneGateError,
     ProjectEdit,
     ProjectNameConflictError,
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    closed_with_open_milestones,
     display_name,
     readable_error,
     scan_runtime_states,
@@ -96,6 +102,7 @@ from local_operator.server.models.desktop_projects import (
     ProjectTimeline,
     ProjectView,
     linked_session_view,
+    project_patched,
     project_summary,
     project_timeline_entry,
     project_view,
@@ -158,10 +165,7 @@ def _not_found(registry: ProjectRegistry, key: str) -> HTTPException:
     names = f" — closest: {', '.join(near)}" if near else ""
     return HTTPException(
         404,
-        {
-            "code": "project_not_found",
-            "message": f"no project with id or name {key!r}{names}",
-        },
+        _wd.project_not_found(key=repr(key), names=names).envelope(code="project_not_found"),
     )
 
 
@@ -172,16 +176,38 @@ def _refusal(exc: Exception, key: str) -> HTTPException:
         # malformed value — the client's move is to pick another name or open
         # the existing project, which 409 (with a machine code) says and 422
         # does not.
-        return HTTPException(409, {"code": "project_name_exists", "message": str(exc)})
+        return HTTPException(
+            409, _wd.desktop_refusal(error=str(exc)).envelope(code="project_name_exists")
+        )
     if isinstance(exc, ProjectSchemaGuardError):
         # The row EXISTS and is readable; this build is too old to rewrite it.
         # 409, not 404 (the operator can see it) and not 422 (nothing about the
         # request is malformed): the state of the target is what refuses.
-        return HTTPException(409, {"code": "project_schema_newer", "message": str(exc)})
+        return HTTPException(
+            409, _wd.desktop_refusal(error=str(exc)).envelope(code="project_schema_newer")
+        )
     if isinstance(exc, ProjectRegistryLockTimeout):
         # Contention is transient; the client retries.
-        return HTTPException(503, {"code": "project_store_busy", "message": str(exc)})
-    return HTTPException(422, {"code": "project_invalid", "message": readable_error(exc)})
+        return HTTPException(
+            503, _wd.desktop_refusal(error=str(exc)).envelope(code="project_store_busy")
+        )
+    if isinstance(exc, ProjectDoneGateError):
+        # Still 422 (the request is well-formed; it asks for a state the plan's
+        # milestones contradict), but with its OWN machine code: the remedy is
+        # a deliberate choice — complete the milestones or resend with
+        # `force_done: true` — which a client can only offer if it can tell this
+        # refusal from a malformed value. `message` is the store's exact
+        # sentence; `incomplete` names what the confirm dialog should list.
+        # This mapping is shared with the create routes: they would emit the
+        # same code if create ever carried milestones (it cannot today).
+        return HTTPException(
+            422,
+            _wd.desktop_refusal(error=readable_error(exc)).envelope(code="project_done_incomplete")
+            | {"incomplete": list(exc.incomplete)},
+        )
+    return HTTPException(
+        422, _wd.desktop_refusal(error=readable_error(exc)).envelope(code="project_invalid")
+    )
 
 
 def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str, int]:
@@ -363,6 +389,10 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
             # "leave it alone", and the store's edit vocabulary reads the same
             # absence from `model_fields_set`.
             payload = {field: getattr(body, field) for field in body.model_fields_set}
+            # `force_done` is a flag about THIS call, not a field of the row:
+            # it never reaches `ProjectEdit` (which would not know it) and
+            # rides the registry keyword instead — the same door the tool uses.
+            force_done = bool(payload.pop("force_done", False))
             try:
                 # The EDIT MODEL is built inside the try too: it runs the same
                 # validators (dates, tag grammar, estimate bounds), and a
@@ -370,7 +400,9 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 # its ``(ReceiptConflict, ValueError)`` arm — a bare 409 string,
                 # not this route's 422 sentence.
                 fields = ProjectEdit(**payload)
-                outcome = registry.update_project(found.id, fields, reporter="operator")
+                outcome = registry.update_project(
+                    found.id, fields, reporter="operator", force_done=force_done
+                )
             except (
                 ValueError,
                 ValidationError,
@@ -380,8 +412,16 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 raise _refusal(exc, key) from exc
             updated = outcome.project
             live = _live_counts(registry, [updated])
-            return project_summary(
-                updated, live_sessions=live.get(updated.id, 0), window=_window(registry)
+            # The store persists nothing about a forced close, so this answer
+            # is the client's only chance to say "closed with N milestones
+            # open" (see `ProjectPatched`).
+            return project_patched(
+                updated,
+                live_sessions=live.get(updated.id, 0),
+                window=_window(registry),
+                forced_done=closed_with_open_milestones(
+                    updated, force_done=force_done, was_done=found.status == "done"
+                ),
             )
 
         return reply(await asyncio.to_thread(mutate))
@@ -399,13 +439,9 @@ async def remove(key: str, body: ProjectDelete, request: Request) -> CRUDRespons
             if body.confirm.strip().casefold() != found.name.casefold():
                 raise HTTPException(
                     422,
-                    {
-                        "code": "project_confirm_mismatch",
-                        "message": (
-                            f"confirm must repeat the project name {found.name!r} "
-                            "exactly (the name, not the id)"
-                        ),
-                    },
+                    _wd.project_confirm_mismatch(name=repr(found.name)).envelope(
+                        code="project_confirm_mismatch"
+                    ),
                 )
             try:
                 registry.delete_project(found.id)

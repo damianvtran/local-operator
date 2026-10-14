@@ -198,7 +198,8 @@ async def test_a_dead_grant_answers_the_sign_in_class_and_spends_nothing(
         assert response.status_code == 401
         assert response.json()["detail"] == {
             "code": "radient_credential_refused",
-            "message": SIGN_IN,
+            "params": {"error": SIGN_IN},
+            "text": SIGN_IN,
             "details": {"reason": "grant_invalid"},
         }
         # Nothing was spent on a credential the store had already been told is dead.
@@ -354,7 +355,8 @@ async def test_an_upstream_refusal_of_a_live_bearer_is_the_credential_class(
         assert response.status_code == 401
         assert response.json()["detail"] == {
             "code": "radient_credential_refused",
-            "message": "Radient could not complete this operation",
+            "params": {"error": "Radient could not complete this operation"},
+            "text": "Radient could not complete this operation",
             "details": {"upstream_status": 401},
         }
         # The fresh token WAS spent here, which is what separates this case from the
@@ -368,7 +370,8 @@ async def test_an_upstream_outage_is_the_retry_class(headless_tui_env, monkeypat
         assert response.status_code == 502
         assert response.json()["detail"] == {
             "code": "radient_upstream_failed",
-            "message": "Radient could not complete this operation",
+            "params": {"error": "Radient could not complete this operation"},
+            "text": "Radient could not complete this operation",
             "details": {"upstream_status": 500},
         }
         assert stub.spent() == [FRESH]
@@ -382,7 +385,8 @@ async def test_no_credential_at_all_answers_the_sign_in_class_with_a_code(
         assert response.status_code == 409
         assert response.json()["detail"] == {
             "code": "radient_no_credential",
-            "message": SIGN_IN,
+            "params": {"error": SIGN_IN},
+            "text": SIGN_IN,
             "details": {},
         }
         assert stub.calls == []

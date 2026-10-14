@@ -741,6 +741,88 @@ async def test_an_answer_racing_a_withdrawal_wins_in_both_orders(
         await dispose_quietly(session)
 
 
+@pytest.mark.asyncio
+async def test_an_answer_handed_over_past_the_last_drain_still_lands(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivery parked because a turn was streaming lands when that turn ends.
+
+    THE REGRESSION THIS PINS (CI run 37980552652, macos e2e shard 2): the busy
+    arms (``deliver_ask_messages`` here) latch on ``_is_streaming``, but a turn
+    already past its last steering drain has no boundary left to carry what it
+    parked -- nothing re-checks the queue when a turn ends, so the hand-off
+    reported success and the row never arrived. The racing-withdrawal cell
+    above only met that window when CI made the tail slow, so this cell FORCES
+    the interleaving instead of waiting for it: the first delivery turn is
+    held in its tail (a patched ``_mark_code_requests_dirty`` -- the thread hop
+    that ran there on CI), the second answer is handed over while it is held,
+    and the turn is released. The pinned contract is the turn-end flush
+    (``Session._flush_parked_deliveries``): the second row still lands.
+    """
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="first",
+                tool_name="ask",
+                tool_call_id="ask-tail-a",
+                arguments=_ask_args("first question"),
+            ),
+            tool_call_turn(
+                text="second",
+                tool_name="ask",
+                tool_call_id="ask-tail-b",
+                arguments=_ask_args("second question"),
+            ),
+            text_turn("both queued"),
+            # Spares: the first delivery's response buys its own turn.
+            text_turn("noted"),
+            text_turn("noted"),
+        ]
+    )
+    session = _session(headless_tui_env, "tail-park", stream)
+    session.set_ask_handler(_never_answers)
+    in_tail = asyncio.Event()
+    release = asyncio.Event()
+    armed = [False]
+    original = Session._mark_code_requests_dirty
+
+    async def held_mark(self: Session) -> None:
+        if armed[0]:
+            armed[0] = False
+            in_tail.set()
+            await release.wait()
+        return await original(self)
+
+    monkeypatch.setattr(Session, "_mark_code_requests_dirty", held_mark)
+    try:
+        with bounded(BOUND_S, "a delivery parked in a turn's tail"):
+            await session.prompt("ask both")
+            first, second = _ask_ids(session.transcript.directory)
+            armed[0] = True
+            assert session.respond_ask(first, {"q0": ["yes"]}, by="terminal")["ok"] is True
+            await session.reconcile_asks()  # opens the first delivery turn
+            # The hold is the test's own event, so awaiting it (bounded) is the
+            # assertion that the tail was reached -- not a sleep.
+            await asyncio.wait_for(in_tail.wait(), BOUND_S)
+            assert session._is_streaming, "the first delivery turn must still be live"
+            assert session.transcript.has_entry(store.response_row_id(first))
+            # The second answer lands while that turn is past its last drain:
+            # the busy arm parks it on the steering queue.
+            assert session.respond_ask(second, {"q0": ["no"]}, by="terminal")["ok"] is True
+            await session.reconcile_asks()
+            assert session._steering_queue.qsize() == 1, "the hand-off must have parked"
+            release.set()
+            await _wait_for_delivery(
+                session,
+                lambda: session.transcript.has_entry(store.response_row_id(second)),
+                what="the tail-parked answer's response row",
+            )
+    finally:
+        release.set()
+        await dispose_quietly(session)
+
+
 # ---------------------------------------------------------------------------
 # Restart durability
 # ---------------------------------------------------------------------------

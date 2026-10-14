@@ -70,6 +70,22 @@ import sys
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.text import register_refresh, tr
+
+# ---------------------------------------------------------------------------
+# The splash tips: English in the `tui.welcome` catalogue (RFC §2.2/§3.1)
+# ---------------------------------------------------------------------------
+#
+# The two non-empty `tip` templates below render ONLY on the welcome splash,
+# whose module builds its keyed pool from these fields — so their English
+# lives in that slice's catalogue (`tui.welcome`), resolved once at import
+# through the shared render helper. The `{key}` spelling is ICU-QUOTED in the
+# catalogue (`'{key}' starts …`) so the placeholder survives the runtime
+# unchanged, and `welcome._resolve_tip` substitutes the CURRENT persisted key
+# at render — the same per-render contract the field has always had.
+_t = tr("tui.welcome")
+
 #: Prefix every remappable action's config key and binding id carries. The
 #: settings page, ``_on_config_change`` and the resolver all key on it, so
 #: "is this a hotkey?" is one string comparison rather than a membership test
@@ -146,7 +162,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         label="New session",
         default="ctrl+n",
         help="Starts a fresh conversation, the same as /new.",
-        tip="{key} starts a new conversation",
+        tip=_t(tui_welcome.tip_key_new_session()),
     ),
     KeyAction(
         id="keymap.resume",
@@ -154,7 +170,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         label="Resume a session",
         default="ctrl+s",
         help="Opens the picker of recent conversations, the same as /resume.",
-        tip="{key} reopens a recent conversation",
+        tip=_t(tui_welcome.tip_key_resume()),
     ),
     # The first DESKTOP-scoped action. Not a Textual binding: no `action_*`
     # method, no `Binding`, and `tip=""` so the splash cannot advertise a key
@@ -198,6 +214,32 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
 BY_ID: dict[str, KeyAction] = {action.id: action for action in KEY_ACTIONS}
+
+
+def _reload_copy() -> None:
+    """Re-resolve the catalogued ``tip`` templates after a locale move (C).
+
+    Only ``tip`` is catalogued copy here: ``help``/``label`` stay literals
+    until the bindings/settings slice owns them, and every other field is a
+    key, id or scope — machine values that never translate. ``welcome``'s
+    keyed pool reads these actions when ITS refresh runs, one registration
+    later (import order), so the splash picks the new templates up in the
+    same move. The assignments mirror the definitions above; the live-locale
+    slice test pins both tips against the fixture catalogue.
+    """
+    global KEY_ACTIONS, BY_ID
+    tips = {
+        "keymap.new_session": _t(tui_welcome.tip_key_new_session()),
+        "keymap.resume": _t(tui_welcome.tip_key_resume()),
+    }
+    KEY_ACTIONS = tuple(
+        dataclasses.replace(action, tip=tips[action.id]) if action.id in tips else action
+        for action in KEY_ACTIONS
+    )
+    BY_ID = {action.id: action for action in KEY_ACTIONS}
+
+
+register_refresh(_reload_copy)
 
 #: ``id -> scope``, the one-question lookup every writer and display path
 #: needs: "is this value a Textual key or a desktop shortcut?". Derived so a

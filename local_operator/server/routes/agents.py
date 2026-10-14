@@ -44,6 +44,8 @@ from local_operator.clients.radient import (
 )
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
+from local_operator.i18n.keys import wire_errors_agents as _wa
+from local_operator.i18n.text import tr
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_agent_registry,
@@ -67,6 +69,9 @@ from local_operator.types import AgentState
 
 router = APIRouter(tags=["Agents"])
 logger = logging.getLogger("local_operator.server.routes.agents")
+
+#: RFC §3.1 render point for this slice's copy.
+_t = tr("wire.errors.agents")
 
 
 @router.get(
@@ -195,7 +200,9 @@ async def list_agents(
 
     except Exception as e:
         logger.exception("Error retrieving agents")
-        raise HTTPException(status_code=500, detail=f"Error retrieving agents: {e}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_retrieving_agents(error=str(e)).envelope()
+        )
 
     total = len(agents_list)
     start_idx = (page - 1) * per_page
@@ -282,11 +289,13 @@ async def create_agent(
         new_agent = agent_registry.create_agent(agent_edit_metadata)
     except ValidationError as e:
         logger.exception("Validation error creating agent")
-        raise HTTPException(status_code=422, detail=f"Validation error: {e}")
+        raise HTTPException(status_code=422, detail=_wa.validation_error(error=str(e)).envelope())
     except Exception as e:
         logger.error(f"Error type: {type(e).__name__}")
         logger.exception("Error creating agent")
-        raise HTTPException(status_code=400, detail=f"Failed to create agent: {e}")
+        raise HTTPException(
+            status_code=400, detail=_wa.failed_to_create_agent(error=str(e)).envelope()
+        )
 
     new_agent_serialized = new_agent.model_dump()
 
@@ -342,13 +351,17 @@ async def get_agent(
         agent_obj = agent_registry.get_agent(agent_id)
     except KeyError as e:
         logger.exception("Agent not found")
-        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_wrapped(error=str(e)).envelope()
+        )
     except Exception as e:
         logger.exception("Error retrieving agent")
-        raise HTTPException(status_code=500, detail=f"Error retrieving agent: {e}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_retrieving_agent(error=str(e)).envelope()
+        )
 
     if not agent_obj:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_wa.agent_not_found().envelope())
 
     agent_serialized = agent_obj.model_dump()
 
@@ -423,13 +436,17 @@ async def update_agent(
         updated_agent = agent_registry.update_agent(agent_id, agent_edit_data)
     except KeyError as e:
         logger.exception("Agent not found")
-        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_wrapped(error=str(e)).envelope()
+        )
     except Exception as e:
         logger.exception("Error updating agent")
-        raise HTTPException(status_code=400, detail=f"Failed to update agent: {e}")
+        raise HTTPException(
+            status_code=400, detail=_wa.failed_to_update_agent(error=str(e)).envelope()
+        )
 
     if not updated_agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail=_wa.agent_not_found().envelope())
 
     updated_agent_serialized = updated_agent.model_dump()
 
@@ -498,7 +515,7 @@ async def upload_agent_to_radient(
             config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
         )
         if not api_key:
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+            raise HTTPException(status_code=401, detail=_wa.radient_api_key_required().envelope())
         base_url = env_config.radient_api_base_url
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
 
@@ -506,7 +523,9 @@ async def upload_agent_to_radient(
         try:
             agent = agent_registry.get_agent(agent_id)
         except KeyError:
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
         # The archive is consumed entirely within this handler, so the context
         # manager owns its temp directory. Using the bare export_agent() here
         # leaked a directory holding a full agent zip on every upload.
@@ -517,7 +536,7 @@ async def upload_agent_to_radient(
             except Exception as e:
                 logger.exception("Error uploading agent to Radient")
                 raise HTTPException(
-                    status_code=400, detail=f"Error uploading agent to Radient: {e}"
+                    status_code=400, detail=_wa.error_uploading_agent(error=str(e)).envelope()
                 )
 
         return CRUDResponse(
@@ -531,8 +550,10 @@ async def upload_agent_to_radient(
         logger.exception("Error uploading agent to Radient")
         # If the error is about missing API key, return a clear message
         if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
-        raise HTTPException(status_code=400, detail=f"Error uploading agent to Radient: {e}")
+            raise HTTPException(status_code=401, detail=_wa.radient_api_key_required().envelope())
+        raise HTTPException(
+            status_code=400, detail=_wa.error_uploading_agent(error=str(e)).envelope()
+        )
 
 
 @router.get(
@@ -605,7 +626,7 @@ async def download_agent_from_radient(
         except Exception as e:
             logger.exception("Error downloading agent from Radient")
             raise HTTPException(
-                status_code=400, detail=f"Error downloading agent from Radient: {e}"
+                status_code=400, detail=_wa.error_downloading_agent(error=str(e)).envelope()
             )
 
         agent_serialized = outcome.agent.model_dump()
@@ -628,7 +649,9 @@ async def download_agent_from_radient(
         raise
     except Exception as e:
         logger.exception("Error downloading agent from Radient")
-        raise HTTPException(status_code=400, detail=f"Error downloading agent from Radient: {e}")
+        raise HTTPException(
+            status_code=400, detail=_wa.error_downloading_agent(error=str(e)).envelope()
+        )
 
 
 # --- Instruction-set publication ---------------------------------------------
@@ -736,8 +759,9 @@ def _publication_detail(
     ``message`` is the sentence a human reads (the hub composes its own, so it is
     used unchanged); ``details`` carries the machine-readable rest -- which field
     was wrong, which built-in reserved the name, which moderation categories were
-    cited -- and holds no prose, so a client that renders only ``message`` still
-    reads correctly.
+    cited -- and holds no prose, so a client that renders only ``text`` still
+    reads correctly (the envelope's sentence field; ``message`` was the
+    pre-envelope spelling, kept by no reader after this slice).
 
     THIS IS THE BOUNDARY, so the masker runs HERE rather than at each arm that
     builds a detail. What a caller receives is this body and nothing else, and
@@ -752,9 +776,16 @@ def _publication_detail(
     case where the exception came from somewhere else.
     """
 
+    masked = scrub_details(message)
+    # The envelope (RFC §2.6): `code` is the key the renderer switches on and
+    # stays VERBATIM; the sentence moves to `text` (and `params.error`), which
+    # is what the patched readers (desktopResult / publicationProse / the
+    # "Not Found" discriminator) read first now — `message` alone would be the
+    # shape nothing reads after this slice.
     return {
         "code": code,
-        "message": scrub_details(message),
+        "params": {"error": masked},
+        "text": masked,
         "details": scrub_details(dict(details or {})),
     }
 
@@ -900,9 +931,13 @@ async def _org_radient_credentials(
         if not org_oauth_destination_allowed(base_url):
             raise HTTPException(
                 status_code=400,
-                detail=org_destination_refused_sentence(base_url, DEFAULT_RADIENT_API_BASE_URL),
+                detail=_wa.agents_refusal(
+                    error=org_destination_refused_sentence(base_url, DEFAULT_RADIENT_API_BASE_URL)
+                ).envelope(),
             )
-        raise HTTPException(status_code=401, detail=ORG_LOGIN_REMEDY)
+        raise HTTPException(
+            status_code=401, detail=_wa.agents_refusal(error=ORG_LOGIN_REMEDY).envelope()
+        )
     return SecretStr(access.access_token), base_url
 
 
@@ -931,7 +966,7 @@ async def _radient_route_credentials(
         config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
     )
     if not api_key:
-        raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+        raise HTTPException(status_code=401, detail=_wa.radient_api_key_required().envelope())
     return api_key, env_config.radient_api_base_url
 
 
@@ -1068,7 +1103,9 @@ async def publish_agent_to_radient(
         try:
             target = org_target_params(visibility, tenant_id)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(
+                status_code=400, detail=_wa.agents_refusal(error=str(exc)).envelope()
+            )
 
         api_key, base_url = await _radient_route_credentials(
             target, config_manager, env_config, provider_auth_store
@@ -1082,7 +1119,9 @@ async def publish_agent_to_radient(
         try:
             agent = agent_registry.get_agent(agent_id)
         except KeyError:
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
 
         try:
             overrides = validate_document_overrides(publication.document)
@@ -1128,12 +1167,10 @@ async def publish_agent_to_radient(
         # mapping an org failure onto "RADIENT_API_KEY is required" would name a
         # key the org path never reads.
         if not target and ("RADIENT_API_KEY" in str(e) or "credential" in str(e)):
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+            raise HTTPException(status_code=401, detail=_wa.radient_api_key_required().envelope())
         raise HTTPException(
             status_code=500,
-            detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "This agent could not be published from this machine."
-            ),
+            detail=_publication_detail(LOCAL_FAILURE_CODE, _t(_wa.publish_local_failure())),
         )
 
 
@@ -1192,7 +1229,9 @@ async def republish_agent_to_radient(
         try:
             target = org_target_params(visibility, tenant_id)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(
+                status_code=400, detail=_wa.agents_refusal(error=str(exc)).envelope()
+            )
 
         api_key, base_url = await _radient_route_credentials(
             target, config_manager, env_config, provider_auth_store
@@ -1206,8 +1245,7 @@ async def republish_agent_to_radient(
                 status_code=422,
                 detail=_publication_detail(
                     "invalid_instruction_set",
-                    "An update needs the id of the listing to update: "
-                    "the agent document is not valid: hub_agent_id must not be empty.",
+                    _t(_wa.listing_id_required()),
                     {"field": "hub_agent_id", "rule": "must not be empty"},
                 ),
             )
@@ -1215,7 +1253,9 @@ async def republish_agent_to_radient(
         try:
             agent = agent_registry.get_agent(agent_id)
         except KeyError:
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
 
         try:
             overrides = validate_document_overrides(publication.document)
@@ -1255,12 +1295,10 @@ async def republish_agent_to_radient(
         # credential is the OAuth row, and its own remedies were raised above
         # (see the publish route's arm for the same reasoning).
         if not target and ("RADIENT_API_KEY" in str(e) or "credential" in str(e)):
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+            raise HTTPException(status_code=401, detail=_wa.radient_api_key_required().envelope())
         raise HTTPException(
             status_code=500,
-            detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "This agent could not be republished from this machine."
-            ),
+            detail=_publication_detail(LOCAL_FAILURE_CODE, _t(_wa.republish_local_failure())),
         )
 
 
@@ -1351,9 +1389,7 @@ async def check_agent_name_availability(
         logger.exception("Error checking agent name availability on Radient")
         raise HTTPException(
             status_code=500,
-            detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "The agent name could not be checked from this machine."
-            ),
+            detail=_publication_detail(LOCAL_FAILURE_CODE, _t(_wa.name_check_local_failure())),
         )
 
 
@@ -1418,7 +1454,7 @@ async def list_radient_memberships(
             status_code=500,
             detail=_publication_detail(
                 LOCAL_FAILURE_CODE,
-                "Your organization memberships could not be read from this machine.",
+                _t(_wa.memberships_read_local_failure()),
             ),
         )
 
@@ -1470,7 +1506,9 @@ async def publish_team_to_radient(
                 TeamRegistry(config_manager.config_dir).get_team, team_id
             )
         except (KeyError, ValueError):
-            raise HTTPException(status_code=404, detail=f"Team with ID {team_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.team_not_found_id(team_id=team_id).envelope()
+            )
 
         try:
             # The agent registry powers the derive-from-manager fallback when
@@ -1515,9 +1553,7 @@ async def publish_team_to_radient(
         logger.exception("Error publishing team to Radient")
         raise HTTPException(
             status_code=500,
-            detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "This team could not be published from this machine."
-            ),
+            detail=_publication_detail(LOCAL_FAILURE_CODE, _t(_wa.team_publish_local_failure())),
         )
 
 
@@ -1568,7 +1604,9 @@ async def pull_team_from_radient(
         try:
             validate_team_id(team_id)
         except ValueError:
-            raise HTTPException(status_code=404, detail=f"Team with ID {team_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.team_not_found_id(team_id=team_id).envelope()
+            )
         secrets = [api_key.get_secret_value()]
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
         try:
@@ -1593,18 +1631,12 @@ async def pull_team_from_radient(
             # (review round 1, minor 4).
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    "That team does not name an owning organization, so it cannot be "
-                    f"verified against {tenant_id}. Check the tenant."
-                ),
+                detail=_wa.team_ownerless_tenant_check(tenant_id=tenant_id).envelope(),
             )
         if tenant_id and owner != tenant_id:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"That team belongs to organization {owner}, not {tenant_id}. "
-                    "Check the tenant."
-                ),
+                detail=_wa.team_tenant_mismatch(owner=owner, tenant_id=tenant_id).envelope(),
             )
 
         team_registry = TeamRegistry(config_manager.config_dir)
@@ -1617,7 +1649,7 @@ async def pull_team_from_radient(
         except (ValueError, TypeError) as exc:
             raise HTTPException(
                 status_code=422,
-                detail=f"Cannot reconstruct this team locally: {exc}",
+                detail=_wa.cannot_reconstruct_team(error=str(exc)).envelope(),
             )
 
         # Link the row to its hub document and record what was pulled, so the update
@@ -1656,9 +1688,7 @@ async def pull_team_from_radient(
         logger.exception("Error pulling team from Radient")
         raise HTTPException(
             status_code=500,
-            detail=_publication_detail(
-                LOCAL_FAILURE_CODE, "This team could not be pulled from this machine."
-            ),
+            detail=_publication_detail(LOCAL_FAILURE_CODE, _t(_wa.team_pull_local_failure())),
         )
 
 
@@ -1695,10 +1725,14 @@ async def delete_agent(
         agent_registry.delete_agent(agent_id)
     except KeyError as e:
         logger.exception("Agent not found")
-        raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_wrapped(error=str(e)).envelope()
+        )
     except Exception as e:
         logger.exception("Error deleting agent")
-        raise HTTPException(status_code=500, detail=f"Error deleting agent: {e}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_deleting_agent(error=str(e)).envelope()
+        )
 
     return CRUDResponse(
         status=200,
@@ -1809,8 +1843,10 @@ async def get_agent_conversation(
         if start_idx >= total_messages and total_messages > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Page {page} is out of bounds. "
-                f"Total pages: {(total_messages + per_page - 1) // per_page}",
+                detail=_wa.page_out_of_bounds(
+                    page=str(page),
+                    total_pages=str((total_messages + per_page - 1) // per_page),
+                ).envelope(),
             )
 
         # Pages move backward in history, so we start from the end of the array and
@@ -1837,13 +1873,15 @@ async def get_agent_conversation(
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error retrieving agent conversation")
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving agent conversation: {str(e)}"
+            status_code=500, detail=_wa.error_retrieving_conversation(error=str(e)).envelope()
         )
 
 
@@ -1930,10 +1968,14 @@ async def clear_agent_conversation(
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except Exception as e:
         logger.exception("Error clearing agent conversation")
-        raise HTTPException(status_code=500, detail=f"Error clearing agent conversation: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_clearing_conversation(error=str(e)).envelope()
+        )
 
 
 @router.post(
@@ -2041,11 +2083,13 @@ async def import_agent(
             # Handle ValueError directly as 400 Bad Request
             error_msg = str(e)
             logger.exception(f"Invalid agent import data: {error_msg}")
-            raise HTTPException(status_code=400, detail=error_msg)
+            raise HTTPException(
+                status_code=400, detail=_wa.agents_refusal(error=error_msg).envelope()
+            )
         except zipfile.BadZipFile:
             # Handle BadZipFile directly as 400 Bad Request
             logger.exception("Invalid ZIP file")
-            raise HTTPException(status_code=400, detail="Invalid ZIP file")
+            raise HTTPException(status_code=400, detail=_wa.invalid_zip().envelope())
         except Exception as e:
             # For other exceptions, check if they contain known error messages
             error_msg = str(e)
@@ -2053,10 +2097,14 @@ async def import_agent(
 
             # Check for specific error messages that should be 400 errors
             if "Missing agent.yml" in error_msg or "Invalid ZIP file" in error_msg:
-                raise HTTPException(status_code=400, detail=error_msg)
+                raise HTTPException(
+                    status_code=400, detail=_wa.agents_refusal(error=error_msg).envelope()
+                )
 
             # Otherwise, return 500 Internal Server Error
-            raise HTTPException(status_code=500, detail=f"Error importing agent: {error_msg}")
+            raise HTTPException(
+                status_code=500, detail=_wa.error_importing_agent(error=error_msg).envelope()
+            )
 
 
 @router.get(
@@ -2126,10 +2174,14 @@ async def export_agent(
 
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except Exception as e:
         logger.exception("Error exporting agent")
-        raise HTTPException(status_code=500, detail=f"Error exporting agent: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_exporting_agent(error=str(e)).envelope()
+        )
 
 
 @router.get(
@@ -2266,8 +2318,10 @@ async def get_agent_execution_history(
         if start_idx >= total_executions and total_executions > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Page {page} is out of bounds. "
-                f"Total pages: {(total_executions + per_page - 1) // per_page}",
+                detail=_wa.page_out_of_bounds(
+                    page=str(page),
+                    total_pages=str((total_executions + per_page - 1) // per_page),
+                ).envelope(),
             )
 
         # Pages move backward in history, so we start from the end of the array and
@@ -2294,13 +2348,15 @@ async def get_agent_execution_history(
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error retrieving agent execution history")
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving agent execution history: {str(e)}"
+            status_code=500, detail=_wa.error_retrieving_executions(error=str(e)).envelope()
         )
 
 
@@ -2362,17 +2418,19 @@ async def get_agent_system_prompt(
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except FileNotFoundError as e:
         logger.exception(f"System prompt file not found for agent {agent_id}")
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=_wa.agents_refusal(error=str(e)).envelope())
     except IOError as e:
         logger.exception(f"Error reading system prompt for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
     except Exception as e:
         logger.exception("Error retrieving agent system prompt")
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving agent system prompt: {str(e)}"
+            status_code=500, detail=_wa.error_retrieving_system_prompt(error=str(e)).envelope()
         )
 
 
@@ -2429,9 +2487,7 @@ async def update_agent_system_prompt(
     """
     try:
         if "system_prompt" not in system_prompt:
-            raise HTTPException(
-                status_code=422, detail="Request body must contain 'system_prompt' field"
-            )
+            raise HTTPException(status_code=422, detail=_wa.system_prompt_required().envelope())
 
         agent_registry.set_agent_system_prompt(agent_id, system_prompt["system_prompt"])
         return CRUDResponse(
@@ -2441,16 +2497,20 @@ async def update_agent_system_prompt(
         )
     except KeyError:
         logger.exception(f"Agent with ID {agent_id} not found")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except IOError as e:
         logger.exception(f"Error writing system prompt for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_wa.agents_refusal(error=str(e)).envelope())
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
 
         logger.exception("Error updating agent system prompt")
-        raise HTTPException(status_code=500, detail=f"Error updating agent system prompt: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_updating_system_prompt(error=str(e)).envelope()
+        )
 
 
 # Agent Execution Variables CRUD Endpoints
@@ -2486,11 +2546,13 @@ async def list_agent_execution_variables(
         )
     except KeyError:
         logger.warning(f"Agent not found when listing execution variables: {agent_id}")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except Exception as e:
         logger.exception(f"Error listing execution variables for agent {agent_id}")
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving execution variables: {str(e)}"
+            status_code=500, detail=_wa.error_retrieving_variables(error=str(e)).envelope()
         )
 
 
@@ -2539,7 +2601,9 @@ async def create_agent_execution_variable(
         return JSONResponse(status_code=201, content=jsonable_encoder(response_content))
     except KeyError:
         logger.warning(f"Agent not found when creating execution variable: {agent_id}")
-        raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+        raise HTTPException(
+            status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+        )
     except (
         ValueError
     ) as e:  # Handles case where variable key already exists or type conversion errors
@@ -2547,12 +2611,14 @@ async def create_agent_execution_variable(
             f"Attempt to create existing execution variable '{variable_data.key}' "
             f"for agent {agent_id} or type conversion error: {str(e)}"
         )
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=_wa.agents_refusal(error=str(e)).envelope())
     except Exception as e:
         logger.exception(
             f"Error creating execution variable '{variable_data.key}' for agent {agent_id}"
         )
-        raise HTTPException(status_code=500, detail=f"Error creating execution variable: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_creating_variable(error=str(e)).envelope()
+        )
 
 
 @router.get(
@@ -2580,18 +2646,22 @@ async def get_agent_execution_variable(
         )
         # Distinguish between agent not found and variable not found for clarity
         if f"Agent with id {agent_id} not found" in str(e):
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
         else:
             raise HTTPException(
                 status_code=404,
-                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+                detail=_wa.variable_not_found(
+                    variable_key=variable_key, agent_id=agent_id
+                ).envelope(),
             )
     except Exception as e:
         logger.exception(
             f"Error retrieving execution variable '{variable_key}' for agent {agent_id}"
         )
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving execution variable: {str(e)}"
+            status_code=500, detail=_wa.error_retrieving_variable(error=str(e)).envelope()
         )
 
 
@@ -2655,21 +2725,27 @@ async def update_agent_execution_variable(
             "when updating execution variable"
         )
         if f"Agent with id {agent_id} not found" in str(e):
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
         else:
             raise HTTPException(
                 status_code=404,
-                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+                detail=_wa.variable_not_found(
+                    variable_key=variable_key, agent_id=agent_id
+                ).envelope(),
             )
     except ValueError as e:
         logger.warning(
             f"Type conversion error when updating execution variable '{variable_key}' "
             f"for agent {agent_id}: {str(e)}"
         )
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_wa.agents_refusal(error=str(e)).envelope())
     except Exception as e:
         logger.exception(f"Error updating execution variable '{variable_key}' for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=f"Error updating execution variable: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_updating_variable(error=str(e)).envelope()
+        )
 
 
 @router.delete(
@@ -2694,12 +2770,18 @@ async def delete_agent_execution_variable(
             "when deleting execution variable"
         )
         if f"Agent with id {agent_id} not found" in str(e):
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(
+                status_code=404, detail=_wa.agent_not_found_id(agent_id=agent_id).envelope()
+            )
         else:
             raise HTTPException(
                 status_code=404,
-                detail=f"Execution variable '{variable_key}' not found for agent {agent_id}",
+                detail=_wa.variable_not_found(
+                    variable_key=variable_key, agent_id=agent_id
+                ).envelope(),
             )
     except Exception as e:
         logger.exception(f"Error deleting execution variable '{variable_key}' for agent {agent_id}")
-        raise HTTPException(status_code=500, detail=f"Error deleting execution variable: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wa.error_deleting_variable(error=str(e)).envelope()
+        )

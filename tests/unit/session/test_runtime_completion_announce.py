@@ -31,11 +31,14 @@ import pytest
 
 import local_operator.session.runtime.presence as presence_module
 import local_operator.tui.notify as notify_module
+from local_operator.harness.types import AgentEndEvent
 from local_operator.paths import config_dir
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import desktop_delivery_present
 from local_operator.session.runtime.serving import ServingSessionHandle
-from tests.e2e.harness import ScriptedStream, build_session
+from local_operator.tools.registry import create_tools
+from tests.e2e.harness import ScriptedStream, build_session, tool_call_turn
+from tests.unit.session.test_session import wait_for
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +59,21 @@ def _notification_gate_off() -> Iterator[None]:
     yield
     if prior is not None:
         os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = prior
+
+
+@pytest.fixture(autouse=True)
+def _this_process_is_the_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer "this is the user's own home" for the banner identity gate.
+
+    This suite runs under pytest's autouse HOME redirect, so the runtime's new
+    quiet arm (``_announce_completion`` -> ``desktop_belongs_to_this_process(
+    report=False)``, via ``supervisors.home_is_the_users``) would answer
+    "a run, not a person" and settle every completion BEFORE the ladder these
+    tests parametrise. Patching the INPUT (``real_home``) rather than the
+    predicate keeps the whole chain real; the redirected-home case has its own
+    cell below (``test_..._under_a_foreign_home``) which overrides this patch.
+    """
+    monkeypatch.setattr("local_operator.supervisors.real_home", lambda: Path.home().resolve())
 
 
 @pytest.fixture
@@ -539,6 +557,102 @@ def _fast_ladder(monkeypatch, *delays: float) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_arm_settles_quietly_under_a_foreign_home(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """A per-run HOME is a RUN, not a person: no banner, no warning, no ladder.
+
+    THE NOISE PIN (design T6). ``lop exec`` and agent-runtime-svc run with a
+    HOME that is not the user's; before this arm every such completion fell
+    through to ``detached_notify``, whose identity gate REFUSED it — a
+    claim-then-release against the operator's attention store, the 2/8/30 s
+    retry ladder, and a one-shot WARNING the adapter persists as an audit event
+    into every run. SETTLED is the honest outcome: nothing is owed TO THIS
+    PROCESS, and the durable unseen mark is untouched for the user's own
+    surfaces.
+
+    The control arm is every OTHER cell in this file — they run under the
+    autouse patch (the user's own home) and deliver exactly as before; the
+    mutation for this cell is deleting the early return from
+    ``_announce_completion``, which makes the outcome ``failed`` (the fake sink
+    refuses) instead of ``settled``, fires the refusal report, and arms the
+    retry rung.
+    """
+    import local_operator.session.runtime.serving as serving_module
+    import local_operator.tui.notify as notify_mod
+
+    monkeypatch.setattr(
+        "local_operator.supervisors.real_home", lambda: Path("/nonexistent-foreign-home")
+    )
+    notify_mod._REFUSAL_REPORTED = False
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id)
+        outcome = await asyncio.to_thread(handle._announce_completion)
+        assert (
+            outcome == serving_module._ANNOUNCE_SETTLED
+        ), "a foreign home must settle, not fail into the ladder"
+        assert calls == [], "a banner was attempted from a run that is not the user's"
+        assert (
+            _delivered(session_id, token) is False
+        ), "the claim was taken from a surface that owns it"
+        assert handle._completion_task is None, "the retry ladder was armed"
+        assert (
+            notify_mod._REFUSAL_REPORTED is False
+        ), "report=False must not spend the process's one refusal warning"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_her_session_is_a_user_session_that_may_announce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T10: the serving gate must keep answering YES for HER session.
+
+    ``_session_may_announce`` reads the durable origin marker, and a future
+    change that tagged her session with an origin (making it \"hidden\", like a
+    delegated run) would silence her banners with nothing failing: the served
+    completion would settle quietly for every check-in. Pinned on a REAL
+    bootstrap — the session ``aida.ensure_session`` creates — so the pin fails
+    if the marker is added at creation, not merely if this test's own setup
+    drifts.
+    """
+    from local_operator import aida
+    from local_operator.aida import state as aida_state
+    from local_operator.resume import is_user_session
+    from local_operator.session.runtime.serving import _session_may_announce
+    from tests.e2e.harness import ScriptedStream, build_session
+    from tests.unit.aida.conftest import mark_met
+
+    root = tmp_path / "config"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    mark_met(root)
+    her_id = await aida.ensure_session(root)
+    assert her_id, "the bootstrap must create her"
+    assert aida_state.session_id_of(root) == her_id
+    directory = root / "sessions" / her_id
+    assert not (
+        directory / "origin.json"
+    ).exists(), "an origin marker on her session would hide it from the operator's own listings"
+    assert is_user_session(directory) is True
+    session = build_session(directory, ScriptedStream([]))
+    try:
+        assert (
+            _session_may_announce(session) is True
+        ), "her check-in completions must stay announceable"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_spawn_is_retried_without_being_rearmed_by_hand(
     tmp_path: Path, monkeypatch, banners
 ) -> None:
@@ -763,3 +877,90 @@ async def test_a_workstream_the_operator_asked_for_still_announces(
         assert _delivered(session_id, token) is True
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_end_leaves_the_runtime_nothing_to_announce(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """A ``no_reply`` end publishes NO completion row — and rung 4 is the
+    last reader of that fact, so the arm must find nothing, raise no banner
+    and spend no watermark. The session half of the suppression is pinned in
+    ``test_attention_notify``; this pins that the surface the operator
+    actually hears from cannot resurrect it."""
+    import sqlite3
+
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = ScriptedStream(
+        [tool_call_turn(text="", tool_name="no_reply", tool_call_id="q1", arguments={})]
+    )
+    session = build_session(directory, stream)
+    session.refresh_tools(
+        [*session._tools, *create_tools(session._build_tool_context(), enabled=["no_reply"])]
+    )
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    monkeypatch.setattr(handle, "_watching_surfaces", lambda: frozenset())
+    ends: list[Any] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    calls, _state = banners
+    try:
+        await session.receive_peer_message(
+            "child reporting in",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1, "conversation_name": "child"},
+        )
+        # The end event proves the run HAPPENED (the settled flag alone is
+        # True before the spawned turn starts — the race the cut-off suite
+        # avoids by probing transcripts); settled then proves publication ran.
+        await wait_for(lambda: bool(ends))
+        await wait_for(lambda: session._attention_run_settled)
+
+        await asyncio.to_thread(handle._announce_completion)
+        assert calls == [], "a quiet end must not raise a banner"
+
+        session_id = handle._session_id_for_resume()
+        path = config_dir() / "attention.db"
+        count = 0
+        if path.exists():
+            with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM completions WHERE conversation=?",
+                    (f"session/{session_id}",),
+                ).fetchone()[0]
+        assert count == 0, "no completion row exists to announce"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hers", [True, False])
+async def test_only_her_banner_asks_for_a_durable_click(
+    tmp_path: Path, monkeypatch, hers: bool
+) -> None:
+    """Her check-in is answered hours later, so only hers pays for a long-lived
+    click helper / a synchronously-built bundle. Every other session's call must
+    stay the call it was (no keyword), or the cost lands on every banner."""
+    seen: list[dict[str, Any]] = []
+
+    def fake(title: str, body: str, **kwargs: Any) -> bool:
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(notify_module, "detached_notify", fake)
+    session, handle = await _rig(tmp_path, monkeypatch)
+    session._aida_duty = hers
+    try:
+        await _arm(handle, handle._session_id_for_resume())
+    finally:
+        await session.dispose()
+
+    assert len(seen) == 1, seen
+    if hers:
+        assert seen[0]["durable_click_s"] == notify_module.DURABLE_CLICK_WINDOW_S
+        assert seen[0]["durable_click_s"] > 3600, "must outlive a morning"
+    else:
+        assert "durable_click_s" not in seen[0]

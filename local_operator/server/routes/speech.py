@@ -8,9 +8,12 @@ from pydantic import SecretStr
 from local_operator.agents import AgentRegistry
 from local_operator.clients._http import APIError, error_payload
 from local_operator.clients.openrouter import OpenRouterClient
-from local_operator.clients.radient import RadientClient
+from local_operator.clients.radient import RadientClient, new_correlation_id
+from local_operator.clients.radient_cost import cost_from_headers
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
+from local_operator.i18n.keys import wire_errors_media as _wm
+from local_operator.i18n.messages import Msg
 from local_operator.model.configure import configure_model
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
@@ -22,6 +25,7 @@ from local_operator.server.dependencies import (
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice
+from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt.errors import PROVIDER_CREDIT_MARKERS
 from local_operator.tts import VoicePath, VoicePathResolution
 from local_operator.tts.adapters import Legacy
@@ -36,7 +40,7 @@ router = APIRouter()
 logger = logging.getLogger("local_operator.server.routes.speech")
 
 
-def _upstream_failure_detail(exc: APIError) -> str:
+def _upstream_failure_detail(exc: APIError) -> Msg:
     """Render an upstream speech failure with the upstream's own words attached.
 
     The sentence says what failed and the clause says what the upstream said,
@@ -52,29 +56,22 @@ def _upstream_failure_detail(exc: APIError) -> str:
         exc: The upstream failure, carrying its status and scrubbed body.
 
     Returns:
-        str: The ``detail`` to raise an ``HTTPException`` with.
+        Msg: The diagnostic whose envelope becomes HTTP ``detail``.
     """
-    if exc.status_code is not None and 200 <= exc.status_code < 300:
-        # Not self-evidently a failure: Radient reports some provider failures
-        # in the body of a 200, so "upstream responded 200" next to "failed"
-        # reads as a contradiction unless it is worded as what it is.
-        status = f"Radient reported an error (HTTP {exc.status_code})"
-    elif exc.status_code is not None:
-        status = f"Upstream responded {exc.status_code}"
-    else:
-        status = "No response from the upstream"
     if exc.body:
-        # Agent-server's designed envelope ({"error", "code", "details"}) is
-        # extracted field-first: the `error` string is the only part written
-        # for a client to read, and the raw body can carry framing nobody
-        # should render. A body that is not that envelope falls back to its
-        # scrubbed text, which is what the envelope-path tests pin.
+        # Keep the scrubbed designed-envelope reader and raw-body fallback;
+        # extraction must not expose framing or drop the upstream diagnostic.
         message, _code, _details = error_payload(exc.body)
-        return f"Speech generation failed upstream: {status}: {message or exc.body}"
-    # No body to quote: the client's message already IS the upstream's prose
-    # (``api_error_from_response`` deliberately leaves ``body`` unset for a
-    # designed envelope), so it is the clause.
-    return f"Speech generation failed upstream: {status}: {exc}"
+        error = message or exc.body
+    else:
+        # The client already extracted designed envelopes into str(exc).
+        # No body therefore still has a diagnostic, not a fixed empty clause.
+        error = str(exc)
+    if exc.status_code is not None and 200 <= exc.status_code < 300:
+        return _wm.speech_upstream_reported_error(status=str(exc.status_code), error=error)
+    if exc.status_code is not None:
+        return _wm.speech_upstream_responded(status=str(exc.status_code), error=error)
+    return _wm.speech_upstream_no_response(error=error)
 
 
 #: The sentence for the daemon-local no-credential refusal (the resolver found
@@ -87,12 +84,12 @@ def _upstream_failure_detail(exc: APIError) -> str:
 #: live-acceptance turn). This is NOT the state a press usually meets: the app
 #: disables the speak button without a credential, so a press that fails
 #: answers with the upstream 401 below instead (design round 1, D2).
-SPEECH_NO_CREDENTIAL_SENTENCE = "Sign in to Radient in Settings to enable speaking aloud."
-
-#: The sentence for an agent id that no longer exists. The raw id is an internal
-#: identifier the user never chose, so it goes to the route's log line rather
+#: The speech refusals' sentences are catalogue values now
+#: (`wire.errors.media`; RFC §2.6) — the spellings these constants held
+#: render from `speech_no_credential` / `speech_unknown_agent` at the sites.
+#: `speech_unknown_agent` still carries NO raw agent id: it is an internal
+#: identifier the user never chose, and it goes to the route's log line rather
 #: than the customer's toast (design round 1, D1).
-SPEECH_UNKNOWN_AGENT_SENTENCE = "This conversation's agent is no longer available."
 
 #: The fixed sentences for the upstream refusals a user can act on, keyed by
 #: the status agent-server passes through:
@@ -112,14 +109,13 @@ SPEECH_UNKNOWN_AGENT_SENTENCE = "This conversation's agent is no longer availabl
 #: Fixed text on purpose: the hub's envelope is written for an operator
 #: ("insufficient credits for this request"), not for the toast the user reads.
 #: Every sentence ends with a full stop so the set reads alike in one toast (N1).
-_SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
-    401: "Your Radient sign-in has stopped working. Sign in again in Settings.",
-    402: (
-        "Your Radient credit balance is too low for speech. "
-        "Add credits in the Radient Console to continue."
-    ),
-    429: "Speech is unavailable right now. Try again in a moment.",
-    503: "Speech is temporarily unavailable. Try again in a moment.",
+# Render at the refusal boundary rather than freezing English here: the
+# selection remains status-based, while the generated Msg owns the sentence.
+_SPEECH_REFUSALS: Dict[int, Msg] = {
+    401: _wm.speech_radient_sign_in_failed(),
+    402: _wm.speech_radient_credit_low(),
+    429: _wm.speech_unavailable(),
+    503: _wm.speech_temporarily_unavailable(),
 }
 
 #: The same refusals for a leg the USER's own vendor key serves, parameterised
@@ -154,19 +150,9 @@ _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
 #: ``lop credential update <KEY>``, which are the other two ways a reader can
 #: actually do this. No placeholders beyond ``{vendor}``, so no account or tenant
 #: identity can be interpolated into a customer-visible string.
-_VENDOR_REFUSAL_SENTENCES: Dict[str, str] = {
-    #: ACTIVE voice, vendor as the actor (C3): "was refused" left the actor
-    #: unsaid, and in an app that also refuses plenty of its own things it read
-    #: as the app refusing it.
-    "key": "{vendor} refused your API key. Replace it.",
-    #: Parallel with the Radient sibling's "credit balance is too low for
-    #: speech" and the family's plural "credits" (C4). "no speech credit left"
-    #: implied a speech-specific balance neither vendor sells.
-    "credit": (
-        "Your {vendor} credit balance is too low for speech. "
-        "Add credits with {vendor} to continue."
-    ),
-}
+#: Active voice still names the vendor as actor for a key refusal; credit
+#: refusals retain the parallel balance/top-up remedy. The generated
+#: `speech_vendor_key_refused` / `speech_vendor_credit_low` keys own that copy.
 
 #: How each rung's vendor is named in a customer-facing sentence. The Radient
 #: rung is deliberately absent: it keeps the sentences above, which are already
@@ -222,13 +208,13 @@ def _require_radient_credential(radient_client: RadientClient) -> None:
     """
     if radient_client.api_key is not None and radient_client.api_key.get_secret_value():
         return
-    raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
+    raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
 
 
 def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPException:
     """Map an upstream speech failure onto this daemon's ``HTTPException``.
 
-    The statuses in ``_SPEECH_REFUSAL_SENTENCES`` are refusals the user can act
+    The statuses in ``_SPEECH_REFUSALS`` are refusals the user can act
     on; each passes through with its fixed sentence, and the upstream's body
     never reaches the response. Everything else -- other statuses, a transport
     failure, an error envelope inside a 200 -- keeps the 502 diagnostic path.
@@ -254,19 +240,19 @@ def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPE
     rejected request that merely echoes a marker is not presented as a top-up
     prompt.
 
-    ``detail`` is ALWAYS one of these fixed sentences, never an upstream code or
-    body: the desktop app maps exact strings (``DESIGNED_SPEECH_SENTENCES``), so
-    a machine-readable code may ride alongside but must not replace the sentence.
+    Designed refusals keep their exact sentence in ``detail.text``; diagnostics
+    keep the scrubbed upstream clause. The desktop media reader accepts the
+    RFC §2.6 envelope, and code/params must never replace or truncate that text.
     """
     status = exc.status_code
     if status is None:
-        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
+        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc).envelope())
     vendor = _RUNG_VENDOR_LABELS.get(rung) if rung is not None else None
     if vendor is None:
-        sentence = _SPEECH_REFUSAL_SENTENCES.get(status)
-        if sentence is not None:
-            return HTTPException(status_code=status, detail=sentence)
-        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
+        message = _SPEECH_REFUSALS.get(status)
+        if message is not None:
+            return HTTPException(status_code=status, detail=message.envelope())
+        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc).envelope())
     if status == 402:
         # The status that already meant exactly this keeps its remedy whatever
         # the body says, and the body is not consulted: a payment answer is the
@@ -274,26 +260,26 @@ def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPE
         # a gateway's HTML page.
         return HTTPException(
             status_code=402,
-            detail=_VENDOR_REFUSAL_SENTENCES["credit"].format(vendor=vendor),
+            detail=_wm.speech_vendor_credit_low(vendor=vendor).envelope(),
         )
     if _is_credit_refusal_status(status) and _is_credit_refusal(exc):
         # 402 whatever the vendor called it: the condition is the user's, the
         # remedy is rung-independent, and it must not look retryable.
         return HTTPException(
             status_code=402,
-            detail=_VENDOR_REFUSAL_SENTENCES["credit"].format(vendor=vendor),
+            detail=_wm.speech_vendor_credit_low(vendor=vendor).envelope(),
         )
     if status == 401:
         return HTTPException(
             status_code=401,
-            detail=_VENDOR_REFUSAL_SENTENCES["key"].format(vendor=vendor),
+            detail=_wm.speech_vendor_key_refused(vendor=vendor).envelope(),
         )
     # A status with no vendor-specific sentence keeps the GENERIC one (429/503),
     # never the Radient one: those name a party that is not in this exchange.
-    generic = _SPEECH_REFUSAL_SENTENCES.get(status)
+    generic = _SPEECH_REFUSALS.get(status)
     if status in (429, 503) and generic is not None:
-        return HTTPException(status_code=status, detail=generic)
-    return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
+        return HTTPException(status_code=status, detail=generic.envelope())
+    return HTTPException(status_code=502, detail=_upstream_failure_detail(exc).envelope())
 
 
 async def _synthesize_with_descriptor(
@@ -308,6 +294,8 @@ async def _synthesize_with_descriptor(
     label: str,
     resolved_gender: Optional[str] = None,
     resolution: Optional[VoicePathResolution] = None,
+    session_id: str = "",
+    request_id: str = "",
 ) -> Response:
     """Build the descriptor, resolve the rung, synthesize, and report the leg.
 
@@ -327,11 +315,19 @@ async def _synthesize_with_descriptor(
     ``label`` is the caller's own name for its subject (the agent id, or the
     route's name); it rides the log lines only, never the response copy.
 
+    ``session_id``/``request_id`` are the PR-3 emission pair: the session the
+    call belongs to (empty for the agent route, which names none) and a
+    correlation id minted per request here when the caller has none. They go
+    out as the hub's client correlation headers and are what the recorded spend
+    row carries — never the credential scope; this path's credentials resolve
+    exactly as before.
+
     Raises ``HTTPException`` for every refusal, so both routes' existing
     handlers stay in charge of the response shape: 401 when no rung can run,
     the classified refusal sentences for an upstream failure, and 500 with the
     real message (and a stack) for a defect in the serving leg.
     """
+    request_id = request_id or new_correlation_id()
     if resolution is None:
         resolution = await resolve_voice_path(
             config_dir=config_manager.config_dir,
@@ -340,7 +336,7 @@ async def _synthesize_with_descriptor(
         )
     if not resolution.servable:
         logger.warning("Speech request refused for %s: no speech path", label)
-        raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
+        raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
 
     descriptor = descriptor_from_config(config_manager, resolved_gender=resolved_gender)
     try:
@@ -354,6 +350,8 @@ async def _synthesize_with_descriptor(
             response_format=response_format,
             resolution=resolution,
             radient_client=radient_client,
+            correlation_session_id=session_id,
+            client_request_id=request_id,
         )
     except TtsUnavailable as unavailable:
         error = unavailable.error
@@ -364,14 +362,31 @@ async def _synthesize_with_descriptor(
             logger.error(
                 "Failed to generate speech: %s", error, exc_info=error, extra={"label": label}
             )
-            raise HTTPException(status_code=500, detail=f"Failed to generate speech: {error}")
+            raise HTTPException(
+                status_code=500, detail=_wm.speech_generate_failed(error=str(error)).envelope()
+            )
         logger.warning("Speech request refused for %s: no speech path", label)
-        raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
+        raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
 
     # The echoed-actual-path rule: relay the descriptors of the leg that
     # ACTUALLY served — the hub's own headers on a hub-served call, this
     # daemon's mapping headers on a BYO one — so a surface can tell what was
     # honoured without listening to the audio.
+    #
+    # The charge (PR-3) goes to the ledger HERE, before the response: the
+    # billable count is the client's own (the input text's characters — the
+    # meter the hub prices by), and the hub's cost headers upgrade it with the
+    # server-counted units, the amount and the basis when they are present.
+    emit_voice_spend(
+        config_manager=config_manager,
+        channel="tts",
+        provider=outcome.provider,
+        units=float(len(text)),
+        unit="chars",
+        cost=cost_from_headers(outcome.cost_headers),
+        session_id=session_id,
+        request_id=request_id,
+    )
     return Response(
         content=outcome.audio,
         media_type=f"audio/{response_format}",
@@ -433,6 +448,12 @@ async def create_speech(
     validation anyway, so refusing them here would be this route re-deciding a
     question that is not its own.
     """
+    # The PR-3 emission pair, decided ONCE for this request: the hub correlation
+    # id rides every attempt of the call (see ``new_correlation_id``), and the
+    # body's session id is whatever the caller stated — empty when it named
+    # none, which records the call without guessing a conversation onto it.
+    request_id = new_correlation_id()
+    session_id = str(speech_request.session_id or "")
     try:
         if (
             speech_request.model is None
@@ -460,10 +481,12 @@ async def create_speech(
                 provider_auth_store=provider_auth_store,
                 radient_client=radient_client,
                 label="direct route",
+                session_id=session_id,
+                request_id=request_id,
             )
 
         _require_radient_credential(radient_client)
-        audio_data = radient_client.create_speech(
+        audio_data, speech_headers = radient_client.create_speech_response(
             input_text=speech_request.input,
             instructions=speech_request.instructions,
             model=speech_request.model,
@@ -472,6 +495,26 @@ async def create_speech(
             speed=speech_request.speed,
             provider=speech_request.provider,
             language_code=speech_request.language_code,
+            session_id=session_id or None,
+            client_request_id=request_id,
+        )
+
+        # The legacy path's charge (PR-3): emitted before the response, from
+        # the same header block the client already returned. The unit count is
+        # the client's own (input characters, the hub's meter); the hub's cost
+        # headers upgrade it with the server-counted units and the amount when
+        # they are present. The header lookup is case-insensitive because the
+        # hub's own casing is not ours to assume.
+        lower_headers = {str(name).lower(): str(value) for name, value in speech_headers.items()}
+        emit_voice_spend(
+            config_manager=config_manager,
+            channel="tts",
+            provider=lower_headers.get("x-radient-speech-provider", ""),
+            units=float(len(speech_request.input)),
+            unit="chars",
+            cost=cost_from_headers(speech_headers),
+            session_id=session_id,
+            request_id=request_id,
         )
 
         media_type = f"audio/{speech_request.response_format}"
@@ -497,7 +540,9 @@ async def create_speech(
         # The stack is logged, not just the message: an unexpected fault is the
         # one class that needs it (review round 2, finding 1).
         logger.exception("Failed to generate speech: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wm.speech_generate_failed(error=str(e)).envelope()
+        )
 
 
 @router.post(
@@ -568,9 +613,11 @@ async def create_agent_speech(
             # this is the 404 the route needs; without the catch the miss
             # surfaced as a 500 wrapping the registry's own message. The raw
             # id stays in the log line, not the copy (design round 1, D1).
-            raise HTTPException(status_code=404, detail=SPEECH_UNKNOWN_AGENT_SENTENCE) from None
+            raise HTTPException(
+                status_code=404, detail=_wm.speech_unknown_agent().envelope()
+            ) from None
         if not agent:
-            raise HTTPException(status_code=404, detail=SPEECH_UNKNOWN_AGENT_SENTENCE)
+            raise HTTPException(status_code=404, detail=_wm.speech_unknown_agent().envelope())
 
         # The resolver decides which rung can run, and it runs FIRST -- before
         # any model configuration or classifier call -- so the nothing-available
@@ -587,7 +634,7 @@ async def create_agent_speech(
         )
         if not resolution.servable:
             logger.warning("Speech request refused for agent %s: no speech path", agent_id)
-            raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
+            raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
 
         hosting = agent.hosting or config_manager.get_config_value("hosting")
         model_name = agent.model or config_manager.get_config_value("model_name")
@@ -709,9 +756,11 @@ async def create_agent_speech(
             logger.error(
                 "Failed to generate speech: %s", error, exc_info=error, extra={"agent_id": agent_id}
             )
-            raise HTTPException(status_code=500, detail=f"Failed to generate speech: {error}")
+            raise HTTPException(
+                status_code=500, detail=_wm.speech_generate_failed(error=str(error)).envelope()
+            )
         logger.warning("Speech request refused for agent %s: no speech path", agent_id)
-        raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
+        raise HTTPException(status_code=401, detail=_wm.speech_no_credential().envelope())
     except APIError as upstream_exc:
         # Same classification as the /v1/tools/speech route above: an error
         # Radient reported inside a 200 body is raised as an upstream failure
@@ -726,4 +775,6 @@ async def create_agent_speech(
         # The stack is logged, not just the message: an unexpected fault is the
         # one class that needs it (review round 2, finding 1).
         logger.exception("Failed to generate speech: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=_wm.speech_generate_failed(error=str(e)).envelope()
+        )

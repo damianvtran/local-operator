@@ -60,11 +60,6 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.session.attachments import AttachmentStore
-from local_operator.session.creation import (
-    ensure_session_created_at,
-    session_created_at,
-)
-from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 
 # The engagement reader — and the transcript filename it looks for — live in
 # ``session/runtime/engagement.py``, a stdlib-only module, so the peer-send core
@@ -72,11 +67,23 @@ from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYP
 # dependency weight (that module's docstring has the whole reason). Re-exported
 # rather than redefined: exactly one definition of each, and every existing
 # importer of ``session.transcript`` keeps resolving.
+from local_operator.session.channel_spend import (
+    CHANNEL_SPEND_CUSTOM_TYPE,
+    CHANNEL_SPEND_VERSION,
+    map_image_cost_labels,
+    usd_to_micro,
+)
+from local_operator.session.creation import (
+    ensure_session_created_at,
+    session_created_at,
+)
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
 )
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
     from local_operator.session.history_window import _DisplayWindowCache
@@ -159,6 +166,38 @@ ENTRY_PRUNE = "prune"
 #: ``preserve_mtime=True``, and announcing an account change is never work a
 #: turn carried. Its own note in ``harness/message_types.py`` states the
 #: operator-facing surface.
+#:
+#: ``frontend_state_checkpoint_v1`` is here for the CLOSING checkpoint a runtime
+#: leaves at teardown (``Session._write_closing_checkpoint``). That row is the
+#: tail anchor the next cold open reads its compaction boundary and its status
+#: from, and writing it must not restamp a conversation the user finished hours
+#: ago as freshly worked — the same rule the spend ledger follows one line up.
+#: The type is RESTATED as a literal here rather than imported, because the
+#: constant lives in ``frontend_state``, whose import graph reaches the TUI, and
+#: ``_COLLAPSIBLE_CUSTOM_TYPES`` above already restates it for the same reason;
+#: ``tests/unit/session/test_transcript.py`` pins the two spellings together.
+#:
+#: ONE CONSEQUENCE, named because it is a behaviour change rather than a
+#: tidy-up: ``is_bookkeeping_entry`` is also what decides whether a session
+#: holds "a conversation" (``is_pristine``, ``transcript_is_bookkeeping_only``),
+#: so a journal whose only rows are checkpoints now reads as pristine. That is
+#: the honest answer — a checkpoint is a record ABOUT the session; it carries no
+#: turn the user would recognise — and it is reachable only for a runtime that
+#: ended a turn without persisting a message, since every ordinary turn writes
+#: its own message rows in the same pass.
+#: The busy-turn checkpoint record (see `service_handoff` / the checkpoint
+#: contract). It is BOOKKEEPING, not a conversation row: a checkpoint is a
+#: record ABOUT the session and must not advance the activity clock, or a
+#: mid-turn rollover would re-rank the session as freshly worked. Declared here,
+#: above the bookkeeping set that lists it, so the set can name it.
+CHECKPOINT_CUSTOM_TYPE = "busy_turn_checkpoint_v1"
+
+#: The phase vocabulary for a checkpoint record. ``resume`` means the successor
+#: may carry the turn forward from the committed batch; ``deferred`` means the
+#: work could not be checkpointed and the successor must NOT claim to continue
+#: it (provider streams, PTY, native children, non-idempotent effects).
+CHECKPOINT_PHASES = ("resume", "deferred")
+
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -166,7 +205,25 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
+        CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
+        # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
+        # re-ranking a session as freshly worked because a callout arrived would reorder
+        # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
+        SUPPLEMENT_CUSTOM_TYPE,
+        # The video lane's durable job record (``local_operator.video.records``):
+        # its writes are caused by a generation the user started, but the
+        # terminal transition lands minutes later with the user away — a
+        # bookkeeping row, never a sign the operator returned. The writer
+        # passes ``preserve_mtime=True``. The literal is pinned against
+        # ``video.records.VIDEO_JOB_CUSTOM_TYPE`` by a unit test (the
+        # ``stt.sidecar`` drift rule: this module does not import the writer).
+        "video_job_v1",
+        # A busy-turn handoff checkpoint is a record ABOUT the session (see
+        # ``CHECKPOINT_CUSTOM_TYPE``): its write must not read as operator
+        # activity, or a mid-turn rollover would keep the session ranked fresh.
+        CHECKPOINT_CUSTOM_TYPE,
     }
 )
 
@@ -603,6 +660,15 @@ class TranscriptPage:
     reconciled: bool = False
     #: Anchored pages only: a row newer than the page's newest exists.
     has_newer: bool | None = None
+    #: Internal proof for source-order annotation, not a wire DTO field. Identity
+    #: comes from the descriptor that supplied these payloads and is retained
+    #: only if its inode/size/mtime did not change during the read. A raced page
+    #: remains a legacy read but cannot borrow authority from a newer index.
+    source_signature: tuple[int, int, float] | None = field(default=None, compare=False)
+
+
+def _page_source_signature(st: os.stat_result) -> tuple[int, int, float]:
+    return (st.st_ino, st.st_size, st.st_mtime)
 
 
 #: Backward read granularity, shared by the two readers below. One MiB is large
@@ -1011,6 +1077,7 @@ def _read_around_page(
     if after is None:
         after = max(0, limit - before - 1)
     with path.open("rb") as handle:
+        source = _page_source_signature(os.fstat(handle.fileno()))
         handle.seek(0, os.SEEK_END)
         end_of_file = handle.tell()
         located_end = _locate_cursor_row(handle, end_of_file, around_id)
@@ -1069,7 +1136,8 @@ def _read_around_page(
                 has_newer = True
                 break
         page = tuple(reversed(older[:before])) + (anchor,) + tuple(newer[:after])
-        return TranscriptPage(page, has_older, False, has_newer)
+        verified = source if _page_source_signature(os.fstat(handle.fileno())) == source else None
+        return TranscriptPage(page, has_older, False, has_newer, source_signature=verified)
 
 
 def read_transcript_page(
@@ -1197,6 +1265,7 @@ def read_transcript_page(
     # only ends the skip.
     skipping = before_id is not None or through_id is not None
     with path.open("rb") as handle:
+        source = _page_source_signature(os.fstat(handle.fileno()))
         handle.seek(0, os.SEEK_END)
         end_of_file = handle.tell()
         cursor_id = through_id if through_id is not None else before_id
@@ -1231,13 +1300,191 @@ def read_transcript_page(
                     break
             if len(retained) > limit:
                 break
+        verified = source if _page_source_signature(os.fstat(handle.fileno())) == source else None
     if through_id is not None and not found:
         return TranscriptPage((), False, True)
     if before_id is not None and not found:
         tail = read_transcript_page(directory, limit=limit)
-        return TranscriptPage(tail.entries, tail.has_more, True)
+        return TranscriptPage(
+            tail.entries, tail.has_more, True, source_signature=tail.source_signature
+        )
     rows = tuple(reversed(retained[:limit]))
-    return TranscriptPage(entries=rows, has_more=len(retained) > limit)
+    return TranscriptPage(entries=rows, has_more=len(retained) > limit, source_signature=verified)
+
+
+#: How far back from a needle hit the reader will look for that row's opening
+#: newline. Bounded by the writer's own batching — the largest row measured on
+#: the real store is a 0.9 MB checkpoint — so 4 MiB is an order of magnitude of
+#: headroom, and a candidate whose start is further back is reported UNVERIFIABLE
+#: rather than absent. The safe direction: the caller falls back to the walk.
+_CUSTOM_NEEDLE_LOOKBACK_BYTES = 4 << 20
+
+#: Chunk the needle scan reads at a time, shared with the line walker so the two
+#: readers of one file pay the same syscall shape.
+_CUSTOM_NEEDLE_CHUNK_BYTES = _BACKWARD_CHUNK_BYTES
+
+
+def find_row_for_custom_type(
+    directory: str | Path, custom_type: str
+) -> tuple[int, TranscriptEntry] | None:
+    """The newest CUSTOM row of ``custom_type``, found by BYTES, with its offset.
+
+    Returns ``(offset, entry)`` for the row's first byte, or ``None``. This is the
+    fast path :func:`read_latest_custom_entry` and the durable fold's roster
+    fallback both use, and it is a SCAN, not a parse: it walks the file's chunks
+    backward looking for the bytes every row of this type carries, and JSON-decodes
+    only the candidate rows it finds. Measured on the real store's 118 MB journal:
+    66 ms to scan the whole file, against 457 ms for the parse walk's answer.
+
+    THE NEEDLE IS EXACT FOR THIS FORMAT, which is what makes that safe rather than
+    optimistic: ``TranscriptEntry.to_json`` has serialized with compact separators
+    since the format was introduced (5cf2814a4f), so a row of this type contains
+    ``"custom_type":"<type>"`` verbatim — the same assumption
+    :func:`_cursor_needle` already makes for row ids. A type whose ESCAPED spelling
+    differs from its literal one (a quote, a backslash, a control character) cannot
+    be searched for by bytes at all, and answers ``None`` without reading, which is
+    why the callers keep their parse walk as the authority for that case.
+
+    ``None`` therefore means "no row of this type, spelled the way this format
+    spells it" — and a caller that needs the stronger claim (a journal written by
+    something that re-serialized it) uses the walk, exactly as
+    :func:`read_latest_custom_entry` documents.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return None
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                    ):
+                        return row_offset, entry
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return None
+
+
+def read_custom_entries(
+    directory: str | Path, custom_type: str, *, max_rows: int | None = None
+) -> list[TranscriptEntry]:
+    """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
+
+    The multi-row sibling of :func:`read_latest_custom_entry`, for one consumer
+    class the single-row answer cannot serve: append-only rows where MULTIPLE
+    live objects each need their latest revision — the video phase's
+    ``video_job_v1`` records are written one row per state transition and the
+    reader groups them per job id (newest-wins per id).
+
+    Same scan, same needle, same per-row decode as
+    :func:`find_row_for_custom_type`; the differences are that it collects
+    instead of returning on first match, dedupes by row OFFSET (a payload string
+    that happens to contain the needle decodes to the same enclosing row), and
+    answers newest-first, so a caller may truncate from the tail and keep the
+    newest rows. ``max_rows`` bounds the walk for a journal that has accumulated
+    very many rows of this type; ``None`` reads all of them. The walk cost is
+    the distance from EOF to the OLDEST returned row — never worse than the
+    one-row reader's worst case, which reaches the file start itself.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return []
+    if max_rows is not None and max_rows <= 0:
+        return []
+    needle = b'"custom_type":' + encoded.encode("utf-8")
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return []
+    entries: list[TranscriptEntry] = []
+    seen_offsets: set[int] = set()
+    with handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        overlap = len(needle) - 1
+        position = end_of_file
+        while position > 0:
+            start = max(0, position - _CUSTOM_NEEDLE_CHUNK_BYTES)
+            read_start = max(0, start - overlap)
+            handle.seek(read_start)
+            buf = handle.read(position - read_start)
+            index = buf.rfind(needle)
+            while index != -1:
+                offset = read_start + index
+                located = _row_at_offset(handle, offset)
+                if located is not None:
+                    row_offset, entry = located
+                    if (
+                        entry.type == ENTRY_CUSTOM
+                        and str(entry.payload.get("custom_type", "")) == custom_type
+                        and row_offset not in seen_offsets
+                    ):
+                        seen_offsets.add(row_offset)
+                        entries.append(entry)
+                        if max_rows is not None and len(entries) >= max_rows:
+                            return entries
+                index = buf.rfind(needle, 0, index)
+            position = start
+    return entries
+
+
+def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | None:
+    """The complete row containing byte ``offset``, with its first byte offset.
+
+    ``None`` when the row's start is further back than
+    :data:`_CUSTOM_NEEDLE_LOOKBACK_BYTES` (an unverifiable candidate, not an
+    absence) or when the row does not parse.
+    """
+    block = 64 << 10
+    position = offset
+    while True:
+        start = max(0, position - block)
+        handle.seek(start)
+        window = handle.read(position - start)
+        # THE LAST newline before the hit, not the first: the row's first byte is
+        # the one after the newline that TERMINATES the row above it, and the
+        # leftmost newline in this window is some earlier row's terminator — a
+        # mistake that slices the wrong row and answers a whole-journal question
+        # with an older row (measured: it made ``_latest_entry_id`` return the
+        # previous snapshot, which the monitors' post-append guard correctly
+        # refused as "the conversation changed while your change was applied").
+        boundary = window.rfind(b"\n")
+        if boundary >= 0:
+            row_start = start + boundary + 1
+            break
+        if start == 0:
+            row_start = 0
+            break
+        if offset - start > _CUSTOM_NEEDLE_LOOKBACK_BYTES:
+            return None
+        position = start
+    handle.seek(row_start)
+    raw = handle.readline()
+    entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+    if entry is None:
+        return None
+    return row_start, entry
 
 
 def read_latest_custom_entry(directory: str | Path, custom_type: str) -> TranscriptEntry | None:
@@ -1300,6 +1547,9 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
     so the sentence cannot drift away from the behaviour.
     """
+    located = find_row_for_custom_type(directory, custom_type)
+    if located is not None:
+        return located[1]
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         return None
@@ -1362,6 +1612,16 @@ class ReplaySuffix:
     checkpoint_order: dict[str, int] = field(default_factory=dict)
     #: Bytes actually read, for the caller's own evidence; not a contract.
     bytes_read: int = 0
+    #: Did the backward walk reach the file's FIRST chunk — the one holding the
+    #: journal's opening row? THIS is the caller's fact for "the window is the
+    #: whole journal", and it is deliberately not derived from :attr:`bytes_read`
+    #: or from a stat: the walk stops early when it finds its stopping row, and
+    #: only the pair with ``chunk_start == 0`` means the file's first row was in
+    #: hand. A span compared against a caller's earlier ``st_size`` part company
+    #: with the truth as soon as the file grows between the stat and this read's
+    #: own EOF — a window that stopped short can then look like a full read,
+    #: which is the unsafe direction for every consumer of "I saw everything".
+    reached_bof: bool = False
 
 
 def read_replay_suffix(
@@ -1421,7 +1681,11 @@ def read_replay_suffix(
         # answers the same way rather than turning "nothing yet" into an
         # error the whole-file parse never raised.
         return ReplaySuffix(
-            entries=(), through_present=through_id is None, checkpoint=None, bytes_read=0
+            entries=(),
+            through_present=through_id is None,
+            checkpoint=None,
+            bytes_read=0,
+            reached_bof=False,
         )
     # Normalise the request ONCE, so every stop/collect site below reads the
     # same tuple: an empty request means "no custom rows wanted" (the cheapest
@@ -1437,6 +1701,23 @@ def read_replay_suffix(
         else tuple(opportunistic_types or ())
     )
     collectible = wanted + opportunistic
+    # A REQUIRED TYPE MAY ALREADY BE PROVEN ABSENT (``session.tail_anchor``).
+    # Without the proof, "this journal has no checkpoint row anywhere" is a
+    # whole-file fact, so the walk below is a scan to BOF — 570-650 ms of CPU on a
+    # 35 MB checkpointless journal, once per fresh process, and the one cost the
+    # replay cache in ``attached`` cannot remove. The sidecar is written by the
+    # pre-warm job (see ``index_prewarm``), never by a reader, and it is believed
+    # only after validation against THIS journal version (inode, a file that has
+    # not shrunk, and a scan of the bytes appended since the record). What it
+    # relaxes is one requirement of the stop condition below; the compaction
+    # boundary is still required, so a proven-absent checkpoint can never cut a
+    # journal short of the replay's own boundary.
+    proven_absent: set[str] = set()
+    if wanted:
+        from local_operator.session.tail_anchor import ANCHOR_CUSTOM_TYPE, proves_absent
+
+        if ANCHOR_CUSTOM_TYPE in wanted and proves_absent(path.parent):
+            proven_absent.add(ANCHOR_CUSTOM_TYPE)
     checkpoints: dict[str, dict[str, Any]] = {}
     checkpoint_order: dict[str, int] = {}
     met = 0  # 1-based: the scan walks newest-first, so lower means newer
@@ -1446,6 +1727,7 @@ def read_replay_suffix(
     cursor_reached = through_id is None
     parsed: list[TranscriptEntry] = []  # newest first while reading backward
     bytes_read = 0
+    reached_bof = False
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
@@ -1497,12 +1779,19 @@ def read_replay_suffix(
                         # NEWEST row: its meeting index is what orders it against
                         # another type's newest row.
                         checkpoint_order[custom_type] = met
+            # The walker's last pair is ``chunk_start == 0``: reaching it means
+            # the file's leading fragment was consumed, which is the only way this
+            # read can claim the whole journal. ``reached_bof`` is read from the
+            # SAME expression the stop below turns on, so the two cannot drift —
+            # an inner-loop stop added later would otherwise leave the flag
+            # describing a chunk whose tail was skipped.
             at_start = chunk_start == 0
+            reached_bof = at_start
             boundary_seen = compaction is not None and (
                 first_kept_id is None or first_kept_id in seen_ids
             )
             cursor_seen = through_id is None or through_id in seen_ids
-            checkpoint_seen = all(name in checkpoints for name in wanted)
+            checkpoint_seen = all(name in checkpoints or name in proven_absent for name in wanted)
             if at_start or (boundary_seen and cursor_seen and checkpoint_seen):
                 break
             # A journal with no compaction has no boundary to stop at: keep
@@ -1518,6 +1807,7 @@ def read_replay_suffix(
         checkpoints=checkpoints,
         checkpoint_order=checkpoint_order,
         bytes_read=bytes_read,
+        reached_bof=reached_bof,
     )
 
 
@@ -1575,6 +1865,10 @@ class Transcript:
         # transcript whose model-facing window may also have been compacted.
         self._admitted_command_ids: set[str] = set()
         self._admission_handlers: list[Callable[[str], None]] = []
+        # Notify all row kinds only after fsync, never token-time settlement.
+        self._commit_handlers: list[
+            Callable[[tuple[TranscriptEntry, ...], tuple[int, int, float]], None]
+        ] = []
         #: Shared content-addressed media store. Write path: image payloads
         #: are externalized to it on append. Read path: references are
         #: resolved back to inline base64 on replay, so anything downstream
@@ -1655,6 +1949,7 @@ class Transcript:
         *,
         producer_command_id: str | None = None,
         preserve_mtime: bool = False,
+        checkpoint: dict[str, Any] | None = None,
     ) -> list[TranscriptEntry]:
         """Durably commit an ordered message batch with one fsync.
 
@@ -1666,10 +1961,17 @@ class Transcript:
         ``preserve_mtime`` is forwarded to :meth:`_write_entries`, which holds
         the rule; it is opt-in so every existing call site keeps moving the
         activity clock exactly as it did.
+
+        ``checkpoint`` rides the SAME atomic write as the pair it describes (see
+        :data:`CHECKPOINT_CUSTOM_TYPE`): a busy-turn handoff must never expose a
+        checkpoint whose committed batch is not yet durable, or one whose durable
+        batch has no checkpoint — both are the split this argument exists to
+        prevent. It is written AFTER the message rows in the batch, so a reader
+        that scans backward for the newest checkpoint sees it.
         """
         if producer_command_id is not None and len(messages) != 1:
             raise ValueError("producer admission requires exactly one message")
-        if not messages:
+        if not messages and checkpoint is None:
             return []
 
         def build() -> list[TranscriptEntry]:
@@ -1680,6 +1982,15 @@ class Transcript:
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
                 rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+            if checkpoint is not None:
+                rows.append(
+                    TranscriptEntry(
+                        uuid.uuid4().hex,
+                        time.time(),
+                        ENTRY_CUSTOM,
+                        {"custom_type": CHECKPOINT_CUSTOM_TYPE, "details": checkpoint},
+                    )
+                )
             return rows
 
         return await self._commit(build, preserve_mtime=preserve_mtime)
@@ -1808,21 +2119,21 @@ class Transcript:
         """
         async with self._lock:
 
-            def write() -> list[TranscriptEntry]:
+            def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
                 rows = build()
-                self._write_entries(rows, preserve_mtime=preserve_mtime)
-                return rows
+                source = self._write_entries(rows, preserve_mtime=preserve_mtime)
+                return rows, source
 
             worker = asyncio.create_task(asyncio.to_thread(write))
             cancelled = False
             while True:
                 try:
-                    rows = await asyncio.shield(worker)
+                    rows, source = await asyncio.shield(worker)
                     break
                 except asyncio.CancelledError:
                     cancelled = True
                     if worker.done():
-                        rows = worker.result()
+                        rows, source = worker.result()
                         break
             for entry in rows:
                 self._entries.append(entry)
@@ -1835,6 +2146,12 @@ class Transcript:
                             handler(command_id)
                         except Exception:  # noqa: BLE001 - observers cannot undo durability
                             logger.exception("transcript admission handler failed")
+            if rows and source is not None:
+                for handler in list(self._commit_handlers):
+                    try:
+                        handler(tuple(rows), source)
+                    except Exception:  # noqa: BLE001 - observers cannot undo durability
+                        logger.exception("transcript commit handler failed")
             if cancelled:
                 raise asyncio.CancelledError
             return rows
@@ -2011,7 +2328,7 @@ class Transcript:
 
     def _write_entries(
         self, entries: list[TranscriptEntry], *, preserve_mtime: bool = False
-    ) -> None:
+    ) -> tuple[int, int, float]:
         """Worker-only durable write; no in-memory index changes before fsync.
 
         A vanished file must be rebuilt from committed memory, even when its
@@ -2056,6 +2373,7 @@ class Transcript:
         exists so a second front end attaches to the live runtime rather than
         opening a second writer.
         """
+        written: os.stat_result | None = None
         rebuild = not self.path.exists()
         if self._created_at is None and not rebuild:
             # Another runtime may have materialized a speculative transcript
@@ -2081,6 +2399,7 @@ class Transcript:
                             handle.write(entry.to_json() + "\n")
                         handle.flush()
                         os.fsync(handle.fileno())
+                        written = os.fstat(handle.fileno())
                 except FileNotFoundError:
                     rebuild = True
                 except BaseException:
@@ -2112,12 +2431,23 @@ class Transcript:
                         handle.write(row.to_json() + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
+                    written = os.fstat(handle.fileno())
             except BaseException:
                 try:
                     self.path.unlink()
                 except FileNotFoundError:
                     pass
                 raise
+        assert written is not None
+        # Keep the writer descriptor's identity. Adopt a bookkeeping-restored
+        # mtime only for that same inode/size, never a replacement file's stamp.
+        try:
+            current = self.path.stat()
+        except OSError:
+            current = written
+        if (current.st_ino, current.st_size) == (written.st_ino, written.st_size):
+            written = current
+        return _page_source_signature(written)
 
     def _restore_mtime(self, previous_mtime: float | None) -> None:
         """Put a bookkeeping append's pre-write mtime back, best-effort.
@@ -2163,6 +2493,25 @@ class Transcript:
     def has_admitted_command(self, command_id: str) -> bool:
         """Return whether an append-only user row already owns ``command_id``."""
         return command_id in self._admitted_command_ids
+
+    def subscribe_commits(
+        self, handler: Callable[[tuple[TranscriptEntry, ...], tuple[int, int, float]], None]
+    ) -> Callable[[], None]:
+        """Observe all durable rows with the actual writer-source identity.
+
+        Callbacks run on the owner loop and must only enqueue bounded work;
+        they must not mutate these row references or scan the journal inline.
+        The writer source lets a late correction reject a replaced journal.
+        """
+        self._commit_handlers.append(handler)
+
+        def unsubscribe() -> None:
+            try:
+                self._commit_handlers.remove(handler)
+            except ValueError:
+                pass
+
+        return unsubscribe
 
     def subscribe_admitted_commands(self, handler: Callable[[str], None]) -> Callable[[], None]:
         """Observe user command IDs after their durable append boundary."""
@@ -2290,6 +2639,168 @@ class Transcript:
                             else f"{str(details.get('provider') or '')}:read"
                         ),
                         "kind": kind,
+                    }
+                )
+        return rows
+
+    def channel_spend_rows(self) -> list[dict[str, Any]]:
+        """Every channel-spend RECORD this journal carries, oldest first.
+
+        The channel twin of :meth:`search_spend_rows`, read off the same
+        ``session_channel_spend.v1`` custom rows the Session appends (see
+        ``session/channel_spend.py``). Deliberately NO compaction/prune
+        boundary, for the reason that method documents: money already spent is
+        not invalidated by a later rewrite of the context.
+
+        Rows come back as their raw ``details`` mappings and are NOT deduped
+        here: a higher ``rev`` row can arrive after a lower one, and the fold
+        is the one place that decides which revision wins. The ``start``
+        marker is skipped (``channel_spend_tracked`` reads it); malformed rows
+        are dropped individually, so one bad line cannot hide the rest.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict):
+                continue
+            if details.get("kind") == "start":
+                continue
+            rows.append(dict(details))
+        return rows
+
+    def channel_spend_tracked(self) -> bool:
+        """Whether the journal carries the one-time channel ``start`` marker.
+
+        False for a pre-feature session: its total is inference-only and every
+        surface must say "channels not tracked" rather than implying $0 of
+        channel spend (the no-fabricated-zeros rule). A BACKFILLED legacy
+        journal deliberately has rows but no marker — recovered history is
+        partial by definition, and the combiner degrades it.
+        """
+        for entry in self._entries:
+            if entry.type != ENTRY_CUSTOM:
+                continue
+            payload = entry.payload
+            if payload.get("custom_type") != CHANNEL_SPEND_CUSTOM_TYPE:
+                continue
+            details = payload.get("details")
+            if isinstance(details, dict) and details.get("kind") == "start":
+                return True
+        return False
+
+    def channel_backfill_rows(self) -> list[dict[str, Any]]:
+        """Record-shaped rows recovered from a pre-feature journal, one pass.
+
+        WHAT IS RECOVERED (design §3.5): legacy ``search_cost``/``read_cost``
+        tool details become ``search``/``read`` rows priced from the SAME
+        client table the live emission uses (labelled
+        ``client-search-table-legacy``), and image tool rows that carry a
+        ``cost_usd`` figure become ``image`` rows with the recorded labels.
+        WHAT IS NOT: any row whose money is absent is not invented (no
+        fabricated zeros) — an unpriced search keeps ``amount=None``, and an
+        image row without a figure yields no row at all.
+
+        Record ids are the idempotency contract: ``legacy:<entry id>`` for the
+        search/read pair (the entry is the only stable identity those rows
+        have) and ``image:<generation id>`` for an image generation, falling
+        back to ``legacy:<entry id>`` when the provider returned no id. Running
+        the backfill twice therefore lands the same ids, and the fold (plus the
+        Session's append guard) makes the second run a no-op.
+
+        TWO DOCUMENTED LIMITS of recovering from a pre-feature journal, both
+        visible in the rows it emits rather than silently wrong:
+
+        - A base-code image row's ``details`` carried only ``cost_usd`` (the
+          wave-2 ``cost_source``/``billing_basis``/``cost_provenance`` labels
+          arrive with PR #2141), so a recovered ``openai-sub`` image reads
+          ``estimated``/``none`` rather than ``subscription_api_equivalent``:
+          the figure is real, its basis is the best label available for a row
+          that never recorded one.
+        - The details carry no asset count (the caption prose is not parsed),
+          so a recovered image row states NO unit count rather than a zero —
+          the wire row reports ``units: None`` and the panel omits the note
+          (QA round 1, Q6: ``$0.053   0 images`` was a fabricated zero).
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            details = (entry.payload.get("provider_payload") or {}).get("details")
+            if not isinstance(details, dict):
+                continue
+            ts_ms = int(round(float(entry.ts) * 1000))
+            for key, kind in (("search_cost", "search"), ("read_cost", "read")):
+                cost = details.get(key)
+                if not isinstance(cost, dict):
+                    continue
+                provider = str(cost.get("ledger_provider") or "") or (
+                    str(details.get("provider") or "")
+                    if kind == "search"
+                    else f"{str(details.get('provider') or '')}:read"
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": f"legacy:{entry.id}",
+                        "ts_ms": ts_ms,
+                        "channel": kind,
+                        "provider": provider,
+                        "units": 1,
+                        "unit": "searches" if kind == "search" else "reads",
+                        "amount_micro": usd_to_micro(cost.get("usd")),
+                        "billing_basis": "estimated",
+                        "cost_source": "catalogue",
+                        "price_version": "client-search-table-legacy",
+                        "status": "ok",
+                        "detail": "backfilled from the tool row's own cost details",
+                    }
+                )
+            # ONLY a real image tool row, matched on the tool name rather than
+            # on "has a provider and a cost_usd key": any OTHER tool that
+            # reports a per-call cost would otherwise be misfiled as an image
+            # (review round 1, MINOR 2 — a `classify` row with a cost became an
+            # image record).
+            if entry.payload.get("tool_name") != "generate_image":
+                continue
+            if str(details.get("provider") or "") and "cost_usd" in details:
+                amount = usd_to_micro(details.get("cost_usd"))
+                if amount is None:
+                    continue  # an image row without a figure is not invented
+                generation_id = str(details.get("generation_id") or "")
+                basis, source, price_version = map_image_cost_labels(
+                    route=str(details.get("provider") or ""),
+                    cost_source=details.get("cost_source"),
+                    billing_basis=details.get("billing_basis"),
+                    cost_provenance=details.get("cost_provenance"),
+                    has_amount=True,
+                )
+                rows.append(
+                    {
+                        "version": CHANNEL_SPEND_VERSION,
+                        "record_id": (
+                            f"image:{generation_id}" if generation_id else f"legacy:{entry.id}"
+                        ),
+                        "ts_ms": ts_ms,
+                        "channel": "image",
+                        "provider": str(details.get("provider") or ""),
+                        "model": str(details.get("model") or ""),
+                        # The legacy details carry no asset count (see the
+                        # docstring): NO count and no unit spelling, so the
+                        # wire row reports units unknown (None) rather than a
+                        # zero beside a real dollar figure.
+                        "units": 0,
+                        "unit": "",
+                        "amount_micro": amount,
+                        "billing_basis": basis,
+                        "cost_source": source,
+                        "price_version": price_version,
+                        "status": "ok",
+                        "request_id": generation_id,
                     }
                 )
         return rows
@@ -2998,6 +3509,367 @@ def _replay_row(
     return message
 
 
+def read_indexed_raw_rows(
+    directory: Path,
+    index: Any,
+    ids: list[str],
+    *,
+    max_bytes: int = 512 * 1024,
+) -> dict[str, Any] | None:
+    """PROTOTYPE bounded raw read, NOT an arbitrary settled-body projector.
+
+    The same index's offsets and ordinals share a source witness. A complete
+    line/identity check and FD/path recheck refuse rewrites while reading. This
+    does not detect preserved-stat external mutation or discover prune/call/
+    injection dependencies; callers must not label these raw bodies projected.
+    None means source unavailable, never an absence partition.
+    """
+    if (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise ValueError("bounded raw ids required")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("positive byte budget required")
+    source = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
+    path = directory / "transcript.jsonl"
+    rows, missing, remaining, unavailable = [], [], [], []
+    used = 0
+
+    def witness(st: Any) -> tuple[int, int, float]:
+        return st.st_ino, st.st_size, st.st_mtime
+
+    try:
+        with path.open("rb") as handle:
+            if witness(os.fstat(handle.fileno())) != source:
+                return None
+            for id_ in dict.fromkeys(ids):
+                span = index.journal_ranges.get(id_)
+                if span is None:
+                    missing.append(id_)
+                    continue
+                start, end = span
+                if (
+                    type(start) is not int
+                    or type(end) is not int
+                    or not 0 <= start < end <= source[1]
+                ):
+                    return None
+                if end - start > max_bytes:
+                    unavailable.append(id_)
+                    continue
+                if end - start > max_bytes - used:
+                    remaining.append(id_)
+                    continue
+                handle.seek(start)
+                raw = handle.read(end - start)
+                if len(raw) != end - start or not raw.endswith(b"\n"):
+                    return None
+                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                if entry is None or entry.id != id_:
+                    return None
+                rows.append(entry)
+                used += len(raw)
+            if witness(os.fstat(handle.fileno())) != source or witness(path.stat()) != source:
+                return None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return {
+        "rows": rows,
+        "missing": missing,
+        "remaining": remaining,
+        "unavailable": unavailable,
+        "bytes": used,
+    }
+
+
+def project_indexed_source_subset(
+    directory: Path,
+    index: Any,
+    ids: list[str],
+    *,
+    expected_generation: str,
+    through_id: str | None = None,
+    raw_budget: int = 512 * 1024,
+    encoded_budget: int | None = None,
+) -> dict[str, Any] | None:
+    """Bounded settled-body getter, NOT metadata bootstrap or viewport adoption.
+
+    Structural inverses were built once in the SAME index. Complete ordinary
+    call units and effective prune identities are discovered before one FD read;
+    no whole-file replay, selected Transcript, payload cache or new domain.
+    Unsupported/intrinsically huge units are terminal, aggregate debt has a
+    SMALLER-ID retry. None is unavailable, never invented absence. Publication
+    still needs the caller's session/view/body-owed fences. No public flag/DTO.
+    """
+    from bisect import bisect_right
+
+    from local_operator.network.relay import (
+        SESSION_HISTORY_REPLY_BUDGET_BYTES,
+        session_history_reply_bytes,
+    )
+    from local_operator.session.transcript_index import source_projection_fact
+
+    if (
+        not isinstance(ids, list)
+        or len(ids) > 512
+        or any(not isinstance(id_, str) or not 1 <= len(id_) <= 128 for id_ in ids)
+    ):
+        raise ValueError("at most 512 raw ids of 1..128 characters required")
+    if not expected_generation or expected_generation != index.journal_generation:
+        return None
+    if type(raw_budget) is not int or not 0 < raw_budget <= 512 * 1024:
+        raise ValueError("raw budget must be 1..512 KiB")
+    budget = SESSION_HISTORY_REPLY_BUDGET_BYTES if encoded_budget is None else encoded_budget
+    if type(budget) is not int or not 0 < budget <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        raise ValueError("invalid encoded frame budget")
+    original = list(dict.fromkeys(ids))
+    requested = set(original)
+    views = index.source_views
+    if not views.origins_complete:
+        return None
+    cut = len(index.source_projection_facts) - 1
+    if through_id is not None:
+        if through_id not in views.by_id or through_id in views.duplicates:
+            return None
+        cut = views.by_id[through_id]["seq"]
+    if bisect_right(views.unknown_identity_seqs, cut):
+        return None
+    compaction_at = bisect_right(views.compaction_seqs, cut) - 1
+    low, preserved, governing_unknown = 0, frozenset(), False
+    if compaction_at >= 0:
+        governing = views.compactions[compaction_at]
+        preserved = views.preserved_sets[governing["seq"]]
+        kept = governing.get("first_kept_entry_id")
+        if kept is None:
+            low = governing["seq"] + 1
+        elif kept not in views.by_id or kept in views.duplicates or views.by_id[kept]["seq"] > cut:
+            governing_unknown = True
+        else:
+            low = views.by_id[kept]["seq"]
+        governing_unknown |= bool(governing.get("flags"))
+    global_unknown = governing_unknown or bool(bisect_right(views.global_unknown_seqs, cut))
+    opaque_causal = bool(bisect_right(views.opaque_causal_seqs, cut))
+
+    def eligible(key: str) -> bool:
+        fact = views.by_id.get(key)
+        return bool(
+            1 <= len(key) <= 128
+            and fact
+            and key not in views.duplicates
+            and key not in preserved
+            and fact["seq"] <= cut
+            and not (set(fact.get("flags", [])) - {"injection"})
+            and fact["source_class"] in {"plain_message", "custom_message"}
+        )
+
+    def discover(root: str) -> tuple[set[str], set[str], int] | None:
+        members, prune_ids, todo, discovered = set(), set(), [root], {root}
+        while todo:
+            key = todo.pop()
+            if key in members:
+                continue
+            if not eligible(key):
+                return None
+            fact = views.by_id[key]
+            members.add(key)
+            calls = fact.get("call_ids", []) + (
+                [fact["result_call_id"]] if fact.get("result_call_id") else []
+            )
+            if calls and opaque_causal:
+                return None
+            for call in calls:
+                owners, results = views.owners.get(call, []), views.results.get(call, [])
+                if len(owners) != 1 or not results or len(results) > 512:
+                    return None
+                peers = set(owners + results)
+                if len(discovered | prune_ids | peers) > 512:
+                    return None
+                todo.extend(peers - discovered)
+                discovered.update(peers)
+            prunes = views.prunes.get(key, [])
+            effective = bisect_right(views.prune_seqs.get(key, []), cut) - 1
+            if effective >= 0:
+                prune = prunes[effective]
+                if (
+                    prune["id"] in views.duplicates
+                    or not 1 <= len(prune["id"]) <= 128
+                    or prune.get("flags")
+                ):
+                    return None
+                prune_ids.add(prune["id"])
+            if len(discovered | prune_ids) > 512:
+                return None
+        keys = members | prune_ids
+        member_seqs = [views.by_id[key]["seq"] for key in members]
+        if member_seqs and min(member_seqs) < low <= max(member_seqs):
+            return None
+        size = sum(index.journal_ranges[key][1] - index.journal_ranges[key][0] for key in keys)
+        return (members, prune_ids, size) if size <= raw_budget else None
+
+    status = {key: "remaining" for key in original}
+    units, covered = [], set()
+    for key in original:
+        if key not in views.by_id:
+            status[key] = "missing"
+        elif global_unknown:
+            status[key] = "unavailable"
+        elif key not in covered:
+            unit = discover(key)
+            if unit is None:
+                status[key] = "unavailable"
+            else:
+                units.append(unit)
+                covered.update(unit[0])
+    # A giant/blocked earlier request cannot monopolize later small units.
+    units.sort(key=lambda unit: (unit[2], min(unit[0])))
+    selected, admitted, used = set(), [], 0
+    for members, prunes, size in units:
+        keys = members | prunes
+        new = keys - selected
+        extra = sum(index.journal_ranges[key][1] - index.journal_ranges[key][0] for key in new)
+        if len(requested | selected | keys) > 512 or used + extra > raw_budget:
+            continue
+        admitted.append((members, prunes))
+        selected.update(keys)
+        used += extra
+    raw = read_indexed_raw_rows(
+        directory,
+        index,
+        sorted(selected, key=lambda key: index.journal_rows[key]),
+        max_bytes=raw_budget,
+    )
+    if raw is None or raw["missing"] or raw["remaining"] or raw["unavailable"]:
+        return None
+    rows = {row.id: row for row in raw["rows"]}
+    # The source-derived facts must also agree with the freshly read bodies.
+    # Cache validation alone is not body/causal authority at admission.
+    for key, row in rows.items():
+        fresh_fact = source_projection_fact(
+            {"id": key, "type": row.type, "payload": row.payload}, index.journal_rows[key]
+        )
+        if fresh_fact != views.by_id[key]:
+            return None
+    entries, companions, dependency_ids, coordinates = {}, {}, set(), {}
+
+    def envelope(
+        states: dict[str, str],
+        bodies: dict[str, Any],
+        deps: dict[str, Any],
+        dep_ids: set[str],
+        coords: dict[str, int],
+    ) -> dict[str, Any]:
+        return {
+            "state": "ready",
+            "journal_generation": index.journal_generation,
+            "entries": sorted(bodies.values(), key=lambda body: body["journal_seq"]),
+            "dependency_entries": sorted(deps.values(), key=lambda body: body["journal_seq"]),
+            "source_dependency_ids": sorted(dep_ids),
+            "journal_ordinals": coords,
+            **{
+                kind: [key for key in original if states[key] == kind]
+                for kind in ("present", "missing", "unavailable", "remaining")
+            },
+        }
+
+    for members, prunes in admitted:
+        roots = members & requested
+        notices = collect_prunes([rows[key] for key in prunes])
+        bodies, safe = {}, True
+        for key in sorted(members, key=lambda item: index.journal_rows[item]):
+            row = rows[key]
+            content = row.payload.get("content", [])
+            if not isinstance(content, list) or any(
+                isinstance(block, dict)
+                and ATTACHMENT_KEY in block
+                and block.get("kind") not in ATTACHMENT_KINDS
+                for block in content
+            ):
+                safe = False
+                break
+            message = _replay_row(row, None, notices)
+            if message is None:
+                safe = False
+                break
+            bodies[key] = {
+                "id": key,
+                # The stored row's OWN entry time — the wire row's ``ts``.
+                "ts": row.ts,
+                "journal_seq": index.journal_rows[key],
+                # Keep the writer's discriminator explicit beside the typed
+                # body; a custom dump alone can parse as a default-user Message.
+                "kind": (
+                    CUSTOM_KIND_CUSTOM
+                    if isinstance(message, CustomMessage)
+                    else CUSTOM_KIND_MESSAGE
+                ),
+                "message": message.model_dump(mode="json"),
+            }
+        if not safe:
+            status.update({key: "unavailable" for key in roots})
+            continue
+        unit_deps = (members - requested) | prunes
+        unit_coords = {key: index.journal_rows[key] for key in members}
+        isolated = {
+            "state": "ready",
+            "journal_generation": index.journal_generation,
+            "entries": [bodies[key] for key in sorted(roots)],
+            "dependency_entries": [bodies[key] for key in sorted(members - roots)],
+            "source_dependency_ids": sorted((members | prunes) - roots),
+            "journal_ordinals": unit_coords,
+            "present": sorted(roots),
+            "missing": [],
+            "unavailable": [],
+            "remaining": [],
+        }
+        # Same original partition is retained: metadata alone cannot be truncated.
+        if session_history_reply_bytes(0, isolated) > budget:
+            status.update({key: "unavailable" for key in roots})
+            continue
+        candidate_status = {**status, **{key: "present" for key in roots}}
+        candidate_entries = {**entries, **{key: bodies[key] for key in roots}}
+        candidate_companions = {**companions, **{key: bodies[key] for key in members - requested}}
+        candidate_dependencies = dependency_ids | unit_deps
+        candidate_coordinates = {**coordinates, **unit_coords}
+        candidate = envelope(
+            candidate_status,
+            candidate_entries,
+            candidate_companions,
+            candidate_dependencies,
+            candidate_coordinates,
+        )
+        if session_history_reply_bytes(0, candidate) <= budget:
+            status, entries, companions = candidate_status, candidate_entries, candidate_companions
+            dependency_ids, coordinates = candidate_dependencies, candidate_coordinates
+    retry, retry_keys, retry_bytes = [], set(), 0
+    for members, prunes, size in units:
+        roots = {key for key in members & requested if status[key] == "remaining"}
+        keys = members | prunes
+        if roots and len(retry_keys | keys) <= 512 and retry_bytes + size <= raw_budget:
+            retry.extend(sorted(roots))
+            retry_keys.update(keys)
+            retry_bytes += size
+    result = envelope(status, entries, companions, dependency_ids, coordinates)
+    result.update(
+        retry_ids=list(dict.fromkeys(retry)),
+        retry_smaller_batch=bool(retry) and set(retry) != requested,
+        read_ids=list(rows),
+        read_bytes=raw["bytes"],
+    )
+    try:
+        st = (directory / "transcript.jsonl").stat()
+    except OSError:
+        return None
+    if (st.st_ino, st.st_size, st.st_mtime) != (
+        index.sig.get("inode"),
+        index.sig.get("size"),
+        index.sig.get("mtime"),
+    ):
+        return None
+    return result if session_history_reply_bytes(0, result) <= budget else None
+
+
 def replay_entries(
     entries: Sequence[TranscriptEntry],
     attachments: AttachmentStore | None,
@@ -3067,11 +3939,14 @@ def replay_entries(
         if entries[i].type == ENTRY_COMPACTION:
             compaction_index = i
             break
+    # Bound on ALL paths, not inside a later gate: the replay block below
+    # re-reads the record, and a loop-bound-only binding is both a type
+    # checker complaint and a real foot-gun if the gates ever diverge.
+    compaction = entries[compaction_index] if compaction_index is not None else None
 
     start = 0
     prefix: list[AgentMessage] = []
-    if compaction_index is not None:
-        compaction = entries[compaction_index]
+    if compaction is not None:
         prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
         # re-injected VERBATIM right after the marker, so the user's own
@@ -3136,7 +4011,7 @@ def replay_entries(
         start = context_cut_index(entries)
 
     prunes = collect_prunes(entries)
-    out: list[AgentMessage] = list(prefix)
+    kept: list[AgentMessage] = []
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
             continue
@@ -3146,8 +4021,36 @@ def replay_entries(
         notice = prunes.get(entry.id)
         if notice is not None and isinstance(message, Message):
             _apply_prune(message, notice)
-        out.append(message)
-    return out
+        kept.append(message)
+    if compaction is not None:
+        # Reapply the epoch's capture-elision record to the KEPT window. The
+        # live pass elided superseded captures from the projection it sent
+        # and recorded their stable addresses (producer scope, stream,
+        # revision) on the compaction payload; source rows and attachment
+        # blobs stayed untouched, so replay elides EXACTLY those blocks.
+        # Deliberately NOT a count re-derived here: a later turn can
+        # retro-supersede a capture the pass protected, so re-deriving a
+        # first-N over the resumed segment would drop a block the live
+        # session kept and resurrect one it elided (reviewer round 1, C1).
+        # A record without identities (every pre-elision record) changes
+        # nothing here, and a malformed one degrades to no elision rather
+        # than a guess.
+        from local_operator.compaction.marker import capture_elision_identities
+
+        identities = capture_elision_identities(compaction.payload)
+        if identities:
+            from local_operator.compaction.pruning import apply_capture_elisions
+
+            projected, _elided = apply_capture_elisions(
+                [message for message in kept if isinstance(message, Message)],
+                identities=identities,
+            )
+            projected_iter = iter(projected)
+            kept = [
+                next(projected_iter) if isinstance(message, Message) else message
+                for message in kept
+            ]
+    return list(prefix) + kept
 
 
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:

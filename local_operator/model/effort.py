@@ -63,10 +63,8 @@ from typing import Sequence
 #: subset of one agreed set of words, so a level means the same thing whichever
 #: family it came from and the ladders can be compared rung for rung.
 #:
-#: ``minimal`` is in the vocabulary but in no ladder yet: the OpenAI reasoning
-#: guide lists it as a possible value, and no model page this table transcribes
-#: names it. It is reserved rather than removed so the day a model page does,
-#: the word already sorts in the right place.
+#: ``minimal`` is explicitly supported by Meta's Wonder 1.0/Spark 1.3 model
+#: reasoning guide. The vocabulary is broader than any one family's ladder.
 EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 #: The fallback-chain hop vocabulary — narrower than :data:`EFFORT_ORDER`
@@ -81,6 +79,14 @@ EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xh
 #: ``providers.failover`` re-exports this name so its own callers are
 #: unaffected by the move.
 SUPPORTED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+
+#: A chain's explicit ``auto`` is a reset, not a depth: leave the primary's
+#: override behind and use the TARGET's own default (including a router's auto).
+#: Keep it separate from the fixed vocabulary/ordinal ladder so cheapest-rung
+#: selection, effort cycling and existing fixed-level consumers do not rank it.
+#: Absence still means carry/clamp the primary choice; conflating the two would
+#: silently change every legacy selector and effort-less mapping in user config.
+FALLBACK_EFFORTS = SUPPORTED_EFFORTS | {"auto"}
 
 
 def is_effort_sentinel(level: str) -> bool:
@@ -189,6 +195,12 @@ _OPENAI_O_SERIES = EffortSupport(("low", "medium", "high"))
 #: ``claude-opus-4-20250514`` cannot reach a generation arm through ``[.-]``
 #: either, which is the regression the tests pin.
 _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
+    # dev.meta.ai/docs/reasoning explicitly names this ladder for Wonder 1.0
+    # and Spark 1.3. Full is a product label, not another effort rung or ID.
+    (
+        re.compile(r"(?:^|/)muse-(?:wonder-1\.0|spark-1\.3)$"),
+        EffortSupport(("minimal", "low", "medium", "high", "xhigh", "max")),
+    ),
     # 4.5: the generation that introduced `effort`, and the ONE arm written as a
     # tier rather than a generation range. The doc lists exactly one 4.5 model as
     # supporting it — `claude-opus-4-5-20251101` — and the repo ships

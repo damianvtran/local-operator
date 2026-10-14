@@ -1089,7 +1089,11 @@ def test_the_incremental_fold_agrees_with_the_full_rebuild_on_a_legacy_marker():
     full = replay_entries(entries + [marker], None)
 
     state = DurableFoldState(directory=pathlib.Path("/tmp"))
-    state.history = _replay(entries)
+    # ``_replay`` answers two things now: the replayed history and the journal
+    # row the scroll-back archive opens at (the phone's durable fold needs the
+    # second, and deriving it here a second time would be a second answer to one
+    # question). This test is about the first.
+    state.history, _ = _replay(entries)
     for entry in entries:
         if entry.payload.get("kind") == "custom" and entry.payload.get("custom_type"):
             state.injection_ids.add(entry.id)

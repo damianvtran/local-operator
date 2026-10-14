@@ -542,7 +542,7 @@ async def test_a_small_window_at_its_ceiling_is_relieved_on_the_turn(tmp_path, m
     """The reviewer's second shape: 195k of a 200k window, hint pending.
 
     Here the synchronous pass is the only thing between the turn and an
-    overflow, and the absolute 600k knob is irrelevant — the resolved trigger
+    overflow, and the absolute 400k knob is irrelevant — the resolved trigger
     is the PERCENTAGE of a small window. Routing must read the same resolved
     number the gate does, not a hard-coded ceiling.
     """

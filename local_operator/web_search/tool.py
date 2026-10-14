@@ -478,6 +478,19 @@ async def execute_web_search(
         "provider_searches": None if entry is None else entry.searches,
     }
 
+    # ... and the SAME figure into the CHANNEL ledger, which is the one every
+    # surface reads. ``SEARCH_SPEND`` above stays as the in-process read model
+    # for the old ``/analytics`` panel for one release (design §4.1); nothing
+    # sums it for a total any more, so a search cannot be counted twice.
+    from local_operator.session.channel_spend import emit_web_spend
+
+    emit_web_spend(
+        getattr(context, "record_channel_spend", None),
+        channel="search",
+        provider=response.provider,
+        usd=response.cost.usd if response.cost else None,
+    )
+
     # Hand the captured page context to THIS session, so `web_read` can answer
     # from these pages without a fetch. Attaching is per-session by design: the
     # pages a search retrieved belong to the session that asked for them.

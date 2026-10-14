@@ -46,11 +46,13 @@ def test_the_tool_is_absent_without_the_withdraw_door():
 
 
 def test_the_tool_is_present_with_the_door_and_appended_last():
-    """With the door bound, the tool exists and sits at the END of the array —
-    appending never shifts a provider-visible prefix, which is what the prompt
-    cache keys on."""
+    """With the door bound, the tool exists and sits AFTER everything that
+    existed when it landed — appending never shifts a provider-visible prefix,
+    which is what the prompt cache keys on. Only NEWER appends may follow it,
+    and wave 4 slice A's ``setting`` is the current last (the host-gated
+    entries listed after ``ask_withdraw`` are absent in this environment)."""
     tools = create_tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))
-    assert tools[-1].name == "ask_withdraw"
+    assert [tool.name for tool in tools][-2:] == ["ask_withdraw", "setting"]
 
 
 def test_the_advertised_schema_is_the_two_reasons_and_the_cells_map():

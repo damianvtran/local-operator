@@ -11,11 +11,10 @@
 // module's regression net. It exists at the ADAPTER level
 // (rather than only through the rendered card) because the property most
 // worth pinning is subtractive: a field the feed does not carry — or carries
-// malformed — must reduce (null / empty / the indeterminate branch), never
-// become an invented number. A render test can miss that; a mapping table
-// cannot.
+// malformed — must reduce (null / empty / the reduced state), never become
+// an invented number. A render test can miss that; a mapping table cannot.
 import { describe, expect, it } from "vitest";
-import { IMAGE_GEN_TOOLS, imageGenView } from "./image-gen";
+import { IMAGE_GEN_TOOLS, VIDEO_GEN_TOOLS, imageGenView } from "./image-gen";
 import type { TranscriptEntry, TranscriptEntryDetails } from "../types";
 
 /** The canonical bag's only home in src/ is the adapter — the entry type
@@ -47,16 +46,54 @@ function entry(over: Partial<TranscriptEntry>): TranscriptEntry {
 }
 
 describe("the detection constant", () => {
-	it("names the frozen tool, and only it", () => {
-		/* The harness lane froze ONE tool: image-to-image is a
-		   `source_image_path` argument on the same call. A second name
-		   appearing here without its tool shipping is a wire the adapter
-		   would claim to know. */
+	it("carries the two media tools and the exclusion subset", () => {
+		/* The set is the programme's ONE surface edit (R1: "add
+		   `generate_video` there first, then emit"): the video tool joins so
+		   the adapter's mapping follows with zero edits, and the ONE
+		   exclusion (the card's cancel control) reads `VIDEO_GEN_TOOLS`
+		   rather than subtracting the name here. A set that silently grew a
+		   sibling would widen every reader the exclusion never saw, which is
+		   why this pin moves ONLY when a media tool is added everywhere at
+		   once. */
 		expect(IMAGE_GEN_TOOLS.has("generate_image")).toBe(true);
-		expect(IMAGE_GEN_TOOLS.size).toBe(1);
-		expect(IMAGE_GEN_TOOLS.has("generate_altered_image")).toBe(false);
-		expect(IMAGE_GEN_TOOLS.has("read")).toBe(false);
-		expect(IMAGE_GEN_TOOLS.has("")).toBe(false);
+		expect(IMAGE_GEN_TOOLS.has("generate_video")).toBe(true);
+		expect(IMAGE_GEN_TOOLS.size).toBe(2);
+		for (const other of [
+			"generate_altered_image",
+			"generate_image_v2",
+			"generate_video_v2",
+			"generate_audio",
+			"read",
+			"",
+		]) {
+			expect(IMAGE_GEN_TOOLS.has(other)).toBe(false);
+		}
+		/* The exclusion subset: its own negative controls, plus the drift
+		   guard — the video set must stay INSIDE the detection set, or a
+		   rename that edited one and not the other would silently re-arm the
+		   cancel control for video. */
+		expect(VIDEO_GEN_TOOLS.has("generate_video")).toBe(true);
+		expect(VIDEO_GEN_TOOLS.size).toBe(1);
+		for (const other of ["generate_image", "generate_video_v2", "videogen"]) {
+			expect(VIDEO_GEN_TOOLS.has(other)).toBe(false);
+		}
+		for (const name of VIDEO_GEN_TOOLS) {
+			expect(IMAGE_GEN_TOOLS.has(name)).toBe(true);
+		}
+	});
+});
+
+describe("the material fact", () => {
+	it("is read off the entry's own tool name", () => {
+		expect(imageGenView(entry({ tool_name: "generate_video" })).material).toBe("video");
+		expect(imageGenView(entry({ tool_name: "generate_image" })).material).toBe("image");
+	});
+
+	it("tolerates case the way the transcript branch's lookup does, and defaults to image", () => {
+		expect(imageGenView(entry({ tool_name: "Generate_Video" })).material).toBe("video");
+		/* Anything outside the video subset is the pre-video reading — the
+		   honest default for a member the exclusion was never written for. */
+		expect(imageGenView(entry({ tool_name: "generate_audio" })).material).toBe("image");
 	});
 });
 
@@ -218,6 +255,76 @@ describe("the cancel conflict (media_already_completed)", () => {
 	});
 });
 
+describe("the generating fact (the desktop's F3 rule, mirrored)", () => {
+	it("running implies true; every reduced and settled state is false", () => {
+		expect(imageGenView(entry({ tool_state: "running" })).generating).toBe(true);
+		expect(imageGenView(entry({ tool_state: "queued" })).generating).toBe(false);
+		expect(imageGenView(entry({ tool_state: "composing" })).generating).toBe(
+			false,
+		);
+		for (const wire of ["done", "failed", "interrupted"] as const) {
+			expect(imageGenView(entry({ tool_state: wire })).generating).toBe(false);
+		}
+	});
+
+	it("a press keeps the state it replaced — a queued hold never conjures a body", () => {
+		expect(imageGenView(entry({ tool_state: "queued" }), true).generating).toBe(
+			false,
+		);
+		expect(imageGenView(entry({ tool_state: "running" }), true).generating).toBe(
+			true,
+		);
+		/* The provider-side queue is a reduced `queued` view on this surface
+		   (the stage refine's own arm): the press holds that card's claim —
+		   nothing generating yet — rather than flipping it into a body. */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "running",
+					details: liveDetails({ stage: "queued" }),
+				}),
+				true,
+			).generating,
+		).toBe(false);
+	});
+
+	it("the wire's own cancelling keeps what the row's word last said", () => {
+		/* The frame no longer carries the stage the hold replaced, so the
+		   row's own word decides: `running` had started executing (true);
+		   `queued` had not (false — the reduced hold). */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "running",
+					details: liveDetails({ stage: "cancelling" }),
+				}),
+			).generating,
+		).toBe(true);
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "queued",
+					details: liveDetails({ stage: "cancelling" }),
+				}),
+			).generating,
+		).toBe(false);
+	});
+
+	it("a live stage word keeps the fact current", () => {
+		/* `in_progress` says the provider is working, even over a row whose
+		   word still reads queued — the stage refines the fact the same way
+		   it refines the state. */
+		expect(
+			imageGenView(
+				entry({
+					tool_state: "queued",
+					details: liveDetails({ stage: "in_progress" }),
+				}),
+			).generating,
+		).toBe(true);
+	});
+});
+
 describe("live detail fields reduce honestly when absent or malformed", () => {
 	it("empty details carry no numbers and no text", () => {
 		const view = imageGenView(entry({}));
@@ -249,8 +356,9 @@ describe("live detail fields reduce honestly when absent or malformed", () => {
 		expect(at(0.42)).toBe(0.42);
 		expect(at(1)).toBe(1);
 		/* NOT clamped. 42 is not a fraction, and clamping it into a full bar
-		   would state 100% off a value that never meant one — the
-		   indeterminate branch is the honest rendering. */
+		   would state 100% off a value that never meant one — the reduced
+		   state (no bar at all; one draws only against a carried fraction)
+		   is the honest rendering. */
 		expect(at(42)).toBeNull();
 		expect(at(-0.1)).toBeNull();
 		expect(at(Number.NaN)).toBeNull();

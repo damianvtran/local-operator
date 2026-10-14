@@ -199,8 +199,8 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
             super().__init__()
             self.notice = notice
 
-    def __init__(self) -> None:
-        super().__init__("More recent messages below", "note")
+    def __init__(self, *, fold_width: int = 0) -> None:
+        super().__init__("More recent messages below", "note", fold_width=fold_width)
         self.add_class("interactive-notice")
 
     def action_more(self) -> None:
@@ -231,6 +231,27 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
     """
 
     BINDINGS = [Binding("enter", "older", "Older messages", show=False)]
+
+    #: Head-cut marker for the quiet-group fold (design §5, S5): a span whose
+    #: first row sits below this notice may continue into rows that are NOT on
+    #: hand, so it states a minimum ("at least N") instead of an exact count.
+    #: The fold reads the attribute, not the class: the notice RESTATES rather
+    #: than removes itself when the head runs out (see :meth:`set_interactive`),
+    #: so presence alone stops being the truth — :meth:`set_quiet_group_head_cut`
+    #: is flipped from the same ``more`` verdict the copy is reconciled
+    #: against. Conservative when stale: the notice's own copy is the row's
+    #: answer to the same question, and a fold that reads the old value states
+    #: "at least N", which stays true either way.
+    QUIET_GROUP_HEAD_CUT = True
+
+    def set_quiet_group_head_cut(self, cut: bool) -> None:
+        """State whether rows above this notice are still off-screen.
+
+        Called from the head notice's reconciliation (the same ``more``
+        verdict the copy is decided from), so the fold cannot claim a minimum
+        over a head that is provably the conversation's start.
+        """
+        self.QUIET_GROUP_HEAD_CUT = bool(cut)
 
     class Requested(Message):
         def __init__(self, notice: OlderHistoryNotice) -> None:
@@ -596,7 +617,15 @@ class ReplayTarget(Protocol):
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]: ...
+
+    def _insert_after(self, anchor: Any, block: Any) -> None: ...
+
+    def _replace_block(self, old: Any, block: Any) -> bool: ...
 
     def _painted_tool_card(self, call_id: str) -> Any: ...
 
@@ -641,6 +670,10 @@ class PreparedReplay(ReplayState):
         *,
         marker_text: str | None = None,
         fold_width: int = 0,
+        source_id: str | None = None,
+        source_indices: list[int] | None = None,
+        source_total: int | None = None,
+        after: Any | None = None,
     ) -> list[ImageBlock]:
         # ``fold_width`` is accepted to satisfy ``ReplayTarget``: a prepared
         # replay is built OFFSCREEN, so there is no laid-out destination to
@@ -652,7 +685,48 @@ class PreparedReplay(ReplayState):
             marker_text=marker_text,
             navigation_visible=False,
             fold_width=fold_width,
+            source_id=source_id,
+            source_indices=source_indices,
+            source_total=source_total,
+            after=after,
         )
+
+    def _insert_after(self, anchor: Any, block: Any) -> None:
+        """Place ``block`` right after ``anchor`` in the collected run.
+
+        The collected list IS the mount order, so an adopted source-owned part
+        keeps its original source seat instead of landing at the tail (review
+        round 5, R3-3 placement). Recording mirrors ``_append_block``: the
+        block still declares its empty-state verdict, and an unstamped block
+        still takes the projection anchor/part, so only the POSITION differs.
+        """
+        block.ends_empty_state = True
+        if not block.navigation_anchor_id:
+            block.navigation_anchor_id = self._projection_message_id
+            block.navigation_anchor_part = self._projection_part
+        self._projection_part += 1
+        for index, candidate in enumerate(self.blocks):
+            if candidate is anchor:
+                self.blocks.insert(index + 1, block)
+                return
+        self.blocks.append(block)
+
+    def _replace_block(self, old: Any, block: Any) -> bool:
+        """Swap a seat in the offscreen run, keeping its position and coords.
+
+        The prepared replay's counterpart of ``TranscriptView.replace_block``:
+        the collected list is the mount order, so the replacement goes back to
+        ``old``'s index and inherits its source anchor/part — the same
+        coordinates the source row carried (review round 3, R3-2).
+        """
+        for index, candidate in enumerate(self.blocks):
+            if candidate is old:
+                if old.navigation_anchor_id and not block.navigation_anchor_id:
+                    block.navigation_anchor_id = old.navigation_anchor_id
+                    block.navigation_anchor_part = old.navigation_anchor_part
+                self.blocks[index] = block
+                return True
+        return False
 
     def _painted_tool_card(self, call_id: str) -> None:
         return None
@@ -678,7 +752,19 @@ class PreparedReplay(ReplayState):
         bound: int = 12,
         anchor_id: str = "",
         live_call_ids: set[str] | None = None,
+        fold_width: int = 0,
     ) -> None:
+        """Project ``history`` into ``self.blocks`` for an offscreen view.
+
+        ``fold_width`` is the width the view will have once it is revealed. It
+        is the caller's to name because this view has no laid-out width while
+        it is built: blocks authored without one fold at the 80-column fallback,
+        pin that fold as their height, and re-author when the view is laid out
+        AFTER the reveal — the switch then paints the 80-column heights first
+        and the real ones a frame later (S1, a sidebar switch at 160x45: block
+        heights 2/3/5 → 1/2/3 across three painted states). ``0`` keeps that
+        fallback for a caller with no destination to ask.
+        """
         # Snapshot the session's in-flight calls NOW, before the fold: the
         # answer can change mid-projection, and a half-guarded tail is the
         # duplicate this field exists to prevent.
@@ -702,17 +788,22 @@ class PreparedReplay(ReplayState):
             else None
         )
         end = min(len(history), anchor + bound) if anchor is not None else None
-        project_settled_rows(self, history, bound=bound, end=end)
+        project_settled_rows(self, history, bound=bound, end=end, fold_width=fold_width)
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
-            # No width: a prepared replay is authored offscreen for a parked
-            # view (see `project_settled_rows`' `fold_width` note), and this
-            # notice is folded when that view is laid out.
-            self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
+            self._resume_head_notice = OlderHistoryNotice(
+                RESUME_OLDER_NOTICE, fold_width=fold_width
+            )
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
-            self._resume_tail_notice = HistoryPageNotice()
+            # The tail notice takes the width for the same reason the head one
+            # does, even though neither wraps at the widths in play today
+            # (``RESUME_OLDER_NOTICE`` is 42 chars, this one 30 — one row at 80
+            # and at 142, measured): the pair is built here, and a block that
+            # folds at a width its caller did not name is the class of bug this
+            # whole ``fold_width`` argument exists to close.
+            self._resume_tail_notice = HistoryPageNotice(fold_width=fold_width)
             self.blocks.append(self._resume_tail_notice)
         self._block_sink = None
         # One projection's liveness answer must not leak into the next pass:
@@ -957,8 +1048,10 @@ def project_settled_rows(
 
     ``fold_width`` is the width every block this pass BUILDS will be given.
     Zero means "not supplied", and it is only right where there is no
-    destination to name: a prepared replay authors offscreen for a parked view
-    and is laid out inside it before that view is revealed.
+    destination to name. A prepared replay (:meth:`PreparedReplay.prepare`) was
+    once that case on the theory that its parked view is laid out before it is
+    revealed; a FIRST saved view is revealed without that layout (see
+    ``_prepare_sidebar_session``), so it now names its destination too.
 
     Every other caller has a destination and must name it, because a block
     built without one folds at the 80-column fallback, pins that fold as its
@@ -989,6 +1082,10 @@ def project_settled_rows(
     )
     from local_operator.cross_session import cross_session_hidden
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.hub_receipts import (
+        hub_receipt_fields,
+        hub_receipt_marker,
+    )
 
     # ``job_result`` is declared beside the job manager that writes it, not with
     # the harness markers above — imported from its own home so this fold cannot
@@ -1001,6 +1098,7 @@ def project_settled_rows(
         ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
@@ -1023,6 +1121,7 @@ def project_settled_rows(
         is_harness_chrome,
         is_harness_notice_row,
         is_hidden_tool_call,
+        is_quiet_turn_call,
         turn_cut_tool_call,
         user_row_text,
     )
@@ -1045,6 +1144,7 @@ def project_settled_rows(
         is_intermediate_narration,
     )
     from local_operator.tui.settings import settings_get
+    from local_operator.tui.widgets.transcript import HubMessageBlock
 
     # Results are keyed by the call they answer, and a tool message can sit
     # several messages after its call (one assistant turn issues a batch).
@@ -1155,6 +1255,25 @@ def project_settled_rows(
     # blocks are inserted later, and an empty batch still schedules a
     # settle pass that would race the insert's own settle.
     batch = nullcontext() if self._block_sink is not None else transcript.batch_append()
+    # Mounted source-entry IDs are the identity authority on this surface. Read
+    # once per pass (including hidden grouped members); a same-ID live/reconnect
+    # replay cannot add a second receipt, and a reset/cleared view starts fresh.
+    hub_receipts = {
+        block.navigation_anchor_id: block
+        for block in transcript.blocks()
+        if isinstance(block, HubMessageBlock) and block.navigation_anchor_id
+    }
+    # The source-row seats a richer same-ID replay may have to UPGRADE: a row
+    # already painted as the operator's words (or as a receipt under another
+    # spelling) is the same delivery the marker now describes, so the receipt
+    # takes that seat rather than appending beside it (review round 3, R3-2).
+    # Only human/receipt rows are seats — image blocks and notices have their
+    # own anchors/parts and are never replaced.
+    source_seats = {
+        block.navigation_anchor_id: block
+        for block in transcript.blocks()
+        if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
+    }
     with batch:
         for message in history:
             self._projection_message_id = str(getattr(message, "id", ""))
@@ -1167,6 +1286,23 @@ def project_settled_rows(
             # user-attributed, so replaying it too would put a raw
             # '(alarm) The session resumed…' line in the transcript as if
             # the user had typed it.
+            if getattr(message, "custom_type", None) == HUB_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                body, facts = hub_receipt_fields(details if isinstance(details, dict) else {})
+                receipt_id = str(getattr(message, "id", ""))
+                if body.strip():
+                    existing = hub_receipts.get(receipt_id) if receipt_id else None
+                    if existing is not None:
+                        if existing.restate_receipt(body, facts):
+                            transcript.restate_quiet_member(existing)
+                            appended = True
+                    else:
+                        block = HubMessageBlock(body, facts, fold_width=fold_width)
+                        self._append_block(block)
+                        if receipt_id:
+                            hub_receipts[receipt_id] = block
+                        appended = True
+                continue
             if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 # A HIDDEN delivery (a patience fire) paints NOTHING: not a
@@ -1476,6 +1612,163 @@ def project_settled_rows(
             text = getattr(message, "text", "") or ""
             text = text.strip() if isinstance(text, str) else ""
             if role == "user":
+                # A hub steer persists as a user-role row whose text is the
+                # model envelope. The producer marks it with the typed facts in
+                # provider_payload; honour that positive provenance BEFORE any
+                # human-row classification so the receipt paints — never the
+                # envelope, never a fabricated operator turn. Rows without the
+                # marker keep their previous treatment.
+                marker = hub_receipt_marker(message)
+                if marker is not None:
+                    details_dict = dict(marker)
+                    details_dict.setdefault("text", text)
+                    body, facts = hub_receipt_fields(details_dict)
+                    receipt_id = str(getattr(message, "id", ""))
+                    # The row's own pictures ride exactly as they do on the
+                    # human arm below: the marker reclassifies the ROW, never
+                    # its attachments, and dropping them was losing visible
+                    # content (review round 3, R3-3). Ownership is the
+                    # source's own coordinate (review round 4, R3-3/Q-R5-1):
+                    # (original ordinal, picture) pairs come from the FULL
+                    # authoritative sequence BEFORE any adoption filtering,
+                    # the mounted set is keyed by (source id, part) — body 0,
+                    # picture i owns i + 1 — and only parts this row does not
+                    # own yet are mounted. A replay re-carrying the same parts
+                    # appends nothing, omitted parts keep the media already
+                    # known, and a progressively adopted picture can never
+                    # collide with the body or with another picture whatever
+                    # this pass's mount counter reads.
+                    source_images = [
+                        part
+                        for part in (getattr(message, "content", None) or [])
+                        if isinstance(part, ImageContent)
+                    ]
+                    # The ORIGINAL image ordinal counts PICTURES, not content
+                    # parts: a text part before the pictures must not shift
+                    # every ownership coordinate by one.
+                    source_media = list(enumerate(source_images))
+                    owned_parts = (
+                        {
+                            block.navigation_anchor_part
+                            for block in transcript.blocks()
+                            if isinstance(block, ImageBlock)
+                            and block.navigation_anchor_id == receipt_id
+                        }
+                        if receipt_id
+                        else set()
+                    )
+                    missing_media = [
+                        (ordinal, part)
+                        for ordinal, part in source_media
+                        if (ordinal + 1) not in owned_parts
+                    ]
+
+                    def media_seat() -> Any | None:
+                        # The source's OWN segment: the last part already on hand
+                        # for this id (the receipt body or the picture placed
+                        # after it). Never the physical tail — a late picture
+                        # appended there lands past a reader-facing boundary the
+                        # source never crossed (review round 5, R3-3 placement).
+                        seat_block: Any | None = None
+                        for block in transcript.blocks():
+                            if (
+                                isinstance(block, (HubMessageBlock, ImageBlock))
+                                and block.navigation_anchor_id == receipt_id
+                            ):
+                                seat_block = block
+                        return seat_block
+
+                    def adopt_media(body_block: Any | None = None) -> bool:
+                        adopted = False
+                        if missing_media:
+                            self._append_image_blocks(
+                                [part for _, part in missing_media],
+                                marker_text=text,
+                                fold_width=fold_width,
+                                source_id=receipt_id or None,
+                                source_indices=[ordinal for ordinal, _ in missing_media],
+                                source_total=len(source_media),
+                                after=media_seat() or body_block,
+                            )
+                            adopted = True
+                        # Labels converge on the same rule the seam applies at
+                        # construction: a picture adopted while the source
+                        # carried one picture names nothing, so when the
+                        # source's FULL sequence grows its label re-reads
+                        # from that sequence — full-initial and progressive
+                        # adoption agree on labels, not only on counts.
+                        # Labels re-read from the AUTHORITATIVE source only:
+                        # an empty picture list is an OMISSION (a metadata
+                        # patch), not an instruction to forget a known
+                        # citation — erasing the labels of pictures that are
+                        # still on screen was the round-5 caption regression
+                        # (QA Q-R6-3).
+                        if receipt_id and source_media:
+                            total = len(source_media)
+                            for block in transcript.blocks():
+                                if not (
+                                    isinstance(block, ImageBlock)
+                                    and block.navigation_anchor_id == receipt_id
+                                ):
+                                    continue
+                                ordinal = int(block.navigation_anchor_part or 1) - 1
+                                block.set_label(source_image_label(text, ordinal, total))
+                        return adopted
+
+                    existing = hub_receipts.get(receipt_id) if receipt_id else None
+                    if existing is not None:
+                        if existing.restate_receipt(body, facts):
+                            transcript.restate_quiet_member(existing)
+                            appended = True
+                        if adopt_media(existing):
+                            appended = True
+                    else:
+                        seat = source_seats.get(receipt_id) if receipt_id else None
+                        if isinstance(seat, HubMessageBlock):
+                            # A receipt under a different anchor spelling: the
+                            # same row, so correct it in place rather than
+                            # mounting a second card.
+                            if seat.restate_receipt(body, facts):
+                                transcript.restate_quiet_member(seat)
+                                appended = True
+                            if receipt_id:
+                                hub_receipts[receipt_id] = seat
+                            if adopt_media(seat):
+                                appended = True
+                        elif isinstance(seat, UserBlock):
+                            # RICHER SAME-ID REPLAY: this row was painted as
+                            # the operator's words on an earlier pass and the
+                            # marker teaches provenance it did not have then.
+                            # It is the SAME delivery, so the receipt takes the
+                            # seat — replacing the stale human row at its own
+                            # position — and never mounts beside it. The seat
+                            # is only ever a UserBlock here, so no quiet-group
+                            # membership is disturbed by the swap (a mounted
+                            # receipt would have been found by id above).
+                            block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            if receipt_id:
+                                # The receipt body owns logical part 0 of the
+                                # source anchor (pictures own i + 1), stamped
+                                # BEFORE the swap so the seat's old coordinates
+                                # cannot win.
+                                block.navigation_anchor_id = receipt_id
+                                block.navigation_anchor_part = 0
+                            if self._replace_block(seat, block):
+                                hub_receipts[receipt_id] = block
+                                appended = True
+                            if adopt_media(block):
+                                appended = True
+                        else:
+                            block = HubMessageBlock(body, facts, fold_width=fold_width)
+                            if receipt_id:
+                                block.navigation_anchor_id = receipt_id
+                                block.navigation_anchor_part = 0
+                            self._append_block(block)
+                            if receipt_id:
+                                hub_receipts[receipt_id] = block
+                            adopt_media(block)
+                            appended = True
+                    continue
                 # The live path never paints harness chrome as a user row
                 # (LOOP_PROMPT is registered as a pending echo and consumed;
                 # the auto-continuation prompt is never announced at all).
@@ -1611,7 +1904,15 @@ def project_settled_rows(
                 # where its row came back on every reopen. The call STAYS in
                 # the context (the model reads what it armed) and its result
                 # is still paired; only the settled row is skipped.
-                if is_hidden_tool_call(call):
+                #
+                # THE QUIET PAIR joins it for the SAME reason at this seam
+                # (design docs/design/quiet-turns.md §5, S1): the pair is
+                # persisted and stays in the journal and display pages, but a
+                # resumed conversation must not paint the ``no_reply`` call
+                # as a ledger row — the sentinel is a turn door, not work.
+                # The name is the whole decision here (see ``harness.rows``
+                # for why it is not a ``HIDDEN_TOOL_NAMES`` entry).
+                if is_hidden_tool_call(call) or is_quiet_turn_call(call):
                     continue
                 # THE ASK GATE (design docs/design/ask-gate.md §3): a diverted
                 # ask paints NOTHING on replay — its result carries the hidden
@@ -1946,6 +2247,26 @@ def tool_result_image_blocks(content: Any) -> list[ImageContent]:
     return out
 
 
+def source_image_label(marker_text: str | None, ordinal: int, total: int) -> str:
+    """The ``#N`` label for a picture at ORIGINAL ordinal in a FULL source.
+
+    One rule for construction and for later convergence (review round 4):
+    with ``marker_text`` the number is the source's own citation at that
+    ordinal — citation order equals image order, so an adoption tail can
+    still name the citation it belongs to — otherwise the ergonomic
+    position. A single-picture source names nothing (review round 1, F4).
+    """
+    if total <= 1:
+        return ""
+    if marker_text:
+        from local_operator.tui.widgets.editor import IMAGE_MARKER
+
+        citations = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
+        if ordinal < len(citations):
+            return f"#{citations[ordinal]}"
+    return f"#{ordinal + 1}"
+
+
 def append_image_blocks(
     self: ReplayTarget,
     images: list[ImageContent],
@@ -1953,6 +2274,10 @@ def append_image_blocks(
     marker_text: str | None = None,
     navigation_visible: bool = True,
     fold_width: int = 0,
+    source_id: str | None = None,
+    source_indices: list[int] | None = None,
+    source_total: int | None = None,
+    after: Any | None = None,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -1975,22 +2300,34 @@ def append_image_blocks(
     positional ``#1`` would name a marker the prompt does not contain
     (review round 2, F9). Tool results have no markers and fall back to
     positions.
+
+    SOURCE-OWNED CALLS (review round 4, R3-3/Q-R5-1): with ``source_id``
+    the caller names the source row and passes the ORIGINAL image ordinals
+    (``source_indices``) plus the FULL picture count (``source_total``),
+    and every block is stamped ``(source_id, ordinal + 1)`` BEFORE the
+    appender runs. The receipt body owns logical part 0 and the picture at
+    original ordinal ``i`` owns part ``i + 1``, so a progressively adopted
+    picture cannot collide with the body or with another picture — the
+    mount counter of this pass stops being the authority. Ordinals come
+    from the FULL authoritative source sequence, never from a filtered
+    missing tail, so labels and ownership survive partial adoption; the
+    display label still reads the source's own ``[Image #N]`` citation at
+    that original position when the marker text carries citations.
+
+    ``after`` places each block immediately after the given block (and each
+    later one after the one just placed), which is how an ADOPTED part keeps
+    its original source seat: appending at the physical tail put a late
+    picture past a reader-facing human boundary its source never crossed
+    (review round 5, R3-3 placement; QA Q-R6-2). Without ``after`` the
+    behaviour is the plain append every existing caller keeps.
     """
     from local_operator.tui.app import logger
 
-    indices: list[int] = []
-    if marker_text:
-        from local_operator.tui.widgets.editor import IMAGE_MARKER
-
-        indices = [int(match.group("index")) for match in IMAGE_MARKER.finditer(marker_text)]
+    total = source_total if source_total is not None else len(images)
     mounted: list[ImageBlock] = []
-    for index, image in enumerate(images):
-        if len(images) <= 1:
-            label = ""
-        elif index < len(indices):
-            label = f"#{indices[index]}"
-        else:
-            label = f"#{index + 1}"
+    for position, image in enumerate(images):
+        ordinal = source_indices[position] if source_indices is not None else position
+        label = source_image_label(marker_text, ordinal, total)
         try:
             block = ImageBlock(
                 image.data or None,
@@ -2002,6 +2339,13 @@ def append_image_blocks(
         except Exception:
             logger.debug("image block construction failed", exc_info=True)
             continue
-        self._append_block(block)
+        if source_id is not None:
+            block.navigation_anchor_id = source_id
+            block.navigation_anchor_part = ordinal + 1
+        if after is not None:
+            self._insert_after(after, block)
+            after = block
+        else:
+            self._append_block(block)
         mounted.append(block)
     return mounted

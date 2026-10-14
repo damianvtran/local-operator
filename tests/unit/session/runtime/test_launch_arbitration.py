@@ -1017,7 +1017,7 @@ def test_spawn_runtime_carries_a_chosen_birth_effort_to_the_child(tmp_path, monk
         recorded.append(kwargs.get("env") or {})
         return _Popen()
 
-    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
     monkeypatch.setenv("LOP_MOBILE_CHILD_EFFORT", "stale-from-a-sibling")
     monkeypatch.setenv("LOP_MOBILE_CHILD_PROVIDER", "stale")
 
@@ -1089,12 +1089,13 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     1 (interpreter options are only recognised BEFORE `-m`), and argv[0] carries
     the process label whenever a branded image exists.
 
-    `start_new_session` is asserted here for the same reason and one stronger
-    one: it is the DETACHMENT contract. It is what makes the runtime a separate
-    session and group leader, so a terminal teardown cannot reach it — the
-    invariant ``test_runtime_detachment`` pins on a real process. Dropping the
-    kwarg is a one-word diff that no other test would catch, and its symptom
-    (sessions dying with the interface) is exactly the operator's report.
+    THE DETACHMENT CONTRACT is asserted here as ROUTING rather than as a kwarg:
+    the call site must spawn through ``spawn_disclaimed`` (patch target), the one
+    helper that owns own-session detachment AND the macOS responsibility disclaim
+    — the 2026-10-09 fix. What used to be ``start_new_session=True`` on this call
+    is pinned on a REAL spawn in tests/unit/test_macos_disclaim.py (own session
+    via ``os.getsid``, plus the disclaim attribute), so dropping the helper here
+    cannot hide behind an unchanged kwarg.
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
@@ -1123,7 +1124,7 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
         recorded["start_new_session"] = kwargs.get("start_new_session")
         return _Popen()
 
-    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
     process = launch_module._spawn_runtime("sess-argv01", str(tmp_path), defer_materialise=True)
     capture = getattr(process, "lop_capture_path", None)
     if capture is not None:
@@ -1164,10 +1165,14 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     # Still no `cwd=`: if one is ever added the flag stops being the thing that
     # protects the import, and this assertion should be revisited deliberately.
     assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"
-    assert recorded["start_new_session"] is True, (
-        "the spawn in launch.py lost `start_new_session=True`, so the runtime "
-        "is no longer its own session/group leader and an interface teardown "
-        f"can signal it; kwargs={recorded!r}"
+    # The call site must NOT spell platform detachment itself any more — a
+    # half-detached caller is the shape the 2026-10-09 incident grew from — and
+    # the helper it routes through is pinned above (the patch target). The REAL
+    # spawn's own session and disclaim flags are asserted in
+    # tests/unit/test_macos_disclaim.py.
+    assert recorded["start_new_session"] is None, (
+        "the call site still passes its own detachment; spawning belongs to "
+        f"`spawn_disclaimed`; kwargs={recorded!r}"
     )
 
     # argv[0] is the process LABEL when a branded image exists (`executable=`
@@ -1211,7 +1216,7 @@ def test_spawn_capture_is_private_and_anonymous(tmp_path, monkeypatch) -> None:
         spawned.append(kwargs["stdout"])
         return _Popen()
 
-    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
 
     session_id = "secret-session-id-abc123"
     process = launch_module._spawn_runtime(session_id, str(tmp_path), defer_materialise=True)

@@ -406,6 +406,102 @@ async def test_a_running_loop_owns_the_verdict():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [ACHIEVED, CONTINUE, UNREADABLE])
+@pytest.mark.parametrize("serial_moves", [False, True])
+async def test_a_loop_taking_over_during_an_answer_yields_without_consuming_it(
+    answer, serial_moves
+):
+    # A serial-only retry is valid, but a live loop owns judging independently of
+    # the serial. Hold the actual await so both ownership changes happen there.
+    h = Harness(answers=[answer, ACHIEVED])
+    driver = h.build()
+    task = asyncio.create_task(driver.on_turn_end(error=False, aborted=False, serial=0))
+    await h.judge_started.wait()
+    h.loop = True
+    if serial_moves:
+        h.serial_value += 1
+    h.release_judge.set()
+    await task
+
+    assert len(h.judge_calls) == 1
+    assert h.prompts == h.settled == []
+    assert h.state == GoalJudgeState(state="waiting")
+    assert h.changed == [{"state": "judging"}, {"state": "waiting"}]
+    assert not driver.in_flight
+
+
+@pytest.mark.asyncio
+async def test_a_loop_taking_over_after_a_continuation_prevents_the_next_ask():
+    h = Harness(answers=[CONTINUE, ACHIEVED])
+
+    def takeover(h):
+        h.serial_value += 1
+        h.loop = True
+
+    h.on_prompt = takeover
+    h.release_judge.set()
+    driver = h.build()
+    await driver.on_turn_end(error=False, aborted=False, serial=0)
+
+    assert len(h.judge_calls) == len(h.prompts) == 1
+    assert h.settled == []
+    assert h.state.state == "waiting"
+    assert h.state.run == 1
+    assert h.state.verdict == "continue"
+    assert h.state.failures == 0
+    assert h.changed[-1] == {"state": "waiting"}
+    assert not driver.in_flight
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["answer", "continuation"])
+async def test_a_replacement_goal_is_not_written_when_a_loop_also_takes_over(boundary):
+    h = Harness(answers=[CONTINUE, ACHIEVED])
+    replacement = GoalJudgeState(state="waiting", reason="replacement sentinel")
+    writes_at_replacement = []
+
+    def replace(h):
+        h.loop = True
+        h.token_value = "replacement-token"
+        h.state = replacement
+        writes_at_replacement.append(len(h.changed))
+
+    if boundary == "answer":
+        h.on_judge = replace
+    else:
+        h.on_prompt = replace
+    h.release_judge.set()
+    driver = h.build()
+    await driver.on_turn_end(error=False, aborted=False, serial=0)
+
+    assert len(h.judge_calls) == 1
+    assert len(h.changed) == writes_at_replacement[0]
+    assert h.state == GoalJudgeState(state="waiting", reason="replacement sentinel")
+    assert h.settled == []
+    assert len(h.prompts) == (boundary == "continuation")
+    assert not driver.in_flight
+
+
+@pytest.mark.asyncio
+async def test_yielding_to_a_loop_releases_the_claim_for_a_later_foreign_turn():
+    h = Harness(answers=[ACHIEVED, ACHIEVED])
+    h.on_judge = lambda h: setattr(h, "loop", True)
+    h.release_judge.set()
+    driver = h.build()
+    await driver.on_turn_end(error=False, aborted=False, serial=0)
+    assert h.state.state == "waiting"
+    assert not driver.in_flight
+
+    h.loop = False
+    h.on_judge = None
+    h.serial_value += 1
+    await driver.on_turn_end(error=False, aborted=False, serial=h.serial_value)
+    assert len(h.judge_calls) == 2
+    assert h.settled == ["All the work is done"]
+    assert not driver.in_flight
+
+
+@pytest.mark.asyncio
 async def test_an_error_or_aborted_turn_waits_without_judging():
     for kwargs in ({"error": True, "aborted": False}, {"error": False, "aborted": True}):
         h = Harness(answers=[ACHIEVED])

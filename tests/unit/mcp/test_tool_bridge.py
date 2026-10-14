@@ -16,11 +16,13 @@ from mcp.types import (
 )
 
 from local_operator.harness.intent import INTENT_PROPERTY
+from local_operator.harness.types import CapturedFrame
 from local_operator.harness.types import ImageContent as HarnessImageContent
 from local_operator.harness.types import ToolContext
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
     build_agent_tool,
+    capture_producer_scope,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
@@ -254,6 +256,78 @@ class TestFormatMcpResult:
         # into the one the loop carries.
         assert isinstance(image, HarnessImageContent)
         assert image.data == payload
+
+    def test_capture_claim_rides_into_harness_provenance_with_harness_scope(self) -> None:
+        """A claim in ``_meta`` stamps CapturedFrame; identity stays the harness's.
+
+        The producer's own ``producer_scope`` (forged here) must be ignored:
+        compaction may only ever supersede captures within the ACTUAL producer
+        scope the harness composed at the call site.
+        """
+        payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        result = CallToolResult(
+            content=[
+                ImageContent(
+                    type="image",
+                    data=payload,
+                    mime_type="image/png",
+                    _meta={
+                        "local_operator/capture": {
+                            "stream_id": "screen",
+                            "revision_id": "7",
+                            "producer_scope": "forge-me",
+                        }
+                    },
+                )
+            ],
+            is_error=False,
+        )
+        formatted = format_mcp_result(result, producer_scope="mcp:sess:osworld:copy")
+        image = formatted.content[0]
+        assert isinstance(image, HarnessImageContent)
+        assert image.captured_frame == CapturedFrame(
+            stream_id="screen", revision_id="7", producer_scope="mcp:sess:osworld:copy"
+        )
+
+    def test_capture_claims_absent_or_malformed_keep_images_protected(self) -> None:
+        """Every bad claim degrades to PROTECTED, never to a stamped identity."""
+        payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        cases = [
+            {},  # no meta at all
+            {"_meta": {"local_operator/capture": "not-a-dict"}},
+            {"_meta": {"local_operator/capture": {"stream_id": "", "revision_id": "r"}}},
+            {"_meta": {"local_operator/capture": {"stream_id": "s", "revision_id": "r" * 257}}},
+            {"_meta": {"local_operator/capture": {"stream_id": "s", "revision_id": 7}}},
+        ]
+        for extra in cases:
+            block = {"type": "image", "data": payload, "mime_type": "image/png", **extra}
+            formatted = format_mcp_result(
+                {"content": [block]}, producer_scope="mcp:sess:osworld:copy"
+            )
+            image = formatted.content[0]
+            assert isinstance(image, HarnessImageContent)
+            assert image.captured_frame is None
+        # And with NO scope, even a valid claim must not stamp: without a real
+        # producer identity the image stays protected.
+        claimed = {
+            "type": "image",
+            "data": payload,
+            "mime_type": "image/png",
+            "_meta": {"local_operator/capture": {"stream_id": "s", "revision_id": "r"}},
+        }
+        formatted = format_mcp_result({"content": [claimed]})
+        stamped = formatted.content[0]
+        assert isinstance(stamped, HarnessImageContent)
+        assert stamped.captured_frame is None
+
+    def test_capture_producer_scope_composes_from_actual_origin_only(self) -> None:
+        assert (
+            capture_producer_scope("osworld", "screenshot", "abc123")
+            == "mcp:abc123:osworld:screenshot"
+        )
+        assert capture_producer_scope("osworld", "screenshot", "") is None
+        assert capture_producer_scope("", "screenshot", "abc123") is None
+        assert capture_producer_scope("s" * 200, "t" * 200, "abc") is None
 
     def test_resource_uri_plus_text(self) -> None:
         """A text resource contributes its body; a blob resource is URI-only."""

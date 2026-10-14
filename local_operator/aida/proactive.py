@@ -100,6 +100,12 @@ ROW_PREFIX = "aida-"
 CUSTOM_ENTRY_TYPE = "aida_proactive"
 
 DEFAULT_CADENCE_AT = "08:30"
+# Zero deliberately keeps the calendar-based default; positive values are elapsed
+# hours, not local clock hours. Whole hours bound the cost of provider-backed turns.
+DEFAULT_INTERVAL_HOURS = 0
+MAX_INTERVAL_HOURS = 168
+_CADENCE_ORIGIN = "aida-cadence:v1:"
+_HOUR_MS = 3_600_000
 DEFAULT_MAX_EXTRA_PER_DAY = 2
 DEFAULT_MIN_GAP_MINUTES = 90
 #: The two boolean defaults this engine reads. ``DEFAULT_ENABLED`` is also the
@@ -109,17 +115,48 @@ DEFAULT_MIN_GAP_MINUTES = 90
 DEFAULT_ENABLED = True
 DEFAULT_PAUSED = False
 
+#: The ONE spelling of "nothing needs you today". Three readers share it so they
+#: cannot drift apart: the cadence prompt and the escalation extras ASK for it,
+#: and the settle-time banner veto (``Session._aida_cadence_banner_veto``)
+#: RECOGNISES it through :func:`reply_is_quiet`. A reply that normalises to this
+#: is a quiet day and must never put a banner on the operator's screen.
+#:
+#: A READABLE SENTENCE, not a status token (design review D1): this string is
+#: the most-seen text she writes — it is her reply AND the session-list preview
+#: the operator reads on most days — and the old "(no action needed)" read as a
+#: machine status rather than a chief of staff saying there is nothing to do.
+QUIET_REPLY = "Nothing needs your attention today."
+
+#: The PREVIOUS spelling, still recognised. Models carry the old instruction in
+#: their seed/transcript history for a while after an upgrade, and a quiet day
+#: written in the old words must still decide quiet — the alternative is a
+#: daily paraphrase banner, the exact failure the veto exists to prevent.
+#: Bounded on purpose: one string (plus normalisation), never fuzzy synonyms.
+LEGACY_QUIET_REPLY = "(no action needed)"
+
+#: The sentence that asks for :data:`QUIET_REPLY`. Appended to a check-in message
+#: that does not already carry the sentinel (see :func:`with_quiet_clause`) —
+#: otherwise an escalation extra whose model-written message never mentions it
+#: would be answered in free prose, and the veto would then let a "nothing to
+#: report" banner through.
+QUIET_CLAUSE = (
+    f'If nothing needs the operator\'s action, reply with exactly "{QUIET_REPLY}" and '
+    "nothing else."
+)
+
 #: The cadence self-prompt. It carries the two rules the engine cannot enforce
 #: on her behalf: report only what needs action (the anti-spam half of R16),
 #: and route escalation requests through the tray rather than arming wakes
 #: directly (so the engine keeps its single-writer property).
 CADENCE_MESSAGE = (
-    "Daily proactive check-in. Review the operator's current state — active and "
+    "Configured cadence check-in. Review the operator's current state — active and "
     "stale sessions, projects and workstreams, scheduled wakes, usage signals, and "
     "anything you started earlier that is still in flight — and report ONLY what "
-    "needs the operator's action, in a few short lines. If there is nothing "
+    "needs the operator's action, in a few short lines. Lead with ONE short "
+    "sentence that fits a notification body (about 120 characters) — it is what "
+    "the operator sees first — and put the details after it. If there is nothing "
     "actionable, give the one quiet-day tip below in a sentence when this message "
-    'carries one, otherwise reply with exactly "(no action needed)" and nothing '
+    f'carries one, otherwise reply with exactly "{QUIET_REPLY}" and nothing '
     "else. To schedule a follow-up check, write it to the escalation tray described in your "
     "instructions instead of arming wakes directly."
 )
@@ -129,8 +166,115 @@ CADENCE_MESSAGE = (
 #: rather than an empty turn.
 DEFAULT_EXTRA_MESSAGE = (
     "Proactive follow-up: revisit what you flagged earlier and report only if "
-    "something still needs the operator's action."
+    f"something still needs the operator's action. {QUIET_CLAUSE}"
 )
+
+#: How many banners Aida may raise in a rolling 24 hours, across the cadence and
+#: every escalation extra. A CONSTANT, not a config key: a key would drag in the
+#: ``/settings`` registry (AGENTS.md "Adding a configuration key") for a safety
+#: net that should never be the thing a user tunes. The arithmetic is why it is
+#: 3: one cadence + ``DEFAULT_MAX_EXTRA_PER_DAY`` extras is the engine's own
+#: ceiling, so the cap only bites when a catch-up or a loop has produced MORE
+#: check-ins than the engine meant to arm. A chief of staff that pings more than
+#: this gets her notifications switched off, which silences the ones that matter.
+MAX_BANNERS_PER_DAY = 3
+
+#: The window :data:`MAX_BANNERS_PER_DAY` is counted over.
+BANNER_WINDOW_MS = 24 * 3_600_000
+
+#: THE ONE-LINE SWITCH FOR TIPS. A quiet-day tip (``onboarding.tip_offer``) is a
+#: SILENT row by decision: it lands in her conversation and keeps the unseen
+#: mark, so any surface shows it unread, but it does not raise an OS banner —
+#: a tip is non-actionable by definition ("use only if nothing needs action") and
+#: at most one per 20 h, so a banner for it is the operator being interrupted to
+#: be told something optional. The operator may overrule this later; flipping the
+#: constant to ``True`` is the whole change (the veto then lets a tip through, and
+#: it still counts against :data:`MAX_BANNERS_PER_DAY`).
+TIP_REPLY_NOTIFIES = False
+
+
+def _peel_reply(text: str) -> str:
+    """``text`` with symmetric wrappers, padding and a trailing period removed.
+
+    The normalisation :func:`reply_is_quiet` documents: repeatedly strip
+    whitespace, one trailing period and ONE symmetric wrapper pair (quotes,
+    backticks, parens/brackets, emphasis) until nothing moves — so
+    ``(No action needed).``, `` `no action needed` `` and ``"NO ACTION
+    NEEDED."`` all land on the bare phrase. Deliberately NO synonym folding:
+    a paraphrase ("No action needed today.") stays a banner, and the count of
+    those is watched via the ``banners`` ledger (design section 9) before any
+    broader matching would be considered.
+    """
+    pairs = (("`", "`"), ('"', '"'), ("'", "'"), ("(", ")"), ("[", "]"), ("*", "*"), ("_", "_"))
+    current = str(text or "")
+    for _ in range(8):  # bounded: each round must peel or strip something to continue
+        before = current
+        current = current.strip().rstrip(".").rstrip()
+        for opener, closer in pairs:
+            if len(current) >= 2 and current[0] == opener and current[-1] == closer:
+                current = current[1:-1].strip()
+                break
+        if current == before:
+            break
+    return current
+
+
+#: The normalised spellings :func:`reply_is_quiet` matches: the current
+#: sentence and the bounded legacy sentinel, both peeled the same way.
+_QUIET_FORMS = frozenset(
+    _peel_reply(spelling).casefold() for spelling in (QUIET_REPLY, LEGACY_QUIET_REPLY)
+)
+
+
+def reply_is_quiet(text: str | None) -> bool:
+    """Whether an assistant reply IS the quiet sentinel (:data:`QUIET_REPLY`).
+
+    THE VETO's reply test, and the reason it is not a raw ``==``: the model
+    pads it, wraps it in quotes or backticks, capitalises it, or writes the
+    LEGACY ``(no action needed)`` spelling it was once taught — and a raw match
+    would then banner a quiet day, which is how a chief of staff gets her
+    notifications switched off (taking the actionable ones with them). Case,
+    whitespace, one symmetric wrapper pair and a trailing period are folded
+    (:func:`_peel_reply`); a paraphrase is NOT, deliberately (a daily
+    paraphrase banner is visible in the ``banners`` ledger, and design option B
+    is the upgrade if the count shows drift).
+    """
+    if not text:
+        return False
+    return _peel_reply(str(text)).casefold() in _QUIET_FORMS
+
+
+def reply_is_tip(text: str | None) -> bool:
+    """Whether an assistant reply is the quiet-day tip the row asked for.
+
+    Keyed on the ``Tip:`` prefix ``onboarding.TIP_CLAUSE_PREFIX`` asks for
+    (plus the handful of close shapes a model writes when it half-forgets).
+    A tip is a SILENT row by decision — see :data:`TIP_REPLY_NOTIFIES` for the
+    one-line switch that reverses it.
+    """
+    if TIP_REPLY_NOTIFIES or not text:
+        return False
+    # The markdown a model may wrap the prefix in is stripped by the peel + lstrip;
+    # after that the one shape asked for is a literal "Tip:" opening.
+    folded = _peel_reply(str(text)).lstrip("*_ `").casefold()
+    return folded.startswith("tip:")
+
+
+def with_quiet_clause(message: str) -> str:
+    """``message`` guaranteed to ASK for :data:`QUIET_REPLY` when it is quiet.
+
+    Applied at the two places an escalation extra's message is finalised (the
+    reconcile and the external drain): the cadence prompt carries the sentinel
+    itself, but a custom extra message the model wrote is free prose — without
+    this clause the engine would never be told the one spelling the veto keys
+    on, so a "nothing to report" extra would be reported in paraphrase and
+    banner. Idempotent: a message already carrying the sentinel is unchanged.
+    """
+    text = message or ""
+    if QUIET_REPLY in text or LEGACY_QUIET_REPLY in text:
+        return text
+    return f"{text} {QUIET_CLAUSE}" if text else QUIET_CLAUSE
+
 
 #: The id prefix of trigger check-in rows: ``aida-trigger-<8 hex>``, the hex
 #: deterministic in the consumed record's sorted fingerprints so a re-consume
@@ -171,6 +315,7 @@ class CadencePolicy:
     at: str
     max_extra_per_day: int
     min_gap_minutes: int
+    interval_hours: int = DEFAULT_INTERVAL_HOURS
 
 
 def _read_aida_section(config_dir: Path | str) -> Mapping[str, Any]:
@@ -213,6 +358,11 @@ def policy(config_dir: Path | str) -> CadencePolicy:
         gap = int(gap) if gap is not None else DEFAULT_MIN_GAP_MINUTES
     except (TypeError, ValueError):
         gap = DEFAULT_MIN_GAP_MINUTES
+    interval = cadence.get("interval_hours", DEFAULT_INTERVAL_HOURS)
+    # Settings validates writes; hand-edited YAML must obey the same contract,
+    # including rejecting bool (an int subclass) rather than arming hourly.
+    if type(interval) is not int or not 0 <= interval <= MAX_INTERVAL_HOURS:
+        interval = DEFAULT_INTERVAL_HOURS
     paused = bool(cadence.get("paused", DEFAULT_PAUSED))
     return CadencePolicy(
         enabled=enabled,
@@ -220,6 +370,7 @@ def policy(config_dir: Path | str) -> CadencePolicy:
         at=at,
         max_extra_per_day=max(0, max_extra),
         min_gap_minutes=max(0, gap),
+        interval_hours=interval,
     )
 
 
@@ -243,7 +394,13 @@ def parse_cadence_at(at: str) -> tuple[int, int] | None:
     return hour, minute
 
 
-def next_cadence_ms(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> int:
+def next_cadence_ms(
+    now_ms: int,
+    at: str = DEFAULT_CADENCE_AT,
+    *,
+    interval_hours: int = DEFAULT_INTERVAL_HOURS,
+    anchor_ms: int | None = None,
+) -> int:
     """The next local occurrence of ``at`` after ``now_ms``, in epoch ms.
 
     Local wall clock, on the calendar — ``datetime`` arithmetic over today's
@@ -252,6 +409,10 @@ def next_cadence_ms(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> int:
     falls back to :data:`DEFAULT_CADENCE_AT`, logged once per call site's
     patience — it is read per arm, so the log is throttled to DEBUG.
     """
+    if interval_hours:
+        every = interval_hours * _HOUR_MS
+        anchor = now_ms if anchor_ms is None else anchor_ms
+        return anchor + max(1, (now_ms - anchor) // every + 1) * every
     clock = parse_cadence_at(at)
     if clock is None:
         logger.debug("aida: invalid cadence time %r; using %s", at, DEFAULT_CADENCE_AT)
@@ -269,6 +430,81 @@ def next_cadence_ms(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> int:
 def is_aida_row(wake_id: str) -> bool:
     """Whether ``wake_id`` is a row this engine owns."""
     return isinstance(wake_id, str) and wake_id.startswith(ROW_PREFIX)
+
+
+def is_cadence_family_row(wake_id: str) -> bool:
+    """Whether ``wake_id`` is a CHECK-IN row: the cadence or an escalation extra.
+
+    The banner veto (``Session._aida_cadence_banner_veto``) applies to these
+    rows and only these: trigger check-ins (``aida-trigger-*``) ask her to ACT
+    rather than to report, so the sentinel rule does not describe them and their
+    rows stay quiet; a user-armed ``wN`` wake is the user's own intent and a
+    sentinel reply must never silence it. Kept beside :func:`is_aida_row` so the
+    two ownership questions cannot drift apart one call site at a time.
+    """
+    return isinstance(wake_id, str) and (
+        wake_id == CADENCE_ID or wake_id.startswith(EXTRA_ID_PREFIX)
+    )
+
+
+def banner_budget_spent(config_dir: Path | str, *, now_ms: int | None = None) -> bool:
+    """Whether her rolling-24h banner budget (:data:`MAX_BANNERS_PER_DAY`) is used up.
+
+    LOCK-FREE BY DESIGN, and that is the load-bearing property: the decision
+    runs at settle time on the event loop (``Session._emit`` ->
+    ``_finalize_attention_notify``), and ``state.locked`` can park the caller
+    for up to its 5 s wait — a check-in settling must never freeze every other
+    surface in the process. ``state.read_json`` is an atomic-replace read, so an
+    unlocked reader sees either the previous or the next complete file, which
+    is all a rolling count needs. Unreadable/absent ledger answers "not spent":
+    the budget is a safety net, and a transient read failure must not eat a
+    banner the operator asked for (the greeting ledger separately fails
+    CLOSED — that one guards the never-contacted rule).
+    """
+    data = state.read_json(state.onboarding_path(config_dir), what="onboarding") or {}
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    return len(_banner_stamps(data, now=now)) >= MAX_BANNERS_PER_DAY
+
+
+def note_banner_sent(config_dir: Path | str, *, now_ms: int | None = None) -> None:
+    """Record one banner against the rolling budget, under the aida lock.
+
+    Called (via ``asyncio.to_thread``) after a publish that carried
+    ``notify=True`` — the row is durable first, so a crash between the two errs
+    toward one banner counted rather than one forgotten. The write prunes
+    stamps older than :data:`BANNER_WINDOW_MS` in the same locked pass, so the
+    list cannot grow without bound. Best-effort by contract for its caller: a
+    stamp failure must never touch the outcome it describes.
+    """
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    path = state.onboarding_path(config_dir)
+    with state.locked(config_dir):
+        data = state.read_json(path, what="onboarding") or {}
+        stamps = _banner_stamps(data, now=now)
+        stamps.append(now)
+        data["banners"] = stamps
+        state.write_json(path, data)
+
+
+def _banner_stamps(data: Mapping[str, Any], *, now: int) -> list[int]:
+    """The budget timestamps still inside the window, as ints.
+
+    Shape-tolerant on read (ints and floats, bools rejected as the house rule
+    everywhere in this package) because the file is shared state: an older
+    build or a hand-edit must not crash a settle. ``now`` comes from the
+    caller so a single evaluation counts against one instant.
+    """
+    raw = data.get("banners")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    kept: list[int] = []
+    for stamp in raw:
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        value = int(stamp)
+        if 0 <= now - value < BANNER_WINDOW_MS:
+            kept.append(value)
+    return kept
 
 
 def cadence_message(config_dir: Path | str, now_ms: int) -> str:
@@ -329,25 +565,176 @@ def session_class_reactive(config_dir: Path | str, session_id: str) -> bool:
     return session_action_class(root / "sessions" / session_id, registry=registry) != PROACTIVE
 
 
-def cadence_schedule(
-    now_ms: int, at: str = DEFAULT_CADENCE_AT, *, config_dir: Path | str
-) -> WakeSchedule:
-    """The cadence row: one-shot, due at the next ``at``.
+def _validated_phase(raw: Any) -> dict[str, int] | None:
+    """Fail closed on future versions/corruption; never reinterpret an owed row."""
+    if not isinstance(raw, Mapping):
+        return None
+    keys = ("interval_hours", "anchor_ms", "due_ms")
+    if set(raw) != set(keys) or any(type(raw.get(key)) is not int for key in keys):
+        return None
+    phase = {key: raw[key] for key in keys}
+    if not 0 <= phase["interval_hours"] <= MAX_INTERVAL_HOURS:
+        return None
+    if phase["anchor_ms"] < 0 or phase["due_ms"] <= phase["anchor_ms"]:
+        return None
+    every = phase["interval_hours"] * _HOUR_MS
+    if every and (phase["due_ms"] - phase["anchor_ms"]) % every:
+        return None
+    return phase
 
-    ``created_at`` carries ``now`` so the scheduler's stable ordering keeps it
-    where it was planted; ``next_due_at`` is the next occurrence, never "now"
-    (a due-now cadence would fire inside ``LOAD_GRACE_MS`` of an ensure, which
-    is a boot-time turn nobody asked for). ``config_dir`` is REQUIRED — the
+
+def _phase_origin(phase: Mapping[str, int]) -> str:
+    return _CADENCE_ORIGIN + ":".join(
+        str(phase[key]) for key in ("interval_hours", "anchor_ms", "due_ms")
+    )
+
+
+def cadence_phase(row: WakeSchedule | None) -> dict[str, int] | None:
+    """Read our reserved v1 ARM ORIGIN, never a generic scheduler field.
+
+    request_id is opaque to the shared wake writer, but is its retry/rollback
+    identity. Include DUE as well as mode/anchor: retries of one arm settle that
+    exact arm; a later occurrence must not falsely settle as its predecessor.
+    The row commits origin and due atomically in the authoritative transcript.
+    Loading may shift due to grace; origin deliberately retains the owed instant.
+    Unknown/malformed versions preserve present rows instead of re-timing them.
+    """
+    if row is None or row.id != CADENCE_ID or not row.request_id:
+        return None
+    if not row.request_id.startswith(_CADENCE_ORIGIN):
+        return None
+    parts = row.request_id[len(_CADENCE_ORIGIN) :].split(":")
+    if len(parts) != 3 or any(not part.isascii() or not part.isdecimal() for part in parts):
+        return None
+    try:
+        return _validated_phase(
+            dict(
+                zip(
+                    ("interval_hours", "anchor_ms", "due_ms"),
+                    (int(part) for part in parts),
+                    strict=True,
+                )
+            )
+        )
+    except ValueError:
+        return None
+
+
+def remember_cadence(
+    config_dir: Path | str,
+    schedules: Sequence[WakeSchedule],
+    *,
+    held: bool = False,
+) -> None:
+    """Mirror a COMMITTED row (or record an intentional hold), never retirement.
+
+    Called only after the transcript append, except before an intentional pause
+    removes its row. A crash before this mirror leaves the transcript origin as
+    authority. No ordinary boot/event/turn writes when the receipt is unchanged.
+    """
+    row = next((row for row in schedules if row.id == CADENCE_ID), None)
+    phase = cadence_phase(row)
+    if row is None or (phase is None and row.request_id):
+        return
+    with state.locked(config_dir):
+        raw = state.read_state(config_dir) or {}
+        if phase is None and not any(raw.get(key) for key in ("cadence_phase", "cadence_pending")):
+            return
+        fields = {"cadence_phase": phase, "cadence_pending": None, "cadence_held": held}
+        if any(raw.get(key) != value for key, value in fields.items()):
+            state.update_state(config_dir, **fields)
+
+
+def _transcript_cadence(config_dir: Path | str, session_id: str) -> WakeSchedule | None:
+    """The authoritative snapshot, not a potentially stale/missing wake index."""
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import read_latest_custom_entry
+
+    entry = read_latest_custom_entry(
+        Path(config_dir) / "sessions" / session_id, WAKE_SCHEDULES_CUSTOM_TYPE
+    )
+    if entry is None:
+        return None
+    for raw in entry.payload.get("details", {}).get("schedules", []):
+        if isinstance(raw, Mapping) and raw.get("id") == CADENCE_ID:
+            return WakeSchedule.model_validate(raw)
+    return None
+
+
+def cadence_schedule(
+    now_ms: int,
+    at: str = DEFAULT_CADENCE_AT,
+    *,
+    config_dir: Path | str,
+    interval_hours: int = DEFAULT_INTERVAL_HOURS,
+    existing: WakeSchedule | None = None,
+    cadence_fired: WakeSchedule | None = None,
+) -> WakeSchedule:
+    """One-shot cadence, calendar-based by default or on an elapsed-hour grid.
+
+    ``created_at`` keeps the scheduler's stable ordering. An owed interval is
+    retained (or recovered into a short grace), never advanced without an
+    accepted occurrence. Its origin pins the unshifted anchor/due through load.
+    ``config_dir`` is REQUIRED — the
     message composes the R25 nudge clause through :func:`cadence_message`, and
     a caller that could skip it would be a second path that arms a row without
     the ledger moving.
     """
+    phase = cadence_phase(existing)
+    if existing is not None:
+        # An owed occurrence survives mode switches, including a load-time grace
+        # shift (its origin retains the ORIGINAL due). Unknown origins are not an
+        # invitation to rewrite another arm's identity or to bring a fire forward.
+        owed = min(existing.next_due_at, phase["due_ms"] if phase else existing.next_due_at)
+        if owed <= now_ms or (existing.request_id and phase is None):
+            return existing
+        old_interval = phase["interval_hours"] if phase else DEFAULT_INTERVAL_HOURS
+        if old_interval == interval_hours:
+            return existing
+    if not interval_hours and existing is None and cadence_fired is None:
+        # Daily installs keep the original one-shot construction, without paying
+        # for a phase ledger or changing their legacy origin/default semantics.
+        due = next_cadence_ms(now_ms, at)
+        origin = None
+    else:
+        raw = state.read_state(config_dir) or {}
+        fired_phase = cadence_phase(cadence_fired)
+        pending = _validated_phase(raw.get("cadence_pending"))
+        saved = _validated_phase(raw.get("cadence_phase"))
+        source = fired_phase if cadence_fired is not None else pending or saved
+        if source and source["interval_hours"] != interval_hours:
+            source = None
+        anchor = source["anchor_ms"] if source else now_ms
+        if cadence_fired is not None or raw.get("cadence_held") or source is None:
+            due = next_cadence_ms(now_ms, at, interval_hours=interval_hours, anchor_ms=anchor)
+        else:
+            # Absence alone is NOT retirement. A first-arm/persist failure leaves
+            # this pending due owed; do not infer delivery from wall time or index.
+            due = source["due_ms"]
+        phase = {"interval_hours": interval_hours, "anchor_ms": anchor, "due_ms": due}
+        origin = _phase_origin(phase)
+        # Prepare BEFORE row persistence. It never spends an occurrence: existing
+        # transcript rows outrank this mirror, and only an accepted fire advances.
+        with state.locked(config_dir):
+            latest = state.read_state(config_dir) or {}
+            if latest.get("cadence_pending") != phase:
+                state.update_state(config_dir, cadence_pending=phase)
     return WakeSchedule(
         id=CADENCE_ID,
         message=cadence_message(config_dir, now_ms),
-        next_due_at=next_cadence_ms(now_ms, at),
+        next_due_at=max(due, now_ms + 1_000) if due <= now_ms else due,
+        request_id=origin,
         every_ms=None,
         created_at=now_ms,
+        # NOTIFY IS THE POINT OF THIS ROW: with no surface attached, a
+        # check-in that finds something actionable must be able to reach the
+        # operator (rung 4 of the completion ladder raises the OS banner).
+        # Whether it ACTUALLY banners is decided at settle time by the veto
+        # (``Session._aida_cadence_banner_veto``), which reads the reply: a
+        # quiet day — the sentinel or a tip — stays silent. Before this flag
+        # no Aida row set it, so her shipped cadence was silent no matter
+        # what the reply said.
+        notify=True,
     )
 
 
@@ -400,6 +787,9 @@ def filter_on_load(
         return list(schedules)
     if not hold_active(config_dir) and not class_reactive:
         return list(schedules)
+    pol = policy(config_dir)
+    if pol.paused or class_reactive:
+        remember_cadence(config_dir, schedules, held=True)
     kept = [s for s in schedules if not is_aida_row(s.id)]
     if len(kept) != len(schedules):
         logger.info(
@@ -520,6 +910,7 @@ def reconcile(
     now_ms: int | None = None,
     class_reactive: bool = False,
     attended: bool = True,
+    cadence_fired: WakeSchedule | None = None,
 ) -> ReconcileResult:
     """The in-session full-list reconcile. Pure file side effects: the ledger.
 
@@ -562,6 +953,8 @@ def reconcile(
     pol = policy(config_dir)
     notes: list[str] = []
     if not pol.enabled or pol.paused or class_reactive:
+        if pol.paused or class_reactive:
+            remember_cadence(config_dir, original, held=True)
         kept = [s for s in original if not is_aida_row(s.id)]
         if pol.paused and any(s.id == GREETING_WAKE_ID for s in original):
             # THE ONE-TIME GREETING DIES WITH THE PAUSE (review round 1, m1).
@@ -580,6 +973,32 @@ def reconcile(
     # special-cased either: they stay and the generic catch-up path delivers
     # them ("one wake implementation").
     kept = list(original)
+
+    # -- the banner upgrade, IN PLACE, for any existing cadence row ---------
+    # A cadence row armed BEFORE her check-ins could banner (``WakeSchedule
+    # .notify`` defaulted False and no Aida row ever set it) reads
+    # ``notify=False`` forever if left alone: its fires can never request a banner, so
+    # the reply-aware veto is never reached and the headline fix would reach
+    # only FRESH installs (review MAJOR-1 — the first cut sat inside the
+    # creation block below, which by construction never runs while a row
+    # exists, so it was dead code for exactly the established install it was
+    # written for). On the ACTIVE path only: paused/disabled drops her rows
+    # anyway. Upgraded with ``model_copy`` rather than rebuilt — a rebuild
+    # would mint a new ``created_at`` on every reconcile, the churn the REUSE
+    # note below exists to prevent — and ``changed`` flips exactly once
+    # because the upgraded row is what persists. First banner day on an
+    # upgraded install: the row's next cadence fire notifies when the reply
+    # is actionable, and stays silent for the sentinel/a tip/unsettled-ledger/
+    # spent-budget cases — the same gates a fresh install gets; the reply is
+    # the only thing that decides.
+    kept = [
+        (
+            row.model_copy(update={"notify": True})
+            if row.id == CADENCE_ID and not row.notify
+            else row
+        )
+        for row in kept
+    ]
 
     # -- escalation tray ----------------------------------------------------
     # THE TRAY IS CONSUMED INSIDE THE LOCK (review round 1, M1b). Consuming
@@ -618,7 +1037,7 @@ def reconcile(
                     # cadence row may not be in ``kept`` yet (it is appended
                     # last), so its would-be due time is computed rather than
                     # looked up.
-                    cadence_due = _cadence_due(kept, pol, now)
+                    cadence_due = _cadence_due(kept, pol, now, config_dir=config_dir)
                     too_close = any(
                         abs(row.next_due_at - due) < gap_ms for row in kept if is_aida_row(row.id)
                     ) or (cadence_due is not None and abs(cadence_due - due) < gap_ms)
@@ -631,10 +1050,18 @@ def reconcile(
                     kept.append(
                         WakeSchedule(
                             id=_next_extra_id({row.id for row in kept}),
-                            message=message or DEFAULT_EXTRA_MESSAGE,
+                            # The model-written message gets the sentinel
+                            # clause appended when it lacks one, so the veto's
+                            # reply test applies to extras exactly as it does
+                            # to the cadence (one constant, three writers).
+                            message=with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
                             next_due_at=due,
                             every_ms=None,
                             created_at=now,
+                            # An extra is a check-in like the cadence: it may
+                            # banner when actionable (settle-time veto reads
+                            # the reply).
+                            notify=True,
                         )
                     )
                     taken += 1
@@ -655,7 +1082,7 @@ def reconcile(
     # skipped (an existing install) and legacy ledgers, so only a genuinely
     # first-run install waits — and an existing cadence row is never dropped
     # by this gate, only not created.
-    if not any(row.id == CADENCE_ID for row in kept) and _cadence_allowed(config_dir):
+    if any(row.id == CADENCE_ID for row in kept) or _cadence_allowed(config_dir):
         # REUSE the existing cadence row whenever one exists — rebuilding it
         # would mint a new ``created_at`` on every reconcile, which makes
         # ``changed`` permanently true (so a watcher tick or an after-turn
@@ -663,13 +1090,22 @@ def reconcile(
         # an instant the user may have just read in ``/aida status``. An
         # OVERDUE one is kept on purpose rather than re-armed forward: the
         # generic wake machinery owns missed-while-down delivery, and this
-        # engine deliberately has no second implementation of it.
-        existing = next((row for row in original if row.id == CADENCE_ID), None)
-        kept.append(
-            existing
-            if existing is not None
-            else cadence_schedule(now, pol.at, config_dir=config_dir)
+        # engine deliberately has no second implementation of it. (The notify
+        # UPGRADE for a legacy row lives above, OUTSIDE this creation-only
+        # block — review MAJOR-1: inside, it never ran for an established
+        # install.)
+        existing = next((row for row in kept if row.id == CADENCE_ID), None)
+        candidate = cadence_schedule(
+            now,
+            pol.at,
+            config_dir=config_dir,
+            interval_hours=pol.interval_hours,
+            existing=existing,
+            cadence_fired=cadence_fired,
         )
+        kept = [candidate if row.id == CADENCE_ID else row for row in kept]
+        if existing is None:
+            kept.append(candidate)
 
     # -- the one-time greeting, armed only once a PERSON asked for it --------
     # A live session is the ONLY writer that can arm it when the owner holds
@@ -722,7 +1158,13 @@ def reconcile(
     )
 
 
-def _cadence_due(rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int) -> int | None:
+def _cadence_due(
+    rows: Sequence[WakeSchedule],
+    pol: CadencePolicy,
+    now_ms: int,
+    *,
+    config_dir: Path | str,
+) -> int:
     """The cadence row's due time, or the time it *would* be armed for.
 
     Used only by the spacing check: the cadence row may not exist yet in the
@@ -732,7 +1174,20 @@ def _cadence_due(rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int) 
     for row in rows:
         if row.id == CADENCE_ID:
             return row.next_due_at
-    return next_cadence_ms(now_ms, pol.at)
+    if pol.interval_hours:
+        raw = state.read_state(config_dir) or {}
+        for key in ("cadence_pending", "cadence_phase"):
+            phase = _validated_phase(raw.get(key))
+            if phase and phase["interval_hours"] == pol.interval_hours:
+                if raw.get("cadence_held"):
+                    return next_cadence_ms(
+                        now_ms,
+                        pol.at,
+                        interval_hours=pol.interval_hours,
+                        anchor_ms=phase["anchor_ms"],
+                    )
+                return max(phase["due_ms"], now_ms + 1_000)
+    return next_cadence_ms(now_ms, pol.at, interval_hours=pol.interval_hours)
 
 
 async def append_notes(transcript: Any, notes: Sequence[str]) -> None:
@@ -1291,6 +1746,7 @@ async def ensure_armed(
         STATUS_CONFLICT,
         WakeWriteError,
         arm_wake,
+        edit_wake,
         repair_index,
     )
 
@@ -1315,6 +1771,9 @@ async def ensure_armed(
         ids = _row_ids(entry)
         aida_ids = [i for i in ids if is_aida_row(i)]
         if not pol.enabled or pol.paused or class_reactive:
+            if pol.paused or class_reactive:
+                current = _transcript_cadence(root, session_id)
+                remember_cadence(root, [current] if current else [], held=True)
             if aida_ids:
                 await _cancel_ids(root, session_id, aida_ids, now_ms=now)
             if not pol.enabled:
@@ -1338,6 +1797,39 @@ async def ensure_armed(
         if wake_store.is_held(entry):
             return "held"
         result = "present"
+        current = _transcript_cadence(root, session_id)
+        if current is None and pol.interval_hours:
+            # Index presence is not an arm receipt either. A stale projection
+            # must not prevent recovery of an interval's durable pending due.
+            ids.discard(CADENCE_ID)
+        if current is not None:
+            # The transcript wins even if a crash left its derived index behind.
+            if CADENCE_ID not in ids:
+                await repair_index(root, session_id)
+                ids.add(CADENCE_ID)
+            candidate = cadence_schedule(
+                now,
+                pol.at,
+                config_dir=root,
+                interval_hours=pol.interval_hours,
+                existing=current,
+            )
+            if candidate != current:
+                await edit_wake(
+                    root,
+                    session_id,
+                    CADENCE_ID,
+                    {
+                        "at": _iso_due(candidate.next_due_at),
+                        "message": candidate.message,
+                        "notify": True,
+                    },
+                    now_ms=now,
+                    request_id=candidate.request_id or "",
+                    expected_request_id=current.request_id or "",
+                )
+                result = "armed"
+            remember_cadence(root, [candidate])
         if CADENCE_ID not in ids and not _cadence_allowed(root):
             # First run, greeting not yet delivered: the boot paths call this
             # on every launch, and arming here would schedule a headless 08:30
@@ -1346,16 +1838,28 @@ async def ensure_armed(
             result = "waiting"
         elif CADENCE_ID not in ids:
             try:
+                candidate = cadence_schedule(
+                    now,
+                    pol.at,
+                    config_dir=root,
+                    interval_hours=pol.interval_hours,
+                )
                 await arm_wake(
                     root,
                     session_id,
                     {
-                        "message": cadence_message(root, now),
-                        "at": _iso_due(next_cadence_ms(now, pol.at)),
+                        "message": candidate.message,
+                        "at": _iso_due(candidate.next_due_at),
+                        # Same contract as ``cadence_schedule``: the row may
+                        # banner; the settle-time veto reads her actual reply
+                        # before one is raised.
+                        "notify": True,
                     },
                     wake_id=CADENCE_ID,
                     now_ms=now,
+                    request_id=candidate.request_id or "",
                 )
+                remember_cadence(root, [candidate])
                 result = "armed"
             except WakeWriteError as exc:
                 if exc.status == 503:
@@ -1458,7 +1962,8 @@ async def _drain_tray_external(
             and is_aida_row(str(raw["id"]))
             and isinstance(raw.get("next_due_at"), int)
         ]
-        cadence_due = next_cadence_ms(now, pol.at)
+        current = _transcript_cadence(root, session_id)
+        cadence_due = _cadence_due([current] if current else [], pol, now, config_dir=root)
         # ``enumerate``, not ``requests.index(request)`` (review round 2,
         # NIT-1): ``list.index`` resolves to the FIRST EQUAL item, so a tray
         # holding duplicate entries would re-restore an already-processed one
@@ -1497,7 +2002,14 @@ async def _drain_tray_external(
                 await arm_wake(
                     root,
                     session_id,
-                    {"message": message or DEFAULT_EXTRA_MESSAGE, "at": _iso_due(due)},
+                    {
+                        "message": with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
+                        "at": _iso_due(due),
+                        # Same contract as the reconcile arm above: an extra
+                        # may banner when actionable; a quiet reply is vetoed
+                        # at settle time.
+                        "notify": True,
+                    },
                     wake_id=extra_id,
                     now_ms=now,
                 )
@@ -1663,6 +2175,8 @@ async def pause(
     from local_operator.wakes import store as wake_store
 
     entry = wake_store.read_entry(root, session_id)
+    current = _transcript_cadence(root, session_id)
+    remember_cadence(root, [current] if current else [], held=True)
     aida_ids = _aida_ids(entry)
     # PAUSE CANCELS PENDING PATIENCE CYCLES (§8.2.4): a paused assistant must
     # not keep a hidden timer nagging on her behalf, and a cycle that cannot

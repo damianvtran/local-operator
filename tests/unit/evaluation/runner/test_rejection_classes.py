@@ -49,8 +49,12 @@ from local_operator.evaluation.runner.provider_client import (
 )
 from local_operator.evaluation.runner.public_reply import (
     _actions_from_json_string,
+    _is_single_action,
+    _unwrap_tool_call,
     decode_public_reply,
+    drop_sibling_action_fields,
     normalise_public_reply,
+    read_action_sequence,
 )
 from tests.unit.evaluation.runner.test_provider_client import observation
 
@@ -188,8 +192,13 @@ _PRESERVED_MESSAGES = [
     # the names and leave the bare rule the model cannot act on.
     "model reply action_batch requires exactly an actions array; it carried 1 "
     "unexpected key(s): 'observation_id'",
-    # The batch-level rules, also the harness's own sentences.
-    "decision must carry a non-empty actions array",
+    # The batch-level rule, also the harness's own sentence.
+    # (``decision must carry a non-empty actions array`` deliberately LEFT this
+    # list when the reply-shape change landed: the rule is still the hint's
+    # prefix, and ``classify_rejection`` still reads the class through it, but
+    # after the decoder learned to read one-action replies and action
+    # SEQUENCES the population left under the class needs the accepted shape
+    # appended -- see ``test_the_batch_shape_hint_names_the_accepted_shape``.)
     "decision carries a second action batch for the same observation; send one batch",
     # The adapter's negotiated restriction, phrased WITH the alternative it can
     # carry -- a bare refusal would leave the model shortening text forever.
@@ -223,6 +232,43 @@ def test_a_measured_message_is_preserved_rather_than_paraphrased(reason: str) ->
         rejection_hint(key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE)
         == reason
     )
+
+
+def test_the_batch_shape_hint_names_the_accepted_shape() -> None:
+    """The class that LEFT ``_PRESERVED_HINTS``, and why the rule sentence stays.
+
+    The rule sentence is still the hint's PREFIX -- the class table and every
+    sealed artifact are read through it, and ``classify_rejection`` must keep
+    bucketing both the old and the new diagnostics ``batch-shape`` -- but the
+    decoder now reads one-action replies and action SEQUENCES, so the
+    population left under the class is the replies that state no action at
+    all: an empty object, a note-only envelope. Those need the accepted shape
+    itself, plus the one action that answers "a note and no work". Recounted
+    2026-10-11 over this machine's sealed corpus: of the 46 refusals left under
+    the class, 31 state no action at all (23 ``{}``, 8 note-only).
+    """
+
+    reason = "decision must carry a non-empty actions array"
+
+    hint = rejection_hint(
+        classify_rejection(reason),
+        reason=reason,
+        observation=observation(),
+        surface=LEGACY_ACTION_SURFACE,
+    )
+
+    assert hint.startswith(reason)
+    assert '"actions" array holds at least one action' in hint
+    assert 'make the action a "wait"' in hint
+    # The example is schema-derived, so the hint cannot advertise a shape the
+    # decoder would refuse; it carries the observation's own id and an action
+    # kind this surface admits.
+    assert '"kind":' in hint
+    assert "input_value=" not in hint
+    # Comparability, asserted rather than assumed: the class table still reads
+    # this hint (and every sealed diagnostic carrying the sentence) as
+    # ``batch-shape``.
+    assert classify_rejection(hint) == "batch-shape"
 
 
 #: The measured half of the envelope diagnostic, byte for byte. Measured on
@@ -536,6 +582,26 @@ def _published_reply(artifact: str) -> str | None:
 #: would make the replay's cost a function of how badly a run went.
 _MARKER_CACHE: dict[str, tuple[str, ...]] = {}
 
+#: What a sealed ``stream:`` line says when the decoder judged the reply-channel
+#: call's own argument bytes. Old-generation artifacts carry no stream line at
+#: all and were all read as prose by the build that refused them, so absence
+#: reads as prose.
+_CHANNEL_READ = "channel=read"
+
+
+def _channel_of(artifact: str) -> bool:
+    """Whether a sealed reply was judged on the reply-channel call's bytes.
+
+    This is the axis the channel reading moves on, so the replay has to read it
+    from the artifact rather than assume one: the same bytes may be a decision
+    on the channel and a statement about one in prose.
+    """
+
+    for line in artifact.splitlines():
+        if line.startswith("stream: "):
+            return _CHANNEL_READ in line
+    return False
+
 
 def _declared_markers(episode: str) -> tuple[str, ...]:
     """The boundary markers the harness would have declared for that episode.
@@ -562,23 +628,32 @@ def _declared_markers(episode: str) -> tuple[str, ...]:
     return markers
 
 
-def _replay_verdict(reply: str) -> str:
+def _replay_verdict(reply: str, channel: bool) -> str:
     """The verdict a reply's own bytes earn it, through the runtime's decoder.
 
     Mirrors ``parse_decision``'s FRAMING layer and nothing else: the corpus
     replay is about what the decoder can read, so adapter-level validation is
-    out of scope here exactly as it is inside ``_decode_leading_json``. The two
-    calls are the real ones -- the leading-JSON tolerance and the normaliser --
-    so the class printed for an artifact is the class the run would have given
-    it, rather than a second opinion about the same bytes.
+    out of scope here exactly as it is inside ``_decode_leading_json``. The
+    calls are the real ones -- the leading-JSON tolerance, the SEQUENCE read
+    (when trailing text follows the first value, exactly where the runtime
+    runs it), and the normaliser told whether its value was the reply's last
+    word (``at_end``, so a one-action head is never promoted over material the
+    runtime would refuse) -- so the class printed for an artifact is the class
+    the run would have given it, rather than a second opinion about the same
+    bytes. ``channel`` is the artifact's own stream line: the reply-channel
+    call's arguments are read structurally (``channel_arguments``), prose keeps
+    the named carriers, and a replay that guessed this axis differently from
+    the run would measure a different decoder.
     """
 
     payload = reply.strip()
     try:
-        decoded, _trailing, _framing = _decode_leading_json(payload)
+        decoded, trailing, _framing = _decode_leading_json(payload, channel_arguments=channel)
         if not isinstance(decoded, dict):
             return "batch-shape"
-        normalise_public_reply(decoded)
+        if trailing and read_action_sequence(payload) is not None:
+            return _ACCEPTED_SHAPE
+        normalise_public_reply(decoded, at_end=not trailing, channel_arguments=channel)
     except (DecisionParseError, ValueError) as error:
         # The same reason string ``parse_decision`` would hand the classifier,
         # so the replayed class is derived by the SAME function the run used.
@@ -642,9 +717,10 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
     tagged_accepted = 0
     for artifact, episode in published:
         reply = _published_reply(artifact) or ""
-        verdict_before = _replay_verdict(reply)
+        channel = _channel_of(artifact)
+        verdict_before = _replay_verdict(reply, channel)
         stripped, removed = strip_reasoning_boundary_markers(reply, _declared_markers(episode))
-        verdict_after = _replay_verdict(stripped)
+        verdict_after = _replay_verdict(stripped, channel)
         before[verdict_before] = before.get(verdict_before, 0) + 1
         after[verdict_after] = after.get(verdict_after, 0) + 1
         if not removed:
@@ -676,6 +752,51 @@ def test_the_sealed_corpus_replays_through_the_reply_normaliser(
         print(f"  {tagged_accepted:4d}  tagged replies accepted")
 
 
+def _stated_actions(reply: str, channel: bool) -> list[Any] | None:
+    """The actions one reply STATES under a read-tolerance, or ``None``.
+
+    The family readers mirror the runtime's own decision points -- the sequence
+    read, the single-action shape, the generic tool-call unwrap, the carrier
+    names, and (on the reply channel, ``channel``) a sole key of any name --
+    and the actions this returns are what the caller compares against
+    ``decode_public_reply``: two readers of the same bytes, so a tolerance that
+    read the wrong thing would fail the equality rather than the accounting.
+    ``None`` means no read-tolerance covers the reply, which is what pins
+    "every other batch-shape refusal stays refused".
+    """
+
+    payload = reply.strip()
+    try:
+        value, trailing, _framing = _decode_leading_json(payload)
+    except (DecisionParseError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if trailing:
+        return read_action_sequence(payload)
+    try:
+        framed = _unwrap_tool_call(value, channel_arguments=channel)
+    except DecisionParseError:
+        return None
+    if framed is not value:
+        if isinstance(framed, list):
+            if framed and all(isinstance(item, dict) for item in framed):
+                return framed
+            return None
+        if _is_single_action(framed):
+            return [framed]
+        if (
+            isinstance(framed, dict)
+            and isinstance(framed.get("actions"), list)
+            and framed["actions"]
+        ):
+            return framed["actions"]
+        return None
+    if _is_single_action(value):
+        return [value]
+    return None
+
+
 def _actions_value(reply: str) -> Any:
     """The ``actions`` member of a sealed reply, or ``None`` when it has none.
 
@@ -690,29 +811,44 @@ def _actions_value(reply: str) -> Any:
     return value.get("actions") if isinstance(value, dict) else None
 
 
-def test_the_sealed_string_actions_replies_are_recovered_and_nothing_else_is(
+def test_the_sealed_batch_shape_replies_are_read_or_legibly_refused(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Every sealed ``batch-shape`` refusal, replayed and accounted for.
 
     `class: batch-shape` is one key over TWO different defects in the corpora:
-    an ``actions`` value that is not a non-empty array at all (``null``, an empty
-    array, two competing arrays) and the value this change exists for -- an
-    ``actions`` STRING carrying the array, because the model opened a quote at
-    the value and then wrote the rest of its own envelope inside it. The claim
-    here is the accounting, over the paid runs rather than over a sample: every
-    reply the string tolerance fires on is now ACCEPTED, every other one is
-    still refused, and at least one is actually recovered -- without which the
-    corpus has stopped exercising the path this exists for, which is a
-    measurement failure rather than a pass.
+    an ``actions`` value that is not a non-empty array at all (``null``, an
+    empty array, two competing arrays) -- still refused; an ``actions`` STRING
+    carrying the array (``_actions_from_json_string``), recovered by the older
+    tolerance; and the foreign CALL shapes the reply-shape change reads (a
+    sole-key carrier, a sole key of ANY name on the reply channel, one action
+    object, an actions SEQUENCE, a bare array under a wrapper), recovered by
+    the same decoder the run uses. The claim is
+    the accounting, over the paid runs rather than over a sample: every reply a
+    read-tolerance fires on is now ACCEPTED, and the actions accepted are the
+    ones that reply STATES (asserted per family, never a salvage of something
+    else); every other batch-shape refusal is still refused; and at least one
+    reply is actually recovered -- without which the corpus has stopped
+    exercising the paths this exists for, which is a measurement failure rather
+    than a pass.
 
     The counts are printed rather than pinned, for the reason the replay test
     above gives: the corpus is a paid run's output that grows as canary runs
-    land, and a hard-coded number would go red on the next run and read as a
-    regression. Measured 2026-09-22 over the campaign runs on this machine: 32
-    batch-shape refusals, 30 of them string-actions, all 30 recovered -- 40% of
-    that corpus's 74 sealed refusals, against 39 more that published no reply
-    bytes at all (the empty-reply class, unaddressed here).
+    land. Recounted 2026-10-11 over this machine's runs (r2 sealed, r3 still
+    sealing): 210 published batch-shape refusals, 134 recovered by this
+    build's tolerances, 70 still refused as ``batch-shape``, and 6 that replay
+    ``incomplete-json``. The r2 corpus alone keeps its published figures -- 134
+    refusals, 87 recovered (73 admitted, 14 read but refused by their own
+    validation), 46 still refused, 1 incomplete-json -- and the r3 growth is
+    the channel reading: 47 of its 75 batch-shape refusals are a sole key the
+    model invented (``reply_json``, ``reply_objects``, ``reply_text``,
+    ``content`` -- plus one ``fields`` over a bare action list), complete and
+    correctly bound inside a name no carrier list had ever seen. Three of the
+    remaining replies sit behind the 4000-char evidence bound and no decoder
+    can read those bytes. The string family, which the original accounting was
+    built around, has itself rotated out of the live corpus (0 recoveries
+    here) while the new families carry the class; that is why the recovery
+    assertion asks for ANY family, not for that one.
     """
 
     sealed = [
@@ -723,27 +859,46 @@ def test_the_sealed_string_actions_replies_are_recovered_and_nothing_else_is(
     if len(sealed) < _MIN_CORPUS_ARTIFACTS:
         pytest.skip(f"corpus has rotated: {len(sealed)} published batch-shape refusals left")
 
-    recovered: list[str] = []
+    recovered_string: list[str] = []
+    recovered_new: list[str] = []
     still_refused: dict[str, int] = {}
     for artifact, episode in sealed:
         reply = (_published_reply(artifact) or "").strip()
+        channel = _channel_of(artifact)
         decoded, coerced = _actions_from_json_string(_actions_value(reply))
-        verdict = _replay_verdict(reply)
+        verdict = _replay_verdict(reply, channel)
         if coerced:
             assert verdict == _ACCEPTED_SHAPE, (episode, verdict)
             # The actions that execute are the array the model stated inside the
             # string -- never a salvage of something else.
-            assert decode_public_reply(reply)["actions"] == decoded, episode
-            recovered.append(episode)
+            assert (
+                decode_public_reply(reply, channel_arguments=channel)["actions"] == decoded
+            ), episode
+            recovered_string.append(episode)
         else:
-            assert verdict != _ACCEPTED_SHAPE, (episode, verdict)
-            still_refused[verdict] = still_refused.get(verdict, 0) + 1
+            stated = _stated_actions(reply, channel)
+            if stated is not None:
+                # A foreign CALL shape this build reads. The actions accepted
+                # are the ones the reply itself states -- with the sibling-
+                # field tolerance applied, because that drop is what the
+                # decoder itself does to what it read -- so a tolerance that
+                # salvaged something else still fails the equality.
+                assert verdict == _ACCEPTED_SHAPE, (episode, verdict)
+                expected, _dropped = drop_sibling_action_fields(stated)
+                assert (
+                    decode_public_reply(reply, channel_arguments=channel)["actions"] == expected
+                ), episode
+                recovered_new.append(episode)
+            else:
+                assert verdict != _ACCEPTED_SHAPE, (episode, verdict)
+                still_refused[verdict] = still_refused.get(verdict, 0) + 1
 
-    assert recovered, sorted(still_refused)
+    assert recovered_string or recovered_new, sorted(still_refused)
 
     with capsys.disabled():
         print(f"\nsealed batch-shape replay ({len(sealed)} published refusals):")
-        print(f"  {len(recovered):4d}  recovered through the string tolerance")
+        print(f"  {len(recovered_string):4d}  recovered through the string tolerance")
+        print(f"  {len(recovered_new):4d}  recovered through the reply-shape tolerances")
         for verdict, count in sorted(still_refused.items()):
             print(f"  {count:4d}  still refused as {verdict}")
 
@@ -842,8 +997,8 @@ def test_the_structured_classifier_reads_pydantic_types_and_never_values() -> No
             "extra-action-key",
         ),
         (
-            {"actions": [{"kind": "drag", "x": 1}]},
-            {"actions": [{"kind": "drag", "x": "is limited to"}]},
+            {"actions": [{"kind": "definitely_not_a_kind", "x": 1}]},
+            {"actions": [{"kind": "definitely_not_a_kind", "x": "is limited to"}]},
             "unknown-action-kind",
         ),
         (

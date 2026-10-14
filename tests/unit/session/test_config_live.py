@@ -223,6 +223,25 @@ def _patience_policy() -> Any:
     return patience_engine.policy(config_dir())
 
 
+def _bridge_settings() -> Any:
+    """The bridge's OWN reader for the local machine prefs (review round 3, Q6).
+
+    Mirrors the FIXED route: the directory-scoped process watcher's last-good
+    snapshot after a poll — never the retained-manager cache (that cache was
+    the Q6 defect; the end-to-end retained-consumer regression lives in
+    ``tests/unit/server/test_desktop_team_bridge.py``). ``paths.config_dir()``
+    is read per call, so the probe points it at the watched directory and an
+    external write lands on the next read.
+    """
+    from local_operator.config_watch import process_watcher
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    watcher = process_watcher(config_dir())
+    watcher.poll_now()
+    return TeamBridgeSettings.from_values(watcher.values)
+
+
 def _bash_shell(watcher: ConfigWatcher) -> str:
     """What `execute_bash` resolves per call (it reads through `paths.config_dir()`,
     which the probe points at the watcher's directory)."""
@@ -703,6 +722,19 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is that very resolver against the watched directory, in the setting's own
     # units (hours).
     "projects.stale_after_hours": (2, lambda s, w: stale_after_s() / 3600.0),
+    # -- team_bridge: the local machine prefs, observed through the public
+    # bridge settings plumbing the status route's ``local`` block calls -------
+    # The section is LIVE because the surfaces consult these keys on every
+    # paint (the composed gate, RFC §5.4) — no restart. Observed through
+    # ``TeamBridgeSettings.from_config`` (the normalising reader IS what makes
+    # a stored value consumable, so the reader is what must move), never the
+    # raw document. The CI honesty test failed by name without these:
+    # "LIVE sections with no live-apply probe: ['team_bridge']".
+    "team_bridge.enabled": (True, lambda s, w: _bridge_settings().enabled),
+    "team_bridge.session": (
+        "synthetic-live-probe-session",
+        lambda s, w: _bridge_settings().session,
+    ),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
@@ -811,6 +843,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: BUILDS from those keys on every request. The end-to-end half was measured on
 #: a running daemon: a write through ``settings_io.write_setting`` landed in the
 #: hub request body on the next call, with no restart (voicing S2 QA round 1).
+#: ``static`` is host-owned the same way: ``static.roots`` is read PER REQUEST by the
+#: ``/v1/static/*`` routes straight off ``config.yml`` (``read_config_values``) and no
+#: ``Session`` holds it. Proven in ``tests/unit/server/test_static_roots.py::
+#: test_a_write_from_another_process_takes_effect_without_a_restart``.
+#: ``mesh_updates`` is host-owned in the ``runtime`` shape: its one key gates what an
+#: UPDATE does next, not what a session does. The update front ends read it at their
+#: own start (``update._roll_after_update`` → ``rollouts.open_after_update``) and the
+#: relay's rollout driver re-reads it before every ask
+#: (``rollouts.rollout_policy``), so ``off`` halts a policy-driven roll at its next
+#: member boundary. No ``Session`` holds it, so a probe here could watch nothing
+#: move. The live halves are proven where they live:
+#: ``tests/unit/network/test_rollouts.py`` drives the driver's halt (off mid-roll →
+#: no next ask; auto → the ask proceeds) and the reader's shapes, and
+#: ``tests/unit/test_update.py`` drives the front-end exits through the real
+#: ``update_command`` (the record it opens; the suppression row ``--no-roll`` writes).
 HOST_OWNED_LIVE_SECTIONS = {
     "hub",
     "appearance",
@@ -822,6 +869,19 @@ HOST_OWNED_LIVE_SECTIONS = {
     "aida",
     "wakes",
     "speech",
+    "static",
+    "mesh_updates",
+    # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
+    # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
+    # nothing in ``Session`` reads the ``console`` block, so a probe in this file
+    # would watch nothing move. The live half is the host's own watcher:
+    # ``src/main/console/index.ts`` registers ``watchQuickSend(... onConfigChange:
+    # () => registry.setPolicy(readConsolePolicy(...)))``, so a config.yml write
+    # reaches a RUNNING app without terminating any surface — which is exactly what
+    # LIVE promises. That live apply lives in the desktop app's suite
+    # (``scripts/console-host.test.mjs``: the registry's admission against
+    # ``policy.maxLive``/``userReserved``), the same split ``desktop`` uses.
+    "console",
 }
 
 
@@ -1050,11 +1110,18 @@ def test_the_scope_of_every_reclassified_key_is_the_one_its_consumer_earns() -> 
     # agent's own shell, so a policy re-read per command is a policy the
     # constrained party can turn OFF between two commands.
     assert scope_of["shell_environment"] is settings_io.Scope.NEW_LAUNCH
-    for key in ("auto_save_conversation", "session.cleanup.enabled"):
+    # The cleanup policies live in their own sections (one per class) but are
+    # still read only by the launch-time maintenance pass and its hourly sweep.
+    for key, section in (
+        ("auto_save_conversation", "session"),
+        ("session.cleanup.enabled", "session_cleanup"),
+        ("session.cleanup.delegated.enabled", "session_delegated"),
+        ("session.cleanup.delegated.max_age_hours", "session_delegated"),
+    ):
         setting = settings_io.resolve_key(key)
         assert setting is not None
-        assert setting.section == "session", key
-        assert scope_of["session"] is settings_io.Scope.NEW_LAUNCH, key
+        assert setting.section == section, key
+        assert scope_of[section] is settings_io.Scope.NEW_LAUNCH, key
 
 
 # ---------------------------------------------------------------------------

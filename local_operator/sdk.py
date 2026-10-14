@@ -77,7 +77,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from local_operator.paths import AGENT_HOME_ENV, CONFIG_DIR_ENV
 from local_operator.session.spec import (
@@ -89,9 +89,16 @@ from local_operator.session.spec import (
 )
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
+    from contextlib import AbstractAsyncContextManager
+
     from local_operator.harness.types import AgentEvent, EventHandler
+    from local_operator.i18n.messages import Msg
     from local_operator.output_contract import MarkdownSchema, decode_output
-    from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
+    from local_operator.session.protocol import (
+        OwningSessionProtocol,
+        SessionProtocol,
+        ViewerSessionProtocol,
+    )
     from local_operator.session.runtime.launch import (
         EngageOutcome,
         Errand,
@@ -535,7 +542,9 @@ def _make_refuse_gate(error_type: type[Exception]) -> Callable[..., Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -> Any:
+async def _build_session(
+    spec: SessionSpec, roots: SessionRoots, *, mode: str, world_root: Path | None = None
+) -> Any:
     """Build one session from ``spec`` — construction plus post-open attachment.
 
     The sequence mirrors ``exec_session.run_session``'s call into
@@ -575,6 +584,19 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
     config_manager = ConfigManager(config_dir=roots.config_path)
     agent_registry = AgentRegistry(config_dir=roots.config_path)
 
+    def startup_refusal_text(message: "Msg") -> str:
+        # The SDK still raises a plain, one-argument SessionSpecError: the
+        # envelope is an internal rendering boundary, not a new exception API.
+        # Only refusals pay for locale imports/reads, AFTER public root isolation.
+        # Reuse this already-scoped manager; None would make the resolver build
+        # another manager (and potentially repair config/load credentials).
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.resolve import DEFAULT_LANGUAGE, resolve_language
+
+        language = config_manager.get_config().values.get("language")
+        locale = resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)
+        return render(message.code, message.params, locale=locale)
+
     # ``Any`` on purpose: ``create_session``'s declared return is
     # ``SessionProtocol``, and the attachment calls below (``attach_team``,
     # ``attach_agent_profile``, ``set_tool_inventory``) are concrete-Session
@@ -587,6 +609,7 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
             agent_registry,
             has_ui=(mode == "attach"),
             cwd=str(roots.cwd_path),
+            world_root=world_root,
         )
     except HostingNotConfiguredError as error:
         if mode != "attach":
@@ -598,11 +621,14 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         # runtime is serving the id, and this root cannot start one until its
         # hosting is configured — which is also why spawn_session()/deliver()
         # cannot be the next step here yet.
+        from local_operator.i18n.keys import wire_errors_sdk_startup
+
         raise SessionSpecError(
-            f"no live runtime is serving {spec.resume!r}, and this root cannot start "
-            f"one: {error} Configure hosting for this root (its config.yml), then "
-            "engage the id with spawn_session()/deliver() and attach once a runtime "
-            "exists."
+            startup_refusal_text(
+                wire_errors_sdk_startup.attach_hosting_unconfigured(
+                    resume=repr(spec.resume), error=str(error)
+                )
+            )
         ) from error
 
     if mode == "attach":
@@ -613,10 +639,12 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         # silently returning something that will write.
         if getattr(session, "owns_runtime", False):
             await session.dispose()
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
             raise SessionSpecError(
-                f"no live runtime is serving {spec.resume!r}; open it with "
-                "mode='own' to run it in this process, or engage it first with "
-                "spawn_session()/deliver() and attach once a runtime exists."
+                startup_refusal_text(
+                    wire_errors_sdk_startup.attach_runtime_missing(resume=repr(spec.resume))
+                )
             )
         return session
 
@@ -624,7 +652,13 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         session.attach_team(team)
     if spec.profile:
         if not session.attach_agent_profile(spec.profile):
-            raise SessionSpecError(f"Could not attach profile {spec.profile!r}")
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
+            raise SessionSpecError(
+                startup_refusal_text(
+                    wire_errors_sdk_startup.profile_attach_failed(profile=repr(spec.profile))
+                )
+            )
     inventory = declared_tool_inventory(session, runner_args)
     if spec.approvals.mode == "declared":
         # The policy's own list is the declaration when spec.tools does not
@@ -638,9 +672,14 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         if inventory is None:
             inventory = policy_tools
         elif tuple(inventory) != policy_tools:
+            from local_operator.i18n.keys import wire_errors_sdk_startup
+
             raise SessionSpecError(
-                f"spec.tools {tuple(inventory)} and ApprovalPolicy.declared({policy_tools}) "
-                "name different inventories; state the run's reach once"
+                startup_refusal_text(
+                    wire_errors_sdk_startup.tool_inventory_mismatch(
+                        spec_tools=str(tuple(inventory)), policy_tools=str(policy_tools)
+                    )
+                )
             )
     if inventory is not None:
         session.set_tool_inventory(inventory, unattended=spec.approvals.stands_as_approval)
@@ -697,9 +736,146 @@ def _assert_session_dir_under_root(session: Any, roots: SessionRoots) -> None:
         )
 
 
+def _resolve_world_root(spec: SessionSpec, roots: SessionRoots) -> Path | None:
+    """Normalize and validate ``spec.world_root`` ONCE, before construction.
+
+    The world boundary is a two-sided contract, and this preflight is where
+    both sides are checked — before discovery walks a tree, before a provider
+    is configured, before anything can be allocated:
+
+    * the model's working directory must lie INSIDE the world (the world is
+      the project scope the model may see);
+    * the store roots (``config_dir``, ``agent_home``) must lie OUTSIDE it —
+      they carry controller state (credentials, transcripts, the isolated
+      registries) — and the refusal names both directions, because a world
+      nested inside controller state is the same defect wearing the other
+      spelling;
+    * on a host where the kernel sandbox is the enforcement in play, neither
+      store root may lie inside a tree that sandbox must expose read-only to
+      shell children (``/private/var/folders`` — where ``tempfile`` puts the
+      common case — and the other machinery paths): a confined child could
+      read controller state there regardless of the root, because a broad
+      ``allow`` defeats a specific ``deny`` in seatbelt (measured in both
+      rule orders), so the profile CANNOT carve the stores back out. The
+      layout is refused here, before anything is allocated, and the message
+      names the responsible subtree — a durable path like the home directory
+      is the supported shape; ``None`` is untouched.
+    * the world is resolved (symlinks, ``..``) exactly like every other root
+      so no comparison can be fooled by a path spelling — the same rule
+      ``SessionRoots`` states for its own fields.
+
+    ``None`` returns ``None`` without touching the filesystem: the default
+    path ordinary sessions take must stay side-effect-free.
+    """
+    if spec.world_root is None:
+        return None
+    world = Path(spec.world_root).expanduser().resolve()
+
+    def _inside(candidate: Path, root: Path) -> bool:
+        return candidate == root or candidate.is_relative_to(root)
+
+    if world == Path(world.anchor):
+        raise SessionSpecError("world_root must not be a filesystem root")
+    cwd = roots.cwd_path
+    if not _inside(cwd, world):
+        raise SessionSpecError(
+            f"world_root {world} does not contain the session's cwd {cwd}; the world is "
+            "the model's project scope and its cwd must live inside it"
+        )
+    for label, path in (("config_dir", roots.config_path), ("agent_home", roots.agent_home_path)):
+        if _inside(path, world):
+            raise SessionSpecError(
+                f"world_root {world} contains the {label} {path}; controller state must "
+                "stay outside the model's world"
+            )
+        if _inside(world, path):
+            raise SessionSpecError(
+                f"world_root {world} sits inside the {label} {path}; the world must be a "
+                "scope of its own, not a folder inside controller state"
+            )
+    # The kernel boundary cannot protect the stores wherever the sandbox has
+    # to expose a whole machinery tree: seats measure an allow as defeating a
+    # deny (see ``kernel_exposed_read_subtrees``), so a store under one of
+    # those trees would be readable by the confined shell no matter what the
+    # profile says. Refuse the layout instead — the fail-closed direction.
+    # Gated on the sandbox actually being the enforcement: on a host without
+    # it, confined shells are refused outright (``spawn_refusal``), so there
+    # is no kernel path to guard.
+    from local_operator.tools.confinement import (
+        kernel_exposed_read_subtrees,
+        sandbox_unavailable_reason,
+    )
+
+    if sandbox_unavailable_reason() is None:
+        exposed = kernel_exposed_read_subtrees()
+        stores = (
+            ("config_dir", roots.config_path),
+            ("agent_home", roots.agent_home_path),
+        )
+        for label, path in stores:
+            for subtree in exposed:
+                if path == subtree or path.is_relative_to(subtree):
+                    raise SessionSpecError(
+                        f"world_root {world}: the {label} {path} lies under {subtree}, a "
+                        "tree the kernel sandbox must expose read-only to shell children; "
+                        "a confined child could read controller state there and the sandbox "
+                        "profile cannot carve it back out. Place the world and its stores "
+                        "outside these trees (a durable path such as the home directory "
+                        "works), or run on a host where confined shells are refused."
+                    )
+    try:
+        world.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as error:
+        raise SessionSpecError(f"world_root {world} is not usable: {error}") from error
+    return world
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
+
+
+# TYPE-ONLY surface: overloads that describe the DECORATED context manager.
+# The implementation below is untouched -- same ``@asynccontextmanager``, same
+# body, same runtime behaviour -- so this hunk changes what the SDK EXPOSES TO
+# TYPE CHECKERS and nothing else. WHY it exists (review round 1, R1): the
+# owning methods live on ``OwningSessionProtocol``, NOT on the shared
+# ``SessionProtocol`` (widening the shared protocol forced every conformer to
+# grow stubs), so a default-own caller must be typed as an OWNER to call
+# ``subscribe_requests``/``shutdown_owned_work`` without Any/cast, an attach
+# caller must be typed as the viewer (which has no owning surface), and a
+# dynamic-mode caller keeps the base type and narrows explicitly. Ordinary
+# ``def`` overloads, because the decorated result is an
+# ``AbstractAsyncContextManager``, not a coroutine. Annotation-only; the
+# sibling ``sdk.py`` owner (PR2273) was told exactly this hunk is coming.
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["own"] = "own",
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[OwningSessionProtocol]: ...
+
+
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["attach"],
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[ViewerSessionProtocol]: ...
+
+
+@overload
+def open_session(
+    spec: SessionSpec,
+    *,
+    roots: SessionRoots,
+    mode: Literal["own", "attach"],
+    allow_multi_root: bool = False,
+) -> AbstractAsyncContextManager[SessionProtocol]: ...
 
 
 @asynccontextmanager
@@ -739,10 +915,15 @@ async def open_session(
         _guard_agent_shell()
 
     roots.assert_durable()
+    # Preflight the world boundary BEFORE the live-root/scoped-env scopes and
+    # anything they construct: a refused layout must fail before discovery,
+    # before the provider, before a single byte is generated (see
+    # ``_resolve_world_root``).
+    world_root = _resolve_world_root(spec, roots)
     with _live_root(roots, allow_multi_root=allow_multi_root):
         with _scoped_process_env(roots):
             _check_resolved_roots(roots)
-            session = await _build_session(spec, roots, mode=mode)
+            session = await _build_session(spec, roots, mode=mode, world_root=world_root)
             try:
                 if mode == "own":
                     _assert_session_dir_under_root(session, roots)
@@ -777,6 +958,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
             ("name", spec.name),
             ("goal", spec.goal),
             ("birth_effort", spec.birth_effort),
+            ("world_root", spec.world_root),
         )
         if value is not None
     ]
@@ -837,6 +1019,7 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
             ("tools", spec.tools),
             ("name", spec.name),
             ("goal", spec.goal),
+            ("world_root", spec.world_root),
         )
         if value not in (None, False)
     ]

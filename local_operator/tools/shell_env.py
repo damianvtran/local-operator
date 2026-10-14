@@ -324,6 +324,30 @@ def reset_policy_cache() -> None:
     _POLICY_CACHE.clear()
 
 
+#: The strict allowlist policy a CONFINED session's shell children run under.
+#: A confined session is a benchmark episode: a model the operator did not
+#: personally invite onto the host, so the provider key — or any other
+#: ambient credential the deployment exported — must not be readable out of
+#: the model's own environment. ``inherit=()`` grants only
+#: :data:`BASE_ALLOWLIST` (filtered for credential shape) plus the harness's
+#: deliberate injections.
+CONFINED_SHELL_POLICY = ShellEnvironmentPolicy(mode=MODE_ALLOWLIST)
+
+
+def policy_for_confinement(root: str | os.PathLike[str] | None) -> ShellEnvironmentPolicy | None:
+    """The shell policy for a session: strict when confined, else ``None``.
+
+    ``None`` means "no override — resolve the process's own configured
+    policy", which is what an ordinary session does and what every session
+    did before this helper existed. Keyed on the confinement marker because
+    that marker IS "this is not the operator's own session": the filesystem
+    boundary and the temp redirection already specialize on it, and the
+    environment decision belongs in the same place (see
+    ``tools.confinement`` for the sibling boundary and its stated limits).
+    """
+    return CONFINED_SHELL_POLICY if root else None
+
+
 def load_policy() -> ShellEnvironmentPolicy:
     """The policy for this process, resolved on first use and then FROZEN.
 

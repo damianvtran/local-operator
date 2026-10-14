@@ -298,7 +298,8 @@ def test_http_gate_and_login_flow() -> None:
     # branch is not the default.
     assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
-    assert sorted(capabilities) == ["features", "stt"]
+    assert sorted(capabilities) == ["features", "i18n", "stt"]
+    assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]
     assert sorted(stt) == ["available", "path", "reason"]
@@ -2612,6 +2613,189 @@ def test_a_routed_slash_answer_carries_its_words_to_the_phone(tmp_path, monkeypa
     assert long_line.startswith("team-0: Led by m · 1 member")
 
 
+def test_a_job_cancel_command_forwards_the_job_id_and_carries_the_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """The relay's post-turn job rail (video programme §2.2, contract §4.1).
+
+    The phone's rail is mechanism-only in v1 — no rendered control — but the op
+    must exist end to end so the first carrier and delegated surfaces can ride
+    it: the frame carries the job's own id, the runtime's receipt is the ack's
+    ``detail``, and a malformed id is refused at the validator BEFORE any frame
+    leaves. That the cut lands on ``AsyncJobManager.cancel`` — the same engine
+    call ``jobs op='cancel'`` makes — is pinned at its own seam
+    (``tests/unit/session/runtime``).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=4345,
+        kind="tui",
+        session_id="job-cancel",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    written: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            written.append(frame)
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                replies.pop(0) | {"req": frame["req"]}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    url = "/api/sessions/job-cancel/command"
+
+    # A cut that landed: the runtime's receipt is the answer, verbatim.
+    replies.append({"op": "ack", "detail": "cancelled job job-9 (a long build)"})
+    reply = client.post(url, json={"op": "job_cancel", "job_id": "job-9"})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "cancelled job job-9 (a long build)"}
+    assert written[-1]["op"] == "job_cancel" and written[-1]["job_id"] == "job-9"
+
+    # The refused cut (the job already settled) is the runtime's neutral
+    # reading, not an error: it travels as a 200 receipt, like the tool's own.
+    replies.append({"op": "ack", "detail": "job job-9 was not cancelled (status: completed)"})
+    reply = client.post(url, json={"op": "job_cancel", "job_id": "job-9"})
+    assert reply.status_code == 200
+    assert "was not cancelled" in reply.json()["detail"]
+
+    # An unknown job is a refusal in words, carried as a 422.
+    replies.append({"op": "error", "message": "unknown job nope"})
+    reply = client.post(url, json={"op": "job_cancel", "job_id": "nope"})
+    assert reply.status_code == 422
+    assert reply.json()["error"] == "unknown job nope"
+
+    # A malformed id never leaves the relay: the validator refuses it at the
+    # boundary, so no frame (and no runtime) is involved.
+    frames_before = len(written)
+    for body in (
+        {"op": "job_cancel"},
+        {"op": "job_cancel", "job_id": ""},
+        {"op": "job_cancel", "job_id": 7},
+    ):
+        refused = client.post(url, json=body)
+        assert refused.status_code == 422, body
+        assert refused.json()["error"], body
+    assert len(written) == frames_before
+
+
+def test_a_supplement_command_forwards_the_pair_and_carries_the_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """The phone's route to a highlight job's controls (memo §2.7, lane R).
+
+    The relay is a COURIER here, deliberately: the web's press rides the SAME
+    session command route every other mutation uses — scoped by the session in
+    the URL and the (anchor, job) pair in the frame — and the runtime's receipt
+    is the ack's ``detail``. This pins that path at the relay's own seam: the
+    frame leaves with the pair, the receipt (including the NEUTRAL ``already
+    finished`` for a settled job) comes back as a 200, a runtime-side refusal
+    travels as a 422 in its own words, and a session with no live runtime is
+    refused BEFORE any frame leaves (the same 409 every op on this route
+    gives). The runtime's own dispatch is pinned at its seam
+    (``tests/unit/supplements``); this file owns the carrier.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=4346,
+        kind="tui",
+        session_id="hl-controls",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    written: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            written.append(frame)
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                replies.pop(0) | {"req": frame["req"]}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    url = "/api/sessions/hl-controls/command"
+    anchor = "a" * 32
+    job = "3f9c1a7e5b20"
+
+    # A cut that landed: the runtime's receipt is the answer, verbatim, and the
+    # frame carried the pair the runtime's identity gate checks.
+    replies.append({"op": "ack", "detail": "cancelled"})
+    reply = client.post(url, json={"op": "supplement_cancel", "anchor": anchor, "job": job})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "cancelled"}
+    assert written[-1]["op"] == "supplement_cancel"
+    assert written[-1]["anchor"] == anchor and written[-1]["job"] == job
+
+    # The NEUTRAL receipt for a settled job travels as a 200, not an error.
+    replies.append({"op": "ack", "detail": "already finished"})
+    reply = client.post(url, json={"op": "supplement_cancel", "anchor": anchor, "job": job})
+    assert reply.status_code == 200
+    assert reply.json()["detail"] == "already finished"
+
+    # A steer carries the operator's words verbatim and answers its receipt.
+    replies.append({"op": "ack", "detail": "steering"})
+    reply = client.post(
+        url,
+        json={
+            "op": "supplement_steer",
+            "anchor": anchor,
+            "job": job,
+            "text": "label the axes",
+        },
+    )
+    assert reply.status_code == 200
+    assert reply.json()["detail"] == "steering"
+    assert written[-1]["text"] == "label the axes"
+
+    # An owner that predates the ops refuses in its own words, carried as 422.
+    replies.append(
+        {
+            "op": "error",
+            "message": "this session cannot run turn supplements; update the owner",
+        }
+    )
+    reply = client.post(url, json={"op": "supplement_restart", "anchor": anchor, "job": job})
+    assert reply.status_code == 422
+    assert "update the owner" in reply.json()["error"]
+
+    # A session with NO live runtime: refused before any frame leaves.
+    frames_before = len(written)
+    reply = client.post(
+        "/api/sessions/hl-cold/command",
+        json={"op": "supplement_cancel", "anchor": anchor, "job": job},
+    )
+    assert reply.status_code == 409
+    assert reply.json()["error"] == "session not connected"
+    assert len(written) == frames_before
+
+
 def test_the_phone_catalogue_drops_terminal_only_vocabulary() -> None:
     """The sheet's copy is read on a TOUCH device (UX round 1, U5).
 
@@ -2676,3 +2860,42 @@ def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> 
     # keyboard opens, which the --lo-vvh pin depends on; initial-scale=1 keeps the
     # default reading size. The wide mode is the only thing allowed to leave them.
     assert "width=device-width" in shell and "initial-scale=1" in shell
+
+
+def test_durable_projection_carries_supplement_rows_per_anchor(tmp_path, monkeypatch) -> None:
+    """The cold-open half of the sibling map (memo §3.1 row 18): custom rows are
+    invisible to ``fold_history`` (messages only), so the durable fold collects
+    them itself -- newest version per anchor, replay-safe -- and the rebuild
+    copies the map onto the projection an old app build ignores."""
+    import asyncio
+
+    from local_operator.mobile.daemon import _durable_projection
+    from local_operator.session.transcript import Transcript
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
+
+    cfg = tmp_path / "config"
+    root_dir = cfg / "sessions" / "root-session"
+    root_dir.mkdir(parents=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    def row(anchor: str, version: int, state: str) -> dict[str, Any]:
+        return {
+            "anchor": anchor,
+            "job": "3f9c1a7e5b20",
+            "version": version,
+            "state": state,
+            "files": [],
+            "components": [],
+            "at": 1791000000.0 + version,
+        }
+
+    transcript = Transcript(root_dir)
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("a" * 32, 1, "decided")))
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("a" * 32, 2, "done")))
+    asyncio.run(transcript.append_custom(SUPPLEMENT_CUSTOM_TYPE, row("b" * 32, 1, "queued")))
+
+    projection = _durable_projection("root-session")
+    assert projection is not None
+    assert projection.supplements["a" * 32]["version"] == 2
+    assert projection.supplements["a" * 32]["state"] == "done"
+    assert projection.supplements["b" * 32]["state"] == "queued"

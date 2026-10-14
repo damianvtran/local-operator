@@ -651,7 +651,12 @@ def _shipped_task_tool(tmp_path) -> AgentTool:
     from local_operator.tools.registry import create_tools
 
     def _launcher(
-        label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+        label: str,
+        prompt: str,
+        *,
+        agent: str = "task",
+        effort: str | None = None,
+        model: str | None = None,
     ) -> str:
         raise AssertionError("validation must refuse the call before any launch")
 

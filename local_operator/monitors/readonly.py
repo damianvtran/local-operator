@@ -124,6 +124,12 @@ OBSERVING_VERBS: dict[str, tuple[str, frozenset[str]]] = {
     # console's four read methods minus `screenshot` (writes a PNG — see the
     # module docstring).
     "console": ("method", frozenset({"list", "status", "read"})),
+    # code_requests' two ops: `list` reads this session's derived index and the
+    # local fetch cache, `show` reads the cache and (at most) one conditional
+    # fetch for a ref the cache does not know — a network READ with no side
+    # effect, which is what a scheduled "tell me when round 2 lands" check
+    # needs to re-run unattended.
+    "code_requests": ("op", frozenset({"list", "show"})),
 }
 
 #: Refusals for specific (tool, verb) pairs whose reason is worth naming
@@ -186,6 +192,17 @@ def readonly_verdict(
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
             return 'monitor can\'t watch "bash": a bash monitor needs a "command".'
+        if args.get("background") is True:
+            # The check IS the runner: a backgrounded call returns a job id
+            # instead of output, so the watch would arm, capture that notice
+            # as its baseline, and never have anything to diff. Refuse it
+            # where the model can still act on the sentence instead of
+            # striking it out over five ticks.
+            return (
+                'monitor can\'t watch "bash" background=true: the check is the runner — '
+                "a backgrounded call returns a job id, not output to watch. "
+                "Drop background (a monitor cannot watch a detached call)."
+            )
         return _bash_verdict(command)
 
     tier = (

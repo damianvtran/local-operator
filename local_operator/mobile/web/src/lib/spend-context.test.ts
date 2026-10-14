@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pyFixed } from "./fixed-point";
 import {
+	channelBreakdown,
 	contextEstimateMarker,
 	contextReading,
 	contextSemanticColor,
@@ -33,6 +34,7 @@ import {
 	formatUsd,
 	formatWindow,
 	microFromUsd,
+	publishedSpend,
 	sessionSpend,
 	type SessionSpendInput,
 } from "./spend-context";
@@ -230,5 +232,175 @@ describe("the context reading", () => {
 		expect(none.status).toBe("no-reading");
 		expect(none.spelling).toBe("");
 		expect(contextEstimateMarker(none)).toBe("");
+	});
+});
+
+describe("publishedSpend (PR-2: the published object wins)", () => {
+	it("falls back to null for an absent or malformed object", () => {
+		expect(publishedSpend({ spend_channels: undefined })).toBeNull();
+		expect(publishedSpend({ spend_channels: null })).toBeNull();
+		// A wire that cannot state a total must not invent one: the caller
+		// keeps the legacy reading rather than a fabricated figure.
+		expect(
+			publishedSpend({
+				spend_channels: { version: 1, tracked: true, total_micro: Number.NaN },
+			}),
+		).toBeNull();
+	});
+
+	it("ports _band_cost_cell's unknown branches, $— included", () => {
+		const unknown = {
+			spend_channels: { version: 1, tracked: true, total_micro: 0, knowledge: "unknown" },
+		};
+		expect(publishedSpend(unknown, { input_tokens: 10 })?.text).toBe("$\u2014");
+		expect(publishedSpend(unknown, {})?.text).toBe("");
+		expect(publishedSpend(unknown)?.text).toBe("");
+	});
+
+	it("keeps the zero policy and marks lower bounds", () => {
+		const base = { version: 1, tracked: true, total_micro: 961_000 };
+		const exact = publishedSpend({ spend_channels: { ...base, knowledge: "exact" } });
+		expect(exact?.text).toBe("$0.961");
+		expect(exact?.isFloor).toBe(false);
+		const partial = publishedSpend({ spend_channels: { ...base, knowledge: "partial" } });
+		expect(partial?.text).toBe("\u2265$0.961");
+		expect(partial?.isFloor).toBe(true);
+		// Pending voice money is a floor too — the band's conscious stance.
+		const pending = publishedSpend({
+			spend_channels: {
+				...base,
+				knowledge: "exact",
+				pending: { voice: "pending_owner_append", calls: 2 },
+			},
+		});
+		expect(pending?.text).toBe("\u2265$0.961");
+		expect(pending?.isFloor).toBe(true);
+		// A zero total spends no segment, mark or not.
+		expect(
+			publishedSpend({ spend_channels: { ...base, total_micro: 0, knowledge: "exact" } })?.text,
+		).toBe("");
+	});
+});
+
+describe("channelBreakdown (PR-2: the phone's chips)", () => {
+	const rows = [
+		{ channel: "image", amount_micro: 53_000 },
+		{ channel: "tts", amount_micro: null },
+	];
+	it("is null without an object", () => {
+		expect(channelBreakdown({ spend_channels: undefined })).toBeNull();
+	});
+	it("draws rows ALWAYS and gates the untracked notice on evidence (M-4)", () => {
+		// The desktop section's own gate, mirrored: a marker-less session ALONE
+		// is not a disclosure — degradation needs evidence — so `exact` keeps
+		// silent and `partial`/`unknown` carry the notice.
+		expect(
+			channelBreakdown({
+				spend_channels: {
+					version: 1,
+					tracked: false,
+					total_micro: 210_000,
+					knowledge: "exact",
+					rows: [],
+				},
+			}),
+		).toEqual({ chips: [], hiddenCount: 0, untrackedNotice: false });
+		expect(
+			channelBreakdown({
+				spend_channels: {
+					version: 1,
+					tracked: false,
+					total_micro: 210_000,
+					knowledge: "partial",
+					rows: [],
+				},
+			})?.untrackedNotice,
+		).toBe(true);
+		// RECOVERED ROWS ARE DRAWN (the dropped-rows bug this fixes): a
+		// backfilled session has no marker but real recovered rows, and they
+		// render beside the notice rather than being discarded by `tracked`.
+		const recovered = channelBreakdown({
+			spend_channels: {
+				version: 1,
+				tracked: false,
+				total_micro: 53_000,
+				knowledge: "partial",
+				rows: [{ channel: "image", amount_micro: 53_000, basis: ["estimated"] }],
+			},
+		});
+		expect(recovered?.chips.map((chip) => `${chip.label} ${chip.text}`)).toEqual([
+			"image $0.053",
+		]);
+		expect(recovered?.untrackedNotice).toBe(true);
+	});
+	it("spells every row's own amount, $— for the unstated", () => {
+		const breakdown = channelBreakdown({
+			spend_channels: { version: 1, tracked: true, total_micro: 53_000, rows },
+		});
+		expect(breakdown?.chips.map((chip) => `${chip.label} ${chip.text}`)).toEqual([
+			"image $0.053",
+			"tts $\u2014",
+		]);
+	});
+	it("shortens inference labels to the model half and caps with a count", () => {
+		const many = Array.from({ length: 6 }, (_, index) => ({
+			channel: "inference",
+			label: `provider/model-${index}`,
+			amount_micro: 1_000,
+			basis: ["billed"],
+		}));
+		const breakdown = channelBreakdown({
+			spend_channels: { version: 1, tracked: true, total_micro: 6_000, rows: many },
+		});
+		expect(breakdown?.chips).toHaveLength(4);
+		expect(breakdown?.chips[0].label).toBe("model-0");
+		expect(breakdown?.hiddenCount).toBe(2);
+	});
+	it("gives named channels the chip budget, keeping wire order (m2)", () => {
+		// The backend cap's own selection shape: two inference rows head the
+		// wire, and a plain "first four" would spend the whole budget on them.
+		// Named channels win; inference takes what is left; wire order kept.
+		const rows = [
+			{ channel: "inference", label: "provider/a", amount_micro: 1_000 },
+			{ channel: "inference", label: "provider/b", amount_micro: 1_000 },
+			{ channel: "image", amount_micro: 2_000 },
+			{ channel: "tts", amount_micro: 3_000 },
+			{ channel: "search", amount_micro: 4_000 },
+			{ channel: "read", amount_micro: 5_000 },
+		];
+		const breakdown = channelBreakdown({
+			spend_channels: { version: 1, tracked: true, total_micro: 16_000, rows },
+		});
+		expect(breakdown?.chips.map((chip) => chip.label)).toEqual([
+			"image",
+			"tts",
+			"search",
+			"read",
+		]);
+		expect(breakdown?.hiddenCount).toBe(2);
+	});
+	it("marks subscription quota and only when no billed claim rides beside it", () => {
+		const sub = channelBreakdown({
+			spend_channels: {
+				version: 1,
+				tracked: true,
+				total_micro: 5_000,
+				rows: [
+					{
+						channel: "inference",
+						label: "openai/gpt-5.4",
+						amount_micro: 5_000,
+						basis: ["subscription_api_equivalent"],
+					},
+					{ channel: "image", amount_micro: 1_000, basis: ["estimated"] },
+					{
+						channel: "search",
+						amount_micro: 250,
+						basis: ["subscription_api_equivalent", "billed"],
+					},
+				],
+			},
+		});
+		expect(sub?.chips.map((chip) => chip.subEquivalent)).toEqual([true, false, false]);
 	});
 });

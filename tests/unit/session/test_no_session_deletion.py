@@ -128,6 +128,56 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # pairing code, a pending pairing request, one device certificate, and the
     # revocation record itself: four single files this module itself wrote, never a
     # directory.
+    # -- code-request store (derived files, never a session) -----------------
+    # All three calls below touch ONLY the two derived files this module owns, both
+    # built by ``index_path``/``cache_path`` as ``<config>/code_requests/<stem>.json``
+    # and ``<config>/cache/code_requests/<stem>.json``. The stem is not a raw string
+    # from the caller: ``_derived_stem`` refuses anything but ``[A-Za-z0-9_-]{1,128}``,
+    # so no id can contribute a separator or a ``..`` and none of these can name a path
+    # under ``sessions/``. The files are DERIVED — the transcript is the truth, and a
+    # deleted index is rebuilt by the next scan.
+    (
+        "local_operator/code_requests/ledger.py::_write_json",
+        "<path>.replace",
+        "Atomic pid-temp replace of one <config>/code_requests/<stem>.json (index or cache)",
+    ),
+    (
+        "local_operator/code_requests/ledger.py::write_index",
+        "<path>.unlink",
+        "Drops <config>/code_requests/<stem>.json when the session has no rows left",
+    ),
+    (
+        "local_operator/code_requests/ledger.py::drop_session",
+        "<path>.unlink",
+        "Drops both derived files for one session id, on that session's own deletion",
+    ),
+    # -- the code-request FETCH cache (1b): same derived-store argument as the
+    # ledger entries above. Every path here is built from ``fetch_dir()``
+    # (``<config>/cache/code_requests``) plus a sanitized host segment and a
+    # quoted-filename stem; no caller string can contribute a separator, and the
+    # files are cached fetch state, regenerable by the next refresh pass — a
+    # deleted entry is one conditional request away from being rebuilt.
+    (
+        "local_operator/code_requests/cache.py::_write_json",
+        "os.replace",
+        "Atomic pid-temp replace of one <config>/cache/code_requests/<host>/<file>.json",
+    ),
+    (
+        "local_operator/code_requests/cache.py::drop_entry",
+        "<path>.unlink",
+        "Drops one cached ref entry (memory + this file) on an explicit drop",
+    ),
+    (
+        "local_operator/code_requests/cache.py::clear_dirty",
+        "<path>.unlink",
+        "Drops one session's dirty marks once its fetch pass consumed them",
+        2,
+    ),
+    (
+        "local_operator/code_requests/cache.py::sweep",
+        "<path>.unlink",
+        "Drops entries untouched for SWEEP_AGE_S — the derived-store age sweep",
+    ),
     (
         "local_operator/operator/devices.py::clear_pairing",
         "<path>.unlink",
@@ -315,6 +365,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "server does not leave a lease behind and does not delete a live "
         "sibling's",
     ),
+    # The local surface keys' per-boot generation counter
+    # (`local_operator/server/utils/local_tokens.py`): one FILE at
+    # `<config>/run/serve/generation`, beside the serve records the registry
+    # publishes. The writer is a local copy of the staged-write shape for
+    # `network/identity.py`'s stated reason -- the shared helper is private to
+    # the session runtime's module, and this one keeps the boot path from
+    # depending on the session plane -- which is exactly why it carries
+    # argued rows here: every path it touches is that one sibling of the
+    # records the counter belongs to, a FILE never a directory, and never
+    # anything under sessions/.
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.replace",
+        "Atomic replacement of the generation FILE at <config>/run/serve/generation, "
+        "beside the serve records; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/server/utils/local_tokens.py::_write_staged",
+        "os.unlink",
+        "Removes only its own `.generation.*.tmp` file after a failed replacement",
+    ),
     (
         "local_operator/server/utils/desktop_presence.py::"
         "DesktopDeliveryPublisher._prune_dead_records",
@@ -402,6 +473,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only this call's own .<name>.<pid>.<tid>.<token>.tmp sidecar after "
         "the replace, in the same directory under <config>/network/",
+    ),
+    (
+        "local_operator/network/rollouts.py::_write_record",
+        "os.replace",
+        # S3a's rollout record write: the path is <config>/network/rollouts/
+        # ro_<id>.json — config-root- and record-derived, never a session id —
+        # and this is ``os.replace``, which refuses DIRECTORIES outright
+        # (EISDIR/ENOTEMPTY), so no directory under `sessions/` can be
+        # removed through it.
+        "Atomic replace of <config>/network/rollouts/ro_<id>.json; "
+        "os.replace cannot target a directory",
     ),
     (
         "local_operator/network/store.py::_quarantine",
@@ -665,10 +747,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- the one legitimate remover -----------------------------------------
     (
-        "local_operator/session/cleanup.py::remove_session_dir",
+        "local_operator/session/cleanup.py::_bounded_rmtree",
         "shutil.rmtree",
-        "THE session remover: guarded by the store marker, the config dir, "
-        "the hard guards and the cleanup log",
+        "THE ONE directory remover under sessions/, shared by remove_session_dir "
+        "and the scratchpad-content pass (remove_scratchpad_entry): called only "
+        "with a target those two already guarded, and its widen/retry phases "
+        "touch nothing outside the target itself",
+    ),
+    (
+        "local_operator/session/cleanup.py::remove_scratchpad_entry",
+        "os.unlink",
+        "The content phase's FILE remover: _scratchpad_refusal has cleared the "
+        "target (pre-resolve symlink check, strict containment below "
+        "<store>/<session>/scratchpad/, store marker, config dir), the removal "
+        "shape is an lstat-confirmed non-directory, and the caller only plans "
+        "files whose shape+size+age passed",
     ),
     (
         "local_operator/session/cleanup.py::_write_record",
@@ -910,11 +1003,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "FrontendStateStore.replace(state) — an in-memory paint swap, not a path",
     ),
+    # The refresh-retire drop's version of the row above, and the same reading:
+    # its one `.replace` is `store.replace(state)` on the session's in-memory
+    # FrontendStateStore (it clears the canonical mirror's stale streaming bit),
+    # and the function takes no path at all — it reads `self._frontend_store`
+    # and the session id it logs, nothing else.
+    (
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
+        "<path>.replace",
+        "FrontendStateStore.replace(state) — an in-memory claim drop, not a path",
+    ),
     # Same shape as the browser-bridge/keys writers below: a temp FILE inside
     # the secrets directory replacing master.key in that same directory. Both
     # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
     # a fixed basename — no caller input and no session id reaches either, so
     # neither can name a path under sessions/.
+    # The tail-anchor sidecar: an atomic write of a session's OWN file. Both paths
+    # are that directory's own children (``tail-anchor.v1.json`` and its
+    # ``.<name>.<pid>.tmp``), and the target is a regular file inside the session —
+    # never the directory the store walks, and never another session's.
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "os.replace",
+        "Atomic write of <session>/tail-anchor.v1.json; both paths are its own children",
+    ),
+    (
+        "local_operator/session/tail_anchor.py::write_anchor",
+        "<path>.unlink",
+        "Clears this pid's own .tmp sidecar in the same directory after a failed write",
+    ),
     (
         "local_operator/secrets/keys.py::replace_master_key",
         "os.replace",
@@ -1663,15 +1780,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tools/group_reaper.py::_safe_unlink", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/group_reaper.py::kill_own_groups", "<path>.unlink", "pgid ledger FILE"),
     ("local_operator/tools/spill.py::SpillStore._remove", "<path>.unlink", "spill FILE"),
+    # The notifier's own files under <config_dir>/notifier/: a build lock, the
+    # terminal memory and the --action probe cache, each built from
+    # ``config_dir()`` plus a fixed basename — none can name a path under
+    # sessions/. The ``_build_in_background`` rows that stood here moved when
+    # the single-builder rework split the marker into claim/release.
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background",
+        "local_operator/tui/notifier_app/__init__.py::_claim_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "stale build-marker FILE <config_dir>/notifier/.building; config-dir lock",
     ),
     (
-        "local_operator/tui/notifier_app/__init__.py::_build_in_background._run",
+        "local_operator/tui/notifier_app/__init__.py::_release_build_lock",
         "<path>.unlink",
-        "build marker FILE",
+        "build-marker FILE <config_dir>/notifier/.building; config-dir lock",
+    ),
+    (
+        "local_operator/spawn/remembered.py::remember",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/spawn/remembered.py::forget",
+        "<path>.unlink",
+        "Removes <config_dir>/notifier/last-terminal.json; config-dir FILE",
+    ),
+    (
+        "local_operator/tui/notify.py::_write_persisted_action_support",
+        "os.replace",
+        "Atomic write of <config_dir>/notifier/notify-send-actions.json; config-dir FILE",
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
@@ -1690,9 +1827,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
     (
-        "local_operator/update.py::_remove_tree",
+        "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
-        "<stable>/generations/<id> — reserved by this call, or listed from generations_dir()",
+        "<stable>/generations/<id> — reserved/listed generations only; the owned "
+        "transaction wrapper retains current and live attempts before this same deletion",
+        1,
+    ),
+    (
+        "local_operator/update.py::check_latest",
+        "<path>.unlink",
+        "The PyPI version cache file (_cache_path: <cache>/pypi-local-operator.json), "
+        "dropped when an answered read proves the cached release not downloadable; "
+        "a fixed basename under the cache dir — never a session path",
     ),
     (
         "local_operator/update.py::flip_pointer",
@@ -1745,6 +1891,79 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/update.py::_write_executable",
         "<path>.unlink",
         "cleanup of this function's own mkstemp temp FILE beside the shim",
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.rename",
+        "owned staged regular wheel FILE -> reserved generation/artifact FILE after SHA256; "
+        "never a session directory",
+        1,
+    ),
+    (
+        "local_operator/update.py::_download_candidate_artifact",
+        "<path>.unlink",
+        "failed owned temporary artifact FILE only; unlink cannot remove a directory",
+        1,
+    ),
+    # Node-local install attempt records, not session directories. Registration
+    # replaces a staged regular JSON FILE; retirement unlinks only that FILE
+    # after nonce/PID ownership checks. Exact operation counts stay enforced.
+    (
+        "local_operator/install_transaction.py::register_attempt",
+        "<path>.replace",
+        "owned staged JSON FILE -> INSTALLROOT/generation/.install-attempt.json FILE; "
+        "not a sessions/ path, and file replacement cannot replace a directory",
+        1,
+    ),
+    (
+        "local_operator/install_transaction.py::finish_attempt",
+        "<path>.unlink",
+        "nonce/PID-validated INSTALLROOT/generation attempt FILE only; unlink refuses directories",
+        1,
+    ),
+    # The durable update-operation RECORD: an atomic staged-FILE write under the
+    # node-local INSTALLROOT/.update-operations directory, never a session store.
+    # Both calls are dir_fd-relative to the O_NOFOLLOW/O_DIRECTORY handle this
+    # function validates by (st_dev, st_ino, st_uid) before writing, and both
+    # name a regular JSON FILE — the staged temp and the record — so neither can
+    # remove a directory.
+    (
+        "local_operator/install_transaction.py::_persist_operation",
+        "os.replace",
+        "staged operation JSON FILE -> INSTALLROOT/.update-operations/<id>.json FILE; "
+        "dir_fd-relative to a validated non-session directory, and replace cannot remove one",
+    ),
+    (
+        "local_operator/install_transaction.py::_persist_operation",
+        "os.unlink",
+        "the staged operation temp FILE only (FileNotFoundError suppressed); unlink refuses "
+        "directories",
+    ),
+    # Candidate publication: the same node-local generation authority. The replace
+    # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
+    # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree
+    # and neither name is ever a session directory or derived from a session id.
+    (
+        "local_operator/install_transaction.py::preserve_publication",
+        "<path>.replace",
+        "owned staged attempt JSON FILE -> INSTALLROOT/generation attempt FILE; "
+        "file replacement cannot replace a directory",
+    ),
+    (
+        "local_operator/install_transaction.py::preserve_publication",
+        "<path>.unlink",
+        "the staged attempt temp FILE only (missing_ok); unlink refuses directories",
+    ),
+    # The bootstrap snapshot cleanup: ``snapshot.temporary`` is set ONLY by
+    # ``resolve_snapshot``'s own ``tempfile.mkdtemp(prefix="lop-snapshot-")``
+    # archive, so this rmtree removes a directory THIS module created under the
+    # system temp root — never a session directory, a config root, or any
+    # caller-supplied source tree (the ``temporary`` flag is the guard).
+    (
+        "local_operator/update_bootstrap.py::controller",
+        "shutil.rmtree",
+        "resolve_snapshot's own creator-owned temporary archive dir (temporary=True); "
+        "never a user source/installed generation and never under sessions/",
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
@@ -1916,6 +2135,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/session.py::_paired_prefix",
         "<path>.remove",
         "set.remove(tool_call_id)",
+    ),
+    (
+        # The durable-row observer stores callbacks in _commit_handlers, a
+        # list[Callable]. Unsubscribing removes only that in-memory callback;
+        # the receiver cannot name a path or remove a session directory.
+        "local_operator/session/transcript.py::Transcript.subscribe_commits.unsubscribe",
+        "<path>.remove",
+        "self._commit_handlers: list[Callable].remove(handler), never a filesystem path",
     ),
     (
         "local_operator/session/transcript.py::Transcript.subscribe_admitted_commands.unsubscribe",
@@ -2524,6 +2751,72 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes this request's tempfile.mkdtemp() upload spool; never session-derived",
         2,
     ),
+    # -- the turn-supplement sweep: the attachment STORE's own orphaned blobs --
+    # Both calls unlink FILES inside the content-addressed attachment store at
+    # ``<config>/attachments/`` -- ``session/attachments.py``'s directory, a
+    # SIBLING of ``sessions/``, never under it. ``content`` is the store's own
+    # direct child this pass listed, and ``meta`` is the store's sidecar for the
+    # same digest; the digest is that child's name minus ``.bin``, required
+    # non-empty and hex-only (``blob_candidates``), so neither path can leave
+    # the store. ``unlink()`` removes a FILE entry -- a symlink entry is removed
+    # as the link, never as its target -- so neither call can displace a
+    # directory at all. Nothing here is derived from a session id; the module's
+    # only touch of ``sessions/`` is the read-only reference scan.
+    (
+        "local_operator/supplements/sweep.py::store_sweep",
+        "<path>.unlink",
+        "Orphaned component blob FILES under <config>/attachments/; content is a store "
+        "child, meta is its hex digest + '.json', neither session-derived",
+        2,
+    ),
+    # -- the delegated content layer's rescue-bundle housekeeping ------------
+    # Both calls touch the SAME two artefacts, both spelled from the plan's
+    # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
+    # session's ``scratchpad/``): git's ``<bundle>.lock`` and the partial
+    # bundle itself. They are the only files this pass ever writes into a pad.
+    # The lock is cleared before ``git bundle create`` so a killed attempt
+    # cannot block every later retry with "File exists" (measured on the
+    # acceptance copy), and both are removed on failure so the next pass
+    # retries from nothing. Neither call can name a session entry or a
+    # directory — the lock is a sibling of a path the plan already vetted.
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle",
+        "<path>.unlink",
+        "Clears <bundle>.lock before git bundle create; the bundle target is the "
+        "plan's own path inside the pad, and clearing its stale lock is self-healing",
+    ),
+    (
+        "local_operator/session/delegated_retention.py::_write_rescue_bundle._clean_up",
+        "<path>.unlink",
+        "Best-effort removal of those same two artefacts (partial bundle + lock) "
+        "after a failed create or verify, so the next pass starts clean",
+    ),  # -- owned_process: the managed owner's own files -----------------------
+    # Every path here is built from the run root the CALLER passed (``--run-root``,
+    # refused when volatile) or from the real passwd home's LaunchAgents plus this
+    # attempt's unique owner label. More importantly, os.open(O_CREAT|O_EXCL)
+    # produces a REGULAR temp file, and replacing a directory with that file
+    # fails; Path.unlink also refuses directories. These exact call counts
+    # therefore cannot remove a session directory, even under a surprising root.
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "os.replace",
+        "Atomic write of one owner-path file: <target> and its same-directory .tmp sibling",
+    ),
+    (
+        "local_operator/owned_process.py::_atomic_write_bytes",
+        "<path>.unlink",
+        "Clears the same-directory .tmp sibling this call itself created",
+    ),
+    (
+        "local_operator/owned_process.py::_retire_launchd_attempt",
+        "<path>.unlink",
+        "The plist THIS start attempt wrote, under the real <home>/Library/LaunchAgents",
+    ),
+    (
+        "local_operator/owned_process.py::retire_owned_job",
+        "<path>.unlink",
+        "The owner's OWN plist (exact label), under the real <home>/Library/LaunchAgents",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -2712,6 +3005,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> tail-anchor.v1.json (a session's own cold-read hint)
+        "local_operator/session/tail_anchor.py::write_anchor",
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
         # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)
@@ -2726,6 +3021,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # a path operation, and this function holds no session-directory path at
         # all (it is handed a plain directory string).
         "local_operator/session/attached.py::AttachedSession._publish_working_directory",
+        # Same receiver, same reason, one function over: the refresh-retire drop
+        # swaps the in-memory frontend state (clearing the stale streaming bit)
+        # and holds no session-directory path at all.
+        "local_operator/session/attached.py::AttachedSession._drop_liveness_claim",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
         "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
@@ -2788,7 +3087,13 @@ def test_cleanup_module_is_the_only_directory_remover_near_sessions() -> None:
         for rel, _line, label, owner in _call_sites()
         if rel in near and label.rsplit(".", 1)[-1] in ("rmtree", "rmdir", "removedirs")
     )
-    assert hits == [f"{CLEANUP_MODULE}::remove_session_dir"], hits
+    # The single remover MOVED when the scratchpad-content pass arrived
+    # (delegated content reclaim): remove_session_dir now delegates its rmtree
+    # to _bounded_rmtree so ONE call site — hook and pre-widen walk included —
+    # serves both it and remove_scratchpad_entry (see the allow-list rows).
+    # The belt's intent is unchanged: exactly ONE function, inside the cleanup
+    # module, holds a directory remover anywhere near sessions.
+    assert hits == [f"{CLEANUP_MODULE}::_bounded_rmtree"], hits
 
 
 def test_displacers_near_sessions_are_the_named_set() -> None:

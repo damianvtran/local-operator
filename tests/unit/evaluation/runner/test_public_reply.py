@@ -28,6 +28,7 @@ from local_operator.evaluation.evidence.models import (
     canonical_digest,
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.evaluation.protocol import Observation
 from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import EpisodeRunner, _rejection_detail
 from local_operator.evaluation.runner.model import (
@@ -1675,3 +1676,596 @@ def test_a_decision_behind_leading_junk_keeps_its_own_validation_class() -> None
         parse_decision("commentary " + stale, current, route=ROUTE)
 
     assert classify_rejection(str(info.value)) == "observation-binding"
+
+
+# --- The foreign reply shapes: carriers, one action, and sequences ----------
+#
+# The sealed 2026-10-03 corpus's dominant rejection class was ``batch-shape``:
+# 97 of its 137 decision-rejected turns, and 96 of those arrived as complete,
+# well-formed JSON in a foreign CALL shape -- the model answering on the reply
+# channel with its own argument shape rather than the envelope. The spellings
+# whose intent is unambiguous are read below; each fixture is the corpus's
+# shape and carries its own count. Nothing here validates an action: whether
+# the actions are admissible stays ``parse_decision``'s question, and the
+# tests that need that verdict drive ``parse_decision``.
+
+
+def _one_action(current: Observation) -> dict[str, Any]:
+    """One protocol-shaped action bound to ``current``, from the shared fixture."""
+
+    return json.loads(type_payload(current))["actions"][0]
+
+
+def _two_actions(current: Observation) -> list[dict[str, Any]]:
+    """Two actions, in the order the sequences below spell them."""
+
+    enter = {"keys": ["enter"], "kind": "key", "observation_id": current.observation_id}
+    return [_one_action(current), enter]
+
+
+def _canonical(payload: str, current: Observation) -> bytes:
+    """The canonical batch one payload states through the real decoder."""
+
+    return parse_decision(payload, current, route=ROUTE).action_batch.to_canonical_json()
+
+
+#: The carrier names the sealed corpus used for the whole reply, recounted
+#: 2026-10-11: ``reply`` (26 admitted replies across the corpus), ``answer``
+#: (the key carrying the decision in ``{"answer": ..., "reasoning": ...}``),
+#: ``streaming_json`` (1) and ``reply_again_corrected`` (1).
+_CARRIER_KEYS = ("reply", "answer", "streaming_json", "reply_again_corrected")
+
+
+@pytest.mark.parametrize("key", _CARRIER_KEYS)
+@pytest.mark.parametrize("spelling", ["as-object", "as-string"])
+def test_a_sole_reply_carrier_is_read_and_its_note_survives(key: str, spelling: str) -> None:
+    """The measured carrier wrappers: one key NAMING the reply the model sends.
+
+    ``{"reply": "<the whole envelope as a string>"}`` is what 15 of the 97
+    sealed refusals carried; ``streaming_json`` and ``reply_again_corrected``
+    one each, and ``answer`` is where the ``{"answer": ..., "reasoning": ...}``
+    shape carries its decision. The wrapper changes where the decision sits,
+    never what it says: the batch is the legacy one byte for byte, and the
+    note inside it is still the model's visible reply. A sole value that does
+    NOT read as a decision keeps the refusal the reply always had -- see the
+    negative test below, which pins the two shapes this must never read.
+    """
+
+    current = observation()
+    body = {"actions": _two_actions(current), "public_observations": "visible fact"}
+    wrapped = json.dumps({key: json.dumps(body) if spelling == "as-string" else body})
+
+    decision = parse_decision(wrapped, current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == _canonical(json.dumps(body), current)
+    assert decode_public_reply(wrapped)["public_observations"] == "visible fact"
+
+
+def test_a_sole_carrier_that_is_not_a_decision_keeps_its_refusal() -> None:
+    """A named carrier the model did not use for a decision changes nothing.
+
+    ``{"reply": ""}`` and ``{"reply": "prose"}`` refuse: the value does not
+    read as a decision, and the reply keeps the refusal it always had rather
+    than borrowing the wrapper's own parse error. Three shapes that must never
+    become a decision channel are pinned beside them: a NOTE quoting a
+    decision (``public_observations`` is where a model recites its own
+    previous reply, and the field is a note channel by contract), a
+    generic-named ``{"note": ...}``, and the refusal corpus's own
+    ``{"wrapper": {...}}`` -- a structural "any sole key" rule would execute
+    all three IN PROSE, which is why the carriers are a named set there. On
+    the reply-channel call itself the structural rule does exist and is tested
+    in the section below: there the argument object IS the reply the model is
+    sending, so a name cannot state anything about a decision.
+    """
+
+    current = observation()
+    quoted = json.dumps({"actions": _two_actions(current)})
+    bodies = [
+        json.dumps({"reply": ""}),
+        json.dumps({"reply": "I will click the button next."}),
+        json.dumps({"reply_candidate": {}}),
+        json.dumps({"public_observations": quoted}),
+        json.dumps({"note": quoted}),
+        json.dumps({"wrapper": json.loads(quoted)}),
+    ]
+
+    for body in bodies:
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(body, current, route=ROUTE)
+        assert classify_rejection(str(info.value)) == "batch-shape", body
+
+
+# --- The reply channel reads a sole key by STRUCTURE, not vocabulary --------
+#
+# The FROZEN 2026-10-11 snapshot this change was built from: 46 of ITS 66
+# batch-shape refusals were a sole key the model had invented that day --
+# ``reply_json`` (19), then ``reply_objects`` (15), ``reply_text`` (11) and
+# ``content`` (1), each holding a complete, correctly-bound envelope (three of
+# them cut by the 4000-char evidence bound, so no decoder can read those
+# bytes). The corpus kept sealing while the change was written, so its live
+# size is larger -- 47 recovered of 76 recorded batch-shape refusals when
+# this comment was last recounted; 46/66 is the measured FAMILY, not the
+# corpus size. A third targeted
+# carrier-name bump would have been obsolete within one batch -- the same
+# double-encoding habit produced r2's ``{"reply": ...}`` and then renamed
+# itself daily -- so the DEDICATED reply channel is read structurally instead:
+# any sole key whose value states exactly one decision. The reading is safe
+# there and only there, because a call's argument object IS the reply the
+# model sends; prose keeps the named-carrier list.
+
+
+def test_a_sole_key_on_the_reply_channel_is_read_structurally(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On the call's own channel the name states nothing, so the value decides.
+
+    The three measured invented names plus one this build has never seen all
+    read identically -- string or object spelling -- and the batch is the
+    legacy one byte for byte. Tolerated is not silent: the log names every
+    tolerated key (a roster, through the same whole-or-nothing guard the
+    extra-key tolerance uses), because that roster is how the NEXT invented
+    name becomes measurable without paying for another corpus.
+    """
+
+    current = observation()
+    body = {"actions": _two_actions(current), "public_observations": "visible fact"}
+
+    for key in ("reply_json", "reply_text", "content", "invented_name"):
+        for spelling in ("as-object", "as-string"):
+            wrapped = json.dumps({key: json.dumps(body) if spelling == "as-string" else body})
+
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                decision = parse_decision(wrapped, current, route=ROUTE, channel_arguments=True)
+
+            assert decision.action_batch.to_canonical_json() == _canonical(
+                json.dumps(body), current
+            ), (key, spelling)
+            assert decision.public_reply == wrapped
+            assert f"sole key '{key}'" in caplog.text, (key, spelling)
+            assert (
+                decode_public_reply(wrapped, channel_arguments=True)["public_observations"]
+                == "visible fact"
+            )
+
+
+def test_the_list_carrying_one_envelope_is_read_as_that_envelope() -> None:
+    """The measured ``reply_objects`` shape: the envelope inside a one-element array.
+
+    Reading that array as an actions array would refuse a valid decision at
+    its own validation, so a channel value that is a list carrying exactly one
+    envelope is read as that envelope. More than one envelope -- or an
+    envelope beside an action -- is the ambiguity the two-batch rule refuses
+    ("exactly one decision-valued payload"), and the reply keeps the refusal
+    it had.
+    """
+
+    current = observation()
+    body = {"actions": _two_actions(current)}
+
+    single = json.dumps({"reply_objects": json.dumps([body])})
+    decision = parse_decision(single, current, route=ROUTE, channel_arguments=True)
+    assert decision.action_batch.to_canonical_json() == _canonical(json.dumps(body), current)
+
+    for wrapped in (
+        json.dumps({"reply_objects": json.dumps([body, body])}),
+        json.dumps({"reply_objects": json.dumps([body, _one_action(current)])}),
+    ):
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(wrapped, current, route=ROUTE, channel_arguments=True)
+        assert classify_rejection(str(info.value)) == "batch-shape", wrapped
+
+
+def test_the_channel_structural_reading_stops_at_prose_and_at_ambiguity() -> None:
+    """The bounds: prose keeps the vocabulary; ambiguity keeps the refusal.
+
+    Bound (ii): the same bytes in prose keep the refusal the named-carrier
+    list has always given them -- ``{"note": quoted}`` and ``{"wrapper":
+    {...}}`` must not become actions in prose. Bound (i): on the channel a key
+    with a sibling, or a value that is not one decision, is refused exactly as
+    today.
+    """
+
+    current = observation()
+    body = {"actions": _two_actions(current)}
+    quoted = json.dumps(body)
+
+    prose = [
+        json.dumps({"reply_json": quoted}),
+        json.dumps({"reply_objects": json.dumps([body])}),
+        json.dumps({"note": quoted}),
+        json.dumps({"wrapper": body}),
+    ]
+    for payload in prose:
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(payload, current, route=ROUTE)
+        assert classify_rejection(str(info.value)) == "batch-shape", payload
+
+    on_channel = [
+        json.dumps({"reply_json": quoted, "reasoning": "why"}),
+        json.dumps({"action": "lop_structured_reply", "input": body}),
+        json.dumps({"reply_json": ""}),
+        json.dumps({"reply_json": "not a decision"}),
+        json.dumps({"reply_json": json.dumps({})}),
+    ]
+    for payload in on_channel:
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(payload, current, route=ROUTE, channel_arguments=True)
+        assert classify_rejection(str(info.value)) == "batch-shape", payload
+
+
+def test_a_channel_wrapped_decision_still_binds_and_still_validates() -> None:
+    """Reading a wrapper never skips a check: the same binds, the same classes.
+
+    The degenerate binding the r3 corpus is dominated by -- one hex character
+    where the 64-char observation id belongs -- is NOT laundered by the
+    channel reading: the wrapped envelope refuses ``observation-binding``,
+    which is what executing it would have made a stale action. Validation
+    refuses too: a field no kind declares keeps ``extra-action-key``.
+    """
+
+    current = observation()
+    action = _one_action(current)
+
+    collapsed = json.dumps(
+        {
+            "reply_json": json.dumps(
+                {"actions": [dict(action, observation_id=current.observation_id[:1])]}
+            )
+        }
+    )
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(collapsed, current, route=ROUTE, channel_arguments=True)
+    assert classify_rejection(str(info.value)) == "observation-binding"
+
+    stale = json.dumps(
+        {
+            "reply_json": json.dumps(
+                {"actions": [dict(action, observation_id=observation(1).observation_id)]}
+            )
+        }
+    )
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(stale, current, route=ROUTE, channel_arguments=True)
+    assert classify_rejection(str(info.value)) == "observation-binding"
+
+    with_extra = json.dumps(
+        {"reply_json": json.dumps({"actions": [dict(action, frequency_penalty=0)]})}
+    )
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(with_extra, current, route=ROUTE, channel_arguments=True)
+    assert classify_rejection(str(info.value)) == "extra-action-key"
+
+
+def test_an_invented_wrapper_under_an_invented_wrapper_keeps_the_refusal() -> None:
+    """The depth bound still bounds: this is a normaliser, not a search.
+
+    The channel reading applies where a sole key's value states exactly one
+    decision, so a wrapper whose value is itself a wrapper states nothing and
+    the reply keeps its refusal. The declared-key layer composes with the
+    reading in the order the depth allows: a declared wrapper around an
+    invented one still reaches the envelope.
+    """
+
+    current = observation()
+    body = {"actions": _two_actions(current)}
+
+    deep = json.dumps({"outer": json.dumps({"inner": json.dumps(body)})})
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(deep, current, route=ROUTE, channel_arguments=True)
+    assert classify_rejection(str(info.value)) == "batch-shape"
+
+    composed = json.dumps({"input": json.dumps({"reply_json": json.dumps(body)})})
+    decision = parse_decision(composed, current, route=ROUTE, channel_arguments=True)
+    assert decision.action_batch.to_canonical_json() == _canonical(json.dumps(body), current)
+
+
+def test_a_competing_batch_inside_a_string_carrier_is_still_refused() -> None:
+    """M1: the string carrier hands its inner decode the same channel fact.
+
+    The competing-batch rule runs inside ``_carried_value``'s inner decode,
+    over the string's own remainder. A candidate under a DECLARED key
+    unwraps even without the flag, but an invented key does not -- measured
+    before the flag reached the inner call: the hidden batch was ACCEPTED
+    with the remainder silently dropped, while the bare spelling in the same
+    string refused. The refusal now surfaces as the carrier's own
+    ``batch-shape`` (a sole value that does not read as a decision keeps the
+    refusal it had rather than borrowing the inner error), which is all the
+    rule needs: no silent drop.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    body = json.dumps({"actions": [action]})
+    hidden = json.dumps({"actions": [dict(action)]})
+    elsewhere = json.dumps(
+        {"actions": [dict(action, observation_id=observation(1).observation_id)]}
+    )
+
+    for candidate in (
+        json.dumps({"zzz": json.loads(hidden)}),
+        json.dumps({"input": json.loads(hidden)}),
+    ):
+        payload = json.dumps({"reply_json": body + " , " + candidate})
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(payload, current, route=ROUTE, channel_arguments=True)
+        assert classify_rejection(str(info.value)) == "batch-shape", payload
+
+    # A second batch naming ANY OTHER observation is a quotation, not a
+    # competing decision -- the same asymmetry the bare spelling tolerates.
+    tolerated = json.dumps(
+        {"reply_json": body + " , " + json.dumps({"zzz": json.loads(elsewhere)})}
+    )
+    decision = parse_decision(tolerated, current, route=ROUTE, channel_arguments=True)
+    assert decision.action_batch.to_canonical_json() == _canonical(body, current)
+
+
+def test_the_actions_string_reader_carries_the_channel_fact() -> None:
+    """M1 residual (review round 2): the actions-as-JSON-string reader threads it.
+
+    ``_actions_from_json_string`` coerces the string and runs its own
+    competing-batch scan over what follows the array -- both inner calls read
+    the same bytes every other reader does, and without the channel fact an
+    invented-key candidate there is invisible: measured, ``{"reply_json":
+    {"actions": "<arr>, {\"zzz\": {same-obs}}"}}`` and the nested
+    ``action_batch.actions`` spelling were ACCEPTED with the hidden
+    same-observation batch silently dropped, while the declared-key and bare
+    spellings refused. All six now refuse; an other-observation candidate is
+    still the tolerated quotation.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    other = _one_action(observation(1))
+
+    def string_with(candidate: Any) -> str:
+        return json.dumps([action]) + " , " + json.dumps(candidate)
+
+    for candidate in (
+        {"zzz": {"actions": [dict(action)]}},
+        {"input": {"actions": [dict(action)]}},
+        {"actions": [dict(action)]},
+    ):
+        # The class follows the CARRIER, not the candidate key: the invented
+        # key is refused with the same sentence its declared/bare siblings get
+        # (measured), because the refusal it causes is the carrier's own.
+        for body, expected in (
+            ({"actions": string_with(candidate)}, "batch-shape"),
+            ({"action_batch": {"actions": string_with(candidate)}}, "envelope-shape"),
+        ):
+            payload = json.dumps({"reply_json": body})
+            with pytest.raises(DecisionParseError) as info:
+                parse_decision(payload, current, route=ROUTE, channel_arguments=True)
+            assert classify_rejection(str(info.value)) == expected, payload
+
+    tolerated = json.dumps(
+        {"reply_json": {"actions": string_with({"zzz": {"actions": [dict(other)]}})}}
+    )
+    decision = parse_decision(tolerated, current, route=ROUTE, channel_arguments=True)
+    assert len(decision.action_batch.actions) == 1
+
+
+def test_the_recording_re_decode_reads_what_the_decoder_accepted() -> None:
+    """B1: the SECOND reader of an accepted reply carries the channel fact.
+
+    ``redact_public_reply`` re-decodes the accepted bytes at evidence
+    recording; without ``channel_arguments`` the re-decode takes the prose
+    path and refuses a wrapped reply the decoder admitted -- raised outside
+    every rejection handler, which sealed whole episodes failed/unscored on
+    the r3 wrapped-with-note family. With the fact carried beside the bytes
+    (``ModelDecision.channel_arguments``) the note is found, redacted and
+    published as the canonical envelope.
+    """
+
+    current = observation()
+    wrapped = json.dumps({"reply_json": envelope(type_payload(current), "Live notes: all good")})
+    decision = parse_decision(wrapped, current, route=ROUTE, channel_arguments=True)
+    assert decision.channel_arguments is True
+
+    recorded = redact_public_reply(
+        decision.public_reply or "",
+        RedactionSet.from_resolved_values(()),
+        channel_arguments=decision.channel_arguments,
+    )
+    assert json.loads(recorded)["public_observations"] == "Live notes: all good"
+
+    # The prose reading of the same bytes is the object lesson: a second
+    # reader WITHOUT the fact refuses, which is what sealed the episodes.
+    with pytest.raises(DecisionParseError):
+        redact_public_reply(decision.public_reply or "", RedactionSet.from_resolved_values(()))
+
+    # The redaction boundary itself is not bypassed by the new reading: a
+    # secret in the note is still replaced.
+    secret = "known-secret/credential-value"
+    secret_wrapped = json.dumps({"reply_json": envelope(type_payload(current), secret)})
+    secret_decision = parse_decision(secret_wrapped, current, route=ROUTE, channel_arguments=True)
+    clean = redact_public_reply(
+        secret_decision.public_reply or "",
+        RedactionSet.from_resolved_values([secret]),
+        channel_arguments=secret_decision.channel_arguments,
+    )
+    assert secret not in clean
+    assert json.loads(clean)["public_observations"] == "[redacted public observations]"
+
+
+@pytest.mark.parametrize("spelling", ["bare", "input-object", "input-string"])
+def test_a_single_action_is_read_as_a_one_action_batch(
+    spelling: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One action, stated alone, is a batch of one -- the measured 22 of 97.
+
+    The model wrote the action as a sentence rather than as an array: bare at
+    the top level, as a generic tool-call wrapper's object, or inside the
+    wrapper's JSON string (the corpus uses all three). Each becomes the SAME
+    one-action batch as the canonical envelope -- byte for byte the action it
+    wrote, so a tolerance that salvaged the turn by running something else is
+    impossible by construction. Tolerated is not silent: acceptance writes a
+    line, and this asserts it.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    payloads = {
+        "bare": json.dumps(action),
+        "input-object": json.dumps({"input": action}),
+        "input-string": json.dumps({"input": json.dumps(action)}),
+    }
+
+    with caplog.at_level(logging.WARNING):
+        decision = parse_decision(payloads[spelling], current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == _canonical(
+        json.dumps({"actions": [action]}), current
+    )
+    assert "single action object" in caplog.text
+
+
+def test_a_single_action_with_material_after_it_keeps_the_refusal() -> None:
+    """A one-action reply is read only as the reply's WHOLE content.
+
+    With prose, or with a batch, after the single action the reply stated more
+    than that action -- and executing the head while silently dropping the rest
+    is the failure mode both gates exist for (``at_end`` in the normaliser, the
+    sequence read in ``parse_decision``). The refusal is the class the reply
+    always had, so sealed bundles keep bucketing identically.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    bodies = [
+        json.dumps(action) + " and that is all.",
+        json.dumps(action) + "\n" + json.dumps({"actions": _two_actions(current)}),
+    ]
+
+    for body in bodies:
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(body, current, route=ROUTE)
+        assert classify_rejection(str(info.value)) == "batch-shape", body
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "newline",
+        "comma-bracket",
+        "comma-bracket-brace",
+        "note-tail",
+        "input-string",
+        "input-wrappers",
+    ],
+)
+def test_an_actions_sequence_is_read_in_order(spelling: str) -> None:
+    """The contents of the actions array, the brackets never written: 18 of 97.
+
+    Ten of the sealed refusals concatenated one-action objects at the top
+    level (newline- or comma-separated, some closed by one stray ``]`` and the
+    envelope's own ``}``), and eight carried the same inside a wrapper's
+    string (five of them also closing with ``]``, two with the note tail).
+    The decision is the SEQUENCE, in the order the model wrote it -- asserted
+    against the canonical two-action envelope rather than counted, because a
+    read that reordered or dropped an action would be worse than the refusal
+    it replaces. The note in the envelope tail is NOT recovered, the same
+    disposition the string-actions tolerance documents: nothing is published
+    for it, and the actions are the whole of what was read.
+    """
+
+    current = observation()
+    actions = _two_actions(current)
+    first, second = json.dumps(actions[0]), json.dumps(actions[1])
+    payloads = {
+        "newline": first + "\n" + second,
+        "comma-bracket": first + ", " + second + "]",
+        "comma-bracket-brace": first + ", " + second + "]}",
+        "note-tail": first + ", " + second + '],"public_observations": "a fragment"}',
+        "input-string": json.dumps({"input": first + ", " + second + "]"}),
+        "input-wrappers": json.dumps({"input": first}) + "\n" + json.dumps({"input": second}),
+    }
+
+    decision = parse_decision(payloads[spelling], current, route=ROUTE)
+
+    assert decision.action_batch.to_canonical_json() == _canonical(
+        json.dumps({"actions": actions}), current
+    )
+    assert decision.public_reply is None
+    assert decode_public_reply(payloads[spelling])["public_observations"] == ""
+
+
+def test_a_sequence_element_that_is_not_one_action_keeps_the_refusal() -> None:
+    """A sequence is read only when EVERY element is one action.
+
+    An element that is a whole batch (or a plain object with no ``kind``, or a
+    trailing word behind the closing marker) means the concatenation could be
+    saying something else -- and a batch element is the competing question the
+    decoder refuses elsewhere, so it must not be resolved by order. Material
+    after the sequence is not a marker and refuses too.
+    """
+
+    current = observation()
+    action = _one_action(current)
+    bodies = [
+        json.dumps(action) + "\n" + json.dumps({"actions": [action]}),
+        json.dumps(action) + "\n" + json.dumps({"duration_ms": 500}),
+        json.dumps(action) + ", " + json.dumps(action) + "] trailing prose",
+    ]
+
+    for body in bodies:
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(body, current, route=ROUTE)
+        assert classify_rejection(str(info.value)) == "batch-shape", body
+
+
+def test_a_bare_array_under_a_wrapper_is_the_decision() -> None:
+    """The call's arguments ARE the array: 4 of the 97, one with a note.
+
+    ``{"input": [<actions>]}`` is the array itself where the envelope was
+    expected -- the same read as an ``action_batch`` holding an array, one
+    level out, and the note beside it is the ordinary envelope note that
+    survives. A list that is empty, or is not objects, is not a decision and
+    keeps its refusal.
+    """
+
+    current = observation()
+    actions = _two_actions(current)
+
+    decision = parse_decision(json.dumps({"input": actions}), current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == _canonical(
+        json.dumps({"actions": actions}), current
+    )
+
+    with_note = json.dumps({"input": [actions[0]], "public_observations": "why"})
+    noted = parse_decision(with_note, current, route=ROUTE)
+    assert noted.action_batch.to_canonical_json() == _canonical(
+        json.dumps({"actions": [actions[0]]}), current
+    )
+    assert decode_public_reply(with_note)["public_observations"] == "why"
+
+    for body in (json.dumps({"input": []}), json.dumps({"input": [1, 2]})):
+        with pytest.raises(DecisionParseError) as info:
+            parse_decision(body, current, route=ROUTE)
+        assert classify_rejection(str(info.value)) == "batch-shape", body
+
+
+def test_a_read_shape_still_binds_and_still_validates() -> None:
+    """Reading a shape never skips the checks a canonical envelope gets.
+
+    The binding check runs over the read actions: a single action naming a
+    different observation refuses the whole turn as ``observation-binding``
+    -- a staleness the batch-shape sentence used to hide. Validation runs too:
+    an action-level key no kind declares keeps its own class. These are the
+    corpus's own reclassifications (5 ``extra-action-key``, 1
+    ``observation-binding``, 1 ``out-of-frame-coordinate``, 1
+    ``adapter-capability`` in the sealed 2026-10-03 set), and each is the
+    defect the reply actually has.
+    """
+
+    current = observation()
+
+    stale = dict(_one_action(current), observation_id=observation(1).observation_id)
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(json.dumps(stale), current, route=ROUTE)
+    assert classify_rejection(str(info.value)) == "observation-binding"
+
+    with_extra = dict(_one_action(current), frequency_penalty=0)
+    with pytest.raises(DecisionParseError) as info:
+        parse_decision(json.dumps(with_extra), current, route=ROUTE)
+    assert classify_rejection(str(info.value)) == "extra-action-key"

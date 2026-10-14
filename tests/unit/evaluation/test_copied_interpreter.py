@@ -11,6 +11,7 @@ of the cause. See ``copied_interpreter.py`` for the full account.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,107 @@ def test_copied_interpreter_is_the_running_interpreter_and_imports_pydantic_core
     assert probe.stdout.split() == [str(part) for part in sys.version_info[:2]]
 
 
+def test_the_copied_executable_is_never_run_before_its_library_is_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordering guard: no exec of the copy before the carry.
+
+    A probe moved back in front of the carry is a real dyld abort (SIGABRT)
+    on a uv-managed interpreter and posts one crash report per venv build;
+    this pins the order with synthetic probes instead of paying the abort.
+    """
+
+    library = tmp_path / "libpython-synthetic.dylib"
+    library.write_bytes(b"synthetic-libpython-bytes")
+    monkeypatch.setattr(helper, "_shared_libpython", lambda base: library)
+
+    venv = tmp_path / "venv"
+    venv_bin = venv / "bin"
+    seen: list[tuple[bool, bool]] = []
+
+    def recording_probe(executable: Path, code: str) -> subprocess.CompletedProcess[str]:
+        if executable.parent == venv_bin:
+            target = venv / "lib" / library.name
+            seen.append(
+                (
+                    target.is_file(),
+                    target.is_file() and target.read_bytes() == library.read_bytes(),
+                )
+            )
+        return subprocess.CompletedProcess([str(executable), code], 0, "ok\n", "")
+
+    monkeypatch.setattr(helper, "_probe", recording_probe)
+    executable = helper.copied_interpreter(venv)
+
+    assert executable.is_file()
+    assert seen, "copied_interpreter never probed the copy"
+    assert all(
+        carried and matches for carried, matches in seen
+    ), f"a probe ran before the shared libpython was carried: {seen}"
+    assert seen[0][0] and seen[0][1], f"the first probe ran before the carry: {seen[0]}"
+
+
+def test_carried_library_that_still_fails_names_it_and_the_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy that still cannot start after the carry names both paths."""
+
+    library = tmp_path / "libpython-synthetic.dylib"
+    library.write_bytes(b"synthetic-libpython-bytes")
+    monkeypatch.setattr(helper, "_shared_libpython", lambda base: library)
+    monkeypatch.setattr(
+        helper,
+        "_probe",
+        lambda *_: subprocess.CompletedProcess([], 134, "", "SYNTHETIC_START_FAILURE"),
+    )
+
+    venv = tmp_path / "venv"
+    with pytest.raises(AssertionError, match="still did not start after copying") as raised:
+        helper.copied_interpreter(venv)
+
+    message = str(raised.value)
+    assert str(library) in message
+    assert str(venv / "lib" / library.name) in message
+    assert "SYNTHETIC_START_FAILURE" in message
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_a_pre_existing_link_is_never_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_kind: str
+) -> None:
+    """The carry must land in a fresh file, never through a planted name.
+
+    A symlink or hardlink at the target would let copy2 write into the file it
+    stands for -- in production, the uv-managed machine-wide interpreter; the
+    sentinel's bytes are the tripwire.
+    """
+
+    library = tmp_path / "libpython-synthetic.dylib"
+    library.write_bytes(b"synthetic-libpython-bytes")
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"do-not-touch")
+
+    venv = tmp_path / "venv"
+    target = venv / "lib" / library.name
+
+    def plant_link(base: Path) -> Path:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if link_kind == "symlink":
+            target.symlink_to(sentinel)
+        else:
+            os.link(sentinel, target)
+        return library
+
+    monkeypatch.setattr(helper, "_shared_libpython", plant_link)
+    monkeypatch.setattr(helper, "_probe", lambda *_: subprocess.CompletedProcess([], 0, "ok\n", ""))
+
+    helper.copied_interpreter(venv)
+
+    assert sentinel.read_bytes() == b"do-not-touch", f"the write went through the {link_kind}"
+    assert target.is_file() and not target.is_symlink()
+    assert target.read_bytes() == library.read_bytes()
+
+
 def test_unrepairable_start_failure_names_the_base_and_the_dyld_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -44,12 +146,15 @@ def test_unrepairable_start_failure_names_the_base_and_the_dyld_error(
     started: list[bool] = []
     real_probe = helper._probe
 
-    def failing_probe(executable: Path, code: str):  # type: ignore[no-untyped-def]
+    def failing_probe(executable: Path, code: str) -> subprocess.CompletedProcess[str]:
         if code == "print('ok')" and not started:
             started.append(True)
-            result = real_probe(executable, "import sys; sys.exit(134)")
-            result.stderr = "dyld: Library not loaded: @rpath/libpython"
-            return result
+            # Synthesise the failed start rather than really exec'ing the
+            # unrepaired copy: a real exec is a dyld abort that posts its own
+            # crash report, and the stderr this test asserts on is synthetic.
+            return subprocess.CompletedProcess(
+                [str(executable), code], 134, "", "dyld: Library not loaded: @rpath/libpython"
+            )
         return real_probe(executable, code)
 
     monkeypatch.setattr(helper, "_probe", failing_probe)

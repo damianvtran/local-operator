@@ -913,6 +913,7 @@ def build_system_blocks(
     goal_status: str = "",
     user_instructions: str = "",
     repo_guidance: str = "",
+    language_line: str = "",
     credentials: Sequence[str] | None = None,
     team_brief: str = "",
     agent_brief: str = "",
@@ -954,6 +955,16 @@ def build_system_blocks(
     not a per-turn instruction competing with the live conversation. Keeping
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
+
+    ``language_line`` is the SYS1 sentence telling the model the user's
+    preferred language (from the one backend resolver, ``i18n.resolve``).
+    Same head-block, read-once discipline as ``user_instructions`` — it sits
+    in the STABLE prefix, never the per-turn tail, and a language change takes
+    effect at the next session/prefix rebuild, not mid-session (a mid-session
+    rewrite would reprice the whole cached prefix, RFC §10). It is placed
+    BEFORE the custom-instructions section so a hand-written "always answer in
+    X" preference still outranks this default. Model-facing ENGLISH by
+    design, uniform for every locale including ``en``.
 
     ``goal_status`` is the goal's lifecycle state (``"" | "active" | "done"``),
     and it exists so that the ``<goal>`` block cannot outlive the goal's
@@ -1075,6 +1086,12 @@ def build_system_blocks(
         # files are part of the project's standing state, edited between
         # sessions, never within one.
         instructions = f"{instructions}\n\n{repo_guidance.strip()}"
+    if language_line.strip():
+        # The model-facing language sentence (SYS1; see the docstring): in the
+        # stable head, before custom instructions (which must be able to
+        # override its default), English wording parameterised by the one
+        # backend language setting, uniform for every locale including `en`.
+        instructions = f"{instructions}\n\n{language_line.strip()}"
     if user_instructions.strip():
         # Tagged, not merged: the model must be able to tell the operator's
         # standing customization apart from the packaged rules above it, and

@@ -27,7 +27,7 @@ def test_the_catalogue_carries_prefixes_text_on_every_row(monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "catalogue-token")
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/commands", headers={"Authorization": "Bearer catalogue-token"}
         )
@@ -57,6 +57,9 @@ def test_the_catalogue_carries_prefixes_text_on_every_row(monkeypatch):
         "effort",
         "approvals",
         "theme",
+        # C's `/language`: a value the command owns (a language tag), completed
+        # inline like the theme name above.
+        "language",
     }
 
 
@@ -83,7 +86,7 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "catalogue-token")
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/commands", headers={"Authorization": "Bearer catalogue-token"}
         )
@@ -126,6 +129,7 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
         "effort",
         "approvals",
         "theme",
+        "language",
     }
     for row in rows:
         if row["consumes_prompt"] or row["prefixes_text"]:
@@ -182,7 +186,7 @@ def test_the_credential_row_publishes_its_own_text(monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "catalogue-token")
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         response = client.get(
             "/v1/desktop/commands", headers={"Authorization": "Bearer catalogue-token"}
         )
@@ -217,7 +221,7 @@ def test_the_commands_capability_reports_the_narrowed_policy():
     bug and the sentence stands alone. Left unpinned, a later edit dropping the
     bump would silently put the UI's remedy back on the wrong branch.
     """
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
         result = client.get("/v1/capabilities").json()["result"]
 
     assert result["features"]["commands"] == 2

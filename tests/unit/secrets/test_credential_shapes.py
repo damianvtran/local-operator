@@ -95,6 +95,8 @@ from tests.unit.secrets.credential_shape_corpus import (
     STORE_ENTRY_NAME,
     TYPE_ANNOTATION_NEGATIVES,
     TYPE_ANNOTATION_POSITIVES,
+    VENDOR_IDENTIFIER_MATRIX,
+    VENDOR_REAL_KEY_POSITIVES,
     Case,
     _compact,
 )
@@ -1217,7 +1219,9 @@ def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
     knows and is what makes the line-terminator leak unrepresentable rather than
     merely unobserved. The old ``size + _PIPE_DEFERRAL_LIMIT`` shape is kept for
     the sizes where the window is the value (a value whose widest spelling is the
-    escaped form is 4x, so the two agree only below the floor).
+    escaped form is 4x, so the two agree only while the widest spelling IS the
+    value — below the floor that is no longer automatic either: see
+    ``_below_floor_forms``).
 
     ``getattr`` because this row is a guard on the filter as a whole rather than a
     discriminator for this change: the SHAPE rule it measures predates it, so it
@@ -2760,17 +2764,284 @@ def test_the_incidents_own_evasion_is_a_regression_case() -> None:
     assert masked == "host is [redacted]"
 
 
-def test_a_value_under_the_floor_keeps_its_verbatim_coverage_only() -> None:
+def test_a_short_ascii_value_keeps_its_verbatim_coverage_only() -> None:
     """The over-masking floor, stated as a contract rather than left implied.
 
     A short value's permutations are strings ordinary output already contains
-    (``atled`` is ``delta`` backwards), so they are not enumerated. What must
-    not change is the pre-existing guarantee: the value ITSELF is still masked.
+    (``atled`` is ``delta`` backwards), so they are not enumerated — and for a
+    value that needs no escaping that is the whole story: ``json.dumps`` escapes
+    none of its characters, so its JSON escaping IS the value and the family below
+    adds nothing to it. What must not change either way is the pre-existing
+    guarantee: the value ITSELF is still masked.
     """
     short = "k3y-8812"
     assert len(short) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN
     assert redaction_shapes.credential_forms(short) == (short,)
     assert redact_secret_values(f"id={short}", [short]) == "id=[redacted]"
+
+
+# --- SHORT known values: the JSON-escaping family, under its own bound ----------
+#
+# The floor's rule stands — a short value's PERMUTATIONS are not enumerated — and
+# one family is not a permutation: the value's own bytes written the way every JSON
+# producer writes them, which is how a multi-byte, quoted or newline-carrying value
+# arrives in a READ RESULT while the session holds only the verbatim bytes. It is
+# enumerated under a second, separate bound on the SPELLING's length
+# (``redaction_shapes._SHORT_ESCAPE_MIN_SPELLING_LEN``). These tests are both
+# halves: what the family must now mask, and the residual it must not claim.
+#
+# Values are assembled from CODE POINTS because this file is read by agents through
+# the pass it describes: a multi-byte sequence written as a literal here is masked
+# in their transcript, which is the reason ``_LT``/``_GT`` are built above.
+
+
+def _codepoints(*codes: int) -> str:
+    """A synthetic value from its code points, so none appears literally here."""
+    return "".join(chr(code) for code in codes)
+
+
+#: 8 to 10 characters — all under the floor — in the scripts a real credential
+#: travels in, plus the two characters that make an encoder escape (a newline, a
+#: quote) and one value carrying a LITERAL backslash-u sequence.
+SHORT_CJK_EIGHT = _codepoints(0x79D8, 0x5BC6, 0x6587, 0x66F8, 0x756A, 0x53F7, 0x516B, 0x56DB)
+SHORT_CJK_TWO = _codepoints(0x79D8, 0x5BC6)
+SHORT_CJK_ONE = chr(0x79D8)
+SHORT_CYRILLIC_NINE = _codepoints(
+    0x0441, 0x0435, 0x043A, 0x0440, 0x0435, 0x0442, 0x043D, 0x044B, 0x0439
+)
+SHORT_MIXED_SCRIPTS = "p" + _codepoints(0x0430) + "ssword" + SHORT_CJK_TWO
+SHORT_WITH_NEWLINE = "ab" + chr(10) + "cd" + SHORT_CJK_TWO
+SHORT_WITH_QUOTE = "ab" + chr(34) + "cd" + SHORT_CJK_TWO
+SHORT_LITERAL_BACKSLASH_U = "tok" + chr(92) + "u00e9" + "xy"
+
+#: The values the short-value sweeps run over. The last row is a CONTROL: a value
+#: that gains no spelling at all, so a sweep that had quietly stopped covering the
+#: family still has a row that passes for the ordinary reason.
+SHORT_SWEEP_VALUES = (
+    ("short cjk eight", SHORT_CJK_EIGHT),
+    ("short cyrillic nine", SHORT_CYRILLIC_NINE),
+    ("short mixed scripts", SHORT_MIXED_SCRIPTS),
+    ("short with a newline", SHORT_WITH_NEWLINE),
+    ("short with a quote", SHORT_WITH_QUOTE),
+    ("short ascii, escape-free", "k3y-8812"),
+)
+
+
+#: One value per row for the exact-form test, so a failure names the shape that
+#: broke rather than an index.
+SHORT_EXACT_FORM_VALUES = (
+    ("two cjk, escaping exactly at the bound", SHORT_CJK_TWO),
+    ("eight cjk", SHORT_CJK_EIGHT),
+    ("nine cyrillic", SHORT_CYRILLIC_NINE),
+    ("mixed scripts", SHORT_MIXED_SCRIPTS),
+    ("carrying a newline", SHORT_WITH_NEWLINE),
+    ("carrying a quote", SHORT_WITH_QUOTE),
+)
+
+
+def _short_json_spellings(value: str) -> dict[str, str]:
+    """The two spellings the below-floor family adds, in the encoding it emits them.
+
+    Built HERE rather than read back out of ``credential_forms``, so a sweep over
+    it can FAIL: a parametrisation that took its spellings from the policy would
+    shrink with the policy and stay green the day the family disappeared. The
+    upper-case spelling is the one a hand-rolled encoder or an upper-casing tool
+    leaves behind — the digits only, because the ``\\u`` introducer is
+    case-sensitive (see ``redaction_shapes._uppercased_json_escape_digits``).
+    """
+    escaped = json.dumps(value)[1:-1]
+    return {
+        "json escaped": escaped,
+        "json escaped, upper-case digits": re.sub(
+            r"(\\u)([0-9A-Fa-f]{4})",
+            lambda match: match.group(1) + match.group(2).upper(),
+            escaped,
+        ),
+    }
+
+
+@pytest.mark.parametrize("value_label,value", SHORT_EXACT_FORM_VALUES)
+def test_a_short_value_gets_its_two_escapings_and_nothing_else(
+    value_label: str, value: str
+) -> None:
+    """The family, exactly: two spellings added, and the boundary around them.
+
+    The added strings are enumerated rather than described, so this measures the
+    WIDTH of what the pass now claims. Both escapings must be present AND at least
+    the spelling bound long, the value's own two boundaries (its reversal and its
+    spread characters) must stay released, and a neighbouring scalar's escaping
+    must survive — the last is the negative control that separates this family from
+    a "mask any escape run" rule.
+    """
+    assert len(value) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN, value_label
+    spellings = _short_json_spellings(value)
+    forms = redaction_shapes.credential_forms(value)
+    assert forms == tuple(sorted(forms, key=len, reverse=True)), value_label
+    for label, spelling in spellings.items():
+        assert (
+            len(spelling) >= redaction_shapes._SHORT_ESCAPE_MIN_SPELLING_LEN
+        ), f"{value_label}/{label}: under the spelling bound, so this test proves nothing"
+        assert spelling in forms, f"{value_label}/{label} is missing from the spelling list"
+        text = f"printed {spelling} done"
+        assert redact_secret_values(text, [value]) == "printed [redacted] done", label
+    neighbour_escape = json.dumps(SHORT_CJK_ONE + chr(0x5BC7))[1:-1]
+    for released in (
+        f"near {neighbour_escape} in a log",
+        f"reversed {value[::-1]} here",
+        f"spread {' '.join(value)} here",
+    ):
+        assert redact_secret_values(released, [value]) == released, released
+
+
+def test_a_short_values_escaping_under_the_bound_stays_a_stated_residual() -> None:
+    """The residual, pinned so the note on the constant cannot drift from behaviour.
+
+    A ONE-character CJK value escapes to six characters — a single escape, which is
+    a plausible run inside any JSON body — so the spelling bound refuses it and the
+    escaped spelling reaches the model while the verbatim one is masked. That is
+    the stated limit of this family (a one-character value, a spelling under the
+    bound, an encoding it does not enumerate), not a hole found later, and it is
+    asserted rather than described so that widening the bound has to come with
+    this test.
+    """
+    escaped = json.dumps(SHORT_CJK_ONE)[1:-1]
+    assert len(escaped) < redaction_shapes._SHORT_ESCAPE_MIN_SPELLING_LEN
+    assert redaction_shapes.credential_forms(SHORT_CJK_ONE) == (SHORT_CJK_ONE,)
+    text = f"printed {escaped} and {SHORT_CJK_ONE} done"
+    masked = redact_secret_values(text, [SHORT_CJK_ONE])
+    assert escaped in masked, "the residual is gone; the constant's note needs updating"
+    assert SHORT_CJK_ONE not in masked, "the verbatim spelling must still be masked"
+
+
+def test_a_value_carrying_a_literal_backslash_u_gains_only_the_decoding_spelling() -> None:
+    """The round-trip guard, on the case that makes a textual upper-casing wrong.
+
+    A value carrying a LITERAL backslash-u sequence is escaped by ``json.dumps``
+    with its own backslash escaped first, so the ``\\u`` an upper-casing rule finds
+    there belongs to the CONTENT — rewriting it yields the escape of a DIFFERENT
+    scalar. Without the round trip that string would join the needle list and the
+    pass would mask text no session registered, which is the over-masking defect
+    this module's negative corpus exists to prevent. Asserted in both directions:
+    the spelling that decodes to the value IS offered, the one that does not is
+    NOT, and ordinary text carrying the latter is byte-identical.
+    """
+    value = SHORT_LITERAL_BACKSLASH_U
+    assert len(value) < redaction_shapes._TRANSFORM_MIN_VALUE_LEN
+    escaped = json.dumps(value)[1:-1]
+    assert escaped != value
+    assert len(escaped) >= redaction_shapes._SHORT_ESCAPE_MIN_SPELLING_LEN
+    wrong = _short_json_spellings(value)["json escaped, upper-case digits"]
+    assert wrong != escaped, "the upper-casing rule no longer rewrites this string"
+    assert json.loads(f'"{wrong}"') != value, "the rewritten spelling decodes to the value"
+    forms = redaction_shapes.credential_forms(value)
+    assert escaped in forms
+    assert wrong not in forms
+    ordinary = f"the other scalar's escape {wrong} in a log line"
+    assert redact_secret_values(ordinary, [value]) == ordinary
+
+
+@pytest.mark.parametrize("value_label,value", SHORT_SWEEP_VALUES)
+def test_the_spelling_list_stays_bounded_and_longest_first_below_the_floor(
+    value_label: str, value: str
+) -> None:
+    """The structural bound again, on the short path — which now has two terms.
+
+    The pass runs over every settled result, so its cost is a contract on both
+    paths: at most 24 spellings, none duplicated, longest first, and the longest is
+    what :func:`~local_operator.redaction_shapes.longest_redaction_form` derives
+    the chunked surfaces' hold from. A short MULTI-BYTE value is what changed: its
+    widest spelling is its escaping, four characters per byte for an ASCII-escaped
+    one, so the window it needs is no longer its own length.
+    """
+    forms = redaction_shapes.credential_forms(value)
+    assert len(forms) <= 24, f"{value_label} grew to {len(forms)} spellings"
+    assert len(set(forms)) == len(forms), f"{value_label} has a duplicated spelling"
+    assert forms == tuple(sorted(forms, key=len, reverse=True)), value_label
+    assert redaction_shapes.longest_redaction_form([value]) == max(len(f) for f in forms)
+    if any(len(form) > len(value) for form in forms):
+        assert redaction_shapes.stream_hold_window([value]) > len(value), value_label
+
+
+@pytest.mark.parametrize("value_label,value", SHORT_SWEEP_VALUES)
+def test_a_short_values_escaping_survives_no_split_of_either_chunked_surface(
+    value_label: str, value: str
+) -> None:
+    """Every offset, both chunked surfaces, for the family the floor used to skip.
+
+    The hold is sized from the WIDEST spelling while the leak happens at the
+    narrowest cut, and for a short value that is a new relationship: the escaping is
+    several times the length of the value the window was previously derived from.
+    Swept at every split rather than sampled, on both surfaces the session has (the
+    eval worker's frames and the bash pipe, live view and peek tail), because a
+    window that happens to be wide enough for three offsets is the shape a sampled
+    test cannot tell from a correct one.
+    """
+    spellings = {"the value itself": value, **_short_json_spellings(value)}
+    for spelling_label, spelling in spellings.items():
+        payload = f"prefix {spelling} suffix\n"
+        for offset in range(len(payload) + 1):
+            masker = redaction_shapes.StreamMasker([value])
+            published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+            published += masker.push("", final=True)
+            where = f"{value_label}/{spelling_label} at {offset} chars"
+            assert spelling not in published, f"{where}: leaked from the stream masker"
+            assert REDACTION_MARKER in published, f"{where}: nothing was masked"
+        raw = payload.encode()
+        for split in range(len(raw) + 1):
+            redactor = builtin._PipeRedactor([value])
+            bundled = redactor.feed(raw[:split]) + redactor.feed(raw[split:])
+            bundled += redactor.feed(b"", final=True)
+            where = f"{value_label}/{spelling_label} at {split} bytes"
+            assert spelling.encode() not in bundled, f"{where}: leaked from the pipe"
+
+
+@pytest.mark.asyncio
+async def test_a_short_known_value_is_masked_in_a_real_read_result(tmp_path: Path) -> None:
+    """The sink this family exists for, exercised end to end rather than by proxy.
+
+    A real ``read`` of a real file, through the store's own composed pass and the
+    session's result hook — the two callables a tool result actually travels
+    (``Session._redact_tool_result_text`` reads ``redact_with_report``). Helper
+    parity proves nothing here: the finding this family came from was measured on
+    this path, where a synthetic ``scrub_values`` call masked the value while the
+    settled result left the escaped spelling in place.
+
+    Three controls, because a green pass can mean three different things: the read
+    must have RETURNED the spelling (or the absence below is vacuous), the SHAPE
+    pass must not be the masker (``{"payload": …}`` gets no shape hit while
+    ``{"token": …}`` does, so a wrapper that the table recognises would measure the
+    table instead), and a neighbouring scalar's escaping must survive untouched.
+    """
+    from local_operator.tools.builtin import execute_read
+
+    value = SHORT_CJK_EIGHT
+    escaped = json.dumps(value)[1:-1]
+    upper = _short_json_spellings(value)["json escaped, upper-case digits"]
+    neighbour = json.dumps(SHORT_CJK_ONE + chr(0x5BC7))[1:-1]
+    target = tmp_path / "result.json"
+    target.write_text(
+        '{"payload": "' + escaped + '", "near": "' + neighbour + '", "n": 1}\n'
+        "log line: payload=" + escaped + " upper=" + upper + "\n",
+        encoding="utf-8",
+    )
+    source = target.read_bytes()
+
+    session = _session(tmp_path)
+    session.variables.store_credential("LO_SYNTH_SHORT", value, "command")
+    context = ToolContext(cwd=str(tmp_path), variables=session.variables)
+    result = await execute_read("call-short", {"path": str(target)}, None, None, context)
+    assert not result.is_error, result.text
+    # The controls: the result really carries the spelling, and the shape table is
+    # not what masks it. Both are asserted, not assumed.
+    assert escaped in result.text
+    assert escaped in scrub_shapes(result.text), "the shape pass is the masker here"
+
+    masked = session._redact_tool_result_text(result.text)
+    assert escaped not in masked, "the settled result published the escaped spelling"
+    assert upper not in masked, "the settled result published the upper-case spelling"
+    assert REDACTION_MARKER in masked
+    assert neighbour in masked, "an ordinary neighbouring escape was rewritten"
+    assert target.read_bytes() == source, "the read rewrote the executor's file"
 
 
 def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
@@ -2790,6 +3061,171 @@ def test_ordinary_text_that_looks_transformed_is_left_byte_identical() -> None:
     )
     for text in ordinary:
         assert redact_secret_values(text, [SPELLED_VALUE]) == text
+
+
+# --- a PLAIN-WORD value is masked as a word, not as a substring ----------------
+#
+# The display half of the edit-corruption loop (2026-10-09): scrubbing
+# ``PASSWORD=<word>`` registers the word, and a substring match then rewrote
+# ordinary prose (``un<mask>ally``) in output the model copies back into source
+# files. The rule under test: a value of ASCII letters only is matched on
+# letter-run boundaries; every other shape keeps the substring match. Built from
+# parts so this file never holds the word contiguously (the display layer masks it
+# in agent-visible transcripts).
+
+PLAIN_WORD = "synth" + "etic"
+#: 14 letters, i.e. at or over ``_TRANSFORM_MIN_VALUE_LEN``, so every ENCODED spelling
+#: is generated for it (the 9-letter word above only has its verbatim form).
+LONG_PLAIN_WORD = "indisting" + "uishable"
+
+
+class TestPlainWordValueIsMatchedOnWordBoundaries:
+    """DISPLAY of the exact-value pass for a letters-only value."""
+
+    def test_the_word_inside_a_longer_run_of_letters_is_left_alone(self) -> None:
+        for text in (
+            f"un{PLAIN_WORD}ally",
+            f"{PLAIN_WORD}ally",
+            f"pre{PLAIN_WORD}",
+            f"{PLAIN_WORD}s and {PLAIN_WORD}ism",
+        ):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text, text
+
+    def test_the_standalone_word_is_still_masked_in_every_position(self) -> None:
+        for text, expected in (
+            (f"a {PLAIN_WORD} store", "a [redacted] store"),
+            (PLAIN_WORD, "[redacted]"),
+            (f"x={PLAIN_WORD}.", "x=[redacted]."),
+            (f"'{PLAIN_WORD}'", "'[redacted]'"),
+            (f"({PLAIN_WORD}, {PLAIN_WORD})", "([redacted], [redacted])"),
+            # A word glued to a digit, underscore or symbol is NOT a longer run of
+            # letters: a credential is routinely glued into exactly these.
+            (f"{PLAIN_WORD}1", "[redacted]1"),
+            (f"my_{PLAIN_WORD}", "my_[redacted]"),
+            (f"{PLAIN_WORD}_x", "[redacted]_x"),
+            (f"{PLAIN_WORD}-x", "[redacted]-x"),
+            (f"{PLAIN_WORD}\n", "[redacted]\n"),
+        ):
+            assert redact_secret_values(text, [PLAIN_WORD]) == expected, text
+
+    def test_other_case_variants_are_not_values_and_are_left_alone(self) -> None:
+        """Unchanged behaviour, pinned: the pass has never been case-insensitive."""
+        for text in (PLAIN_WORD.capitalize(), PLAIN_WORD.upper()):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text
+
+    def test_the_reversed_spelling_is_matched_on_the_same_boundaries(self) -> None:
+        # LONG: a value under the transform floor has no reversal spelling at all.
+        reversed_word = LONG_PLAIN_WORD[::-1]
+        masked = redact_secret_values(f"is {reversed_word} ok", [LONG_PLAIN_WORD])
+        assert masked == "is [redacted] ok"
+        glued = f"un{reversed_word}ally"
+        assert redact_secret_values(glued, [LONG_PLAIN_WORD]) == glued
+
+    @pytest.mark.parametrize("label", sorted(_spellings(LONG_PLAIN_WORD)))
+    def test_every_spelling_of_a_long_plain_word_still_masks(self, label: str) -> None:
+        """The #1428 family list, run over a letters-only value: nothing is dropped."""
+        spelling = _spellings(LONG_PLAIN_WORD)[label]
+        masked = redact_secret_values(f"printed={spelling} done", [LONG_PLAIN_WORD])
+        assert spelling not in masked, f"{label} survived the mask"
+        assert masked == "printed=[redacted] done"
+
+    def test_an_encoded_spelling_keeps_the_substring_match_even_glued_in(self) -> None:
+        """Only the two letter-run spellings take the boundary; an encoded one is a leak
+        wherever it sits, so it fails toward masking."""
+        encoded = _spellings(LONG_PLAIN_WORD)["hex lower"]
+        masked = redact_secret_values(f"blob{encoded}tail", [LONG_PLAIN_WORD])
+        assert encoded not in masked
+
+    @pytest.mark.parametrize(
+        "value",
+        (
+            "synth" + "etic9",  # digit
+            "synth" + "etic-pass",  # symbol
+            "Synth" + "eticPass7",  # mixed shape
+            "p\u00e4ssw\u00f6rd",  # non-ASCII letters: no word edge to rely on
+            "\u5bc6\u7801\u5bc6\u7801\u5bc6\u7801",  # CJK has no spaces to bound on
+        ),
+    )
+    def test_a_value_that_is_not_a_plain_ascii_word_keeps_the_substring_match(
+        self, value: str
+    ) -> None:
+        """Pins the unchanged half: only letters-only values moved to boundaries."""
+        for text in (f"x{value}y", f"un{value}ally", f"{value}"):
+            masked = redact_secret_values(text, [value])
+            assert value not in masked, text
+            assert REDACTION_MARKER in masked
+
+    def test_the_boundary_cannot_hide_a_longer_value_that_contains_the_word(self) -> None:
+        """Longest-first still holds: a long value runs first, then the bare word."""
+        longer = PLAIN_WORD + "9"
+        masked = redact_secret_values(
+            f"{longer} then {PLAIN_WORD} then {PLAIN_WORD}ally", [PLAIN_WORD, longer]
+        )
+        assert masked == f"[redacted] then [redacted] then {PLAIN_WORD}ally"
+
+    @pytest.mark.parametrize("label", sorted(_spellings(LONG_PLAIN_WORD)))
+    def test_the_stream_masker_never_leaks_the_word_at_any_cut(self, label: str) -> None:
+        """Chunked surfaces: a boundary is read at a cut, so the risk is a LEAK, swept.
+
+        The cut rules are unchanged; what must hold is that no chunking publishes the
+        word (a cut may over-mask a fragment of a longer word, never under-mask).
+        """
+        spelling = _spellings(LONG_PLAIN_WORD)[label]
+        payload = f"prefix {spelling} suffix\n"
+        for offset in range(len(payload) + 1):
+            masker = redaction_shapes.StreamMasker([LONG_PLAIN_WORD])
+            published = masker.push(payload[:offset]) + masker.push(payload[offset:])
+            published += masker.push("", final=True)
+            assert spelling not in published, f"{label} leaked at {offset}"
+            assert REDACTION_MARKER in published
+
+    def test_the_stream_masker_settles_to_the_whole_text_answer_on_one_push(self) -> None:
+        text = f"a {PLAIN_WORD} store, un{PLAIN_WORD}ally\n"
+        masker = redaction_shapes.StreamMasker([PLAIN_WORD])
+        assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
+
+    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(
+        self, tmp_path: Path
+    ) -> None:
+        """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
+        store = VariableStore(cwd=str(tmp_path))
+        first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
+        assert PLAIN_WORD not in first
+        assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
+        assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
+        prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
+        assert store.redact(prose) == prose
+
+    @pytest.mark.parametrize(
+        "escape",
+        ("\\n", "\\t", "\\r", "\\b", "\\f", "\\u000a", "\\u000b", "\\u00ab"),
+    )
+    def test_a_json_escape_is_a_boundary_not_its_last_letter(self, escape: str) -> None:
+        """The raw-JSON shape: an escape's last character can itself be a letter.
+
+        ``raw_arguments`` is scrubbed as the RAW string, so a value at the start of a line
+        sits after ``\\n`` — whose last character is a letter — or after a ``\\uXXXX`` whose
+        last hex digit is one (``a``/``b``). Reading that character as a word character
+        released the token there while the parsed arguments stayed masked (QA round 1, Q-1).
+        """
+        for prefix in ("line1", "pre"):
+            raw = '{"content": "' + prefix + escape + PLAIN_WORD + ' here"}'
+            masked = redact_secret_values(raw, [PLAIN_WORD])
+            assert PLAIN_WORD not in masked, (escape, prefix)
+            assert REDACTION_MARKER in masked, (escape, prefix)
+
+    def test_a_letter_run_that_is_not_an_escape_still_suppresses_the_mask(self) -> None:
+        """The other direction: "escape before the token" did not become "backslash letter".
+
+        A plain letter before the token is still a longer run of letters (the accepted
+        residual), and the glued forms keep masking — the escape reading only widens what
+        counts as a SEPARATOR; it does not narrow the letter run.
+        """
+        for text in (f"un{PLAIN_WORD}ally", f"{PLAIN_WORD}ally"):
+            assert redact_secret_values(text, [PLAIN_WORD]) == text, text
+        for before in ("_", "1", "\\", '"'):
+            masked = redact_secret_values(f"x{before}{PLAIN_WORD} tail", [PLAIN_WORD])
+            assert PLAIN_WORD not in masked, before
 
 
 def test_every_spelling_of_a_longer_value_is_masked_before_a_prefix_value() -> None:
@@ -6217,7 +6653,25 @@ _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de
 #:     of the added spellings, which is the live gap this change closes; under
 #:     this module they are masked whole and contained (``complete`` true,
 #:     ``exposed`` false).
-_CORPUS_GRADING_DIGEST = "515f0e918997e14c9f12710962a6f080d2d81952e02659b6b7277bd2eba3c929"
+#:
+#: MOVED ONCE MORE on 2026-10-09 by the vendor-identifier fix (session ``565245718d90``):
+#:
+#: 13. **The MODULE change moved NOTHING in the corpus as it stood.** The 527 rows the
+#:     constant above covered (313 positives, 214 negatives) were graded under
+#:     ``origin/main``'s module and this one, masked text per row: **zero moved**. The
+#:     change releases only a tail of 8-15 lowercase letters with no separator, and the
+#:     corpus's smallest letters-only POSITIVE is the 16-letter ``pk-`` round-1 repro.
+#:
+#: 14. **The corpus change is the specification:** TEN positives (``VENDOR_REAL_KEY_POSITIVES``:
+#:     realistic mixed-case/digit keys, the 16-letter ceiling, a long unbroken lowercase
+#:     tail, camelCase and digit-carrying identifiers that the rule's bet keeps masking, and
+#:     one ``<prefix>_<word>=<value>`` pair that agent review R1 requires to keep masking)
+#:     and SIX negatives (``VENDOR_IDENTIFIER_NEGATIVES``: the reported identifier in a bare,
+#:     ``def``, dotted-call, JSON-key, TypeScript-export and spaced-assignment position).
+#:     ``POSITIVE_CASES`` moves 313 -> 323 and ``NEGATIVE_CASES`` 214 -> 220. The six
+#:     negatives are MASKED under ``origin/main``'s module and released under this one; the
+#:     ``=value`` positive is masked under BOTH.
+_CORPUS_GRADING_DIGEST = "c878ef5cc134d864afeda25990359d0af5e0d4ebb78a75d990a361f34146dcb3"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -8163,3 +8617,55 @@ def test_the_value_side_still_masks_beside_the_name_release(text: str) -> None:
     """The release is scoped to NAMES: the pinned value-side positives keep masking."""
     masked, hits = scrub_shapes_with_hits(text)
     assert masked != text and hits
+
+
+# --- 2026-10-09: a vendor-prefixed single-word identifier is a NAME ----------------------
+
+
+@pytest.mark.parametrize("case", VENDOR_IDENTIFIER_MATRIX, ids=lambda c: c.reason[:48])
+def test_a_vendor_prefixed_identifier_is_not_masked(case: Case) -> None:
+    """Every prefix in both vendor tables, in every source position, stays readable.
+
+    The defect this pins is a FEEDBACK LOOP, not a cosmetic mask: the model copies what
+    it saw into ``edit``/``write`` and the marker lands in source (see
+    ``tests/unit/harness/test_loop_redaction_feedback.py``). Name-agnostic is the claim
+    under test, so it is asserted against EVERY prefix in the tables rather than the one
+    that was reported. FAIL-ON-REVERT: ``_VENDOR_TAIL_IS_ONE_WORD`` in
+    ``_vendor_tail_guard``.
+    """
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert masked == case.text and not hits, case.reason
+
+
+@pytest.mark.parametrize("case", VENDOR_REAL_KEY_POSITIVES, ids=lambda c: c.reason[:48])
+def test_a_real_vendor_key_still_masks_beside_the_identifier_release(case: Case) -> None:
+    """The release is bounded: case, a digit, or 16+ letters keeps the mask."""
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert masked != case.text and hits, case.reason
+
+
+def test_a_one_word_name_glued_to_a_value_is_not_released() -> None:
+    """Agent review R1: the identifier release is for the BARE word, never ``word=value``.
+
+    The first cut mirrored the two-word form's ``=value`` arm and so let the VALUE of a
+    ``<prefix>_<word>=<secret>`` pair through where the base masked it whole. Asserted on
+    the value itself (not just "something masked") and against the bare word beside it.
+    FAIL-ON-REVERT: re-adding the ``=`` arm to ``_VENDOR_TAIL_IS_ONE_WORD``.
+    """
+    value = "Hunter2" + "Secret99"
+    word = "availab" + "le"
+    pair = "gsk" + "_" + word + "=" + value
+    assert value not in scrub_shapes(pair)
+    assert value not in scrub_shapes("export X=" + pair)
+    bare = "gsk" + "_" + word
+    assert scrub_shapes(bare) == bare
+
+
+def test_the_identifier_release_ceiling_is_exactly_fifteen_letters() -> None:
+    """15 letters release, 16 mask: the boundary as a pair, so a drift reds one side."""
+    at_ceiling = "xai" + "_" + "a" * 15
+    over_ceiling = "xai" + "_" + "a" * 16
+    assert scrub_shapes(at_ceiling) == at_ceiling
+    assert scrub_shapes(over_ceiling) != over_ceiling
+    short = "xai" + "_" + "a" * 7
+    assert scrub_shapes(short) == short, "below the 8 floor: no match"

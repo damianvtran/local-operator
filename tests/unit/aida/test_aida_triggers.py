@@ -271,7 +271,9 @@ async def test_the_session_settle_hook_journals_then_deletes(isolated_root: Path
         def __init__(self) -> None:
             self.entries: list[tuple[str, dict[str, Any]]] = []
 
-        async def append_custom(self, kind: str, payload: dict[str, Any]) -> None:
+        async def append_custom(
+            self, kind: str, payload: dict[str, Any], *, preserve_mtime: bool = False
+        ) -> None:
             self.entries.append((kind, payload))
 
     class _Stub:

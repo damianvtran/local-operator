@@ -625,6 +625,28 @@
         }
       }
     },
+    "/v1/desktop/delegated-cleanup-notice/ack": {
+      "post": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Ack Delegated Cleanup Notice",
+        "description": "Acknowledge the one-time delegated-cleanup notice, so it is never served again.\n\nThe write half of the pair whose read half rides ``GET /v1/desktop/sessions``\n(which only PEEKS: every list read \u2014 the app's own attach and auth probes\namong them \u2014 must not consume a once-per-store notice). The renderer calls\nthis after it has shown the band. Idempotent: acknowledging twice, an\nalready-acknowledged record, or no record at all all answer\n``{\"acknowledged\": true}`` \u2014 the state the caller asked for, the sibling\npin/archive convention; a client that needs the store's own answer re-reads\nthe listing, where the notice is simply gone. A store this process cannot\nwrite logs and the notice repeats rather than erroring.",
+        "operationId": "ack_delegated_cleanup_notice_v1_desktop_delegated_cleanup_notice_ack_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_dict_str__Any__"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/sessions": {
       "get": {
         "tags": [
@@ -958,6 +980,40 @@
               "default": 0,
               "title": "Entry Ts"
             }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order Ids"
+            }
           }
         ],
         "responses": {
@@ -1143,6 +1199,40 @@
               "minimum": 0,
               "default": 0,
               "title": "Entry Ts"
+            }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order Ids"
             }
           }
         ],
@@ -2326,6 +2416,40 @@
               "minimum": 0,
               "default": 0,
               "title": "Entry Ts"
+            }
+          },
+          {
+            "name": "journal_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1,
+              "minimum": 0,
+              "default": 0,
+              "title": "Journal Order"
+            }
+          },
+          {
+            "name": "order_ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "maxItems": 512
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Order Ids"
             }
           }
         ],
@@ -16355,6 +16479,18 @@
               "served"
             ],
             "title": "Ts Source"
+          },
+          "journal_seq": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Seq"
           }
         },
         "type": "object",
@@ -16395,6 +16531,62 @@
               }
             ],
             "title": "Has Newer"
+          },
+          "journal_ordinals": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Ordinals"
+          },
+          "journal_generation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Generation"
+          },
+          "journal_missing_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Missing Ids"
+          },
+          "journal_order_state": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "building",
+                  "unsupported",
+                  "unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Order State"
           }
         },
         "type": "object",
@@ -20067,7 +20259,8 @@
               "memberships.list",
               "org_agents.list",
               "org_team.get",
-              "org_teams.list"
+              "org_teams.list",
+              "signup.resend"
             ],
             "title": "Operation"
           },
@@ -21124,6 +21317,18 @@
                 "type": "null"
               }
             ]
+          },
+          "delegated_cleanup_notice": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delegated Cleanup Notice"
           }
         },
         "type": "object",
@@ -21587,6 +21792,11 @@
           "hotkey_scope": {
             "type": "string",
             "title": "Hotkey Scope",
+            "default": ""
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit",
             "default": ""
           }
         },

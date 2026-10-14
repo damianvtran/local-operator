@@ -18,6 +18,7 @@ from local_operator.clients._http import (
     api_error_from_exception,
 )
 from local_operator.clients.radient import RadientTranscriptionResponseData
+from local_operator.config import ConfigManager
 from local_operator.server.app import app
 from local_operator.server.dependencies import get_radient_client
 
@@ -106,7 +107,7 @@ async def test_create_transcription_no_api_key(test_app_client, temp_audio_file)
 
     mock_radient_client.create_transcription.assert_not_called()
     assert response.status_code == 500
-    assert "Radient API key is not configured" in response.json()["detail"]
+    assert "Radient API key is not configured" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -146,7 +147,7 @@ async def test_create_transcription_file_save_failure(test_app_client, tmp_path,
         del app.dependency_overrides[get_radient_client]
 
     assert response.status_code == 500
-    assert "Failed to save uploaded audio file" in response.json()["detail"]
+    assert "Failed to save uploaded audio file" in response.json()["detail"]["text"]
     # The failed upload must leave nothing behind.
     assert list(scratch.iterdir()) == []
 
@@ -174,7 +175,7 @@ async def test_create_transcription_client_runtime_error(test_app_client, temp_a
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "Radient API error" in response.json()["detail"]
+    assert "Radient API error" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -200,7 +201,7 @@ async def test_create_transcription_client_value_error(test_app_client, temp_aud
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 400
-    assert "Invalid parameter" in response.json()["detail"]
+    assert "Invalid parameter" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -227,7 +228,7 @@ async def test_create_transcription_file_not_found_error(test_app_client, temp_a
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "Temporary audio file not found after saving" in response.json()["detail"]
+    assert "Temporary audio file not found after saving" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -251,7 +252,7 @@ async def test_create_transcription_unexpected_error(test_app_client, temp_audio
 
     mock_radient_client.create_transcription.assert_called_once()
     assert response.status_code == 500
-    assert "An unexpected error occurred during transcription" in response.json()["detail"]
+    assert "An unexpected error occurred during transcription" in response.json()["detail"]["text"]
 
 
 @pytest.mark.asyncio
@@ -725,3 +726,198 @@ async def test_create_transcription_billing_wording_alone_is_not_a_quota_refusal
     detail = response.json()["detail"]
     assert "has run out of credits" not in detail
     assert "enabled for billing" in detail
+
+
+# -- PR-3: the hub's transcription envelope carries the charge -----------------
+
+
+def _session_config(tmp_path, session_id: str) -> ConfigManager:
+    """A REAL config manager whose ``sessions/<id>`` directory exists.
+
+    A real manager, not a stand-in: the marker write re-reads ``config_dir``
+    and stats the session directory, and the typing is right that a
+    ``SimpleNamespace`` would not answer it the way the caller assumes.
+    """
+    (tmp_path / "config" / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+    return ConfigManager(config_dir=tmp_path / "config")
+
+
+@pytest.mark.asyncio
+async def test_the_route_records_the_hub_charge(tmp_path):
+    """The success path turns the envelope's cost object into ONE spend record.
+
+    ``result.cost`` is the documented shape (docs.radienthq.com, transcription-api
+    "Pricing"); ``result.duration`` is meters-up-to-whole-seconds, so the
+    fallback count is ``ceil(duration)`` when the object states no units. The
+    record is handed to analytics and a pending marker lands in the session's
+    sidecar when the named session is a local directory — the §4.2 fallback
+    (the daemon cannot append to the owning runtime's journal).
+    """
+    from io import BytesIO
+    from unittest.mock import MagicMock as _MagicMock
+
+    from local_operator.server.routes.transcription import create_transcription_endpoint
+    from local_operator.session.channel_spend import read_pending_records
+
+    session_dir = tmp_path / "config" / "sessions" / "sess-9"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    client = _MagicMock()
+    client.api_key = "[redacted]"
+    # ``cost`` is an EXTRA field of the response model (it is the server's newer
+    # envelope, not a declared attribute), so the live shape is built through
+    # ``model_validate``: the constructor's keyword list is the DECLARED schema,
+    # and a type checker is right to refuse a name it does not know.
+    client.create_transcription.return_value = RadientTranscriptionResponseData.model_validate(
+        {
+            "text": "hello world",
+            "provider": "elevenlabs",
+            "status": "completed",
+            "duration": 2.832875,
+            "cost": {
+                "v": 1,
+                "amount_usd": "0.001",
+                "basis": "billed",
+                "units": 3,
+                "unit": "second",
+                "usage_record_id": "6acabfcf80f7de3d24c98268",
+                "price_version": "transcription-rates@2026-10-01",
+            },
+        }
+    )
+    upload = UploadFile(filename="clip.mp3", file=BytesIO(b"audio-bytes"))
+    captured: list[Any] = []
+
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured.append,
+    ):
+        response = await create_transcription_endpoint(
+            client,
+            _session_config(tmp_path, "sess-9"),
+            upload,
+            session_id="sess-9",
+        )
+
+    assert response.status == 200
+    assert len(captured) == 1
+    record = captured[0]
+    assert record.channel == "stt"
+    assert record.session_id == "sess-9"
+    assert record.amount_micro == 1000
+    assert record.billing_basis == "billed" and record.cost_source == "server_reported"
+    # The server's metered seconds win over the ceiling fallback (3 vs ceil(2.83)).
+    assert record.units == 3.0 and record.unit == "seconds"
+    assert record.provider == "elevenlabs"
+    assert record.request_id == "6acabfcf80f7de3d24c98268"
+    pending = read_pending_records(session_dir)
+    assert len(pending) == 1 and pending[0]["channel"] == "stt"
+
+
+@pytest.mark.asyncio
+async def test_an_old_hub_envelope_without_cost_states_unknown_never_zero(tmp_path):
+    """FALSIFICATION companion: no cost object → amount None, units ceil(duration).
+
+    The record must NOT invent 0 for the absent figure; the only count that
+    survives is the ceiling of the audio duration the envelope reported.
+    """
+    from io import BytesIO
+    from unittest.mock import MagicMock as _MagicMock
+
+    from local_operator.server.routes.transcription import create_transcription_endpoint
+
+    client = _MagicMock()
+    client.api_key = "[redacted]"
+    client.create_transcription.return_value = RadientTranscriptionResponseData(
+        text="hello world",
+        provider="elevenlabs",
+        status="completed",
+        duration=2.832875,
+    )
+    upload = UploadFile(filename="clip.mp3", file=BytesIO(b"audio-bytes"))
+    captured: list[Any] = []
+
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured.append,
+    ):
+        await create_transcription_endpoint(
+            client,
+            ConfigManager(config_dir=tmp_path / "config"),
+            upload,
+            session_id=None,
+        )
+
+    record = captured[0]
+    assert record.amount_micro is None
+    assert record.billing_basis == "not_tracked" and record.cost_source == "none"
+    assert record.units == 3.0, "ceil(2.832875) — the meter rounds up"
+    assert record.session_id == ""
+    assert not (tmp_path / "config" / "sessions").exists(), "no session named: no marker"
+
+
+@pytest.mark.asyncio
+async def test_a_non_finite_duration_states_no_count_and_keeps_the_call(tmp_path):
+    """FALSIFICATION (review round 1, MINOR 2): ``duration=inf`` must not 500.
+
+    Pydantic accepts ``inf`` (and Python's JSON parser accepts the
+    ``Infinity`` token), and ``math.ceil`` raises on it — which turned a
+    successful, paid transcription into a 500 and discarded the spend record.
+    A non-finite duration is simply "no client count": the server's own units
+    win when the cost object states them, else none is invented.
+    """
+    from io import BytesIO
+    from unittest.mock import MagicMock as _MagicMock
+
+    from local_operator.server.routes.transcription import create_transcription_endpoint
+
+    client = _MagicMock()
+    client.api_key = "[redacted]"
+    client.create_transcription.return_value = RadientTranscriptionResponseData.model_validate(
+        {
+            "text": "hi",
+            "provider": "elevenlabs",
+            "status": "completed",
+            "duration": float("inf"),
+            "cost": {
+                "v": 1,
+                "amount_usd": "0.001",
+                "basis": "billed",
+                "units": 3,
+                "unit": "second",
+            },
+        }
+    )
+    captured: list[Any] = []
+
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured.append,
+    ):
+        response = await create_transcription_endpoint(
+            client,
+            ConfigManager(config_dir=tmp_path / "config"),
+            UploadFile(filename="clip.mp3", file=BytesIO(b"audio-bytes")),
+            session_id=None,
+        )
+
+    assert response.status == 200, "a junk duration must not discard a paid transcription"
+    assert captured and captured[0].units == 3.0, "the server's stated units win"
+
+    # Without a cost object there is no count at all — units stay 0 with a NULL
+    # amount, never a ceiling of an infinity.
+    client.create_transcription.return_value = RadientTranscriptionResponseData.model_validate(
+        {"text": "hi", "provider": "elevenlabs", "status": "completed", "duration": float("inf")}
+    )
+    captured2: list[Any] = []
+    with patch(
+        "local_operator.server.utils.voice_spend.enqueue_channel_record",
+        side_effect=captured2.append,
+    ):
+        response = await create_transcription_endpoint(
+            client,
+            ConfigManager(config_dir=tmp_path / "config"),
+            UploadFile(filename="clip.mp3", file=BytesIO(b"audio-bytes")),
+            session_id=None,
+        )
+    assert response.status == 200
+    assert captured2 and captured2[0].units == 0.0 and captured2[0].amount_micro is None

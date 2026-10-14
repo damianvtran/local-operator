@@ -68,6 +68,11 @@ def test_read_tier_tools_are_monitorable(tool_name: str) -> None:
         ("team", {"op": "show"}),
         ("project", {"op": "list"}),
         ("project", {"op": "show"}),
+        # The code-request tool's two ops: `list` reads this session's derived
+        # index and the fetch cache, `show` adds a bounded conditional fetch of
+        # one ref — reads both, so `monitor(code_requests show …)` can arm.
+        ("code_requests", {"op": "list"}),
+        ("code_requests", {"op": "show", "ref": "https://github.com/o/r/pull/7"}),
         ("lsp", {"action": "definitions"}),
         ("network", {"action": "status"}),
         ("network", {"action": "show"}),

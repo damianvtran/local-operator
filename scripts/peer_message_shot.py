@@ -13,6 +13,23 @@ failure the other frame does not show:
     collapsed  (default)  every receipt closed: the ONE-ROW guarantee
     expanded              the long receipt opened: sender detail + full body
     empty                 an EMPTY-body receipt, opened — the degenerate case
+    group                 a RUN of receipts folded under one quiet-group bar
+                          (design §5, S5): the bar's one line over receipts
+                          and the tool rows between them
+    group-open            the same run with the bar opened: the members list
+                          in place, exactly as they paint unfolded
+    loose                 the `group` seed on a checkout WITHOUT the fold: the
+                          same receipts as loose cards — the before-frame the
+                          `group` capture completes
+    group-idle            the acceptance shape: [receipt, send, receipt, send]
+                          with the quiet no_reply pair arriving hidden (S1) —
+                          ONE bar at idle, nothing visible after it
+    group-answered        the acceptance shape with the turn's answer after
+                          the run: the bar closed at the boundary, the answer
+                          visible below it
+    hazard                the live-prose repro (F1): a receipt, a STREAMING
+                          answer, another receipt — on a pre-fix tree the bar
+                          folds over and hides the answer
 
 The ``empty`` shape exists because that branch is the one an ordinary body
 never takes, and it has now carried two defects in a row: first a dangling
@@ -37,6 +54,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -82,6 +100,13 @@ from local_operator.tui.widgets.transcript import (  # noqa: E402
     PeerMessageBlock,
     UserBlock,
 )
+
+try:  # The bar exists only on trees that carry the S5 fold; running this
+    # script against a pre-fold checkout (the `loose` before-frame, e.g.
+    # origin/main) must still import.
+    from local_operator.tui.widgets.transcript import QuietGroupBlock  # noqa: E402
+except ImportError:  # pragma: no cover - a capture-only compatibility arm
+    QuietGroupBlock = None  # type: ignore[assignment]
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 #: The shape the operator reported: a multi-paragraph release-window
@@ -195,6 +220,144 @@ def _seed_empty(app: OperatorApp) -> list[PeerMessageBlock]:
     return blocks
 
 
+def _seed_group(app: OperatorApp) -> list[PeerMessageBlock]:
+    """A run of consecutive receipts with tool rows inside — the folded state.
+
+    The frame has to show the fold's whole claim: ONE line where the run used
+    to be five rows (two receipts and three tool rows), the tool rows inside
+    it folded too, and — with the answer after the run as the control — the
+    ledger around it unmoved. The leading tool row is deliberate: a span runs
+    between splitters, so the row ABOVE the first receipt sits inside it.
+    """
+    app._append_block(UserBlock("what is left before we can cut the release?"))
+    _tool(
+        app,
+        "t0",
+        "bash",
+        {"command": "git log --oneline v0.50.3..origin/main"},
+        "2 commits",
+    )
+    first = PeerMessageBlock(LONG_PEER_BODY, LONG_SENDER)
+    app._append_block(first)
+    _tool(
+        app,
+        "t1",
+        "send",
+        {"target": "lo-release-window", "message": "folding #751 in"},
+        "delivered",
+    )
+    second = PeerMessageBlock(SHORT_PEER_BODY, SHORT_SENDER)
+    app._append_block(second)
+    _tool(app, "t2", "bash", {"command": "pytest tests/unit/tui -q"}, "green")
+    app._append_block(_answer("Both receipts are folded under one bar."))
+    return [first, second]
+
+
+def _send_card(app: OperatorApp, call_id: str, message: str) -> None:
+    """The visible `send` row a quiet turn paints when it replies."""
+    card = ToolCard(call_id, "send", {"target": "lo-release-window", "message": message})
+    app._append_block(card)
+    card.mark_done("delivered")
+
+
+def _quiet_pair(app: OperatorApp) -> None:
+    """The no_reply pair, driven live: suppressed at the announcement (S1), so
+    the frame carries no trace of it while the run it belongs to does."""
+    from local_operator.harness.types import (
+        QUIET_TURN_KEY,
+        TextContent,
+        ToolExecutionEndEvent,
+        ToolExecutionStartEvent,
+        ToolResult,
+    )
+    from local_operator.tui.events import ToolEnded, ToolStarted
+
+    app.post_message(
+        ToolStarted(ToolExecutionStartEvent(tool_call_id="q1", tool_name="no_reply", args={}))
+    )
+    app.post_message(
+        ToolEnded(
+            ToolExecutionEndEvent(
+                tool_call_id="q1",
+                tool_name="no_reply",
+                result=ToolResult(
+                    tool_call_id="q1",
+                    tool_name="no_reply",
+                    content=[TextContent(text="Quiet.")],
+                    details={QUIET_TURN_KEY: True},
+                ),
+            )
+        )
+    )
+
+
+def _seed_group_idle(app: OperatorApp) -> list[PeerMessageBlock]:
+    """The operator's acceptance shape: two receipts, each followed by the
+    reply sent, with the quiet pair present-but-hidden (S1). ONE bar over the
+    four visible rows, and nothing visible after it."""
+    first = PeerMessageBlock(LONG_PEER_BODY, LONG_SENDER)
+    app._append_block(first)
+    _send_card(app, "s1", "ack — folding #751 into your window")
+    second = PeerMessageBlock(SHORT_PEER_BODY, SHORT_SENDER)
+    app._append_block(second)
+    _send_card(app, "s2", "ack — looking")
+    _quiet_pair(app)
+    return [first, second]
+
+
+def _seed_group_answered(app: OperatorApp) -> list[PeerMessageBlock]:
+    """The idle shape plus the turn's answer after the run: the bar closes at
+    the boundary (visible prose), the answer stays visible below it."""
+    blocks = _seed_group_idle(app)
+    app._append_block(_answer("Both receipts are folded; nothing needs a reply."))
+    return blocks
+
+
+async def _settle_until(pilot: Any, predicate: Callable[[], bool], *, label: str) -> None:
+    """Pump frames until ``predicate`` holds (the live seam is two hops)."""
+    for _ in range(200):
+        await pilot.pause()
+        if predicate():
+            return
+    raise AssertionError(f"never reached: {label}")
+
+
+async def _seed_hazard(pilot: Any, app: OperatorApp, session: Any) -> None:
+    """The F1 repro: a receipt, a STREAMING answer (the live mount order), and
+    another receipt — on a pre-fix tree the bar folds over the answer."""
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    from local_operator.tui.events import AssistantDelta
+    from local_operator.tui.widgets.transcript import TranscriptView
+
+    view = app.query_one(TranscriptView)
+
+    # The same precondition every pilot test establishes: a live event emitted
+    # before boot subscribed its bridge has no handler to receive it.
+    await _settle_until(pilot, lambda: app._session is not None, label="session boot")
+
+    def peers() -> list[PeerMessageBlock]:
+        return [b for b in view.blocks() if isinstance(b, PeerMessageBlock)]
+
+    def assistants() -> list[AssistantBlock]:
+        return [b for b in view.blocks() if isinstance(b, AssistantBlock)]
+
+    session.emit(
+        PeerMessageDeliveredEvent(body=SHORT_PEER_BODY, sender=dict(SHORT_SENDER), message_id="p1")
+    )
+    await _settle_until(pilot, lambda: len(peers()) == 1, label="peer p1")
+    app.post_message(AssistantDelta("Checking the gates — the window is open."))
+    await _settle_until(pilot, lambda: len(assistants()) == 1, label="answer mounted")
+    session.emit(
+        PeerMessageDeliveredEvent(
+            body="one more thing — the window is yours",
+            sender=dict(LONG_SENDER),
+            message_id="p2",
+        )
+    )
+    await _settle_until(pilot, lambda: len(peers()) == 2, label="peer p2")
+    app.post_message(AssistantDelta("Checking the gates — the window is open. It is mine."))
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -203,10 +366,23 @@ async def main() -> None:
         size = (int(cols), int(rows))
     shape = sys.argv[3] if len(sys.argv) > 3 else "collapsed"
 
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        blocks = _seed_empty(app) if shape == "empty" else _seed(app)
+        if shape == "hazard":
+            await _seed_hazard(pilot, app, session)
+            blocks = []
+        elif shape == "empty":
+            blocks = _seed_empty(app)
+        elif shape == "group-idle":
+            blocks = _seed_group_idle(app)
+        elif shape == "group-answered":
+            blocks = _seed_group_answered(app)
+        elif shape in ("group", "group-open", "loose"):
+            blocks = _seed_group(app)
+        else:
+            blocks = _seed(app)
         await pilot.pause()
 
         if shape == "empty":
@@ -216,6 +392,13 @@ async def main() -> None:
                 toggle = getattr(block, "toggle_expanded", None)
                 if callable(toggle):
                     toggle()
+            await pilot.pause()
+        elif shape == "group-open":
+            # Open every bar: the frame this state exists for is the members
+            # listing in place — the same widgets that paint unfolded, with
+            # the bar's own one line above them.
+            for bar in (app.query(QuietGroupBlock) if QuietGroupBlock is not None else []):
+                bar.toggle_expanded()
             await pilot.pause()
         elif shape == "expanded":
             # `toggle_expanded` exists only once the receipt is a ledger card.
@@ -233,6 +416,23 @@ async def main() -> None:
         # nothing else (QA round 1, Q2).
         await pilot.pause()
         await settle_status_line(pilot, app)
+        if QuietGroupBlock is not None:
+            for bar in app.query(QuietGroupBlock):
+                members = list(bar._members)
+                heights = []
+                for member in members:
+                    region = getattr(member, "region", None)
+                    heights.append(region.height if member.display and region else None)
+                print(
+                    f"bar: expanded={bar._expanded} members={len(members)} "
+                    f"types={[type(m).__name__ for m in members]} member_heights={heights}",
+                    file=sys.stderr,
+                )
+        if shape == "hazard":
+            from local_operator.tui.widgets.transcript import TranscriptView
+
+            for block in app.query_one(TranscriptView).blocks():
+                print(f"  {type(block).__name__} display={block.display}", file=sys.stderr)
         screen = app.screen
         print(
             f"size={screen.size} virtual={screen.virtual_size} "

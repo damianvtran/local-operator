@@ -2724,3 +2724,146 @@ async def test_the_scrolled_panel_never_leads_with_an_annotation() -> None:
             if panel.view_offset == before:
                 break
     assert frames > 8, f"premise: this size scrolls far enough to cut mid-block ({frames})"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_muse_source_survives_compaction_with_its_meters(stale) -> None:
+    from local_operator.providers.usage import META_MUSE_ALLOWANCE_NOTE
+
+    now = 200 * 60_000
+    report = _report(
+        _percent("meta-muse:window", "5 hour", 31, shared=True),
+        _percent("meta-muse:weekly", "7 day", 12, shared=True),
+        provider="meta-muse",
+    )
+    report.fetched_at = now - (120 * 60_000 if stale else 0)
+    report.notes = META_MUSE_ALLOWANCE_NOTE
+    body = build_usage_body([report], 48, now, now)
+    panel = UsagePanel()
+    panel._offset = 0
+    rows, _ = panel._window_rows(body, 4)
+    text = "\n".join(row.plain for row in rows)
+    assert "Sign-in snapshot" in text and "r won't update Muse" in text
+    assert "31%" in text and "12%" in text
+    if stale:
+        assert "2h ago" in text
+    source = next(row for row in body.lines if "Sign-in snapshot" in row.plain)
+    assert source.style == Style(color=theme_mod.semantic_color("fg"))
+
+
+def test_unknown_muse_explanation_survives_compaction_without_inventing_numbers() -> None:
+    from local_operator.providers.usage import META_MUSE_NO_OBSERVATION_NOTE
+
+    report = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
+    body = build_usage_body([report], 48, 200 * 60_000)
+    panel = UsagePanel()
+    panel._offset = 0
+    rows, _ = panel._window_rows(body, 2)
+    text = "\n".join(row.plain for row in rows)
+    assert "No allowance observation recorded." in text
+    assert "%" not in text
+    assert body.notes
+    assert rows[1].style == Style(color=theme_mod.semantic_color("fg"))
+
+
+def test_other_provider_notes_remain_decorative() -> None:
+    report = UsageReport(provider="deepseek", notes="nonessential endpoint detail")
+    body = build_usage_body([report], 48, 200 * 60_000)
+    assert not body.notes
+    source = next(row for row in body.lines if "nonessential" in row.plain)
+    assert source.style == Style(color=theme_mod.semantic_color("dim"))
+
+
+def test_paid_wallet_keeps_actual_amount_and_explicit_spend_eligibility():
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui.widgets.usage_panel import build_usage_body
+
+    plan = UsageLimit(
+        id="plan",
+        label="Included",
+        shared=True,
+        amount=UsageAmount(used_fraction=1, unit="percent"),
+    )
+    wallet = UsageLimit(
+        id="wallet",
+        label="Credits",
+        paid_fallback=True,
+        available=True,
+        amount=UsageAmount(remaining=123.5, unit="credits"),
+    )
+    report = UsageReport(provider="openai", limits=[plan, wallet])
+    lines = build_usage_body([report], width=100, now_ms=0, header_ms=0).lines
+    rendered = "\n".join(line.plain for line in lines)
+    assert "credits will continue" in rendered
+    assert "123.5 credits left" in rendered
+    wallet.available = False
+    rendered = "\n".join(
+        line.plain for line in build_usage_body([report], width=100, now_ms=0, header_ms=0).lines
+    )
+    assert "Spend unavailable" in rendered
+    assert "123.5 credits left" in rendered
+    assert "credits will continue" not in rendered
+
+
+def test_paid_family_exhaustion_does_not_claim_shared_plan_exhausted():
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui.widgets.usage_panel import build_usage_body
+
+    shared = UsageLimit(
+        id="plan",
+        label="Included",
+        shared=True,
+        amount=UsageAmount(used_fraction=0.2, unit="percent"),
+    )
+    family = UsageLimit(
+        id="family", label="Opus", tier="opus", amount=UsageAmount(used_fraction=1, unit="percent")
+    )
+    wallet = UsageLimit(
+        id="paid",
+        label="Credits",
+        paid_fallback=True,
+        available=True,
+        amount=UsageAmount(remaining=25, unit="credits"),
+    )
+    report = UsageReport(provider="anthropic", limits=[shared, family, wallet])
+    rendered = "\n".join(line.plain for line in build_usage_body([report], 100, 0, 0).lines)
+    assert "included quota used" not in rendered
+    assert "credits will continue" not in rendered
+    assert "model-family caps still apply" in rendered
+    shared.shared = False
+    shared.amount.used_fraction = 1
+    rendered = "\n".join(line.plain for line in build_usage_body([report], 100, 0, 0).lines)
+    assert "credits will continue" not in rendered
+
+
+def test_paid_notes_do_not_displace_meters_in_short_compaction():
+    from rich.style import Style
+
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.usage_panel import UsagePanel, build_usage_body
+
+    plan = UsageLimit(
+        id="plan",
+        label="Included",
+        shared=True,
+        amount=UsageAmount(used_fraction=1, unit="percent"),
+    )
+    wallet = UsageLimit(
+        id="wallet",
+        label="Credits",
+        paid_fallback=True,
+        available=True,
+        amount=UsageAmount(remaining=123.5, unit="credits"),
+    )
+    body = build_usage_body([UsageReport(provider="openai", limits=[plan, wallet])], 52, 0, 0)
+    note = next(row for row in body.lines if "credits will continue" in row.plain)
+    assert note.style == Style(color=theme_mod.semantic_color("fg"))
+    assert not body.notes
+    panel = UsagePanel()
+    rows, _ = panel._window_rows(body, 3)
+    assert any("Included" in row.plain for row in rows)
+    assert any("123.5" in row.plain for row in rows)
+    assert collect_stats([UsageReport(provider="openai", limits=[wallet])]).describe() == (
+        "1 window · 1 reported balance"
+    )

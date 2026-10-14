@@ -5650,3 +5650,112 @@ async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path)
         rows = app._settings_team_rows()
 
     assert rows == [("Data Quality", "0 members", "Finds issues")]
+
+
+@pytest.mark.asyncio
+async def test_the_two_cleanup_classes_are_two_titled_groups_with_their_own_scope_tag(
+    tmp_path: Path,
+) -> None:
+    """Parent keys under "Your conversations", delegated keys under "Delegated
+    work", each header carrying the scope tag. The delegated title was once 49
+    cells and silently lost its tag (found in a rendered frame): the tag is the
+    assertion that the title stays short enough to keep it."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        lines = [line.rstrip() for line in view.render_lines_for_test()]
+        headers = [
+            row.section.name
+            for row in view._rows
+            if row.kind == "header" and row.section is not None
+        ]
+        assert (
+            headers.index("session")
+            < headers.index("session_cleanup")
+            < headers.index("session_delegated")
+        )
+        by_section: dict[str, list[str]] = {}
+        for row in view._rows:
+            if row.kind == "setting" and row.setting is not None:
+                by_section.setdefault(row.setting.section, []).append(row.setting.key)
+        assert by_section["session_delegated"] == [
+            "session.cleanup.delegated.enabled",
+            "session.cleanup.delegated.max_age_hours",
+        ]
+        assert "session.cleanup.enabled" in by_section["session_cleanup"]
+        assert by_section["session"] == ["auto_save_conversation"]
+        view._selected = (
+            next(
+                i
+                for i, r in enumerate(view._rows)
+                if r.kind == "header"
+                and r.section is not None
+                and r.section.name == "session_delegated"
+            )
+            + 1
+        )
+        view._repaint()
+        text = view._row_text(
+            next(
+                r
+                for r in view._rows
+                if r.kind == "header"
+                and r.section is not None
+                and r.section.name == "session_delegated"
+            ),
+            0,
+            100,
+        ).plain
+        assert "Delegated work" in text and "takes effect: new launch" in text, text
+        assert lines  # the page painted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry,message",
+    [
+        ("1", "max_age_hours must be between 2 and 720 (30 days); got 1"),
+        ("721", "max_age_hours must be between 2 and 720 (30 days); got 721"),
+        ("abc", "expected a whole number"),
+    ],
+)
+async def test_an_out_of_range_delegated_age_is_refused_with_the_range(
+    tmp_path: Path, entry: str, message: str
+) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.delegated.max_age_hours")
+        view.action_activate()
+        await pilot.pause()
+        view._buffer = entry
+        view._commit_edit()
+        await pilot.pause()
+        assert view._error == message
+        stored = ConfigManager(tmp_path).get_nested_value(
+            ("session", "cleanup", "delegated", "max_age_hours"), None
+        )
+        assert stored is None, "a refused value must not reach config.yml"
+
+
+@pytest.mark.asyncio
+async def test_a_valid_delegated_age_is_written_nested(tmp_path: Path) -> None:
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "session.cleanup.delegated.max_age_hours")
+        view.action_activate()
+        await pilot.pause()
+        view._buffer = "96"
+        view._commit_edit()
+        await pilot.pause()
+        assert not view._error
+        assert (
+            ConfigManager(tmp_path).get_nested_value(
+                ("session", "cleanup", "delegated", "max_age_hours"), None
+            )
+            == 96
+        )

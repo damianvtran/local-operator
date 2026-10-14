@@ -1101,7 +1101,11 @@ class _CheckpointTranscript:
     def __init__(self) -> None:
         self.checkpoint: tuple[str, dict[str, Any]] | None = None
 
-    async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+    async def append_custom(
+        self, custom_type: str, payload: dict[str, Any], *, preserve_mtime: bool = False
+    ) -> None:
+        # Mirrors the real writer's signature; this double stands in for the
+        # transcript ``FrontendStateStore.checkpoint`` writes through.
         self.checkpoint = (custom_type, payload)
 
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:

@@ -30,11 +30,15 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "agents",
         "browser",
         "classification",
+        "code-requests",
         "configuration",
         "console",
         "credentials",
+        "delivery",
         "extensions",
         "failover",
+        "highlights",
+        "i18n",
         "image-generation",
         "mcp",
         "mobile",
@@ -45,9 +49,11 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "qwencloud",
         "scratchpad",
         "sessions",
+        "skills",
         "system-tools",
         "teams",
         "tunnel",
+        "video-generation",
     ]
     assert all(guide.resource_type == "guide" for guide in guides)
     assert all(40 <= len(guide.description) <= 180 for guide in guides)
@@ -87,8 +93,22 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set the default provider and model configuration", "configuration"),
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
+        (
+            "allocate bounded engineering delivery and preflight costly evidence "
+            "before converging code review and QA",
+            "delivery",
+        ),
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("generate an image of a cat", "image-generation"),
+        ("generate a video from a photo", "video-generation"),
+        # The edit lane's router-honest row: "image to image" is vocabulary
+        # the lexical router can see (measured 2026-10-10), so the
+        # post-hub-slice edit capability is routable. A task that only says
+        # "change the headline on this photo" is NOT matched by this router
+        # and is deliberately not asserted here — don't pin what it cannot
+        # see.
+        ("image to image edit of a product photo", "image-generation"),
+        ("what are the highlights under my answer and how do I turn them off", "highlights"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
         (
@@ -111,6 +131,14 @@ def test_guide_listing_never_contains_guide_body() -> None:
         (
             "list the other lop sessions running on this machine",
             "sessions",
+        ),
+        (
+            "check the review rounds and CI on this pull request",
+            "code-requests",
+        ),
+        (
+            "how do skills work and how do I add one for a user",
+            "skills",
         ),
     ],
 )
@@ -620,6 +648,21 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     artefacts, archives, anything the shell built) rather than as "build output"
     alone: a dependency tree is the largest single shape in the audit and calling
     it build output is what let it read as somebody else's problem.
+
+    The boundary MOVED when the shell channel gained its own after-the-fact
+    check: the tools still refuse BEFORE the write, while a command that NAMES
+    the pad — the variable, its path, or a leading home spelling — now gets a
+    ``[scratch]`` line on its result when it took the pad over its budget or
+    entry cap, or put a refused name in it (a name the command spelled or one a
+    copy brought in), and the ``eval`` kernel gets the budget and entry-cap
+    line only. The precise trigger and the channel split are pinned together
+    with the claim (design review round 1, D4): "pad-touching" read as every
+    command, and the reader who sees no line on an alias spelling or a
+    Python-side creation must not take that for a clean run. Review round 2
+    (R2-3) added the over-read's other half to the copy clause: the check
+    reads the COMMAND, not the disk, so a copy that failed still reports the
+    name it would have created — pinned so the sentence cannot be quietly
+    re-tightened into a promise the layer does not keep.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -632,9 +675,15 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
 
     assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
-    # The boundary: the tools are checked, a shell is not.
-    assert "enforced at the TOOLS and not in a shell" in collapsed
-    assert "NOT policed" in collapsed
+    # The boundary: a write is refused before it lands; the shell channel is
+    # checked AFTER the command and can only be reported on — and the check's
+    # trigger is the pad being NAMED, not any command that touched it.
+    assert "enforced at the TOOLS, and the shell channel is CHECKED AFTER THE FACT" in collapsed
+    assert "a command that names the pad" in collapsed
+    assert "copied it in" in collapsed
+    assert "reads the command, not the disk" in collapsed
+    assert "The `eval` kernel gets the budget and entry-cap line only." in collapsed
+    assert "it cannot undo" in collapsed
 
 
 def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:

@@ -285,6 +285,13 @@ def test_app_client(temp_dir):
     # Create and yield the test client
     transport = ASGITransport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
+    # Every route validates the Host now (P1.5 DNS-rebinding guard, RFC §3.6).
+    # This suite reaches the app over ``base_url="http://test"`` on purpose --
+    # the DNS name keeps ``scope["server"]`` non-loopback, so the file routes
+    # stay in their rooted (fail-closed) posture -- but the request must still
+    # carry the Host a real client sends, so the guard admits it. Tests that
+    # exercise a refusal set their own ``Host`` per request.
+    client.headers["Host"] = "127.0.0.1:1111"
     yield client
 
     # Restore original state

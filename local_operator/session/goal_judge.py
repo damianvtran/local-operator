@@ -510,6 +510,13 @@ class GoalJudge:
                 # is over, and the record now belongs to a DIFFERENT goal, so this
                 # driver must not write its state onto the new one.
                 return
+            # Admission is not ownership for the whole chain: either host can
+            # start `/loop` while a continuation is awaited. The live callback
+            # must be checked before every new paid ask, not only in `_drive`.
+            # Token-first above keeps this yield from touching a replacement goal.
+            if self.loop_running():
+                self._publish(state="waiting")
+                return
             # Captured IMMEDIATELY before the call, so the comparison below is
             # against the context this verdict is about.
             captured = self.serial()
@@ -520,6 +527,13 @@ class GoalJudge:
                 # belongs to an objective nobody is pursuing: drop it, and leave
                 # the record alone — the new goal's own trigger publishes its
                 # state.
+                return
+            # A loop can take ownership while the provider answer is awaited,
+            # with OR without a serial change. Yield before consuming the answer
+            # or retrying it: a stale-context retry is legitimate only while no
+            # loop owns the verdict. Both hosts supply a live ownership predicate.
+            if self.loop_running():
+                self._publish(state="waiting")
                 return
             if self.serial() != captured:
                 # A turn this judge did NOT admit ended while the verdict was in

@@ -12,6 +12,7 @@ from local_operator.agent_profiles import NameTakenError, install_seed
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
     get_config_manager,
@@ -166,11 +167,10 @@ async def install(body: NamedMutation, request: Request):
         except NameTakenError:
             raise HTTPException(
                 409,
-                "That name belongs to another agent. "
-                "Choose a different name to extend the packaged profile.",
+                _wd.profile_name_taken().envelope(),
             ) from None
         if installed is None:
-            raise HTTPException(404, "Packaged profile not found")
+            raise HTTPException(404, _wd.packaged_profile_not_found().envelope())
         # Pass through whether this call WROTE anything. The install-all
         # shortcut loops this op once per built-in, so without the flag its
         # summary cannot distinguish a fresh install from an idempotent no-op
@@ -208,7 +208,7 @@ async def sync_profiles(
     """
 
     if body.name and body.all:
-        raise HTTPException(422, "Pass either name or all, not both")
+        raise HTTPException(422, _wd.pass_name_or_all().envelope())
     names = [body.name] if body.name else None
 
     # Imported per call, not at module scope: this pulls the sync machinery's
@@ -244,9 +244,7 @@ async def sync_profiles(
             # gets the hub arm as a plain merge.
             replace = "remote" if body.force and body.confirm_replace else None
             if body.force and not body.confirm_replace and _has_hub_rows(agents, names):
-                raise HTTPException(
-                    422, "--force replaces your copy; use replace with confirm_replace"
-                )
+                raise HTTPException(422, _wd.force_requires_confirm_replace().envelope())
             seeds = SyncReport(
                 entries=tuple(sync_installed_seeds(agents, names=names, force=body.force))
             )

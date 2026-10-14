@@ -20,6 +20,7 @@ import weakref
 from collections import deque
 from collections.abc import (
     Callable,
+    Collection,
     Iterable,
     Iterator,
     Mapping,
@@ -70,7 +71,17 @@ from local_operator.harness.types import (
     decode_window_of,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
-from local_operator.model.costs import cost_summary, job_cost, turn_cost
+from local_operator.model.costs import (
+    carry_floor,
+    cost_summary,
+    job_subtree_cost,
+    turn_cost,
+)
+from local_operator.session.channel_spend import (
+    ChildrenSnapshot,
+    InferenceSnapshot,
+    combine,
+)
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
@@ -96,7 +107,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     #: runtime contract, and a reduced host simply has none of them. Declared
     #: AFTER the imports, not in the typing block above, because flake8 resolves
     #: a name used here against the module's import order.
-    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    AccrueSpendFn = Callable[..., int]
     SeedSpendFn = Callable[..., SessionSpend]
     ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
     IdentityFn = Callable[[Any], dict[str, str]]
@@ -813,6 +824,97 @@ def _capped_components(components: Sequence[Any]) -> list[Any]:
     return values[len(values) - USAGE_COMPONENT_CAP :]
 
 
+#: State fields whose value can only GROW while a conversation is worked in, so a
+#: closing row takes the larger of the runtime's own reading and the durable row's.
+#: Money and tokens are the two the reviewer measured going backwards when the row
+#: was not refreshed: a cold open painted ``context_tokens: 51000`` from a row
+#: written by the FIRST runtime while the journal's own receipts said 121000.
+#: State fields that only ever accumulate, so the larger of two readings wins.
+#: ``active_duration_s`` is the SUMMED DURATION OF THE TURNS this conversation ran
+#: (the figure the TUI's status line renders); review round 2 (F8) put it here
+#: rather than keeping the durable figure, because a runtime's own turn time is
+#: real elapsed duration either way and the larger value can never lower what a
+#: surface recorded.
+_MONOTONIC_STATE_FIELDS = ("cumulative_parent_cost", "subagent_cost", "active_duration_s")
+
+
+def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
+    """What a closing checkpoint must carry over from the durable row it read.
+
+    WHY THIS EXISTS. A closing row is REPLACEMENT state for every reader that
+    takes the newest row, so a runtime whose own view is poorer than the row it
+    restored would LOWER the conversation's durable state — the N1 defect
+    (``test_headless_turn_preserves_a_rich_frontend_checkpoint``), which review
+    round 1 (F1) required be fixed by MERGING rather than by writing once and
+    stopping. The rules, field by field, are the ones that test demands and the
+    ones the staleness probe demands:
+
+    * **Money and time never go backwards** (:data:`_MONOTONIC_STATE_FIELDS`):
+      the larger of the two wins, whoever wrote it — the cost fields and
+      ``active_duration_s``, the summed duration of the turns that ran, only ever
+      accumulate. Review round 2 (F8) folded the duration field into this rule and
+      removed the ``attached`` special case it used to need.
+    * **``context_tokens`` IS NOT MONOTONIC** (review round 2, F7): a compaction
+      SHRINKS it, so "the larger of the two wins" would pin a pre-compaction
+      reading over the runtime's own post-compaction one for the rest of the
+      conversation. The durable row supplies it only when this runtime has no
+      reading of its own — the N1 case, where a headless restore never saw a
+      provider receipt at all.
+    * **A blank field never overwrites a set one** — the title
+      (``conversation_title`` with its ``user_set``/``forked`` companions) and the
+      todo list. A headless runtime has no title of its own and reported ``""``,
+      which is how the TUI's title was lost; the title belongs to the
+      CONVERSATION, not to the runtime that happens to be closing it.
+    * **Identity stays this runtime's**: ``session_id``, ``epoch``,
+      ``checkpoint_id`` and ``jobs`` are never taken from the durable row. A
+      closing row names the runtime that wrote it — for a FORK, whose fixups
+      deliberately clear the parent's id and child list, inheriting them back
+      would smuggle another session's children into this transcript (the #573
+      shape ``_inherited_identity_fixups`` documents).
+
+    Everything else is the runtime's own current view, which is what a status row
+    is FOR.
+    """
+    overrides: dict[str, Any] = {}
+    for field in _MONOTONIC_STATE_FIELDS:
+        ours = getattr(live, field, None)
+        theirs = getattr(durable, field, None)
+        if theirs is not None and (ours is None or theirs > ours):
+            overrides[field] = theirs
+    if not getattr(live, "conversation_title", "") and getattr(durable, "conversation_title", ""):
+        overrides["conversation_title"] = durable.conversation_title
+        overrides["conversation_title_user_set"] = bool(
+            getattr(durable, "conversation_title_user_set", False)
+        )
+        overrides["conversation_title_forked"] = bool(
+            getattr(durable, "conversation_title_forked", False)
+        )
+    if not getattr(live, "todos", None) and getattr(durable, "todos", None):
+        overrides["todos"] = durable.todos
+    # NEITHER THE LATCH NOR THE GOAL IS CARRIED OVER (review round 3, F13). Round 2
+    # added two "a blank never overwrites a set one" branches here, for the title
+    # latch and for ``goal``, and both were the wrong rule for the same reason
+    # ``context_tokens`` was wrong in F7: these fields legitimately go BACKWARDS,
+    # because the user can release them. ``/goal --clear`` (``set_goal("")`` ->
+    # ``delete_goal``) and ``/title refresh`` (``release_user_set``) are real
+    # actions, and both produce exactly the shape the branches overruled — a blank
+    # live field against a set durable one — so the merge resurrected a goal the
+    # user cleared and re-set a latch the user released, in every later closing row.
+    # What makes that shape unambiguous is that the runtime's own view is the only
+    # one that has OBSERVED the release: a runtime that was merely restored carries
+    # the durable values as its own (the checkpoint restore seeds them), so a blank
+    # live field means someone cleared it.
+    # ``context_tokens`` has its own rule (see the docstring): taken from the
+    # durable row only when this runtime has NO reading of its own, because a
+    # compaction legitimately lowers it and the larger-of-two rule would hold the
+    # stale figure above the current one forever.
+    live_tokens = getattr(live, "context_tokens", None)
+    durable_tokens = getattr(durable, "context_tokens", None)
+    if not live_tokens and durable_tokens:
+        overrides["context_tokens"] = durable_tokens
+    return overrides
+
+
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     """Fields a restored checkpoint must NOT be allowed to carry across a fork.
 
@@ -1084,6 +1186,218 @@ class CostKnowledge(StrEnum):
     EXACT = "exact"
     PARTIAL = "partial"
     FLOOR = "floor"
+
+
+class FrontendSpendChannelRow(BaseModel):
+    """One aggregated row of the published ``spend_channels`` object.
+
+    Money is INTEGER micro-USD, like every other money field on this wire; a
+    UI formats it with its own dollar ladder rather than receiving preformatted
+    text (design §5.1). ``amount_micro=None`` means the row's money could not
+    be stated — it is NEVER a zero (the accumulator's own rule), and the row's
+    ``knowledge`` says how to read it.
+
+    ``label`` is the inference by-identity bucket key (``provider/model``, or
+    ``other`` for the cap's remainder, or ``unattributed`` for money that is
+    real but belongs to no single call). Channel rows leave it empty.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    channel: str
+    provider: str = ""
+    model: str = ""
+    label: str = ""
+    #: ``None`` means NO unit count was recorded (a legacy row recovered
+    #: without one) — the same refusal of a fabricated zero the money fields
+    #: keep, and the panel omits its units note rather than printing ``0``
+    #: (QA round 1, Q6).
+    units: float | None = None
+    unit: str = ""
+    amount_micro: int | None = None
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    basis: list[str] = Field(default_factory=list)
+    price_versions: list[str] = Field(default_factory=list)
+
+
+class FrontendSpendChildren(BaseModel):
+    """The subagent/forked-children contribution inside the published total.
+
+    For PR-1 this is the children's INFERENCE ledger (the figure the band has
+    always included through ``subagent_cost``/``child_costs``). Relayed channel
+    records from child sessions join it in the follow-up; until then this is
+    exactly the money the total contains for children, no more.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    total_micro: int = 0
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: Wire-visible reason for a degraded ``knowledge``: a resumed parent whose
+    #: earlier children's channel journals are not re-readable says so here
+    #: rather than presenting an undercount as exact (review m4/Q9). ``None``
+    #: (absent on the wire), never an empty string: a producer with nothing to
+    #: say must not grow every frame by a key, the same shape ``asks_truncated``
+    #: uses on the state model above.
+    reason: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = handler(self)
+        if self.reason is None:
+            payload.pop("reason", None)
+        return payload
+
+
+class FrontendSpendBreakdownEntry(BaseModel):
+    """One category of a ``breakdown`` partition (design §4.2, wire v1).
+
+    ``amount_micro`` is the entry's STATED micro-USD sum; ``None`` (never 0)
+    when nothing in it was sized, with ``unstated_records`` counting the
+    records that could not be sized. ``bases`` lists the distinct basis
+    spellings inside the entry; the display words for them ride the object's
+    ``vocabulary`` section, so a surface prints core's words rather than
+    carrying its own copy.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    label: str = ""
+    amount_micro: int | None = None
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    unstated_records: int = 0
+    bases: list[str] = Field(default_factory=list)
+
+
+class FrontendSpendBreakdown(BaseModel):
+    """The two reconcilable partitions of the published total (design §4.1).
+
+    ``by_agent`` is parent vs subagents; ``by_source`` is per channel,
+    tree-wide. Each partition's stated amounts sum to ``total_micro`` on its
+    own — and a reader must never ADD the two together: they are two views of
+    one total, which is exactly what makes each independently reconcilable.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    by_agent: list[FrontendSpendBreakdownEntry] = Field(default_factory=list)
+    by_source: list[FrontendSpendBreakdownEntry] = Field(default_factory=list)
+
+
+class FrontendSpendChannelWord(BaseModel):
+    """The published display word for one channel id (design §5.2)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str = ""
+
+
+class FrontendSpendBasisMeta(BaseModel):
+    """The published words and funding class for one billing basis spelling.
+
+    ``source_class`` is ``paygo`` | ``subscription`` | ``unknown`` — a property
+    of the basis VALUE, not of a provider; a subscription-class basis is the
+    only one that carries a ``note``. ``note`` is omitted entirely when there
+    is nothing to explain (the ``children.reason`` precedent above), so a
+    pay-as-you-go session's frames carry no subscription prose.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str = ""
+    source_class: str = "unknown"
+    marker: str = ""
+    note: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_note(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        payload = handler(self)
+        if self.note is None:
+            payload.pop("note", None)
+        return payload
+
+
+class FrontendSpendVocabulary(BaseModel):
+    """The display vocabulary for the ids and bases this object carries.
+
+    Derived per object (only values present), so the section stays small and
+    its absence on an old producer is clean: a surface reads a word here first
+    and falls back to its legacy maps only when the whole section is absent.
+    A new channel or basis therefore renders from this section with zero UI
+    edits.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    channels: dict[str, FrontendSpendChannelWord] = Field(default_factory=dict)
+    bases: dict[str, FrontendSpendBasisMeta] = Field(default_factory=dict)
+
+
+class FrontendSpendChannels(BaseModel):
+    """The session's published per-channel spend (``spend_channels``).
+
+    ONE object every surface renders, so surfaces cannot disagree: the TUI
+    band, ``/session``, the phone and the Electron strip all read
+    ``total_micro``/``knowledge``/``rows`` from here instead of summing
+    locally (design §5.1). ``total_micro`` is the grand total across the
+    session's own inference, its channel records and its children. It is
+    ``None``-free by construction: absence of the whole object is the "this
+    build does not publish it" state an old UI renders legacy-style.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    version: int = 1
+    #: False for a session whose journal carries no channel ``start`` marker —
+    #: a pre-feature conversation. Its totals are inference-only and every
+    #: surface must say "channels not tracked" rather than implying $0 of
+    #: channel spend (no fabricated zeros).
+    tracked: bool = False
+    total_micro: int = 0
+    knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: Money per billing basis: ``billed``/``subscription_api_equivalent``/
+    #: ``estimated`` are micro-USD SUMS, ``not_tracked_micro`` is the money
+    #: whose basis is not tracked yet (this session's own inference plus the
+    #: children bundle), and ``not_tracked_calls`` is a COUNT of rows whose
+    #: amount could not be stated at all. The three money buckets plus
+    #: ``not_tracked_micro`` equal ``total_micro`` — the buckets reconcile
+    #: rather than describing a subset (design round 1, D1). Subscription
+    #: dollars stay in their own bucket — never added into ``billed``.
+    #: ``not_tracked_micro`` is ADDITIVE on the v1 wire: an old producer omits
+    #: it and a reader treats absence as 0 (UI round-2 request: the backend
+    #: publishes the amount so no UI ever re-sums inference rows for it).
+    by_basis: dict[str, int] = Field(default_factory=dict)
+    rows: list[FrontendSpendChannelRow] = Field(default_factory=list)
+    children: FrontendSpendChildren = Field(default_factory=FrontendSpendChildren)
+    #: ADDITIVE sections (design §4/§5): the two reconcilable partitions of
+    #: ``total_micro`` and the display words for the ids and bases above. Both
+    #: are omitted from the wire when unset — absence is exactly what an old
+    #: producer looks like — so an unset section costs no bytes and needs no
+    #: sentinel (the ``children.reason`` precedent).
+    breakdown: FrontendSpendBreakdown | None = None
+    vocabulary: FrontendSpendVocabulary | None = None
+    #: ADDITIVE on the v1 wire, and present ONLY when the session knows of
+    #: voice records that exist (in analytics) but are not in the fold — the
+    #: §4.2 return-path fallback: ``{"voice": "pending_owner_append",
+    #: "calls": N, "reason": "..."}``. Their money is NOT in ``total_micro``
+    #: (the same total shows everywhere); this key is how a surface says why.
+    #: Absent for every other session, so the golden fixture and every legacy
+    #: reader keep the exact key set they always had.
+    pending: dict[str, Any] | None = None
+
+    #: ONE wrap serializer for the three optional keys: pydantic allows one
+    #: ``model_serializer`` per model, and the merge-time rule these keys
+    #: share is the same — an unset key is POPPED, never emitted as null.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_sections(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        payload = handler(self)
+        for key in ("breakdown", "vocabulary", "pending"):
+            if payload.get(key) is None:
+                payload.pop(key, None)
+        return payload
 
 
 class SlashCapability(BaseModel):
@@ -2055,12 +2369,11 @@ def _released_row(job: Any) -> "JobState":
         elif isinstance(component, FrontendUsage):
             descendants.append(component)
     values["descendant_usage"] = descendants
-    direct_cost, unknown = cost_summary(
-        (usage.cost_components or [usage]) if usage is not None else [],
-        model_label=str(getattr(job, "model_label", None) or ""),
+    row_cost, unknown = job_subtree_cost(
+        job, default_model_label=str(getattr(job, "model_label", None) or "")
     )
-    values["direct_cost"] = direct_cost
-    values["direct_cost_knowledge"] = _cost_knowledge(direct_cost, unknown)
+    values["direct_cost"] = row_cost
+    values["direct_cost_knowledge"] = _cost_knowledge(row_cost, unknown)
     return _freeze_job(JobState.model_validate(values))
 
 
@@ -2479,6 +2792,15 @@ class JobState(BaseModel):
     usage: Usage | None = None
     # None knowledge marks old runtimes, which still need the legacy pricing path.
     # Explicit UNKNOWN forbids viewers from discovering/pricing independently.
+    #
+    # THE ROW'S WHOLE-SUBTREE FIGURE, despite the name: its own calls plus every
+    # descendant, settled or still running (``harness.jobs.job_subtree_components``,
+    # the same rollup the session ledger uses). The name predates nested
+    # accounting and stays because it is on the wire and in two shipped clients;
+    # a row that showed only the parent's own cents while its scouts spent dollars
+    # disagreed with the footer total (session 3463fc25dade: $0.02 on the row,
+    # ~$5.5 of Sonnet scouts beneath it). ``direct_cost_knowledge`` is PARTIAL when
+    # any part of the subtree is unpriced, so the figure is then a lower bound.
     direct_cost: float | None = None
     direct_cost_knowledge: CostKnowledge | None = None
     start_time: float = 0.0
@@ -2682,9 +3004,10 @@ class JobState(BaseModel):
         usage = getattr(job, "usage", None)
         if isinstance(usage, dict):
             usage = Usage.model_validate(usage)
-        direct_cost, unknown = cost_summary(
-            (usage.cost_components or [usage]) if usage is not None else [],
-            model_label=getattr(job, "model_label", None) or "",
+        # The row's figure covers its WHOLE subtree, not only its own calls; see
+        # the ``JobState.direct_cost`` note for why the wire name is kept.
+        row_cost, unknown = job_subtree_cost(
+            job, default_model_label=str(getattr(job, "model_label", None) or "")
         )
         descendants = []
         for component in list(getattr(job, "descendant_usage", None) or []):
@@ -2707,8 +3030,8 @@ class JobState(BaseModel):
             requested_model_label=getattr(job, "requested_model_label", None),
             context_window=getattr(job, "context_window", None),
             usage=usage,
-            direct_cost=direct_cost,
-            direct_cost_knowledge=_cost_knowledge(direct_cost, unknown),
+            direct_cost=row_cost,
+            direct_cost_knowledge=_cost_knowledge(row_cost, unknown),
             start_time=float(
                 getattr(job, "start_time", 0.0)
                 or getattr(job, "started_at", 0.0)
@@ -2759,6 +3082,99 @@ class FrontendModelSpec(ModelSpec):
     """Wire model spec that preserves fields introduced by newer runtimes."""
 
     model_config = ConfigDict(extra="allow")
+
+
+class FrontendModelAccess(BaseModel):
+    """Whether the session's selected model can actually run on its host.
+
+    ADDITIVE and published by the host that knows the credentials, because the
+    truth of it is a fact about a CREDENTIAL STORE, not about the conversation:
+    the same session resumed on a machine without the sign-in is genuinely not
+    runnable there, and the field must therefore be recomputed by whichever
+    host publishes state rather than restored from a checkpoint (see the
+    checker's durable fold). ``None`` on the wire means NO CLAIM is made —
+    either the host does not compute it, or its credential store could not be
+    read, in which case "signed_out" would be an accusation the app failed to
+    establish (the same reason ``picker_rows(usable=None)`` shows everything).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    #: ``ok`` — the selected provider is usable here; ``signed_out`` — it is
+    #: not (no stored row, no env key). One word, so a renderer branches on a
+    #: value rather than parsing a sentence.
+    state: Literal["ok", "signed_out", "temporarily_unavailable"]
+    #: Additive native-access vocabulary. Older clients keep reading ``state``;
+    #: updated clients distinguish borrow convergence/refusal from local logout.
+    #: No holder row alone can produce ``effective_borrow``.
+    effective_state: (
+        Literal[
+            "local",
+            "eligible_borrow_unverified",
+            "effective_borrow",
+            "expired",
+            "pending",
+            "owner_unavailable",
+            "withdrawn",
+            "device_bound",
+            "absent",
+        ]
+        | None
+    ) = None
+    #: Keyless borrow context, explicitly historical. A failed/expired reading
+    #: retains the last successful grant's bound but NEVER marks it usable.
+    #: Epoch seconds; None means this process has not observed that fact.
+    owner_device: str = ""
+    owner_label: str = ""
+    observed_at: float | None = None
+    last_grant_at: float | None = None
+    last_grant_expires_at: float | None = None
+    #: The selected model's provider id (``anthropic``), not a display name.
+    provider: str
+    #: The provider's human name for the band's sentence ("Not signed in to
+    #: Anthropic"). Carried rather than looked up client-side because the wire
+    #: has no provider registry, and a client inventing one is how the two
+    #: surfaces start describing one situation with two vocabularies.
+    label: str
+
+
+def model_access_claim(
+    selector: str | None,
+    usable: Collection[str] | None,
+    *,
+    saved: Collection[str] | None = None,
+) -> FrontendModelAccess | None:
+    """The claim a host publishes for ``selector``, or ``None`` for "no claim".
+
+    ONE spelling of the mapping, shared by every publishing host, so the TUI and
+    a serve-side runtime cannot describe the same store with two answers: the
+    inputs are the session's selector (``provider/model_id``) and the WIDE
+    usable-providers set (``ProviderController.usable_providers`` — keyless
+    locals included, because that is the set the pickers filter by).
+
+    ``None`` in either input is "cannot tell": a selectorless session has no
+    model to speak about, and an unreadable store must not present as
+    ``signed_out`` (an accusation nobody established).
+    """
+    if not selector or usable is None:
+        return None
+    from local_operator.providers.registry import get_provider_definition
+
+    provider = selector.partition("/")[0]
+    definition = get_provider_definition(provider)
+    return FrontendModelAccess(
+        state=(
+            "ok"
+            if provider in usable
+            else (
+                "temporarily_unavailable"
+                if saved is not None and provider in saved
+                else "signed_out"
+            )
+        ),
+        provider=provider,
+        label=definition.name if definition is not None else provider,
+    )
 
 
 class FrontendUsage(Usage):
@@ -2930,6 +3346,11 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: "Can the model this session is on actually run here" — see
+    #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
+    #: publish it, or one whose store could not be read); old clients ignore
+    #: the key, and this client renders nothing for ``None``.
+    model_access: "FrontendModelAccess | None" = None
     last_usage: FrontendUsage | None = None
     usage_components: list[FrontendUsage] = Field(default_factory=list)
     context_tokens: int | None = None
@@ -2944,6 +3365,11 @@ class FrontendSessionState(BaseModel):
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
+    #: The published per-channel spend object (design §5.1): what every surface
+    #: reads for channel money. Additive and optional — absent on an old
+    #: runtime, and an old reader ignores it (``extra="allow"``), keeping this
+    #: wire change safe in both directions.
+    spend_channels: FrontendSpendChannels | None = None
     streaming: bool = False
     generation: int = 0
     #: How the last logical turn ended, for a viewer that dropped mid-turn and
@@ -3110,6 +3536,18 @@ class FrontendSessionState(BaseModel):
             payload.pop("asks_open", None)
         if mutable.asks_truncated is None:
             payload.pop("asks_truncated", None)
+        # An IDLE claim costs the frame its null (``, "model_access": null`` —
+        # 22 bytes), and the attach frame has no slack: the class guard in
+        # tests/unit/session/test_attach_frame_size.py sat 2,177 bytes under
+        # the 1 MiB line without the field and 22 bytes over with it (QA round
+        # 1, Q3). Absence already means "no claim" for every consumer — the
+        # field defaults to None and the durable fold writes None for the same
+        # reason — so the null is spent only when a claim EXISTS. A live claim
+        # serializes normally; the delta that CLEARS one still carries an
+        # explicit null (this seam shapes snapshots, not change sets), which
+        # is what lets a follower tell "cleared" from "never said".
+        if mutable.model_access is None:
+            payload.pop("model_access", None)
         return payload
 
     @field_validator("selected_model", "effective_model", mode="before")
@@ -3567,6 +4005,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             snapshot["usage_components"] = _capped_components(components)
         _bound_live_events_in_place(snapshot)
         _bound_asks_in_place(snapshot)
+        _bound_spend_channels_in_place(snapshot)
         # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
         # clipped judge reason) and yielded HERE at the wire, because an entry
         # cap is not a wire bound: the frame this field rides is the one the
@@ -3608,6 +4047,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
         # catalogue takes a residual budget where jobs take a fixed one.
         _bound_model_catalogue_in_place(payload, snapshot)
+        _yield_spend_channels_when_the_frame_has_no_room(payload, snapshot)
         _yield_asks_when_the_frame_has_no_room(snapshot, payload)
     return payload
 
@@ -3971,6 +4411,130 @@ def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
         # the precedent, and QA's reproduction (20 long asks shipped as 9 rows
         # beside ``asks_open: 20``) is why it exists.
         snapshot["asks_truncated"] = True
+
+
+#: Rows a serialized ``spend_channels`` object may carry before the remainder
+#: is GROUPED into one aggregate row.
+#:
+#: The row list is the one part of the object that scales with the session's
+#: own history: one row per serving identity (the inference split) plus one per
+#: metered channel/provider/model, and every row costs ~200 bytes of JSON. The
+#: attach frame's all-maximum shape has ~24 bytes of margin, so a list bounded
+#: only by the session can never be a wire bound. Twelve covers every shape a
+#: normal session produces (the worst real session measured on this host had
+#: 9); bytes past that are bought for a table no surface shows at once.
+SPEND_CHANNEL_ROW_CAP = 12
+
+
+def _cap_spend_channel_rows_in_place(channels: Any) -> None:
+    """Bound ONE serialized ``spend_channels`` row list, grouping the remainder.
+
+    Rows past :data:`SPEND_CHANNEL_ROW_CAP` are GROUPED, not dropped: their
+    stated money is summed into one ``other`` row whose ``knowledge`` is the
+    worst of theirs, so the table's parts still sum to the published total —
+    the invariant ``combine`` exists to keep — and a reader can see that more
+    channels exist. The ``by_basis`` buckets are computed over every record and
+    are NOT touched by the grouping, so the headline and the basis line stay
+    exact even for a clipped table.
+
+    Shared by both routes on purpose: the object rides the attach snapshot AND
+    every refresh delta, and a bound placed only at the snapshot boundary holds
+    for the first frame and leaks on every one after it (the rule this file
+    records for the job fields). The phone's own read
+    (``FrontendStateStore.spend_channels_copy``) reuses this bound as well, so
+    the mobile projection and the desktop frame cap the same list the same way
+    instead of agreeing by inspection.
+    """
+    if not isinstance(channels, dict):
+        return
+    rows = channels.get("rows")
+    if not isinstance(rows, list) or len(rows) <= SPEND_CHANNEL_ROW_CAP:
+        return
+    # NAMED CHANNELS WIN THE BUDGET. Rows arrive in display order with the
+    # inference split first — up to ``IDENTITY_CAP`` (32) rows of ONE channel —
+    # so a plain "first twelve" cap would let inference filler push every
+    # image/tts/stt/search row into the aggregate and the panel could not name
+    # a single metered channel (review round 2, m2). Selection is
+    # deterministic: every non-inference row keeps its place up to the cap
+    # (wire order among those), inference rows take what is left; anything
+    # still over is the aggregate. The final list preserves wire order, so the
+    # table's hierarchy is unchanged.
+    named = [row for row in rows if row.get("channel") != "inference"]
+    inference = [row for row in rows if row.get("channel") == "inference"]
+    kept_named = named[:SPEND_CHANNEL_ROW_CAP]
+    kept_inference = inference[: max(0, SPEND_CHANNEL_ROW_CAP - len(kept_named))]
+    kept_ids = {id(row) for row in kept_named} | {id(row) for row in kept_inference}
+    kept = [row for row in rows if id(row) in kept_ids]
+    dropped = [row for row in rows if id(row) not in kept_ids and isinstance(row, dict)]
+    stated = [
+        int(row["amount_micro"])
+        for row in dropped
+        if isinstance(row.get("amount_micro"), int)
+        and not isinstance(row.get("amount_micro"), bool)
+    ]
+    degraded = any(
+        row.get("amount_micro") is None
+        or str(row.get("knowledge") or "") in {"partial", "floor", "unknown"}
+        for row in dropped
+    )
+    channels["rows"] = kept + [
+        {
+            # ``other`` is the closed set's own overflow channel (see
+            # ``channel_spend.CHANNELS``), and the panel's rank order already
+            # sorts it last — the aggregate cannot displace a named row.
+            "channel": "other",
+            "provider": "",
+            "model": "",
+            "label": f"other channels ({len(dropped)})",
+            # No unit count: the aggregate mixes channels, so any number would
+            # be a fabricated one (the same rule that keeps ``units`` null on a
+            # row whose count was never recorded).
+            "units": None,
+            "unit": "",
+            "amount_micro": sum(stated) if stated else None,
+            "knowledge": "partial" if degraded else "exact",
+            "basis": [],
+            "price_versions": [],
+        }
+    ]
+
+
+def _bound_spend_channels_in_place(snapshot: dict[str, Any]) -> None:
+    """Omit the null form of ``spend_channels`` and cap its row list.
+
+    WHY THE NULL IS OMITTED: on the attach frame's all-maximum fixture the key
+    costs exactly 24 bytes (``,"spend_channels": null``) and that fixture's
+    entire remaining margin was 24 bytes, so an object that is NOT published
+    must cost nothing on the wire. Absent and null mean the same thing here
+    (``None`` is "this build publishes no channel ledger"), which is why
+    dropping the key loses nothing a reader can act on.
+    """
+    channels = snapshot.get("spend_channels")
+    if channels is None:
+        snapshot.pop("spend_channels", None)
+        return
+    _cap_spend_channel_rows_in_place(channels)
+
+
+def _yield_spend_channels_when_the_frame_has_no_room(
+    payload: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    """Drop the channel object when the frame it would ride cannot be sent.
+
+    THE LAST-RESORT YIELD for the money table, and it runs BEFORE the ask yield
+    deliberately: an object that gives way here is re-published by the next
+    money event or refresh (the field is read from the store and rebuilt from
+    the journal), while a dropped ask has no second route on this frame. It
+    measures the REAL payload the socket writes — the same shape
+    ``_frame_line_bytes`` charges for, so the branch cannot fail to fire the way
+    the ask yield's first revision could — and it runs after every other bound
+    so the residual budgets have already accounted for what they can.
+    """
+    if not isinstance(snapshot.get("spend_channels"), dict):
+        return
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    snapshot.pop("spend_channels", None)
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -5552,6 +6116,33 @@ class FrontendStateStore:
             }
         return dict(state.child_costs), pair
 
+    def spend_channels_copy(self) -> dict[str, Any] | None:
+        """A fresh SERIALISED copy of the published ``spend_channels`` object.
+
+        The second sibling of :meth:`spend_context_copy`, for the same reason
+        it exists: the phone's per-event refresh (``serving``/``tui_handle``
+        ``_refresh_state``) cannot read this field through ``read_field`` — the
+        allow-list admits only deeply immutable scalars, and this is a model —
+        and cannot afford :meth:`state`'s whole-state deep copy per folded
+        event. The dump is taken with ``mode="json"``, the same serialisation
+        the desktop sync frame uses (``sync_wire_payload``), and runs through
+        the SAME row cap (``_cap_spend_channel_rows_in_place``) so the phone
+        and the desktop see one bounded shape rather than two spellings of it;
+        the cap GROUPS the remainder into an ``other`` row and leaves
+        ``by_basis``/``total_micro`` exact, so nothing is lost by it.
+
+        ``None`` (not an empty dict) when the store publishes no object: the
+        projection's field then stays absent on the wire, which its consumers
+        read as "this runtime publishes no channel ledger" — the same absence
+        the desktop frame's dropped key means.
+        """
+        channels = self._state.spend_channels
+        if channels is None:
+            return None
+        dumped = channels.model_dump(mode="json")
+        _cap_spend_channel_rows_in_place(dumped)
+        return dumped
+
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.
 
@@ -6224,6 +6815,13 @@ class FrontendStateStore:
             for summary in summaries:
                 _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
+        if "spend_channels" in wire_changes:
+            # The object rides every refresh's DELTA as well (the band's own
+            # publish path), so the cap runs on this route too — a bound placed
+            # only at the snapshot boundary holds for the first frame and leaks
+            # on every one after it, the rule this file records for the job
+            # fields.
+            _cap_spend_channel_rows_in_place(wire_changes["spend_channels"])
         if "asks" in wire_changes:
             # THE DELTA ROUTE IS BOUNDED TOO. ``_bound_asks_in_place`` runs on the
             # attach SNAPSHOT, and the queue's own change path drives the DELTA
@@ -6344,8 +6942,30 @@ class FrontendStateStore:
         registry — but its turn-end checkpoint is unconditional, so the store
         MUST begin from the richest durable state or a single headless turn
         would persist a bare checkpoint over the TUI's spend/duration/title.
+
+        The restored ``spend_channels`` is REBUILT from the session's journal
+        fold rather than trusted from the checkpoint. The checkpoint is written
+        at turn end, so anything that landed after it — the common shape being
+        a quote→settled upgrade observed between turns — is in the journal and
+        the fold but NOT in the checkpointed object; publishing the stale copy
+        made a headless resume disagree with the live owner by exactly that
+        delta (QA round 1, Q1: checkpoint 63000, fold 71000). The fold is
+        already materialised on the session at construction, so this is one
+        pure re-derivation, not a disk read. A pre-feature checkpoint has no
+        object at all, and this lands the fold's object (``tracked=false``,
+        partial) where ``None`` used to sit.
         """
-        return cls(cls._restored_state(session))
+        state = cls._restored_state(session)
+        ledger = {
+            "subagent_cost": state.subagent_cost,
+            "subagent_cost_knowledge": state.subagent_cost_knowledge,
+        }
+        payload = _spend_channels_payload(
+            session, ledger, state.child_costs, getattr(session, "spend", None)
+        )
+        if payload is not None:
+            state = state.model_copy(update={"spend_channels": payload})
+        return cls(state)
 
     @staticmethod
     def _restored_state(session: Any) -> FrontendSessionState:
@@ -6433,9 +7053,7 @@ class FrontendStateStore:
         jobs = self._jobs(session, self._retained_windows(), self._released_memo())
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
-            cost = _job_subtree_cost(job, default_model_label=_label(selected))
-            if cost is not None:
-                child_costs[job.id] = cost
+            _carry_child_cost(child_costs, job, default_model_label=_label(selected))
         parent_cost = current.cumulative_parent_cost
         knowledge = current.cost_knowledge
         # The record is the durable money and it is newer than the checkpoint's
@@ -6522,10 +7140,28 @@ class FrontendStateStore:
         # its measured cases live in ``_replayed_context_change``, shared with
         # the spend republish path so the two cannot drift.
         receipt_context = getattr(last_usage, "context_tokens", None) if last_usage else None
+        # Computed ONCE here because two consumers need the same fresh figures:
+        # the state's ``subagent_cost*`` fields below, and the channel payload's
+        # children section. Two calls could not disagree (it is a pure read of
+        # the manager's ledger), but one call is what keeps them provably the
+        # same number.
+        ledger = _ledger_cost(session)
         changes = dict(
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
-            conversation_title=title,
+            # A BLANK TITLE NEVER OVERWRITES A SET ONE (review round 1, F1). The
+            # title belongs to the conversation, and the store is usually the only
+            # holder of it: a headless runtime whose own title lookup came up
+            # empty reported "" and the next reader lost the title a TUI had set
+            # (the N1 fixture, and QA-Q4's probe of a closing row over a row whose
+            # ``state.checkpoint_id`` was null). A title the user CLEARS is a
+            # different event and carries ``user_set``, so it still lands.
+            conversation_title=title
+            or (
+                ""
+                if getattr(title_state, "user_set", False)
+                else (current.conversation_title or "")
+            ),
             conversation_title_user_set=bool(getattr(title_state, "user_set", False)),
             conversation_title_forked=bool(getattr(session, "wears_inherited_title", False)),
             goal=str(getattr(session, "goal", "") or ""),
@@ -6549,6 +7185,14 @@ class FrontendStateStore:
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
             ),
+            # A fallback delta must not carry the former primary's accusation.
+            # The owner access publisher will replace it with the serving claim.
+            model_access=(
+                current.model_access
+                if current.model_access is None
+                or current.model_access.provider == getattr(effective, "provider", None)
+                else None
+            ),
             # THROUGH THE HELPER, and this site is the one that made the whole
             # channel look broken (review round 2): ``refresh_from_session`` runs
             # from ``observe_event`` at the END of both the message and the turn,
@@ -6570,8 +7214,13 @@ class FrontendStateStore:
             context_breakdown=context_breakdown,
             cumulative_parent_cost=parent_cost,
             child_costs=child_costs,
-            **_ledger_cost(session),
+            **ledger,
             cost_knowledge=knowledge,
+            # The published channel object is rebuilt from the SESSION's fold
+            # and the fresh children figures, in one place, so every surface
+            # reading this state sees one total. ``None`` for a host with no
+            # fold keeps the legacy shape an old surface renders today.
+            spend_channels=_spend_channels_payload(session, ledger, child_costs, spend),
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
@@ -6703,15 +7352,20 @@ class FrontendStateStore:
         # and letting the seed price it would bill the call twice.
         self._seed_legacy_spend(session, None)
         micro = int(round(paint_cost * 1_000_000)) if paint_cost is not None else None
+        # The call's billing basis (PR-3): the SAME decision the analytics
+        # record takes, from the SAME raw usage stamps AND the same unstamped
+        # fallback (the effective model), so the wire's basis array and the
+        # ledger's basis column cannot disagree about one call.
+        basis = _usage_billing_basis(usage, getattr(session, "effective_model", None))
         # ``cast`` rather than a bare call: these are duck-typed members on a
         # session facade (a reduced host may not have them at all), so pyright
         # sees ``object`` where the runtime contract is the call signature
         # below. The ``callable`` guard IS the runtime contract.
         accrue = getattr(session, "accrue_spend", None)
         if callable(accrue):
-            index = int(cast("AccrueSpendFn", accrue)(micro, identity))
+            index = int(cast("AccrueSpendFn", accrue)(micro, identity, basis=basis))
         else:
-            index = spend.accrue(micro, identity)
+            index = spend.accrue(micro, identity, basis=basis)
         schedule = getattr(session, "schedule_spend_price", None)
         if callable(schedule) and not usage_prices_known(usage):
             # A provider receipt is already the exact bill; nothing to converge.
@@ -6831,11 +7485,20 @@ class FrontendStateStore:
         has no accumulator to speak for it (a pre-ledger session). That fallback
         is today's behaviour, kept exactly: a session with no record must not
         silently lose its ``≥``, and it must not lose the money either.
+
+        The channel object is republished HERE too (see ``_channels_change``):
+        this is the adopt seam AND the off-loop re-price's landing point, and a
+        published total that lags the fold by a settled delta is the surface
+        disagreement the whole feature removes (review round 1, M1).
         """
         restore = getattr(session, "restored_usage", None)
         usage = restore() if callable(restore) else None
         if not isinstance(usage, Usage):
-            return None
+            # Still republish the channels: a session with no restored usage
+            # can hold channel money, and adopt is the only seam it is
+            # guaranteed to pass (QA round 1, Q1).
+            change = self._channels_change(session)
+            return self.mutate(**change) if change else None
         state = self._state
         changes: dict[str, Any] = {
             "last_usage": _usage_with_decode_window(usage),
@@ -6856,7 +7519,73 @@ class FrontendStateStore:
             # ``$—`` branch reachable here instead of an unreachable zero.
             changes["cumulative_parent_cost"] = spend.published_usd()
             changes["cost_knowledge"] = spend.knowledge()
+        changes.update(self._channels_change(session))
         return self.mutate(**changes)
+
+    def _channels_change(
+        self,
+        session: Any,
+        *,
+        ledger: Mapping[str, Any] | None = None,
+        child_costs: Mapping[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """``{"spend_channels": payload}`` for a refresh's change set, or ``{}``.
+
+        EVERY writer that moves money must merge this. The published object is
+        what the band and the panels render, so a writer that updates the
+        cumulative figure or the children ledger WITHOUT republishing the
+        channels object leaves the surfaces disagreeing by exactly that delta —
+        the defect this project exists to remove (review round 1, M1: the
+        re-price, the aside accrual and the 50 ms child refresh each moved money
+        the published total never saw). ``{}`` when this host publishes no
+        ledger, in which case the field keeps whatever it had.
+
+        ``ledger``/``child_costs`` are the caller's FRESH reads when it has
+        them; the state's current values are the fallback, so a writer that
+        does not rescan jobs still republishes against the best figures known.
+        """
+        state = self._state
+        if ledger is None:
+            ledger = {
+                "subagent_cost": state.subagent_cost,
+                "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            }
+        if child_costs is None:
+            child_costs = state.child_costs
+        payload = _spend_channels_payload(session, ledger, child_costs, self._spend_of(session))
+        return {"spend_channels": payload} if payload is not None else {}
+
+    def refresh_spend_channels(self, session: Any) -> FrontendUpdate | None:
+        """Publish the session's channel ledger, ALONE and cheaply.
+
+        The ingest seam's publish step (``Session.record_channel_spend``): a
+        channel record arrives several times a turn at most, and the full
+        :meth:`refresh_from_session` re-reads the job roster and the transcript
+        cursor — far more than a search or an image needs to reach the band.
+        This rebuilds exactly the one object from the session's fold plus the
+        children figures the state already holds.
+
+        ``None`` (no update) when the host has no fold: nothing to publish is
+        not the same as publishing a zero, and the field keeps whatever it had.
+        """
+        ledger = _ledger_cost(session)
+        state = self._state
+        payload = _spend_channels_payload(
+            session,
+            (
+                ledger
+                if ledger
+                else {
+                    "subagent_cost": state.subagent_cost,
+                    "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                }
+            ),
+            state.child_costs,
+            self._spend_of(session),
+        )
+        if payload is None:
+            return None
+        return self.mutate(spend_channels=payload)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
         """Accrue a provider call outside the ordinary agent event stream.
@@ -6889,6 +7618,10 @@ class FrontendStateStore:
                     list(state.usage_components) + list(usage.cost_components or [usage])
                 ),
             )
+        # Inference money moved: republish the channels object beside it, or the
+        # band (which reads the published total) never sees the accrual
+        # (review round 1, M1).
+        changes.update(self._channels_change(session))
         return self.mutate(**changes)
 
     def refresh_jobs(self, session: Any) -> FrontendUpdate | None:
@@ -6906,15 +7639,40 @@ class FrontendStateStore:
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
-            cost = _job_subtree_cost(job, default_model_label=_label(selected))
-            if cost is not None:
-                child_costs[job.id] = cost
-        update = self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
+            _carry_child_cost(child_costs, job, default_model_label=_label(selected))
+        ledger = _ledger_cost(session)
+        update = self.mutate(
+            jobs=jobs,
+            child_costs=child_costs,
+            **ledger,
+            # Live child spend moves the published total on this same cadence;
+            # without this the band reads a stale object until the next turn
+            # event while the ledger itself has already moved (review M1).
+            **(self._channels_change(session, ledger=ledger, child_costs=child_costs)),
+        )
         # After the reducer has decided, so the memo hands back the object the
         # state actually holds -- see :meth:`_TrajectoryWindows.adopt_from`.
         self._trajectory_windows.adopt_from(self._state.jobs)
         self._released_rows.adopt_from(self._state.jobs)
         return update
+
+    def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
+        """Publish whether the session's selected model can run on this host.
+
+        Owner-side, and called by the same edges that republish the model
+        catalogue (adoption, a login, a model switch) rather than by
+        ``refresh_from_session``: that method runs on every streaming edge of
+        the session loop, and reading a credential store there would put a
+        SQLite read on that path for a field that changes on credential
+        timescales. The caller owns the credential knowledge
+        (``ProviderController.usable_providers``); this is only the wire.
+        """
+        # Dumped to the wire shape rather than stored as the model, matching
+        # ``refresh_model_catalogue``'s rows: this store is JSON in and JSON
+        # out, and a store holding a live pydantic instance would share a
+        # mutable object through ``read_field``.
+        value = access.model_dump(mode="json") if access is not None else None
+        return self.mutate(model_access=value)
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
         """Publish the runtime's offerable model rows as canonical state.
@@ -6948,6 +7706,26 @@ class FrontendStateStore:
                     # ``Any``, and a duck-typed entry from an embedding host
                     # need not have the attribute.
                     "routed": bool(getattr(entry, "routed", False)),
+                    # Optional native facts must survive canonical adoption too;
+                    # otherwise desktop live rows are rich while a session's
+                    # own first-frame/completion projection drops the details.
+                    **{
+                        field: getattr(entry, field, None)
+                        for field in (
+                            "max_output_tokens",
+                            "supports_tools",
+                            "supports_images",
+                            "supports_audio_input",
+                            "reasoning",
+                            "reasoning_efforts",
+                            "reasoning_default_effort",
+                            "family",
+                            "release_date",
+                            "modalities",
+                            "variants",
+                        )
+                        if getattr(entry, field, None) is not None
+                    },
                     # The row's time-of-use schedule, carried for the same reason
                     # as ``routed`` above and left out of the original round trip
                     # by oversight (review round 1, MINOR 1): without it an
@@ -7353,7 +8131,18 @@ class FrontendStateStore:
         # needs installing against a reader.
         self._install(self._state.model_copy(update={"live_events": live}))
 
-    async def checkpoint(self, transcript: Any) -> None:
+    async def checkpoint(self, transcript: Any, *, preserve_mtime: bool = False) -> None:
+        """Append the durable turn-end (or closing) status row.
+
+        ``preserve_mtime`` is for the CLOSING checkpoint a runtime leaves at
+        teardown (see ``Session._write_closing_checkpoint``): that row is a
+        record ABOUT the session written after the user's last turn, so it must
+        not re-rank the session as freshly worked in ``retention.session_activity``
+        (the one clock the picker and ``session.cleanup`` share). It is a
+        REQUEST the transcript layer validates — honoured only for a whole batch
+        of :data:`~local_operator.session.transcript.BOOKKEEPING_CUSTOM_TYPES`,
+        which this type is a member of — so a caller cannot use it to hide work.
+        """
         state = self.state
         checkpoint_id = uuid.uuid4().hex
         state.checkpoint_id = checkpoint_id
@@ -7394,6 +8183,13 @@ class FrontendStateStore:
                 "asks": None,
                 "asks_open": None,
                 "asks_truncated": None,
+                # A claim about THIS host's credential store, not about the
+                # conversation: a checkpoint reopened on a machine without the
+                # sign-in would otherwise serve a stale ``ok``, and one that
+                # gained credentials would keep a stale ``signed_out``. The
+                # publishing host recomputes it (``refresh_model_access``), so
+                # the durable copy deliberately carries no claim.
+                "model_access": None,
                 "jobs": [
                     job.model_copy(
                         update={
@@ -7420,6 +8216,7 @@ class FrontendStateStore:
         await transcript.append_custom(
             FRONTEND_CHECKPOINT_CUSTOM_TYPE,
             {"checkpoint_id": checkpoint_id, "state": durable.model_dump(mode="json")},
+            preserve_mtime=preserve_mtime,
         )
 
     def _retained_windows(self) -> _TrajectoryWindows:
@@ -7889,28 +8686,191 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     }
 
 
-def _job_subtree_cost(job: Any, *, default_model_label: str) -> float | None:
-    """Direct plus nested descendant spend for one root job row.
+def _children_snapshot(
+    ledger: Mapping[str, Any],
+    child_costs: Mapping[str, float],
+    *,
+    predates_process: bool = False,
+) -> ChildrenSnapshot:
+    """The children contribution to the published total, in micro-USD.
 
-    Mirrors the harness accounting (`jobs.py`): each descendant component is
-    priced at ITS OWN serving identity, never the parent's rate. Any
-    unpriceable component returns ``None`` so the prior figure is retained
-    rather than silently undercounted — the same honesty rule the legacy
-    harvest applied.
+    The SAME rule the cumulative total has always used for children, restated
+    once so the band's number and the channel object's ``children`` section can
+    never disagree: the whole-manager ledger (``subagent_cost``) wins when its
+    knowledge exists, the compatibility ``child_costs`` rows are the fallback
+    (their sum is a true LOWER bound — only priced rows are in the map, so a
+    child the price resolver could not size is missing from it), and a session
+    with no children at all is a stated zero.
+
+    ``predates_process`` is the resumed-parent case (review round 2, m4/Q9): the
+    session carries job rows from an EARLIER process, whose children's channel
+    records were relayed to that process and are not re-readable here. The
+    children block then degrades to ``partial`` with a stated reason — an
+    undercount must never be presented as exact, and the full re-scan of
+    descendant journals is deferred to the follow-up (PR-thread note).
     """
-    direct = job_cost(job, default_model_label=default_model_label)
-    components = list(getattr(job, "descendant_usage", None) or [])
-    if direct is None and not components:
+    knowledge = ledger.get("subagent_cost_knowledge")
+    if knowledge is not None:
+        cost = ledger.get("subagent_cost")
+        snapshot = ChildrenSnapshot(
+            total_micro=_usd_to_micro(cost),
+            knowledge=str(knowledge),
+        )
+    elif child_costs:
+        snapshot = ChildrenSnapshot(
+            total_micro=_usd_to_micro(sum(float(value) for value in child_costs.values())),
+            knowledge="floor",
+        )
+    else:
+        snapshot = ChildrenSnapshot(total_micro=0, knowledge="exact")
+    if predates_process and snapshot.knowledge in ("exact", "unknown"):
+        return ChildrenSnapshot(
+            total_micro=snapshot.total_micro,
+            knowledge="partial",
+            reason="subagent spend from earlier processes is not re-readable here",
+        )
+    return snapshot
+
+
+def _usd_to_micro(value: Any) -> int:
+    """A USD float (or ``None``) as integer micro-USD, never raising."""
+    try:
+        return int(round(float(value or 0.0) * 1_000_000))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
+    """The billing basis label for ONE usage, or ``None`` when unscorable.
+
+    The same :func:`~local_operator.session.spend.inference_billing_labels`
+    the analytics record uses, read from the SAME raw stamps — the usage's
+    pre-collapse serving provider (falling back to the effective model for an
+    UNSTAMPED usage, the :func:`serving_identity` rule both sides share) and
+    its receipt — so the wire's basis array and the ledger's basis column
+    cannot disagree about one call. The fallback is load-bearing: the
+    analytics label reads ``usage.provider or request.model.provider``, and
+    without the same elbow here a truly-unstamped call served by a
+    subscription flavour would read ``billed`` on the wire and
+    ``subscription_api_equivalent`` in ``calls`` (review round 1, MINOR 4).
+    Never raises: a label is not worth a broken frame, and a missing one reads
+    as ``not_tracked`` — the state the wire has always shown for money with no
+    recorded basis.
+    """
+    try:
+        from local_operator.session.spend import inference_billing_labels
+
+        provider = str(getattr(usage, "provider", "") or "")
+        if not provider:
+            provider = str(getattr(effective_model, "provider", "") or "")
+        return inference_billing_labels(provider, getattr(usage, "usd_cost", None))[0]
+    except Exception:  # noqa: BLE001 — an unlabelable call is not a broken frame
         return None
-    descendant = 0.0
-    for component in components:
-        provider = getattr(component, "provider", None) or ""
-        model_id = getattr(component, "model_id", None) or ""
-        cost = turn_cost(f"{provider}/{model_id}" if provider else model_id, component)
-        if cost is None:
-            return None
-        descendant += cost
-    return (direct or 0.0) + descendant
+
+
+def _pending_channels(session: Any) -> list[dict[str, Any]]:
+    """The §4.2 fallback markers this session's fold does not hold, or ``[]``.
+
+    A host without the reader (a reduced facade, a test double) has no pending
+    state to publish, and a reader that faults degrades to the same answer: a
+    marker is never worth a broken refresh. A reader returning a non-sequence
+    is the same class of answer — the ``isinstance`` is the runtime contract,
+    not a typing formality (the callable narrowing above it is what pyright
+    sees; a reduced facade's answer is not guaranteed to be a list).
+    """
+    reader = getattr(session, "pending_channel_records", None)
+    if not callable(reader):
+        return []
+    try:
+        entries = reader()
+    except Exception:  # noqa: BLE001 — a marker read is not worth a broken refresh
+        return []
+    if not isinstance(entries, Iterable):
+        return []
+    return [dict(entry) for entry in entries if isinstance(entry, Mapping)]
+
+
+def _spend_channels_payload(
+    session: Any,
+    ledger: Mapping[str, Any],
+    child_costs: Mapping[str, float],
+    spend: Any,
+) -> FrontendSpendChannels | None:
+    """The published ``spend_channels`` object for one refresh, or ``None``.
+
+    ``None`` means this host publishes no channel ledger (a reduced facade, a
+    test double, an embedded host) — it NEVER means "no money", and a surface
+    must keep its legacy rendering rather than paint a zero. The object itself
+    is built by :func:`local_operator.session.channel_spend.combine`, the one
+    place that sums, so every reader agrees to the micro-USD.
+
+    ``child_records`` carries the LIVE children's channel records (design
+    §5.1): they land in the children block of the total, never in ``rows``,
+    and the fold's ``record_id`` rule is what makes a tree count each record
+    once (QA round 1, Q2).
+    """
+    fold = getattr(session, "channels", None)
+    if fold is None or not hasattr(fold, "rows"):
+        return None
+    child_fold = getattr(session, "_child_channel_spend", None)
+    child_records = (
+        child_fold.rows() if child_fold is not None and hasattr(child_fold, "rows") else ()
+    )
+    inference = InferenceSnapshot(
+        micro=int(getattr(spend, "micro", 0) or 0),
+        calls=int(getattr(spend, "calls", 0) or 0),
+        priced_calls=int(getattr(spend, "priced_calls", 0) or 0),
+        knowledge=(str(spend.knowledge()) if isinstance(spend, SessionSpend) else "unknown"),
+        by_identity=getattr(spend, "by_identity", None),
+    )
+    try:
+        payload = combine(
+            fold.rows(),
+            inference=inference,
+            children=_children_snapshot(
+                ledger,
+                child_costs,
+                predates_process=bool(getattr(session, "_child_channels_predate_process", False)),
+            ),
+            child_records=child_records,
+            tracked=bool(
+                getattr(session, "channels_tracked", getattr(session, "channels_started", False))
+            ),
+            lost=bool(getattr(session, "channels_lost", False)),
+            pending=_pending_channels(session),
+        )
+    except Exception:  # noqa: BLE001 — a publish must never break a refresh
+        logger.debug("spend_channels payload failed", exc_info=True)
+        return None
+    try:
+        return FrontendSpendChannels.model_validate(payload)
+    except Exception:  # noqa: BLE001 — an unbuildable object degrades to absent
+        logger.debug("spend_channels payload did not validate", exc_info=True)
+        return None
+
+
+def _carry_child_cost(child_costs: dict[str, float], job: Any, *, default_model_label: str) -> None:
+    """Record one root row's whole-subtree spend in the compatibility ``child_costs`` map.
+
+    The rollup is the ledger's own (:func:`job_subtree_cost`), so each component
+    is priced at ITS OWN serving identity, never the parent's rate, and a running
+    parent includes its live children. A partly-unpriced subtree never lowers a
+    figure already shown (:func:`carry_floor`) — the same retain-the-prior rule
+    the legacy harvest applied.
+    """
+    knowledge = getattr(job, "direct_cost_knowledge", None)
+    if knowledge is not None:
+        # The runtime already priced this row's subtree when it built the row
+        # (``JobState.from_job``, on the loop that owns the live managers), and a
+        # frozen row has no live manager left to read: use its figure, do not
+        # reprice it in a viewer that may lack the credentials or the memo.
+        cost = getattr(job, "direct_cost", None)
+        lower_bound = knowledge in {CostKnowledge.PARTIAL, CostKnowledge.FLOOR}
+    else:
+        cost, lower_bound = job_subtree_cost(job, default_model_label=default_model_label)
+    stored = carry_floor(child_costs.get(job.id), cost, lower_bound)
+    if stored is not None:
+        child_costs[job.id] = stored
 
 
 def _last_turn_outcome_from(session: Any, current: str) -> str:

@@ -55,9 +55,29 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # Exact executed-step discriminator for retaining signed intent; compared
+    # internally, never rendered as a reason or substituted for signature proof.
+    ("local_operator/network/approvals.py", "sweep", "detail"): (
+        1,
+        "internal executed-permission retention discriminator, never rendered",
+    ),
+    ("local_operator/network/credentials/consent.py", "verified_permission", "detail"): (
+        1,
+        "internal executed-receipt verification discriminator, never rendered",
+    ),
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
+    # The delegated content layer's per-pad row — the same class of prose as
+    # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
+    # ``stale output past the window``, composed by
+    # ``session/delegated_retention.py`` from this project's own class phrases
+    # (``CONTENT_CLASS_*``) and printed as the dry-run parenthetical. The
+    # content pass has no peers and no wire; nothing here is a mesh value.
+    ("local_operator/cli.py", "_content_row_text", "reason"): (
+        1,
+        "the content layer's own class prose (merged-clean clone / stale output past the window)",
+    ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
     # ``lop update``'s prune notices read the plan's OWN reasons — the same sweep
@@ -98,6 +118,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the arm's machine reason, compared to gate enrichment — never printed",
     ),
+    # The Linux refresh arm's one raw read (2026-10-11, stale-relay memo): the
+    # same wrapper's machine reason, compared — never printed — to pick which
+    # clause the failure sentence carries (``not_restarted`` means the restart
+    # was accepted and replaced nothing, the shape that must not read as a bare
+    # refusal). The read gates the SENTENCE; every sentence rendered from it is
+    # composed by ``launchd.build_move_failure``'s approved family, which never
+    # quotes the token.
+    ("local_operator/network/relay.py", "refresh_unit_if_stale", "reason"): (
+        1,
+        "the wrapper's machine reason, compared to pick the failure clause — never printed",
+    ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
     # (never a peer's wire value), and this read is the field re-shape itself —
@@ -118,6 +149,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/onboard.py", "OnboardRun.step_provision", "reason"): (
         1,
         "this device's own store-write refusal code, shown as the caveat's parenthetical",
+    ),
+    # The update verb's origin tail reads the MEMBER'S OWN reply sentence and puts it
+    # on the human line as ``message`` — and that is the design's whole contract
+    # ("report the member's own words", RU §3). The member's updater authors the
+    # field as prose (``UpdateError``'s texts, the state sentences), so the read is a
+    # PASS-THROUGH rather than a gloss: round 3 (M2/Q-R3-2) measured the gloss
+    # RE-WORDING receipts into false states — `uv tool install failed: disk full` lost
+    # its leading clause, and `…: E2BIG` / `[Errno 13] Permission denied: '…'` read as
+    # "it did not answer" when the member had answered. The relay's DIAL seam in the
+    # same function IS glossed (``resume.peer_reason_words``), because that one
+    # carries the relay's wire tokens; the two registers must not swap verdicts.
+    ("local_operator/network/meshupdate.py", "update_peer", "reason"): (
+        1,
+        "the member's own receipt sentence, authored-for-a-reader prose passed "
+        "through verbatim (the design's 'the member's own words'); glossing it "
+        "re-worded receipts into false states (round 3, M2/Q-R3-2)",
     ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
@@ -419,6 +466,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "
         "the canceller for the abort line of the tool result, never a peer's prose",
     ),
+    # The todo store's own blocked-item reason, read by ``todo_fingerprint`` to
+    # build the guardrail's latch fingerprint: authored on this device by the
+    # ``todo`` tool's ``block`` op — this device's own list, never a mesh or peer
+    # token. THIS read compares it and renders nothing; the surfaces that do
+    # display it (``_todo_rows``' view/receipt rows, the TUI panel's item row,
+    # and the turn-boundary reminder to the model) all show the operator's own
+    # blocked reason as the condition to re-check.
+    ("local_operator/tools/builtin.py", "todo_fingerprint", "reason"): (
+        1,
+        "the todo store's own blocked reason (authored by the todo tool's block "
+        "op), compared in the latch fingerprint — this read renders nothing; the "
+        "surfaces that display it show this device's own list, not a mesh token",
+    ),
     # ``mobile/daemon.py`` joined this scan with the mesh half's own import
     # (``MeshRefusal``) — the base file named ``local_operator.network`` nowhere.
     # The read below predates that and is not a mesh value: it is the session's
@@ -434,6 +494,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the session's own attention record's reason, fed to the shared "
         "completion_notice row builder — never a peer's wire value; the module "
         "joined the scan with the mesh half's MeshRefusal import",
+    ),
+    # S3a's own reads of the MEMBER's receipt sentence: ``detail`` is where the
+    # classified answer's prose (RU §6.1's "2 sessions busy since 10:02" class)
+    # lands in the record's per-member entry, and these two sites PASS it there
+    # — ``step_record`` writes it into the receipt and the member's state line,
+    # ``_audit_member_state`` into the origin's member row's ``reason``. Same
+    # contract as ``update_peer`` above (the member's own words, never
+    # re-worded; the gloss's vocabulary does not cover a member's receipt).
+    ("local_operator/network/rollouts.py", "step_record", "detail"): (
+        2,
+        "the member's own receipt prose, passed onto the record's receipts "
+        "verbatim (RU §6.1's detail field is FOR a reader)",
+    ),
+    ("local_operator/network/rollouts.py", "_audit_member_state", "detail"): (
+        1,
+        "the member's own receipt prose, passed into the origin's member row",
     ),
 }
 

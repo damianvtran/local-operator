@@ -75,6 +75,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 
@@ -180,14 +181,7 @@ def _config_dir(request: Request):
 def _refuse_disabled(op: str, name: str) -> HTTPException:
     return HTTPException(
         409,
-        {
-            "code": "aida_disabled",
-            "message": (
-                f"{name} is disabled on this backend, so {op!r} did nothing. "
-                "Enable her with aida.enabled (or unset LOCAL_OPERATOR_NO_AIDA) "
-                "and try again."
-            ),
-        },
+        _wd.aida_disabled(name=name, op=repr(op)).envelope(code="aida_disabled"),
     )
 
 
@@ -277,10 +271,9 @@ def _refuse_lock(verb: str, name: str, exc: BaseException) -> HTTPException:
     aida_state.note_lock_refusal(f"the {verb} command", exc)
     return HTTPException(
         409,
-        {
-            "code": "aida_store_busy",
-            "message": aida_state.op_refusal_sentence(verb, name, exc),
-        },
+        _wd.desktop_refusal(error=aida_state.op_refusal_sentence(verb, name, exc)).envelope(
+            code="aida_store_busy"
+        ),
     )
 
 
@@ -326,12 +319,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
         if session_id is None:
             raise HTTPException(
                 500,
-                {
-                    "code": "aida_bootstrap_failed",
-                    "message": (
-                        f"{name}'s session could not be created; try again (see the logs)."
-                    ),
-                },
+                _wd.aida_bootstrap_failed(name=name).envelope(code="aida_bootstrap_failed"),
             )
         if body.op == "greet":
             # ``surface=desktop``: the route is called by the window the person
@@ -344,13 +332,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
                 # the greeting fires after setup completes.
                 raise HTTPException(
                     409,
-                    {
-                        "code": "aida_no_provider",
-                        "message": (
-                            f"No provider is configured yet, so {name} has nothing to "
-                            "greet you with. Connect a provider, then try again."
-                        ),
-                    },
+                    _wd.aida_no_provider(name=name).envelope(code="aida_no_provider"),
                 )
             if outcome == "paused":
                 return _op_reply(
@@ -367,10 +349,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]
             if outcome == "failed":
                 raise HTTPException(
                     500,
-                    {
-                        "code": "aida_greet_failed",
-                        "message": "The greeting could not be scheduled; try again (see the logs).",
-                    },
+                    _wd.aida_greet_failed().envelope(code="aida_greet_failed"),
                 )
             if outcome == "already":
                 # ``already`` covers delivered and a racing second arm; the

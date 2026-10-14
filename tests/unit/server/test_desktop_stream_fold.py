@@ -35,7 +35,9 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 LOGGER = "local_operator.server.utils.desktop_sessions"
 
 
-async def _opened_sub(bridge: Any, *, after_seq: int = 0) -> tuple[Any, Any]:
+async def _opened_sub(
+    bridge: Any, *, after_seq: int = 0, supplements: bool = False
+) -> tuple[Any, Any]:
     """A subscriber whose OPEN handshake is complete (open + snapshot consumed).
 
     ``sub.opened`` flips at the end of the handshake, and the fold only exists
@@ -46,8 +48,13 @@ async def _opened_sub(bridge: Any, *, after_seq: int = 0) -> tuple[Any, Any]:
     A later phase of a test that already published passes the bridge's CURRENT
     sequence instead, so the handshake has no replay frames in front of its
     snapshot and the same open/snapshot reads hold.
+
+    ``supplements`` is the viewer's declaration for the supplements-v1 family
+    (memo §2.7; the events route reads ``?supplements=1``). Off by default, like
+    every older renderer: a test that publishes ``supplement_progress`` beats
+    must declare it, exactly as a real viewer must.
     """
-    sub = bridge.subscribe()
+    sub = bridge.subscribe(supplements=supplements)
     stream = bridge.events(sub, epoch=bridge.epoch, after_seq=after_seq)
     assert (await asyncio.wait_for(anext(stream), timeout=5))["type"] == "open"
     assert (await asyncio.wait_for(anext(stream), timeout=5))["type"] == "snapshot"
@@ -550,3 +557,117 @@ async def test_the_incremental_merge_size_matches_a_full_dump_on_adversarial_del
             )
         assert "".join(frame["payload"]["delta"] for frame, _ in items) == "".join(fragments)
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_supplement_progress_run_keeps_the_newest_beat(tmp_path) -> None:
+    """§3.1 row 14 (round-1 review R8): ``supplement_progress`` keeps the NEWEST beat.
+
+    A beat re-sends the job's current state -- memo §2.7: the family "is self-replacing
+    by construction" -- and the durable copy is the journal row, so a viewer stalled
+    behind a run of beats collapses them to the latest one. 512 beats arrive as two:
+    the one the fold kept (512) and the tail (512).
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        sub, stream = await _opened_sub(bridge, supplements=True)
+        count = 512
+        for n in range(count):
+            bridge.publish(
+                "event",
+                {
+                    "type": "supplement_progress",
+                    "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                    "job": "3f9c1a7e5b20",
+                    "version": n + 1,
+                    "state": "running",
+                    "stage": "generating",
+                    "elapsed_s": float(n),
+                },
+            )
+        assert not sub.overflow
+
+        delivered = await _drain(sub, stream)
+        assert len(delivered) == 2, "the fold collapsed 511 beats into their newest, then 511"
+        versions = [frame["payload"]["version"] for frame in delivered]
+        assert versions == [511, 512], "keep-newest keeps the latest beat, not every beat"
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_supplement_beat_reaches_only_a_negotiated_viewer(tmp_path) -> None:
+    """The per-viewer gate (memo §2.7): an undeclared viewer never meets the family.
+
+    Two subscribers drain the same two publishes — one beat and one non-supplement
+    event. The plain viewer receives only the non-supplement frame; the viewer that
+    declared ``supplements`` receives both. This is the desktop half of the attach
+    gate whose other half (the owner's capability list) C1 owns.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        plain, plain_stream = await _opened_sub(bridge)
+        marked, marked_stream = await _opened_sub(bridge, supplements=True)
+        beat = {
+            "type": "supplement_progress",
+            "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "job": "3f9c1a7e5b20",
+            "version": 1,
+            "state": "decided",
+        }
+        bridge.publish("event", beat)
+        bridge.publish("event", {"type": "agent_end", "stop_reason": "stop"})
+
+        delivered_plain = await _drain(plain, plain_stream)
+        delivered_marked = await _drain(marked, marked_stream)
+        assert [f["payload"]["type"] for f in delivered_plain] == ["agent_end"]
+        assert [f["payload"]["type"] for f in delivered_marked] == [
+            "supplement_progress",
+            "agent_end",
+        ]
+        # The frame is not merely dropped for the plain viewer: it never enters
+        # the queue, so the byte accounting stays exact on both paths.
+        assert plain.queue.empty() and marked.queue.empty()
+        await plain_stream.aclose()
+        await marked_stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_supplement_replay_is_gated_per_viewer(tmp_path) -> None:
+    """The gate holds on REPLAY too: a cold viewer's cursor must not leak the family.
+
+    A beat published while nobody watched sits in the shared replay buffer. Two
+    cold subscribers connect (after_seq=0): the plain one's replay must skip the
+    beat (its next frame after ``open`` is the snapshot), and the declared one's
+    replay must carry it -- published before that subscription existed, which is
+    exactly the reconnect case the gate has to survive.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        bridge.publish(
+            "event",
+            {
+                "type": "supplement_progress",
+                "anchor": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                "job": "3f9c1a7e5b20",
+                "version": 7,
+                "state": "done",
+            },
+        )
+        plain = bridge.subscribe()
+        plain_stream = bridge.events(plain, epoch=bridge.epoch, after_seq=0)
+        assert (await asyncio.wait_for(anext(plain_stream), timeout=5))["type"] == "open"
+        after_open = await asyncio.wait_for(anext(plain_stream), timeout=5)
+        assert after_open["type"] == "snapshot", "the beat was filtered from replay"
+
+        marked = bridge.subscribe(supplements=True)
+        marked_stream = bridge.events(marked, epoch=bridge.epoch, after_seq=0)
+        assert (await asyncio.wait_for(anext(marked_stream), timeout=5))["type"] == "open"
+        replayed = await asyncio.wait_for(anext(marked_stream), timeout=5)
+        assert replayed["type"] == "event"
+        assert replayed["payload"]["type"] == "supplement_progress"
+        assert replayed["payload"]["version"] == 7
+        await plain_stream.aclose()
+        await marked_stream.aclose()

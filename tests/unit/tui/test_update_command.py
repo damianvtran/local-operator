@@ -77,6 +77,33 @@ async def test_update_when_current_does_not_reexec() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_still_publishing_names_publishing_not_a_fault() -> None:
+    """UX round 2, U-N1: the TUI arm of the pending sentence, pinned.
+
+    The CLI arm is pinned in test_update.py; this is the same VersionCheck
+    driven through the real /update command, so a regression in
+    ``_run_update``'s branch cannot pass the suite silently.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest=None, behind=False, pending_version="0.28.0")
+    with patch("local_operator.update.check_latest", return_value=check):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one("Editor")
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(40):
+                await pilot.pause()
+                if any("still publishing" in text for text in _notices(app)):
+                    break
+            notices = _notices(app)
+            assert any("0.28.0" in text and "still publishing" in text for text in notices)
+            assert not any("could not reach PyPI" in text for text in notices)
+            assert app.return_code != REEXEC_CODE
+
+
+@pytest.mark.asyncio
 async def test_update_success_exits_75() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
@@ -566,3 +593,62 @@ async def test_update_when_current_does_not_refresh() -> None:
             assert any("already on v0.27.0" in text for text in _notices(app))
             refresh.assert_not_called()
             assert app.return_code != REEXEC_CODE
+
+
+@pytest.mark.asyncio
+async def test_update_success_queues_the_mesh_roll_as_a_notice(tmp_path, monkeypatch) -> None:
+    """S3b: ``/update`` opens the rollout record and shows its summary (RU §7.3).
+
+    The record is written by the REAL hook against this test's isolated config
+    dir; the services half is patched (it is not what this cell is about), and
+    the mobile half is already a no-op from the autouse fixture.
+    """
+    from local_operator.network import rollouts, store, types
+    from local_operator.update import DaemonRefresh
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store.save(
+        types.NetworkRecord(
+            network_id="n_tui00000000000000000000000000001",
+            name="home-net",
+            self_device_id="d_origin",
+            members=[
+                types.MemberRecord(device_id="d_origin", name="origin"),
+                types.MemberRecord(device_id="d_a", name="d_a"),
+            ],
+        ),
+        tmp_path,
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
+    with (
+        patch("local_operator.update.check_latest", return_value=check),
+        patch("local_operator.update.perform_upgrade", return_value="0.28.0"),
+        patch(
+            "local_operator.update.refresh_service_daemons_after_upgrade",
+            return_value=DaemonRefresh(name="service daemons"),
+        ),
+    ):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one("Editor")
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause()
+                if app.return_code == REEXEC_CODE:
+                    break
+            assert app.return_code == REEXEC_CODE
+            assert any("queued: d_a" in text for text in _notices(app)), _notices(app)
+            # D1 (round 1): the one-member mesh is the ordinary case, and its
+            # sentence was the "1 peers" render the design round named — the
+            # count now reads "(s)" and the line is the asking form.
+            assert any(
+                "will ask 1 peer(s) to move to this build" in text for text in _notices(app)
+            ), _notices(app)
+
+    record = rollouts.latest_active(root=tmp_path)
+    assert record is not None, "the TUI exit opened no record"
+    assert record["authority"]["via"] == "tui", record["authority"]

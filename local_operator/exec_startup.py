@@ -13,7 +13,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import wire_exec as _wd
+from local_operator.i18n.text import tr
+
 logger = logging.getLogger(__name__)
+
+#: RFC §3.1 render point for this slice's copy.
+_t = tr("wire.exec")
 
 #: Startup selectors that survive the ``exec --background`` process boundary.
 #: Order is the order :func:`local_operator.exec_mode.build_worker_argv` emits
@@ -123,21 +130,25 @@ def report_unresolved_declared_tools(session: Any, args: Any) -> None:
         return
     reachable = _name_tuple(getattr(session, "tool_inventory", None)) or ()
     print(
-        "Warning: --tools names no tool this run could reach: "
-        + ", ".join(unreached)
-        + f". The session reached {len(reachable)} tool(s).",
+        _t(_wd.tools_unreachable(names=", ".join(unreached), count=str(len(reachable)))),
         file=sys.stderr,
     )
 
 
-def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
+def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str = "en") -> None:
+    """Build the same parser for the CLI and worker without implicit config reads.
+
+    Standalone worker/test callers retain English; the CLI passes its read-only
+    resolved locale. Never use the global wire renderer for this help namespace:
+    setting it here would also mutate receipt/refusal text before startup.
+    """
     parser.add_argument(
-        "--team", metavar="NAME", help="Attach a saved team with its manager, roster and briefs"
+        "--team", metavar="NAME", help=_eh.team().envelope(locale=help_locale)["text"]
     )
     parser.add_argument(
         "--profile",
         metavar="NAME",
-        help="Attach a reusable role/specialist (/agent counterpart; not legacy --agent)",
+        help=_eh.profile().envelope(locale=help_locale)["text"],
     )
     goals = parser.add_mutually_exclusive_group()
     # Deliberately NOT the TUI's /goal, which also submits the text as a message
@@ -146,81 +157,59 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
     goals.add_argument(
         "--goal",
         metavar="TEXT",
-        help=(
-            "Set a literal standing goal. Unlike the TUI's /goal this does NOT also "
-            "send the text as a message: pair it with a prompt or --loop"
-        ),
+        help=_eh.goal().envelope(locale=help_locale)["text"],
     )
-    goals.add_argument("--clear-goal", action="store_true", help="Clear the resumed standing goal")
+    goals.add_argument(
+        "--clear-goal",
+        action="store_true",
+        help=_eh.clear_goal().envelope(locale=help_locale)["text"],
+    )
     loops = parser.add_mutually_exclusive_group()
     loops.add_argument(
         "--loop",
         type=int,
         metavar="N",
-        help="Run N continuation iterations after the optional prompt; needs a standing goal",
+        help=_eh.loop().envelope(locale=help_locale)["text"],
     )
     loops.add_argument(
         "--loop-goal",
         metavar="TEXT",
-        help="Continue and judge this goal until achieved (no fixed iteration count)",
+        help=_eh.loop_goal().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--name", metavar="TEXT", help="Set the persisted conversation name")
+    parser.add_argument(
+        "--name", metavar="TEXT", help=_eh.name().envelope(locale=help_locale)["text"]
+    )
     parser.add_argument(
         "--tools",
         metavar="NAMES",
-        help=(
-            "Comma-separated tools this run may reach, and the ONLY ones. Excluded "
-            "tools are unreachable, not merely unapproved. The declaration stands as "
-            "the APPROVAL for its own members only where nobody can be asked — a "
-            "non-tty run without --control; on a terminal, and under --control, every "
-            "write/exec call is still decided by the approval gate. A name this build "
-            "does not have is unreachable and reported"
-        ),
+        help=_eh.tools().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--effort",
         metavar="LEVEL",
-        help="Set reasoning effort; validated against the selected model",
+        help=_eh.effort().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--workstream",
         action="store_true",
-        help=(
-            "Publish this run as a long-lived parallel WORKSTREAM the operator asked "
-            "for: it is listed in the sidebar, /resume and the phone list, carries the "
-            "session that opened it, and can be followed and steered. Without it an "
-            "agent-opened run stays ephemeral: hidden everywhere and silent. Changes "
-            "only the row's visibility, never how approvals are handled (pair it with "
-            "--control for that). Stamps nothing outside an agent's shell"
-        ),
+        help=_eh.workstream().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--output-format",
         choices=("markdown", "json", "yaml", "toml"),
         default=None,
-        help=(
-            "Enforce the format of the assistant's FINAL response. The run fails "
-            "(exit 1) if no valid payload is produced within --output-retries. "
-            "Default: no enforcement — behaviour is unchanged."
-        ),
+        help=_eh.output_format().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--output-schema",
         metavar="PATH",
-        help=(
-            "JSON Schema file the decoded JSON/YAML/TOML payload must satisfy. For "
-            "--output-format markdown: a JSON object {'required_sections': [...]}. "
-            "Requires --output-format."
-        ),
+        help=_eh.output_schema().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--output-retries",
         type=int,
         metavar="N",
-        help=(
-            "Max retries after a failed final response (0-5; default 2). "
-            "Requires --output-format."
-        ),
+        help=_eh.output_retries().envelope(locale=help_locale)["text"],
     )
 
 

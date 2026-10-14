@@ -3,8 +3,9 @@
 The compaction ADVISOR was already off the critical path, but the PASS it
 authorises was not: ``_run_compaction`` was awaited inline at the gates, and it
 makes its own summarization provider call. That was invisible while a pass only
-ever fired at the 600k ceiling (the turn had to stop there anyway) and becomes a
-mid-conversation stall once the advisor starts firing passes early and often.
+ever fired at the ceiling (600k when this was written; the turn had to stop
+there anyway) and becomes a mid-conversation stall once the advisor starts
+firing passes early and often.
 
 This script measures that stall on the REAL path — the real ``Session``, the
 real ``_on_turn_end`` hook, the real gate, the real plan, the real commit — with
@@ -58,7 +59,8 @@ from local_operator.session.transcript import Transcript  # noqa: E402
 
 MODEL = ModelSpec(provider="test", model_id="opus-like", context_window=1_000_000)
 KEEP_RECENT = 40
-#: Below the 600k ceiling and inside the advisor's 300k-600k operating band:
+#: Below the 600k ceiling (pinned in :func:`settings`) and inside the advisor's
+#: 300k-600k operating band:
 #: the whole point is that this pass fires EARLY, when nothing forces relief.
 CONTEXT_TOKENS = 400_000
 
@@ -96,6 +98,10 @@ def settings() -> CompactionSettings:
         # context-full is the strategy that MAKES a summarization call;
         # snapcompact rasterizes locally and would have no latency to measure.
         strategy="context-full",
+        # Pinned, not defaulted: CONTEXT_TOKENS sits below a 600k ceiling and the
+        # measurement is of an EARLY (advisory) pass. The default ceiling is now
+        # 400k, which would put CONTEXT_TOKENS exactly on the trigger.
+        threshold_tokens=600_000,
         advisor_enabled=True,
         advisor_floor_tokens=200_000,
         advisor_trigger_tokens=300_000,

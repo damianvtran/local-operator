@@ -20,6 +20,7 @@ import pytest
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamReasoningDelta,
@@ -358,16 +359,13 @@ def test_invalid_structured_effort_is_not_silently_dropped(caplog) -> None:
     assert settings.fallback_chains["anthropic/claude"]
 
 
-def test_the_advertised_ladder_is_exactly_what_is_accepted() -> None:
-    """The message's list and the gate that refuses a value must be one set.
+def test_the_advertised_fixed_ladder_is_exactly_the_supported_depths() -> None:
+    """Keep fixed depth order separate from chain-only reset sentinels.
 
-    `CHAIN_EFFORT_LADDER` filters `EFFORT_ORDER` by `SUPPORTED_EFFORTS`, so the
-    drift is asymmetric: a rung added to `EFFORT_ORDER` alone is filtered out
-    and can never be advertised while refused (safe), but a rung added to
-    `SUPPORTED_EFFORTS` alone is ACCEPTED and silently missing from the list -
-    something the `sorted(SUPPORTED_EFFORTS)` this replaced could not do
-    (review round 32). Cheap to pin, and the failure it prevents is a user
-    being told a value they just used successfully is not one of the options.
+    `auto` is accepted in a chain but has no ordinal depth. The warning appends
+    it to this fixed ladder; `test_fallback_auto` pins that advertised union
+    against the chain vocabulary so a new accepted value cannot disappear from
+    the diagnostic (the drift pinned in review round 32).
     """
     assert set(CHAIN_EFFORT_LADDER) == SUPPORTED_EFFORTS
     # And it is a ladder, stated LITERALLY. Re-deriving it as
@@ -502,6 +500,44 @@ def _request(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
     return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id))
 
 
+async def test_local_output_envelope_never_retries_rotates_or_hops() -> None:
+    from local_operator.providers.clients import StreamOutputEnvelopeExceeded
+
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        payload = {"choices": [{"delta": {"content": " " * 129}}]}
+        return httpx.Response(
+            200,
+            content=("data: " + json.dumps(payload) + "\n\n").encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    auth = FakeAuth({"openai": ["first", "second"], "anthropic": ["fallback"]})
+    settings = {
+        "retry": {
+            "fallbackChains": {"default": [{"provider": "anthropic", "model": "claude-test"}]}
+        }
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://test.invalid/v1", http_client=http)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        with pytest.raises(StreamOutputEnvelopeExceeded):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    ChatRequest(model=_request().model, max_tokens=1), auth, settings, client_for
+                )
+            ]
+    assert len(requests) == 1
+    assert auth.rotations == []
+    assert auth.keys == {"openai": ["first", "second"], "anthropic": ["fallback"]}
+
+
 async def test_stream_success_passes_events_through() -> None:
     events: list[Any] = [StreamTextDelta(delta="hi"), StreamEndEvent(stop_reason="stop")]
     client = ScriptedClient(events)
@@ -573,6 +609,55 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+async def test_google_boundary_after_primary_exhaustion_is_rendered_for_target() -> None:
+    """A fallback must normalize its own family, not reuse the primary wire."""
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body["model"] == "gpt-4o":
+            return httpx.Response(429, json={"error": {"message": "quota exhausted"}})
+        assert body["messages"][-1]["role"] == "user"
+        content = body["messages"][-1]["content"]
+        text = content if isinstance(content, str) else "".join(p.get("text", "") for p in content)
+        # The selector itself may visit Google with an ordinary user prompt;
+        # the continued conversation is the request that needs this boundary.
+        if any(m["role"] == "assistant" for m in body["messages"]):
+            assert "harness continuation" in text
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    original = ChatRequest(
+        model=ModelSpec(provider="openai", model_id="gpt-4o"),
+        messages=[Message.user("Say OK."), Message.assistant("OK.")],
+    )
+    auth = FakeAuth({"openai": ["synthetic-primary"], "openrouter": ["synthetic-fallback"]})
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {"default": ["openrouter/google/gemini-4-argon"]},
+        }
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return OpenAICompatClient("https://synthetic.invalid/v1", http_client=http)
+
+        events = [e async for e in stream_with_failover(original, auth, settings, client_for)]
+    assert bodies[0]["messages"][-1]["role"] == "assistant"
+    assert bodies[-1]["model"] == "google/gemini-4-argon"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "OK" for e in events)
+    assert original.messages[-1].role == "assistant"
 
 
 async def test_a_failover_hop_re_derives_the_generation_bound_for_the_target() -> None:
@@ -2455,6 +2540,46 @@ class TestProviderErrorKinds:
         assert is_direct_credential_rotation_error(error) is True
         assert is_usage_limit_error(error) is False
         assert is_transient_error(error) is False
+
+    def test_402_renders_as_out_of_credits_while_keeping_every_rotation_semantic(
+        self,
+    ) -> None:
+        """Regression for the rate-limit mislabel: the WORDS change, the kind does not.
+
+        ``kind="quota"`` is what rotation, the direct-credential refresh skip and
+        the sticky-credential rule dispatch on, so this pins every one of those
+        outputs against the pre-change values alongside the new label. A 429 keeps
+        the rate-limit wording.
+        """
+        # Values measured on main BEFORE the label split, per wording. The
+        # ``is_usage_limit_error`` difference between the two is pre-existing and
+        # deliberately left alone: "insufficient" is a weak usage marker that
+        # matches the Radient body but not Anthropic's "credit balance" body.
+        for message, usage_limit in (
+            ("insufficient credits", True),
+            ("Your credit balance is too low", False),
+        ):
+            error = ProviderError(402, message)
+            assert str(error) == f"out of credits (HTTP 402): {message}"
+            assert error.kind == "quota"
+            assert error.retryable is False
+            assert is_direct_credential_rotation_error(error) is True
+            assert is_usage_limit_error(error) is usage_limit
+            assert is_transient_error(error) is False
+            assert is_auth_error(error) is False
+            assert classify_provider_error(error) == "quota"
+        # ---- the 429 neighbour keeps its wording and its semantics ----
+        throttled = ProviderError(429, "slow down", retryable=True)
+        assert str(throttled) == "rate limit or quota exceeded (HTTP 429): slow down"
+        assert throttled.kind == "quota"
+        assert is_usage_limit_error(throttled) is True
+
+    def test_only_a_402_earns_the_out_of_credits_label(self) -> None:
+        """A quota-kind error on another status, or a stated kind, is untouched."""
+        assert str(ProviderError(403, "quota exceeded for project")).startswith(
+            "rate limit or quota exceeded (HTTP 403)"
+        )
+        assert str(ProviderError(402, "x", kind="request")).startswith("invalid request")
 
     @pytest.mark.parametrize(
         ("error", "rendered"),
@@ -5330,31 +5455,29 @@ def test_append_auth_recovery_generic_without_provider() -> None:
     assert "/login <provider>" in out
 
 
-def test_is_rendered_usage_limit_error_reads_the_quota_label() -> None:
-    """The string-form gate the Radient recovery keys off, both quota routes.
+def test_is_rendered_out_of_credits_error_reads_the_402_label_and_its_legacy_form() -> None:
+    from local_operator.providers.failover import is_rendered_out_of_credits_error
 
-    402 and 429 both render through the same label (``_classify_fields``),
-    which is what lets a display site with only the rendered string decide
-    "this is a usage limit" without the original exception.
-    """
-    from local_operator.providers.failover import is_rendered_usage_limit_error
-
-    assert is_rendered_usage_limit_error(
+    assert is_rendered_out_of_credits_error("out of credits (HTTP 402): insufficient credits")
+    # A runtime older than the label split rendered the same failure as quota.
+    assert is_rendered_out_of_credits_error(
         "rate limit or quota exceeded (HTTP 402): insufficient credits"
     )
-    assert is_rendered_usage_limit_error("Rate limit or quota exceeded (HTTP 429): slow down")
-    assert not is_rendered_usage_limit_error("authentication failed (HTTP 401): bad key")
-    assert not is_rendered_usage_limit_error("transient provider error: boom")
-    assert not is_rendered_usage_limit_error("")
+    # A 429 is a rate limit, not a balance problem.
+    assert not is_rendered_out_of_credits_error(
+        "rate limit or quota exceeded (HTTP 429, retry in 42s): slow down"
+    )
+    assert not is_rendered_out_of_credits_error("authentication failed (HTTP 401): bad key")
+    assert not is_rendered_out_of_credits_error("")
 
 
 def test_a_quota_error_never_receives_the_auth_hint() -> None:
     """The disjointness the display sites rely on: one kind, one remedy.
 
     A Radient quota error is exactly the case the two remedies could collide
-    on (the usage-limit sentence names `/login radient` for the sign-out
-    branch), so the auth gate must keep leaving quota errors alone — a login
-    cannot fix an unclaimed grant, and stacking both sentences under one
+    on: the usage-limit recovery and the auth recovery can sit at the same
+    display site, so the auth gate must keep leaving quota errors alone — a
+    login cannot fix an unclaimed grant, and stacking both sentences under one
     failure is the double-fire the contract forbids.
     """
     from local_operator.providers.failover import append_auth_recovery
@@ -7767,3 +7890,46 @@ async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(
     assert excinfo.value.status == 429
     assert long_attempts == ["k1", "k2"], "no probation may leak onto an unpinned route"
     assert long_sleeps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available,expected", [(True, True), (False, False)])
+async def test_quota_blocked_recovers_with_paid_only(
+    tmp_path, monkeypatch, available, expected
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "openai",
+        {
+            "access": "synthetic",
+            "refresh": "synthetic-refresh",
+            "expires": int(time.time() * 1000) + 3600000,
+            "account_id": "synthetic-account",
+            "email": "synthetic@example.test",
+        },
+    )
+    store.block_credential(row.id, "openai", block_ms=60000)
+
+    async def fetch(*args, **kwargs):
+        return UsageReport(
+            provider="openai",
+            limits=[
+                UsageLimit(
+                    "openai:credits",
+                    "Credits",
+                    UsageAmount(remaining=10, unit="credits"),
+                    paid_fallback=True,
+                    available=available,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("local_operator.providers.usage.fetch_usage", fetch)
+    try:
+        recovered = await failover_module._recover_quota_blocked(store, "openai", "gpt-codex")
+        assert (recovered is not None) is expected
+        assert store.is_blocked_for_model(row.id, "openai", "gpt-codex") is not expected
+    finally:
+        store.close()

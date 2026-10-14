@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import local_operator.session.retention as retention
+import local_operator.session.tail_anchor as tail_anchor
 from local_operator.session.retention import (
     CLAIM_TRUST_S,
     LIVE_MARKER_NAME,
@@ -307,6 +308,12 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         # is ``cleanup._has_open_asks``'s job — a question about the asks, not
         # about the file. Its canonical name lives in the asks package.
         store.ASKS_LOG_NAME,
+        # The tail anchor: a record about the journal's OWN bytes (inode, the end
+        # of its last complete row, and a digest of that row), written by the
+        # pre-warm job so a checkpointless journal can be read without scanning to
+        # BOF. Bookkeeping by the same test as the rest — the user did not write
+        # it, and cleanup must not bill it against the size budget.
+        tail_anchor.ANCHOR_FILENAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

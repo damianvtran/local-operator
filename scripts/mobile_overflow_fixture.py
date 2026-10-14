@@ -1022,6 +1022,295 @@ def _ended_ask_projection() -> SessionProjection:
     return projection
 
 
+def _spend_projection(
+    session_id: str,
+    pid: int,
+    *,
+    tracked: bool,
+    knowledge: str,
+    total_micro: int,
+    rows: list[dict[str, Any]],
+    by_basis: dict[str, int] | None = None,
+    usage: dict[str, int] | None = None,
+    pending: dict[str, Any] | None = None,
+) -> SessionProjection:
+    """PR-2's three session-status spend states, one builder.
+
+    The session-status row now renders the PUBLISHED ``spend_channels`` object
+    (its ``total_micro``/``knowledge``, the breakdown chips, the untracked
+    disclosure), so the fixture sessions carry the wire shape the runtime's
+    ``spend_channels_copy`` produces: raw micro-USD, the backend's own
+    knowledge rung, integer row amounts with ``None`` = "could not be stated".
+    The legacy scalars are set to a DIFFERENT figure on purpose — the frames
+    then show which reading won, rather than leaving the two agreeably equal.
+    """
+    projection = SessionProjection(
+        session_id=session_id,
+        pid=pid,
+        kind="tui",
+        conversation_name=f"Spend {session_id.removeprefix('spend-')}",
+        streaming=False,
+        transcript=[
+            TranscriptEntry(id="sp-1", kind="user", text="What has this conversation cost?"),
+            TranscriptEntry(
+                id="sp-2",
+                kind="assistant",
+                text="One published object; the phone never re-sums it.",
+            ),
+        ],
+        version=2,
+    )
+    projection.usage = usage or {}
+    projection.cumulative_parent_cost = 1.9  # deliberately disagrees with the object
+    projection.spend_channels = {
+        "version": 1,
+        "tracked": tracked,
+        "total_micro": total_micro,
+        "knowledge": knowledge,
+        "by_basis": by_basis or {},
+        "rows": rows,
+    }
+    if pending is not None:
+        projection.spend_channels["pending"] = pending
+    return projection
+
+
+def _spend_populated_projection() -> SessionProjection:
+    """Population: named channels with their own amounts, one unstated ($—).
+
+    Four rows so the 390-px chip line is at its own cap: a billed inference
+    split, an estimated image row, a voice row whose amount could not be stated
+    (``$—``, never a fabricated zero), and a subscription-quota row whose chip
+    carries the ``sub-equiv`` marker — the case the collapse rule exists for
+    (quota must not read as billed dollars).
+    """
+    return _spend_projection(
+        "spend-populated",
+        900015,
+        tracked=True,
+        knowledge="partial",
+        total_micro=1_053_000,
+        by_basis={
+            "billed": 900_000,
+            "subscription_api_equivalent": 50_000,
+            "estimated": 103_000,
+        },
+        # CANONICAL WIRE ORDER (review round 1, A3): the producer emits ALL
+        # inference rows first (``_inference_rows(inference) +
+        # _channel_rows(records)``), so the two inference identities head the
+        # list and the metered channels follow.
+        rows=[
+            {
+                "channel": "inference",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5-5",
+                "label": "anthropic/claude-sonnet-5-5",
+                "units": 10.0,
+                "unit": "calls",
+                "amount_micro": 900_000,
+                "knowledge": "exact",
+                "basis": ["billed"],
+                "price_versions": [],
+            },
+            {
+                "channel": "inference",
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "label": "openai/gpt-5.4",
+                "amount_micro": 50_000,
+                "knowledge": "exact",
+                "basis": ["subscription_api_equivalent"],
+                "price_versions": [],
+            },
+            {
+                "channel": "image",
+                "provider": "radient",
+                "model": "gpt-image-2",
+                "amount_micro": 103_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+            {
+                "channel": "tts",
+                "provider": "elevenlabs",
+                "model": "eleven_flash_v2_5",
+                "amount_micro": None,
+                "knowledge": "unknown",
+                "basis": [],
+                "price_versions": [],
+            },
+        ],
+    )
+
+
+def _spend_capped_projection() -> SessionProjection:
+    """More rows than chips: the `· +N more` remainder, named channels kept.
+
+    Six rows against a four-chip cap, with the inference pair at the wire's
+    head, so the frame shows the CAP'S SELECTION rather than just its count:
+    named channels win the budget (the m2 fix), the two inference rows fall
+    into the remainder with them, and the cue reads `· +2 more`.
+    """
+    rows = [
+        {
+            "channel": "inference",
+            "provider": "anthropic",
+            "model": "claude-sonnet-5-5",
+            "label": "anthropic/claude-sonnet-5-5",
+            "amount_micro": 40_000,
+            "knowledge": "exact",
+            "basis": ["billed"],
+            "price_versions": [],
+        },
+        {
+            "channel": "inference",
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "label": "openai/gpt-5.4",
+            "amount_micro": 10_000,
+            "knowledge": "exact",
+            "basis": ["subscription_api_equivalent"],
+            "price_versions": [],
+        },
+        {
+            "channel": "image",
+            "provider": "radient",
+            "model": "gpt-image-2",
+            "amount_micro": 20_000,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+        {
+            "channel": "tts",
+            "provider": "elevenlabs",
+            "amount_micro": 30_000,
+            "knowledge": "exact",
+            "basis": ["billed"],
+            "price_versions": [],
+        },
+        {
+            "channel": "search",
+            "provider": "tavily",
+            "amount_micro": 250,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+        {
+            "channel": "read",
+            "provider": "browser",
+            "amount_micro": 100,
+            "knowledge": "exact",
+            "basis": ["estimated"],
+            "price_versions": [],
+        },
+    ]
+    return _spend_projection(
+        "spend-capped",
+        900018,
+        tracked=True,
+        knowledge="exact",
+        total_micro=100_350,
+        rows=rows,
+    )
+
+
+def _spend_untracked_exact_projection() -> SessionProjection:
+    """Marker-less AND exact: NO disclosure (the desktop M-4 gate).
+
+    Degradation needs evidence: with no recovered rows and nothing lost, a
+    marker-less session's own figure is exact, so the row must read like any
+    other — no `channels not tracked`, no lower-bound mark. This is the shape
+    that proves the notice is evidence-gated rather than keyed on `tracked`
+    alone.
+    """
+    return _spend_projection(
+        "spend-untracked-exact",
+        900019,
+        tracked=False,
+        knowledge="exact",
+        total_micro=210_000,
+        rows=[],
+    )
+
+
+def _spend_recovered_projection() -> SessionProjection:
+    """Marker-less WITH recovered rows: the chips AND the disclosure.
+
+    A backfilled session (no start marker, rows recovered from the journal's
+    sidecar): the rows must DRAW — gating chips on `tracked` silently dropped
+    exactly this evidence — and the untracked notice stands beside them
+    because the combiner's rung is `partial` (something may be missing).
+    """
+    return _spend_projection(
+        "spend-recovered",
+        900020,
+        tracked=False,
+        knowledge="partial",
+        total_micro=53_000,
+        rows=[
+            {
+                "channel": "image",
+                "provider": "radient",
+                "model": "gpt-image-2",
+                "amount_micro": 53_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            }
+        ],
+    )
+
+
+def _spend_untracked_projection() -> SessionProjection:
+    """An UNTRACKED session: inference-only totals, and it must say so.
+
+    ``tracked: false`` is a pre-feature conversation's own statement; the row
+    must render ``channels not tracked`` beside the marked total rather than
+    implying $0 of channel spend (design D3). ``partial`` is the combiner's
+    rung for exactly this case, so the total keeps its ``≥``.
+    """
+    return _spend_projection(
+        "spend-untracked",
+        900016,
+        tracked=False,
+        knowledge="partial",
+        total_micro=210_000,
+        rows=[],
+    )
+
+
+def _spend_unknown_projection() -> SessionProjection:
+    """The unknown total: billed tokens, nothing stateable → ``$—``.
+
+    ``knowledge: unknown`` with zero published money reads exactly as the
+    band's unpriceable case (``_band_cost_cell``): ``$—`` when there was billed
+    activity, and the voice row beside it carries its own unstated amount, so
+    both the total and a row exercise the refusal in one frame.
+    """
+    return _spend_projection(
+        "spend-unknown",
+        900017,
+        tracked=True,
+        knowledge="unknown",
+        total_micro=0,
+        usage={"input_tokens": 9_000, "output_tokens": 120},
+        rows=[
+            {
+                "channel": "tts",
+                "provider": "radient",
+                "model": "eleven_flash_v2_5",
+                "amount_micro": None,
+                "knowledge": "unknown",
+                "basis": [],
+                "price_versions": [],
+            }
+        ],
+    )
+
+
 def _asks_stacked_projection() -> SessionProjection:
     """Queued asks in the BUSIEST column: todos, a running subagent roster, a
     pending approval card AND the minimized ask chip in one stack.
@@ -1189,6 +1478,19 @@ async def main() -> None:
         # The ENDED conversation (D6/D8): a session nobody opens, so the frames
         # that show the sheet FROM a conversation keep working (Q-1, round 3).
         _ended_ask_projection(),
+        # PR-2's session-status spend states: the published object populated,
+        # an untracked conversation, and an unknown total — the three readings
+        # the phone's second line and its marks exist for — plus the states
+        # review/QA round 1 asked to be re-capturable from the committed rig:
+        # the `· +N more` cap, a marker-less-exact session (NO disclosure, the
+        # M-4 gate) and a marker-less session with recovered rows (chips AND
+        # the notice).
+        _spend_populated_projection(),
+        _spend_untracked_projection(),
+        _spend_unknown_projection(),
+        _spend_capped_projection(),
+        _spend_untracked_exact_projection(),
+        _spend_recovered_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial

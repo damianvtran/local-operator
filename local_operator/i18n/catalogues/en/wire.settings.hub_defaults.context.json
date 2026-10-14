@@ -1,0 +1,49 @@
+{
+  "wire.settings.hub_defaults.agents.help": {
+    "maxCells": 72,
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.agents.label": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.agents.off.description": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.agents.on.description": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.model_default.note": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.teams.help": {
+    "maxCells": 72,
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.teams.label": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.teams.off.description": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_defaults.teams.on.description": {
+    "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.",
+    "role": "help text",
+    "tone": "plain, precise"
+  }
+}

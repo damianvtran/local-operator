@@ -177,6 +177,9 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # received the delegation; both are device ids, which is the RFC 8693
         # vocabulary mesh-credentials.md §1.4 names.
         "credential.grant",
+        # Exact finite recovery, never future inheritance or credential material.
+        "credential.finite_requested",
+        "credential.finite_applied",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -251,6 +254,32 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # MESH ROLLING UPDATES, member side (mesh-update-propagation.md §6). One
+        # row per semantic change of one update request: the request was admitted
+        # by the authoriser, a rule refused it, or the install began/ended. A
+        # per-poll row is exactly what this set must NOT become — the split
+        # between these five names is what keeps a busy member's re-asks
+        # countable without writing one row per ask.
+        "update_requested",
+        "update_refused",
+        "update_started",
+        "update_completed",
+        "update_failed",
+        # S3a of the rolling updates: the ORIGIN's side of a rollout. Three
+        # kinds, one per semantic change — the record opening (S3b's hook
+        # writes it through the record API), a member's state changing, and
+        # the pass closing (complete, lapsed or cancelled). A per-poll row is
+        # exactly what these must NOT become; a member handled by the cadence
+        # produces no rows between its changes (note §6).
+        "update_rollout_started",
+        "update_member_state",
+        "update_rollout_done",
+        # S3b's suppression row: an update moved but the switch (``off`` or
+        # ``--no-roll``) stopped the roll before any record opened. Registered
+        # here with the other three because ``_sanitize_detail`` whitelists by
+        # ``DETAIL_KEYS`` — an unregistered name renders with NO detail,
+        # silently.
+        "update_rollout_suppressed",
     }
 )
 
@@ -284,6 +313,10 @@ CAUSES: frozenset[str] = frozenset(
         "policy",
         "timeout",
         "internal",
+        # A member answered ``busy`` and the pass parked it (S3a): a deferral is
+        # its own cause because its remedy is time, not repair — the same reason
+        # ``declined`` below is not ``not_authorised``.
+        "busy",
         # A human said no at the inviter's confirmation prompt, distinct from
         # `sas_mismatch` (the codes disagreed) and from `timeout` (nobody answered).
         "declined",
@@ -419,6 +452,12 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "latency_ms",
         }
     ),
+    "credential.finite_requested": frozenset(
+        {"credential_key", "act", "sub", "scope", "approval_id"}
+    ),
+    "credential.finite_applied": frozenset(
+        {"credential_key", "act", "sub", "scope", "approval_id"}
+    ),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
@@ -474,6 +513,34 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # Mesh rolling updates, member side. `rollout` is the origin's record id when
+    # one exists (empty for the single-peer verb — S1 carries it through so the
+    # S3 driver's rows need no schema change). `target` is the VERSION asked for,
+    # `code` the refusal token this module's own register names, `method` the
+    # install shape on the done/failed pair, and `from` the version the member
+    # was on when the install began. No file paths, no installer output beyond
+    # the bounded tail that rides the REPLY (a sentence for the origin), never
+    # the log.
+    "update_requested": frozenset({"rollout", "target", "capability"}),
+    "update_refused": frozenset({"rollout", "target", "code"}),
+    "update_started": frozenset({"rollout", "target", "method"}),
+    "update_completed": frozenset({"rollout", "target", "method", "from", "version"}),
+    "update_failed": frozenset({"rollout", "target", "method"}),
+    # The origin's side (S3a): the opening row carries WHO decided (a closed
+    # token, never a sentence), under which policy and front end; the member
+    # row carries the state it changed to plus the member's own words when
+    # they exist; the closing row carries the counts in one compact string
+    # (the log's values are bounded short strings, and the pass's leftovers
+    # are what a reader needs).
+    "update_rollout_started": frozenset(
+        {"rollout", "authority", "policy", "via", "target", "from", "members"}
+    ),
+    "update_member_state": frozenset({"rollout", "state", "code", "reason", "method", "version"}),
+    "update_rollout_done": frozenset({"rollout", "counts"}),
+    # The suppression row (S3b): which front end moved (``via``), what the key
+    # said (``policy``) and the per-run override when it was the flag that
+    # stopped the roll (``flag``, empty when the policy did).
+    "update_rollout_suppressed": frozenset({"via", "policy", "flag"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
@@ -556,6 +623,21 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "onboard_approved",
         "onboard_denied",
         "onboard_connected",
+        # The mesh update request and its by-rule refusals are AUTHORITY
+        # decisions ("may this peer move my install"): a widened standing grant
+        # whose request landed with no record would leave a device explaining an
+        # install nobody can attribute. The begin/end rows stay batched — a crash
+        # in their last second narrates nothing an incident needs.
+        "update_requested",
+        "update_refused",
+        # The record's OPENING row is an authority decision too (S3a/S3b): it
+        # names that the primary decided to roll under the standing instruction
+        # (or an operator command), and losing it would leave a fleet of moved
+        # members explaining an update nobody can attribute — the exact
+        # argument `update_requested` is here for. The member-state and closing
+        # rows stay batched: their history is reconstructable from the record
+        # and the members' own durable rows.
+        "update_rollout_started",
     }
 )
 

@@ -33,6 +33,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -1759,6 +1760,13 @@ class _KnowledgeHooks:
     #: ecosystem roots by existence, so a root created mid-session would change
     #: the list and quietly widen what the session scans.
     skill_roots: list[Path] = field(default_factory=list)
+    #: The world boundary this session was constructed with, when it has one.
+    #: Carried so the resolver's miss-path rescan clips to the same scope the
+    #: initial walk used — a refresh that silently re-widened the scan would
+    #: re-admit exactly what the boundary excluded (measured: an in-world
+    #: symlink to an outer skill dir was admitted by the reachable walk; QA
+    #: round 1, Q2). ``None`` on every ordinary session.
+    world_root: Path | None = None
     frozen_block: str | None = None
     #: Compaction entry id observed when ``frozen_block`` was computed. A
     #: change here (a new compaction marker) re-opens selection once — the
@@ -1807,6 +1815,14 @@ class _KnowledgeHooks:
     #: hooks object that never attaches carries ``()`` and behaves exactly as
     #: before the kind existed.
     tool_roster: tuple[Any, ...] = ()
+    #: Whether THIS session's code-request ledger has any rows, as a CALLABLE
+    #: because the answer moves during the session (the first PR opens it).
+    #: WRITTEN BY THE SESSION beside ``tool_roster`` (``set_knowledge_hooks`` /
+    #: ``_refresh_tool_roster``) — the factory's construction-time object has no
+    #: session directory to read the derived index from. ``None`` means the
+    #: deterministic trigger's vocabulary arm simply never fires, which is the
+    #: layer's pre-code-requests behaviour rather than a degraded one.
+    code_requests_ledger: Callable[[], bool] | None = None
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -2027,13 +2043,13 @@ def _knowledge_credential(key: str, config_dir: Path) -> str | None:
     return os.environ.get(key) or None
 
 
-def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str) -> None:
+def _seed_mcp_routing(hooks: _KnowledgeHooks, cwd: str, *, world_root: Path | None = None) -> None:
     """Expose configured names before deferred live connections can race turn one."""
     try:
         from local_operator.mcp.config import load_all_mcp_configs
         from local_operator.mcp.resources import render_mcp_suggestions
 
-        names = tuple(load_all_mcp_configs(cwd)[0])
+        names = tuple(load_all_mcp_configs(cwd, boundary=world_root)[0])
         hooks.mcp_catalogue = lambda query: render_mcp_suggestions(names, query)
         # Published for the classification roster, which needs a server's NAME
         # (plus the harness-owned capability hint) as a candidate. Set beside the
@@ -2050,6 +2066,7 @@ async def _setup_knowledge(
     agent_registry: AgentRegistry,
     warnings_out: list[str],
     cwd: str | Path | None = None,
+    world_root: Path | None = None,
 ) -> _KnowledgeHooks:
     """Discover and index user skills, packaged guides, and private agent hints.
 
@@ -2057,6 +2074,11 @@ async def _setup_knowledge(
     only their short descriptions join the ordinary skill descriptions sent to
     the configured semantic backend. Agent hints always use ``LocalEmbedder``.
     Any layer can fail independently without making session startup fail.
+
+    ``world_root``, when set, is the world boundary the SDK caller validated;
+    ``default_skill_roots`` clips its project ancestor walk there and refuses
+    to inherit the controller home's or the ecosystem's user libraries — the
+    world's own trees plus the packaged catalog are the discovery scope.
 
     No credential carrier is threaded in, deliberately: the embedder's
     credential closure below reads a provider-class STORE row and the process
@@ -2081,12 +2103,15 @@ async def _setup_knowledge(
         # discovered project-local skills for whatever directory the process
         # happened to start in -- every other consumer here already takes the
         # session's cwd, and this one silently did not.
-        hooks.skill_roots = default_skill_roots(Path(cwd) if cwd is not None else None)
+        hooks.skill_roots = default_skill_roots(
+            Path(cwd) if cwd is not None else None, boundary=world_root
+        )
+        hooks.world_root = world_root
         #: The baseline the freshness checks compare against, taken HERE because the
         #: tree has just been walked: recording it at first use instead would make a
         #: session's first message look like a change and pay a second full scan.
         hooks.skills_fingerprint = _skills_fingerprint(hooks)
-        skills, discovery_warnings = discover_skills(hooks.skill_roots)
+        skills, discovery_warnings = discover_skills(hooks.skill_roots, boundary=world_root)
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
         hooks.skills_by_name = {skill.name: skill for skill in skills}
@@ -2475,7 +2500,7 @@ def _current_skill_resources(hooks: _KnowledgeHooks) -> list[Any]:
     try:
         from local_operator.skills.discovery import discover_skills
 
-        discovered, _warnings = discover_skills(list(hooks.skill_roots))
+        discovered, _warnings = discover_skills(list(hooks.skill_roots), boundary=hooks.world_root)
     except Exception:  # noqa: BLE001 — the roster must survive a scan fault
         logger.debug("classification: live skill rescan failed", exc_info=True)
         return known
@@ -2569,6 +2594,13 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "wait",
     "jobs",
     "generate_image",
+    # The video lane's pair (media wave-2): the roster names the START tool
+    # and the one callable that answers "what happened to that job" — both
+    # are createIf-gated, so their presence in the built list IS the
+    # availability signal (the ``generate_image`` rule above).
+    "generate_video",
+    "video_status",
+    "code_requests",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
@@ -3021,6 +3053,86 @@ def _recommendation_line(resource: Any) -> str:
     return f"- {url}"
 
 
+@dataclass(frozen=True)
+class _DeterministicRecommendation:
+    """One message-triggered resource suggestion, rendered by the same block.
+
+    Structural twin of the package's ``Recommendation`` for the one attribute
+    the delivery loop reads (``resources``); the turn path must not import the
+    package (design §7), and a host-supplied classifier object is read by
+    attribute for the same reason.
+    """
+
+    resources: tuple[Any, ...] = ()
+
+
+#: Review/CI vocabulary for the ledger-gated arm of the trigger. Deliberately
+#: COMPOUND and specific — "review" alone would fire on "request a review from
+#: the doctor" and "merge" alone on "merge these two CSVs". The unambiguous
+#: tier fires on its own; the ambiguous tier needs the anchor window below.
+_CODE_REVIEW_VOCAB = re.compile(
+    r"(?i)\b(?:round\s+\d+|review\s+round|review\s+findings|agent\s+review|"
+    r"design\s+review|code\s+review|qa\s+report)\b"
+)
+
+#: Vocabulary that is ambiguous ALONE. ``ci``/``pipeline`` matched "fix the
+#: CI/CD pipeline docs" and "our data pipeline needs a retry"; bare "pull
+#: request" matched "what is a pull request" — all on unrelated turns, even
+#: with a non-empty ledger (review round 1, F9). These fire only when a
+#: build-status, review-outcome or PR/MR word sits within the same approximate
+#: sentence (40 characters either side): "is CI green on the PR" and "merge it
+#: once CI is green" fire; the negatives above do not.
+_AMBIGUOUS_VOCAB = re.compile(r"(?i)\b(?:ci|pipeline|pull\s+request|merge\s+request)\b")
+_AMBIGUOUS_ANCHOR = re.compile(
+    r"(?i)\b(?:green|red|pass(?:ed|es|ing)?|fail(?:ed|s|ing)?|clear|clean|waiting|pending|"
+    r"blocked|running|broken|status|checks?|rerun|re-run|ready|merg(?:e[ds]?|ing)|"
+    r"land(?:ed|ing)?|ship(?:ped|ping)?|approv\w*|pr\b|mr\b|round\s+\d+|"
+    r"review\s+round)\b"
+)
+
+
+def _ambiguous_vocab_fires(query: str) -> bool:
+    """Whether an ambiguous term is talking about THIS session's build/request."""
+    for match in _AMBIGUOUS_VOCAB.finditer(query):
+        window = query[max(0, match.start() - 40) : match.end() + 40]
+        if _AMBIGUOUS_ANCHOR.search(window):
+            return True
+    return False
+
+
+def _code_requests_recommendation(
+    query: str, hooks: _KnowledgeHooks
+) -> _ClassificationCandidate | None:
+    """The deterministic ``tool://code_requests`` suggestion for one message, or ``None``.
+
+    Two arms (design §F): a forge ref parsed by ``code_requests.refs`` — never
+    a loose regex, so ``/pull/new/…`` and issue URLs do not count — fires
+    unconditionally; review/CI vocabulary fires only when this session's ledger
+    is non-empty, because the ledger is the context that makes such words be
+    about pull requests at all.
+
+    The ref parse uses the EMPTY host context on purpose: this is a TRIGGER,
+    not a fetch. A self-hosted URL still means "the user is asking about a code
+    request"; the tool resolves the real host context when it runs, and a
+    trigger must not pay a host-context load (file reads plus a git call) on
+    every user message.
+    """
+    from local_operator.code_requests import refs as code_request_refs
+
+    if next(iter(code_request_refs.iter_refs(query)), None) is None:
+        if _CODE_REVIEW_VOCAB.search(query) is None and not _ambiguous_vocab_fires(query):
+            return None
+        probe = hooks.code_requests_ledger
+        if probe is None or not probe():
+            return None
+    return _ClassificationCandidate(
+        "tool",
+        "code_requests",
+        "This session's PRs/MRs with review rounds, CI and freshness.",
+        "tool://code_requests",
+    )
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3273,6 +3385,15 @@ async def _select_knowledge_block(
                         str(item.file_path),
                     )
                 )
+        # THE DETERMINISTIC CODE-REQUESTS TRIGGER (design §F): a message that
+        # carries a forge ref, or asks about review/CI vocabulary while this
+        # session's ledger is non-empty, appends `tool://code_requests` beside
+        # the agents hint. It is computed ONCE per render (the frozen block
+        # carries it within a task) and delivered through the same advisory
+        # block below, so it shares its dedupe and its maxRecommendations cap.
+        deterministic_code_requests = _code_requests_recommendation(query, hooks)
+    else:
+        deterministic_code_requests = None
 
     from local_operator.skills.api import render_block
 
@@ -3298,7 +3419,16 @@ async def _select_knowledge_block(
     # step under the reply the user was reading. Delivery below is unchanged — the
     # block still reaches the prompt, and the cost line still reaches the log.
     pending, hooks.classification_pending = hooks.classification_pending, []
-    answers: list[Any] = list(pending)
+    # The message's own TRIGGERED suggestion goes FIRST, ahead of the vendor's
+    # answer and any late answers: it is the highest-precision one on the page
+    # (the user's own message named a pull request, or review vocabulary with a
+    # ledger behind it), and a chatty vendor answer filling every cap slot must
+    # not starve the line the trigger exists to deliver. Vendor answers keep
+    # their own late-first order after it.
+    answers: list[Any] = []
+    if deterministic_code_requests is not None:
+        answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
+    answers.extend(pending)
     if recommendation is not None:
         answers.append(recommendation)
     carried: set[str] = set()
@@ -3345,7 +3475,9 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
     # running, because they inherit this closure and it mutates
     # ``hooks.skills_by_name`` IN PLACE. Guides are packaged release resources
     # and cannot change at runtime, so the guide resolver takes no roots.
-    skill_resolver = make_skill_resolver(hooks.skills_by_name, hooks.skill_roots)
+    skill_resolver = make_skill_resolver(
+        hooks.skills_by_name, hooks.skill_roots, boundary=hooks.world_root
+    )
 
     def resolver(url: str) -> str | None:
         guide_result = guide_resolver(url)
@@ -3393,6 +3525,7 @@ def _make_system_blocks_provider(
     goal_state: "GoalState | None" = None,
     user_instructions: str = "",
     repo_guidance: str = "",
+    language_line: str = "",
     variable_store: "VariableStore | None" = None,
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
@@ -3414,6 +3547,13 @@ def _make_system_blocks_provider(
     re-reading the file per turn would let a mid-session edit silently
     invalidate the whole cached prefix. Editing the file takes effect on
     the next session, which is also what makes a session's prompt reproducible.
+
+    ``language_line`` (SYS1) obeys the same capture-once contract, and for the
+    same reason: it rides the stable head block, so the language resolved at
+    session start is the session's language for its lifetime. A `language`
+    settings change takes effect at the next session (or the next stable-prefix
+    rebuild), never mid-session — rewriting it mid-session would reprice the
+    cached prefix from a settings edit nobody asked to be prompt-interrupting.
     """
 
     environment = _env_details(cwd)
@@ -3532,6 +3672,7 @@ def _make_system_blocks_provider(
             goal_status=goal_status,
             user_instructions=user_instructions,
             repo_guidance=repo_guidance,
+            language_line=language_line,
             credentials=names,
             team_brief=team_brief,
             agent_brief=agent_brief,
@@ -4007,17 +4148,56 @@ def _store_maintenance_thread_main(
                 )
             except Exception:  # noqa: BLE001 — housekeeping never fails session start
                 logger.debug("store maintenance worker failed", exc_info=True)
-                return
+                break
             if acquired:
-                return
+                break
             # Another process owns the lock. Back off rather than abandon retry
             # or spin. The next successful acquire checks the stamp while
             # holding the lock, and reset wakes this bounded wait immediately.
             if stop_event.wait(retry_delay):
                 return
             retry_delay = min(retry_delay * 2, _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS)
+        # The launch pass is over: release anything awaiting it BEFORE the
+        # sweeps below, which run for the life of the process.
+        done_event.set()
+        _run_delegated_sweeps(config_manager, config_dir, live_dir, stop_event)
     finally:
         done_event.set()
+
+
+def _run_delegated_sweeps(
+    config_manager: ConfigManager,
+    config_dir: Path,
+    live_dir: Path | None,
+    stop_event: threading.Event,
+) -> None:
+    """The delegated-session class's drain and hourly sweep, on THIS daemon thread.
+
+    Not one of the six stamped passes above, deliberately: those are one-shot
+    and coalesced by a 60-second stamp, while this one must (a) CONTINUE a
+    backlog across passes, (b) recur hourly because a 48-hour window needs
+    steady-state sweeps in a runtime that lives for days, and (c) stop at the
+    next batch when the user switches it off. The loop, its own lock and its own
+    freshness stamp live in ``session.delegated_retention``; this thread is only
+    the host, so no new daemon exists. Housekeeping never fails a session.
+    """
+    if stop_event.is_set():
+        return
+    try:
+        from local_operator.session.delegated_retention import (
+            live_policy_provider,
+            run_sweeps,
+        )
+
+        run_sweeps(
+            config_dir,
+            live_policy_provider(config_manager, config_dir),
+            live_dir=live_dir,
+            should_stop=stop_event.is_set,
+            wait=stop_event.wait,
+        )
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("delegated session sweeps failed", exc_info=True)
 
 
 def _start_store_maintenance(
@@ -4064,12 +4244,18 @@ async def _prepare(
     *,
     has_ui: bool,
     cwd: str | None = None,
+    world_root: Path | None = None,
 ) -> _SessionPlan:
     """Shared wiring core used by :func:`create_session` and
     :func:`build_initial_blocks`. Returns the Session kwargs plus the blocks
     provider; raises ``ValueError`` when hosting/model config is missing.
     ``cwd`` (default: process cwd) is the single working-directory source for
-    the tool context, the session and MCP discovery."""
+    the tool context, the session and MCP discovery. ``world_root``, when an
+    SDK caller carries a world boundary (see ``sdk._resolve_world_root``), is
+    threaded into the same discovery loaders as a clip and installed as the
+    session's ``confinement_root`` AT CONSTRUCTION — before the first tool
+    context and before any child can be built; ``None`` (every ordinary
+    caller) leaves the plan byte-identical to the pre-boundary behaviour."""
     # Resolving a saved model now reads its journal, which can be large. Keep
     # agent/profile I/O and identity resolution off the loop together, before
     # the contiguous lease/claim critical section below. Snapshot the command
@@ -4273,7 +4459,12 @@ async def _prepare(
     # this module's annotations name it.
     from local_operator.network.credentials import build_auth_store
 
-    auth_store = build_auth_store(config_manager.config_dir)
+    # Metadata and sealed provider keys must share the selected root. The
+    # factory's legacy default DB follows ambient HOME, not config_dir; relying
+    # on that default makes a desktop login invisible to this session.
+    auth_store = build_auth_store(
+        config_manager.config_dir, db_path=config_manager.config_dir / "auth.db"
+    )
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -4296,12 +4487,14 @@ async def _prepare(
     config_dir = Path(agent_registry.config_dir)
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
-    hooks = await _setup_knowledge(config_dir, agent_registry, knowledge_warnings, effective_cwd)
+    hooks = await _setup_knowledge(
+        config_dir, agent_registry, knowledge_warnings, effective_cwd, world_root=world_root
+    )
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty
     # before that background task won the race.
-    _seed_mcp_routing(hooks, effective_cwd)
+    _seed_mcp_routing(hooks, effective_cwd, world_root=world_root)
     # The classification seam, built here because the package's cold import must
     # not land inside a turn (see ``_attach_classification``). Built unless
     # values.classification.auto is explicitly off — the default is ON, so the
@@ -4386,6 +4579,15 @@ async def _prepare(
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
+        # The session's own directory. This context is the WARM snapshot
+        # (``create_tools`` below), and a capability tool gated on the store
+        # root must see the same answer here as a live turn does: with
+        # ``session_dir`` missing, ``code_requests`` was built for the live
+        # session but not for this inventory, so the two surfaces disagreed
+        # (QA round 1, Q1: the model was shown the recommendation for a tool
+        # that was never in its tool list). Nothing is materialised here —
+        # only the path travels.
+        session_dir=str(transcript_dir),
         agent_id=agent_id,
         has_ui=has_ui,
         request_approval=request_approval,
@@ -4466,13 +4668,23 @@ async def _prepare(
             )
             agent_prompt = ""
     user_instructions = load_user_instructions(agent_prompt)
+    # The model-facing language line (SYS1), resolved ONCE here beside
+    # ``user_instructions`` for the same head-block reason: it rides the stable
+    # prefix, so the process's language at session start is the session's
+    # language for its lifetime — a settings change takes effect at the next
+    # session/prefix rebuild, never mid-session. Function-local import, like
+    # ``load_repo_guidance`` below: the resolver is read at CALL time, not at
+    # module import.
+    from local_operator.i18n.resolve import preferred_language_line
+
+    language_line = preferred_language_line()
     # Repo guidance (AGENTS.md/CLAUDE.md ancestors) joins the same read-once
     # contract: the head block must stay byte-stable for the session, so the
     # filesystem is consulted here and never again.
     from local_operator.context_files import load_repo_guidance
 
     try:
-        repo_guidance = load_repo_guidance(effective_cwd)
+        repo_guidance = load_repo_guidance(effective_cwd, boundary=world_root)
     except Exception:  # noqa: BLE001 — never block session construction
         repo_guidance = ""
 
@@ -4484,6 +4696,7 @@ async def _prepare(
         goal_state=goal_state,
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
+        language_line=language_line,
         variable_store=variable_store,
     )
 
@@ -4537,10 +4750,20 @@ async def _prepare(
         # one. ``hooks.classifier`` is ``None`` whenever the layer is off, which
         # the adapter reports as "no classifier" rather than raising.
         title_fit_check=title_fit_check(lambda: hooks.classifier),
+        # Turn supplements decide on the SAME service (one cascade, one breaker, one
+        # credential memo), resolved per call for the reason the lines above give.
+        supplement_seam=lambda: hooks.classifier,
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
     )
+    if world_root is not None:
+        # Installed at CONSTRUCTION, not post-open: the session must be
+        # confined before its first tool context is built and before any child
+        # can copy the field. ``None`` adds no key at all so the ordinary
+        # path's kwargs dict cannot drift from what existing callers built;
+        # see local_operator.tools.confinement for the mechanism and limits.
+        session_kwargs["confinement_root"] = str(world_root)
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,
@@ -4660,6 +4883,7 @@ async def wire_mcp_into_session(
     *,
     has_ui: bool = False,
     _deferred_boot: bool = False,
+    boundary: Path | None = None,
 ) -> McpManager | None:
     """Discover MCPs but expose their schemas only after explicit reads.
 
@@ -4676,6 +4900,13 @@ async def wire_mcp_into_session(
     get the warning on stderr. Any failure degrades to an empty catalogue, so
     MCP enrichment never becomes a session startup requirement. Returns the
     manager for the caller to dispose, or ``None``.
+
+    ``boundary`` is the session's world boundary when it has one: it travels
+    to the manager so EVERY load — the startup connect, an explicit connect
+    by name, and every reload — answers with the same clipped config set. It
+    is a parameter rather than read off the session because the deferred-boot
+    closure runs before construction state a reader might reach for is
+    settled.
     """
     from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
@@ -4719,6 +4950,13 @@ async def wire_mcp_into_session(
                 discover_and_load_mcp_tools,
                 secret_base=getattr(session, "config_dir", None),
                 register_secret=getattr(variables, "register_redaction", None),
+                # The world boundary travels through the same tolerance seam as
+                # the credential pair: in-tree callers of this wiring patch the
+                # loader with reduced fakes, and a hard kwarg would break every
+                # one of them. The boundary is enforced inside the loaders
+                # themselves (the manager carries it), so a caller that cannot
+                # receive it cannot be a session's real loader.
+                boundary=boundary,
             ),
         )
     except Exception as exc:  # noqa: BLE001 — degradation is the contract
@@ -5436,6 +5674,7 @@ async def create_session(
     *,
     has_ui: bool = False,
     cwd: str | None = None,
+    world_root: Path | None = None,
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
     mcp_publication_gate: "PublicationGate | None" = None,
@@ -5614,6 +5853,7 @@ async def create_session(
         agent_registry,
         has_ui=has_ui,
         cwd=effective_cwd,
+        world_root=world_root,
     )
     try:
         session = Session(**plan.session_kwargs)
@@ -5733,6 +5973,7 @@ async def create_session(
                     auth_store=plan.auth_store,
                     has_ui=has_ui,
                     _deferred_boot=True,
+                    boundary=world_root,
                 )
                 if manager is not None:
                     attach_mcp_dispose(session, manager)
@@ -5764,6 +6005,7 @@ async def create_session(
         knowledge_hooks=plan.knowledge_hooks,
         auth_store=plan.auth_store,
         has_ui=has_ui,
+        boundary=world_root,
     )
     if mcp_manager is not None:
         attach_mcp_dispose(session, mcp_manager)
