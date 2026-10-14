@@ -971,10 +971,16 @@ class ProviderController:
         Freshness is load-bearing, not decorative: ``immutable=1`` guarantees the
         no-write property but cannot see an uncheckpointed WAL, so a non-empty
         ``-wal`` means the numbers may be behind — and an INVENTORY built from
-        them could name an account a committed DELETE removed. That is why a
-        possibly-stale inventory WITHHOLDS its list rather than presenting
-        deleted accounts as current; an explicit provider is returned flagged, so
-        its own (possibly old) numbers are not silently dropped.
+        them could name an account a committed DELETE removed. Staleness is
+        therefore DISCLOSED, not withheld: the snapshot is RETURNED with
+        ``may_be_stale=True`` (and ``cached_at``), both for the inventory and for
+        an explicit provider, so a busy desktop never blanks the phone's
+        ``/usage`` exactly when the user wants to see credits. A flagged,
+        clearly-labelled snapshot is never PRESENTED as current — the surface
+        renders "cached, as of T (may be out of date)" and may exclude a removed
+        account — which satisfies the safety rule without hiding usable data. The
+        one state that stays UNAVAILABLE is an unreadable/foreign schema, where
+        nothing trustworthy exists to return at all.
 
         The returned reports carry NO account identity: identity and vendor notes
         are stripped here rather than trusted to the renderer.
