@@ -52,6 +52,197 @@ def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, li
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch,spend,expected",
+    [
+        ({}, {"reached": False, "individual_limit": None}, "healthy"),
+        ({"has_credits": False}, {"reached": False}, "depleted"),
+        ({"has_credits": False, "unlimited": True}, {"reached": False}, "depleted"),
+        ({"has_credits": "true"}, {"reached": False}, "depleted"),
+        ({"unlimited": "false"}, {"reached": False}, "depleted"),
+        ({"overage_limit_reached": None}, {"reached": False}, "depleted"),
+        ({"unlimited": True, "overage_limit_reached": True}, {"reached": False}, "depleted"),
+        ({"overage_limit_reached": True}, {"reached": False}, "depleted"),
+        ({}, {"reached": True}, "depleted"),
+        ({}, None, "depleted"),
+        ({}, {}, "depleted"),
+        ({}, {"reached": "false"}, "depleted"),
+        ({"balance": "0"}, {"reached": False}, "depleted"),
+        ({"balance": "bad"}, {"reached": False}, "depleted"),
+        ({"balance": "NaN"}, {"reached": False}, "depleted"),
+        ({"balance": True}, {"reached": False}, "depleted"),
+        ({"unlimited": True, "balance": "0"}, {"reached": False}, "healthy"),
+    ],
+)
+async def test_openai_payable_credits_health(patch, spend, expected) -> None:
+    # Exact sanitized WHAM shape relayed from Aida's read-only live probe.
+    payload = {
+        "rate_limit": {
+            "allowed": False,
+            "limit_reached": True,
+            "primary_window": {"used_percent": 100, "limit_window_seconds": 18000},
+        },
+        "credits": {
+            "has_credits": True,
+            "unlimited": False,
+            "overage_limit_reached": False,
+            "balance": "61899.9587700000",
+            "approx_local_messages": [100],
+            "approx_cloud_messages": [200],
+            **patch,
+        },
+        "spend_control": spend,
+        "rate_limit_reset_credits": {"available_count": 0, "applicable_available_count": 0},
+    }
+    async with _client_for(payload) as client:
+        report = await fetch_usage(client, "openai", access_token="synthetic-oauth")
+    assert report is not None
+    health = usage_health(report, "gpt-5.3-codex", reserve_percent=99)
+    assert health.state == expected
+    if expected == "healthy":
+        assert health.remaining_fraction is None
+        credit = next(row for row in report.limits if row.id == "openai:credits")
+        assert credit.amount.unit == "credits"
+        assert credit.amount.limit is None and credit.amount.used is None
+        assert credit.amount.fraction() is None
+        assert credit.amount.remaining == pytest.approx(float(payload["credits"]["balance"]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plan_used,paid_used,expected",
+    [(25, 100, "healthy"), (100, 25, "healthy"), (100, 95, "reserve"), (100, 100, "depleted")],
+)
+async def test_anthropic_plan_or_paid_headroom(plan_used, paid_used, expected) -> None:
+    payload = {
+        "five_hour": {"utilization": plan_used},
+        "spend": {
+            "enabled": True,
+            "used": {"amount_minor": paid_used * 100, "exponent": 2, "currency": "USD"},
+            "limit": {"amount_minor": 10000, "exponent": 2, "currency": "USD"},
+        },
+    }
+    async with _client_for(payload) as client:
+        report = await fetch_usage(client, "anthropic", access_token="synthetic-oauth")
+    assert report is not None
+    assert usage_health(report, "claude-opus-5").state == expected
+
+
+@pytest.mark.parametrize("supersedes,expected", [(False, "depleted"), (True, "healthy")])
+def test_paid_scope_retains_model_caps(supersedes, expected) -> None:
+    report = UsageReport(
+        provider="openai",
+        limits=[
+            UsageLimit("plan", "Plan", UsageAmount(used_fraction=1), shared=True),
+            UsageLimit("spark", "Spark", UsageAmount(used_fraction=1), tier="spark"),
+            UsageLimit(
+                "paid",
+                "Credits",
+                UsageAmount(remaining=10, unit="credits"),
+                paid_fallback=True,
+                available=True,
+                supersedes_tiers=supersedes,
+            ),
+        ],
+    )
+    assert usage_health(report, "gpt-spark").state == expected
+    assert usage_health(report, "gpt-codex").state == "healthy"
+
+
+@pytest.mark.parametrize("section", ["spend", "extra_usage"])
+@pytest.mark.parametrize("cap,expected", [(None, "healthy"), (-1, "depleted"), ("bad", "depleted")])
+@pytest.mark.asyncio
+async def test_anthropic_uncapped_requires_explicit_null(section, cap, expected) -> None:
+    if section == "spend":
+        meter = {
+            "enabled": True,
+            "used": {"amount_minor": 100, "exponent": 2, "currency": "USD"},
+            "limit": cap,
+        }
+    else:
+        meter = {"is_enabled": True, "used_credits": 1, "monthly_limit": cap}
+    async with _client_for({"five_hour": {"utilization": 100}, section: meter}) as client:
+        report = await fetch_usage(client, "anthropic", access_token="synthetic")
+    assert report is not None
+    assert usage_health(report, "claude-opus").state == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plan,paid,expected", [(100, 10, "healthy"), (25, 100, "healthy"), (100, 100, "depleted")]
+)
+async def test_xai_on_demand_is_alternative(plan, paid, expected) -> None:
+    async with _client_for(
+        {
+            "config": {
+                "creditUsagePercent": plan,
+                "onDemandCap": {"val": 100},
+                "onDemandUsed": {"val": paid},
+            }
+        }
+    ) as client:
+        report = await fetch_usage(client, "xai", access_token="synthetic")
+    assert report is not None
+    assert usage_health(report, "grok-4").state == expected
+
+
+@pytest.mark.asyncio
+async def test_xai_monthly_response_owns_its_on_demand_meter() -> None:
+    def handler(request):
+        config: dict[str, Any] = {"isUnifiedBillingUser": True}
+        if not request.url.query:
+            config.update(
+                monthlyLimit={"val": 100},
+                used={"val": 100},
+                onDemandCap={"val": 100},
+                onDemandUsed={"val": 10},
+            )
+        return httpx.Response(200, json={"config": config})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        report = await fetch_usage(client, "xai", access_token="synthetic")
+    assert report is not None
+    assert usage_health(report, "grok-4").state == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_legacy_extra_usage_converts_both_minor_amounts() -> None:
+    async with _client_for(
+        {
+            "five_hour": {"utilization": 100},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 1250,
+                "monthly_limit": 10000,
+                "decimal_places": 2,
+            },
+        }
+    ) as client:
+        report = await fetch_usage(client, "anthropic", access_token="synthetic")
+    assert report is not None
+    paid = next(limit for limit in report.limits if limit.paid_fallback)
+    assert paid.amount.used == 12.5 and paid.amount.limit == 100
+    assert usage_health(report, "claude-opus").state == "healthy"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "meter",
+    [
+        {"is_enabled": True, "used_credits": True, "monthly_limit": None},
+        {"is_enabled": True, "used_credits": 1, "monthly_limit": True},
+        {"is_enabled": True, "used_credits": -1, "monthly_limit": None},
+        {"is_enabled": True, "used_credits": 1, "monthly_limit": None, "decimal_places": 309},
+    ],
+)
+async def test_anthropic_malformed_paid_meter_does_not_unlock(meter) -> None:
+    async with _client_for({"five_hour": {"utilization": 100}, "extra_usage": meter}) as client:
+        report = await fetch_usage(client, "anthropic", access_token="synthetic")
+    assert report is not None
+    assert usage_health(report, "claude-opus").state == "depleted"
+
+
 def test_num_never_yields_a_value_that_crashes_downstream() -> None:
     """``_num`` is the single coercion boundary all nine fetchers share, so its
     contract is what keeps "a quota fetcher never raises" true for fields nobody
@@ -379,6 +570,9 @@ def test_usage_health_enabled_extra_credit_supersedes_included_plan() -> None:
                 id="anthropic:extra",
                 label="Extra usage",
                 amount=UsageAmount(used=25, limit=100),
+                paid_fallback=True,
+                available=True,
+                supersedes_tiers=True,
             ),
         ],
     )
@@ -1904,6 +2098,10 @@ async def test_qwencloud_token_plan_personal_window_and_packs() -> None:
     assert window.resets_at_ms == 1_800_100_000_000
     assert window.shared is True
     assert report.limits[1].amount.remaining == 20_000
+    assert report.limits[1].paid_usable()
+    window.amount.used_fraction = 1.0
+    assert usage_health(report, "qwen-coder").state == "healthy"
+    assert usage_health(report, "qwen-coder").remaining_fraction is None
 
     # Every gateway call carries the MANAGEMENT token, not the wire key.
     assert len(requests) == 4  # gray + addon + teams + personal

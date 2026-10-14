@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -201,9 +202,47 @@ def report_from_dict(data: Any) -> UsageReport | None:
                 # while the live fetch still carries it — the annotation would
                 # appear on a cold `/usage` and vanish on every warm one.
                 detail=str(limit.get("detail") or ""),
+                # Old cache rows lack the additive fields: default to no paid
+                # evidence, never turn a foreign truthy string into eligibility.
+                paid_fallback=limit.get("paid_fallback") is True,
+                available=(
+                    limit.get("available") if isinstance(limit.get("available"), bool) else None
+                ),
+                supersedes_tiers=limit.get("supersedes_tiers") is True,
+                unlimited=limit.get("unlimited") is True,
             )
             for limit in data.get("limits", [])
         ]
+        # Before paid metadata existed, this exact Anthropic row was emitted
+        # ONLY by the enabled extra-usage parser. Migrate that known wire shape
+        # here, not a generic suffix heuristic in routing. Disabled/malformed
+        # rows remain non-payable alternatives, never conjunctive plan gates.
+        if data.get("provider") == "anthropic":
+            for raw, limit in zip(data.get("limits", []), limits):
+                if limit.id != "anthropic:extra" or "paid_fallback" in raw:
+                    continue
+                if (
+                    limit.amount.used_fraction is None
+                    and (limit.amount.used is not None or limit.amount.limit is not None)
+                    and limit.status != "disabled"
+                ):
+                    # Historical extra_usage scaled only the cap; spend scaled
+                    # both. The wire carries neither producer nor precision, so
+                    # even plausible values cannot prove which units were used.
+                    # Invalidate the whole report: keeping the exhausted plan
+                    # alone would still strand payable headroom. Cache miss
+                    # refreshes where possible; unavailable refresh fails open.
+                    return None
+                limit.paid_fallback = True
+                limit.supersedes_tiers = True
+                fraction = limit.amount.fraction()
+                limit.available = (
+                    limit.amount.unit == "usd"
+                    and limit.status in (None, "ok", "warning", "exhausted")
+                    and fraction is not None
+                    and math.isfinite(fraction)
+                    and 0 <= fraction <= 1
+                )
         raw_next = data.get("next_probe_at_ms")
         try:
             next_probe_at_ms = int(raw_next) if raw_next is not None else None

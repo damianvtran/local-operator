@@ -7890,3 +7890,46 @@ async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(
     assert excinfo.value.status == 429
     assert long_attempts == ["k1", "k2"], "no probation may leak onto an unpinned route"
     assert long_sleeps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available,expected", [(True, True), (False, False)])
+async def test_quota_blocked_recovers_with_paid_only(
+    tmp_path, monkeypatch, available, expected
+) -> None:
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    store = AuthStore(tmp_path / "auth.db")
+    row = store.upsert_credential(
+        "openai",
+        {
+            "access": "synthetic",
+            "refresh": "synthetic-refresh",
+            "expires": int(time.time() * 1000) + 3600000,
+            "account_id": "synthetic-account",
+            "email": "synthetic@example.test",
+        },
+    )
+    store.block_credential(row.id, "openai", block_ms=60000)
+
+    async def fetch(*args, **kwargs):
+        return UsageReport(
+            provider="openai",
+            limits=[
+                UsageLimit(
+                    "openai:credits",
+                    "Credits",
+                    UsageAmount(remaining=10, unit="credits"),
+                    paid_fallback=True,
+                    available=available,
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("local_operator.providers.usage.fetch_usage", fetch)
+    try:
+        recovered = await failover_module._recover_quota_blocked(store, "openai", "gpt-codex")
+        assert (recovered is not None) is expected
+        assert store.is_blocked_for_model(row.id, "openai", "gpt-codex") is not expected
+    finally:
+        store.close()
