@@ -506,12 +506,27 @@ def fold(
         answered_at = int(answered.get("at") or 0) if answered else 0
         window_end = expires_at + LATE_WINDOW_S * _MILLIS
 
+        # A BRIDGE carriage (any question carrying a ``question_id``) is a
+        # request whose declined/dismissed rows are same-uid RECORDS, not a
+        # human's veto: they carry no answers, and any writer on this account can
+        # append one. F6-1: with such a row present, an ``answered`` event that
+        # arrived after the window used to fall below the ``declined`` branch and
+        # the record read ``declined`` — decline sentence to the model and the
+        # surfaces — while its ``answers`` still carried the pick the dispatcher
+        # POSTed. The answered event therefore decides the status for a bridge
+        # carriage; every ordinary ask keeps the ladder below exactly as it was.
+        bridge_carriage = any(
+            isinstance(question, Mapping) and str(question.get("question_id") or "")
+            for question in (queued.get("questions") or ())
+        )
         status: str
         if answered and answered_at <= expires_at:
             # Rule 1 sits ABOVE the view actions on purpose: a dismissal is an
             # action on an ask that already timed out, and it must never swallow
             # an answer that arrived inside the window (design §2.2).
             status = STATUS_ANSWERED
+        elif answered is not None and bridge_carriage:
+            status = STATUS_LATE if now <= window_end else STATUS_EXPIRED
         elif declined is not None:
             status = STATUS_DECLINED
         elif dismissed is not None:

@@ -28321,7 +28321,14 @@ def _ask_report(
     for question in questions:
         chosen = [text for text in answers.get(question.id, []) if text.strip()]
         attached = int(counts.get(question.id, 0))
-        lines.append(f"{question.id} — {question.question}")
+        # ``render._question_models`` falls back to ``model_construct`` for a log
+        # row pydantic rejects, and such an object has no ``question`` at all:
+        # reading it unguarded raised AttributeError out of the render, which the
+        # session's guarded background task swallowed — one malformed (forged or
+        # pre-dating-the-field) row took the whole reconcile pass down. A missing
+        # prompt is shown as the id alone rather than as a crash.
+        prompt = str(getattr(question, "question", "") or "")
+        lines.append(f"{question.id} — {prompt}" if prompt else str(question.id))
         if chosen and attached:
             noun = "image" if attached == 1 else "images"
             body = f"{'; '.join(chosen)} (+{attached} {noun}, shown below)"

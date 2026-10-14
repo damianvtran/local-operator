@@ -1478,11 +1478,12 @@ class AskQueue:
             # between the gate and the append (or a grant withdrawn since) must
             # not have its content landed, and it must not carry the marker.
             # The preview the queue already deemed owed is returned unchanged:
-            # that content came from the fold at the moment the gate passed, and
-            # dropping the row here would be the silent loss this method's own
-            # contract forbids — so the row that lands is the gate-approved
-            # PREVIEW: nothing that failed the gate is written, and nothing owed
-            # is dropped.
+            # that content came from the fold at the moment the gate passed —
+            # INCLUDING the provenance marker the reconcile-time block stamped on
+            # it — and dropping the row here would be the silent loss this
+            # method's own contract forbids. So the row that lands is the
+            # gate-approved PREVIEW: nothing that failed the gate is written, and
+            # nothing owed is dropped, marker and all.
             logger.warning(
                 "bridge ask %s no longer proves its decision at the append — the "
                 "rebuilt row is refused and the pre-append preview is kept",
