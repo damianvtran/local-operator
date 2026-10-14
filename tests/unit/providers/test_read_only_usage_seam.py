@@ -283,12 +283,14 @@ async def test_auth_table_missing_required_column_is_unavailable(tmp_path) -> No
     assert controller.cached_persisted_usage_reports_read_only("openai").unavailable is True
 
 
-async def test_wal_deleted_account_is_not_presented_as_current(tmp_path) -> None:
-    """A committed DELETE sitting in ``-wal`` must not be served as current.
+async def test_wal_deleted_account_is_returned_flagged_not_current(tmp_path) -> None:
+    """A committed DELETE in ``-wal`` is flagged, not silently served as current.
 
     ``immutable=1`` cannot see the WAL, so the reader still sees the removed row
-    (an ordinary connection sees count=0). The seam must flag staleness and
-    WITHHOLD the possibly-deleted inventory rather than list it as current.
+    (an ordinary connection sees count=0). The seam DISCLOSES staleness and
+    returns the snapshot flagged, so the surface can label it or exclude the
+    removed account — it must not be presented as current, and it must not be
+    withheld (a blank phone /usage on a busy desktop is the worse failure).
     """
     import sqlite3
 
@@ -300,7 +302,12 @@ async def test_wal_deleted_account_is_not_presented_as_current(tmp_path) -> None
     )
     seeder.close()
     cache = UsageCacheStore(cache_db)
-    cache.set("k", "openai", [UsageReport(provider="openai")], expires_at_ms=10**13)
+    cache.set(
+        provider_cache_key("openai", fingerprint_accounts(["acct"])),
+        "openai",
+        [UsageReport(provider="openai", identity="acct")],
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
     cache.close()
 
     writer = sqlite3.connect(str(auth_db))
@@ -314,13 +321,54 @@ async def test_wal_deleted_account_is_not_presented_as_current(tmp_path) -> None
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
     snap = controller.cached_persisted_usage_reports_read_only(None)
-    assert snap.may_be_stale is True
-    assert snap.reports == [], "possibly-deleted account was served as current"
+    assert snap.unavailable is False
+    assert snap.may_be_stale is True, "stale snapshot not flagged"
     assert snap.cached_at is not None
-    # An explicit provider is returned flagged, so its own numbers are not
-    # silently dropped — but it is still marked stale.
+    # The value is still returned (not withheld) so the surface can choose.
+    assert [r.provider for r in snap.reports] == ["openai"]
     explicit = controller.cached_persisted_usage_reports_read_only("openai")
     assert explicit.may_be_stale is True
+    assert [r.provider for r in explicit.reports] == ["openai"]
+    writer.close()
+
+
+async def test_wal_present_with_live_account_returns_value_flagged(tmp_path) -> None:
+    """A non-empty WAL beside a LIVE account must not blank the inventory.
+
+    The common busy-desktop case: the account still exists, there is just an
+    uncheckpointed WAL. The inventory must come back with its value, flagged.
+    """
+    import sqlite3
+
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential(
+        "openai", {"access": "a", "refresh": "r", "expires": 10**15, "account_id": "acct"}
+    )
+    seeder.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set(
+        provider_cache_key("openai", fingerprint_accounts(["acct"])),
+        "openai",
+        [UsageReport(provider="openai", identity="acct")],
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    cache.close()
+
+    # A writer that commits a REAL unrelated change keeps a non-empty WAL
+    # without removing the account (a no-op UPDATE writes no frames).
+    writer = sqlite3.connect(str(auth_db))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("UPDATE auth_credentials SET updated_at = updated_at + 1")
+    writer.commit()
+    assert (tmp_path / "auth.db-wal").stat().st_size > 0
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    snap = controller.cached_persisted_usage_reports_read_only(None)
+    assert snap.may_be_stale is True
+    assert snap.unavailable is False
+    assert [r.provider for r in snap.reports] == ["openai"], "inventory was blanked"
     writer.close()
 
 
