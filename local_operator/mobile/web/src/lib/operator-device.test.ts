@@ -109,6 +109,40 @@ describe("the DER encoder", () => {
 		expect(der[5]).toBe(0xf4);
 	});
 
+	it.each([
+		{
+			name: "short r with a high-bit padded s",
+			r: "00".repeat(31) + "01",
+			s: "80" + "00".repeat(31),
+			der: "302602010102210080" + "00".repeat(31),
+		},
+		{
+			name: "high-bit padded r with a short s",
+			r: "80" + "00".repeat(31),
+			s: "00".repeat(31) + "01",
+			der: "302602210080" + "00".repeat(31) + "020101",
+		},
+		{
+			name: "both scalars short",
+			r: "00".repeat(31) + "01",
+			s: "00".repeat(31) + "02",
+			der: "3006020101020102",
+		},
+		{
+			name: "a 31-byte r with a short s",
+			r: "00" + "01".repeat(31),
+			s: "00".repeat(31) + "02",
+			der: "3024021f" + "01".repeat(31) + "020102",
+		},
+	])("preserves scalar place value: $name", ({ r, s, der }) => {
+		// Literal DER pins both directions independently: these small scalar
+		// fixtures test integer representation, not whether (r, s) signs a message.
+		// Random WebCrypto signatures rarely start with zero, so random signing
+		// alone hid the inverse's alignment error behind intermittent verify=false.
+		expect(bytesToHex(rawSignatureToDer(hexToBytes(r + s)))).toBe(der);
+		expect(bytesToHex(derSignatureToRaw(hexToBytes(der)))).toBe(r + s);
+	});
+
 	it("refuses a signature that is not a P-256 one", () => {
 		expect(() => rawSignatureToDer(new Uint8Array(63))).toThrow();
 		expect(() => derSignatureToRaw(new Uint8Array([0x31, 0x00]))).toThrow();
