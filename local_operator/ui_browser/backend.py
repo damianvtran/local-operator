@@ -19,6 +19,7 @@ What IS host-specific, and therefore lives here:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -48,11 +49,16 @@ class UiHostClient(HostClient):
             headers["X-UI-Browser-Instance"] = current.instance_id
         return headers
 
-    async def preflight(self, current: Any) -> None:
+    async def preflight(self, current: Any, *, deadline: float | None = None) -> None:
         # A fresh heartbeat plus a live/reused PID is not process identity. Only
         # modern records buy this bounded check; legacy UI contracts stay intact.
+        remaining = HEALTH_PROBE_TIMEOUT_S
+        if deadline is not None:
+            remaining = min(remaining, deadline - asyncio.get_running_loop().time())
+            if remaining <= 0:
+                raise TimeoutError("browser operation deadline exhausted before health")
         if current.instance_id is not None and not await _health_ok(
-            current.port, current.pid, current.instance_id
+            current.port, current.pid, current.instance_id, timeout=remaining
         ):
             raise HostPreDeliveryFailure(
                 "the desktop browser host is unavailable: its published process generation "
@@ -63,17 +69,22 @@ class UiHostClient(HostClient):
         current = self._read()
         if current is None:
             raise BridgeUnreachable(self.copy_for().no_state)
+        budget = self.timeout_for(method, params)
+        deadline = asyncio.get_running_loop().time() + budget
         try:
-            return await self.call_once(current, method, params)
-        except HostPreDeliveryFailure:
-            replacement = self._read()
-            if replacement is None or self._record_identity(replacement) == self._record_identity(
-                current
-            ):
-                raise
-            # One fresh-record retry ONLY after a proven pre-delivery failure.
-            # Never replay timeouts, disconnects, or a returned command error.
-            return await self.call_once(replacement, method, params)
+            # HTTPX's timeout bounds each I/O phase, not the sum of phases. The
+            # outer clock also fences health/rediscovery and an ambiguous expiry
+            # after send can never enter the pre-delivery retry branch.
+            async with asyncio.timeout(budget):
+                try:
+                    return await self.call_once(current, method, params, deadline=deadline)
+                except HostPreDeliveryFailure:
+                    replacement = self._read()
+                    if replacement is None or self._record_identity(replacement) == self._record_identity(current):
+                        raise
+                    return await self.call_once(replacement, method, params, deadline=deadline)
+        except TimeoutError as exc:
+            raise BridgeUnreachable(self.copy_for().timeout.format(method=method, timeout=budget)) from exc
 
     @staticmethod
     def _record_identity(current: state_store.UiHostState) -> tuple[int, int, str, str | None]:
@@ -144,7 +155,9 @@ async def ui_browser_reachable(
     return await _health_ok(current.port, current.pid, current.instance_id)
 
 
-async def _health_ok(port: int, pid: int, instance_id: str | None = None) -> bool:
+async def _health_ok(
+    port: int, pid: int, instance_id: str | None = None, *, timeout: float = HEALTH_PROBE_TIMEOUT_S
+) -> bool:
     """One bounded loopback /health probe; any failure means "not reachable".
 
     The probe requires the answering process to be the pid the FILE named, not
@@ -163,7 +176,7 @@ async def _health_ok(port: int, pid: int, instance_id: str | None = None) -> boo
     ``proto_mismatch`` whose copy names the remedy.
     """
     try:
-        async with httpx.AsyncClient(timeout=HEALTH_PROBE_TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(f"http://127.0.0.1:{port}/health")
         if response.status_code != 200:
             return False
@@ -173,6 +186,7 @@ async def _health_ok(port: int, pid: int, instance_id: str | None = None) -> boo
             and body.get("host") == state_store.HOST
             and int(body.get("pid", -1)) == pid
             and (instance_id is None or body.get("instance_id") == instance_id)
+            and body.get("ready") is not False
         )
     except Exception:  # noqa: BLE001 - unreachable, malformed, or timed out
         return False

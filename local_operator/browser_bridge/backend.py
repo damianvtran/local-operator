@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from dataclasses import dataclass
@@ -936,7 +937,7 @@ class HostClient:
         """Authentication for one pinned discovery record; hosts may add identity."""
         return {"X-Bridge-Key": current.session_key}
 
-    async def preflight(self, current: Any) -> None:
+    async def preflight(self, current: Any, *, deadline: float | None = None) -> None:
         """Host-specific pre-delivery validation; legacy/extension paths do none."""
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -945,13 +946,21 @@ class HostClient:
             raise BridgeUnreachable(self.copy_for().no_state)
         return await self.call_once(current, method, params)
 
-    async def call_once(self, current: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def call_once(
+        self, current: Any, method: str, params: dict[str, Any], *, deadline: float | None = None
+    ) -> dict[str, Any]:
         """Execute against the SAME record validated by preflight, without replay."""
         copy = self.copy_for()
-        await self.preflight(current)
+        await self.preflight(current, deadline=deadline)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
         timeout = self.timeout_for(method, params)
+        if deadline is not None:
+            # The UI lane owns one outer operation deadline, including health
+            # and a possible pre-delivery rediscovery. Never renew it per socket.
+            timeout = min(timeout, deadline - asyncio.get_running_loop().time())
+            if timeout <= 0:
+                raise TimeoutError("browser operation deadline exhausted before delivery")
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(

@@ -417,6 +417,12 @@ class BrowserResource:
         host = surface_host(surface)
         if host:
             return host
+        # A denied fresh navigation can owe an approval without a minted tab.
+        # Its saved transport pins only that pending flow; it never grants tab
+        # ownership, origin access, or permission to adopt a foreign capability.
+        pending_host = str(record.get("pending_access_host", ""))
+        if pending_host in (HOST_UI, HOST_BRIDGE):
+            return pending_host
         host = str(record.get("host", ""))
         if host and self._record_owes_reconciliation(record):
             return host
@@ -644,6 +650,37 @@ class BrowserResource:
         """
         return self._lane().discovery.peer_identity()
 
+    def refresh_identity(self) -> None:
+        """Invalidate both caches when the peer identity actually CHANGED.
+
+        Discovery is never proof, and an unknown discovery is not proof of a
+        changed incarnation either. ``_peer_identity`` returns ``None`` for
+        "cannot tell" (the record is gone or unreadable), so a ``None`` result
+        must NOT be compared against a learned peer: a host that flaps
+        A -> None -> A would otherwise invalidate twice and force a needless
+        re-recovery each time. Reset only when a RESOLVED peer differs from the
+        learned one; a transient ``None`` leaves the learned verdict intact.
+        """
+        peer = self._peer_identity()
+        if peer is not None and peer != self._ownership_peer:
+            self._ownership_peer = peer
+            self.ownership = None
+            self.recovered = False
+
+    async def ensure_recovered(self) -> None:
+        """Refresh/recover under the caller's resource lock, without minting proof.
+
+        The refresh runs FIRST, so an incarnation change (which clears
+        ``recovered`` inside ``refresh_identity``) is what decides — never a
+        stale flag consulted before the fingerprint (review R1 CR1). This is the
+        ONE place the ordinary action and the finalizer both go through, so
+        there is no second spelling of "do we owe an automatic recovery".
+        """
+        self.refresh_identity()
+        if self.recovered:
+            return
+        await self.recover()
+
     def ownership_mode(self) -> bool | None:
         """The cached ownership verdict, invalidated when the PEER changed.
 
@@ -658,10 +695,7 @@ class BrowserResource:
         Returns None when it has not been learned for this peer yet — callers
         must treat that as "must ask", never as "unavailable".
         """
-        peer = self._peer_identity()
-        if peer != self._ownership_peer:
-            self._ownership_peer = peer
-            self.ownership = None
+        self.refresh_identity()
         return self.ownership
 
     def _peer_is_pre_ownership(self) -> bool:
@@ -761,6 +795,31 @@ class BrowserResource:
                 raise BrowserOwnershipError(
                     _ownership_requires_update_message(self._lane().name)
                 ) from exc
+            if exc.code is ErrorCode.OWNER_REFUSED:
+                # A typed refusal from an ownership-AWARE peer. The peer now also
+                # says WHICH kind via an additive `data.refusal` discriminator, so
+                # the two are told apart without substring-matching the message:
+                #
+                #   * `stale`   — our own generation/predecessor is behind; the
+                #     remedy is a resume, the ordinary same-session case.
+                #   * `foreign` — the proof/session/shape is not ours at all (a
+                #     different owner, a tab that belongs to another allocation).
+                #     Never retried as if it were our own staleness.
+                #
+                # The distinction is CARRIED, not inferred: an older peer that
+                # predates the key omits it, which reads as unknown and keeps the
+                # prior bare-refusal behaviour (the failure still stands).
+                refusal = str(exc.data.get("refusal") or "")
+                if refusal == "stale":
+                    raise BrowserOwnershipError(
+                        "browser owner generation is stale; resume this session's scope "
+                        "before browsing"
+                    ) from exc
+                if refusal == "foreign":
+                    raise BrowserOwnershipError(
+                        "this browser scope belongs to a different owner; no action taken"
+                    ) from exc
+                raise
             if exc.code is ErrorCode.INTERNAL and (
                 "timeout_s" not in exc.data and not exc.data.get("stalled")
             ):
@@ -922,8 +981,7 @@ class BrowserResource:
         try:
             async with self.lock:
                 self.assert_current()
-                if not self.recovered:
-                    await self.recover()
+                await self.ensure_recovered()
                 # A link with no ownership lifecycle settles through the plain
                 # `close` verb instead. Without this the fallback that keeps the
                 # tool working would strand the very tab it opened: `owner_finish`
