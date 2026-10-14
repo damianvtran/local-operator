@@ -363,6 +363,9 @@ class ServeRecord:
     #: Additive, like every field here: a reader built before it drops the key and
     #: sees the daemon it always saw.
     reloadable: bool = False
+    #: Handler presence alone cannot prove scheduler/request continuity. Old
+    #: records default unknown; only an actually wired fence advertises safety.
+    rolling_reload_contract: str = ""
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for
@@ -389,6 +392,7 @@ def build_record(
     announced: tuple[str, int],
     desktop_governed: bool | None = None,
     reloadable: bool = False,
+    rolling_reload_contract: str = "",
     access_token: str = "",
     boot_generation: int = 0,
 ) -> ServeRecord:
@@ -474,6 +478,7 @@ def build_record(
         # claiming the capability for a daemon that installed no handler is a
         # caller signalling a process whose default answer to SIGUSR1 is death.
         reloadable=bool(reloadable),
+        rolling_reload_contract=rolling_reload_contract if reloadable else "",
         # ``""``, never a regenerated key: an env-governed daemon has no claim
         # to publish, and a reader must be able to tell that from a key.
         claim_key="" if governed else secrets.token_urlsafe(32),

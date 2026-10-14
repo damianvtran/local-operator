@@ -1800,6 +1800,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "newer versions; the refresh flags take precedence."
         ),
     )
+    # The isolated verified controller has UNKNOWN/PIP kind. These explicit
+    # destination arguments authorize ONLY its canonical immutable protocol;
+    # ordinary update/install-kind guards are not widened or overridden.
+    for name in ("root", "baseline", "artifact", "digest", "caller", "target", "tail"):
+        update_parser.add_argument(f"--controller-{name}", help=argparse.SUPPRESS)
     update_parser.add_argument(
         "--no-services",
         dest="no_services",
@@ -9924,6 +9929,17 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
         config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # Retain the Server object so a ready-successor handoff can pause/resume
+        # ACCEPTORS on it without a kill: the listener socket lives in this frame
+        # and the handoff runs in the lifespan's loop, so app.state is the one
+        # channel that reaches both. The owner holds a DUP of the listener, so
+        # nothing here can close the bound socket the way a forced restart would.
+        from local_operator import service_handoff
+
+        server = uvicorn.Server(config)
+        asgi_app.state.listener_owner = service_handoff.ListenerOwner(
+            asgi_app, servers=[], listener=listener
+        )
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -9931,7 +9947,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         # those windows are exactly where a traceback would otherwise reach the
         # operator instead of a plain exit.
         try:
-            uvicorn.Server(config).run(sockets=[listener])
+            server.run(sockets=[listener])
         except KeyboardInterrupt:
             pass
     else:
@@ -14833,6 +14849,24 @@ def main() -> int:
                 return invalid
             return mcp_command(args)
         elif args.subcommand == "update":
+            is_controller = (
+                getattr(args, "controller_root", None) is not None
+                or getattr(args, "controller_tail", None) is not None
+            )
+            if is_controller:
+                from local_operator.update_bootstrap import (
+                    BootstrapError,
+                    controller,
+                    controller_tail,
+                )
+
+                try:
+                    if getattr(args, "controller_root", None) is not None:
+                        return controller(args)
+                    return controller_tail(args)
+                except (BootstrapError, OSError, ValueError) as exc:
+                    print(f"rolling update: {exc}", file=sys.stderr)
+                    return 1
             # Lazy: ``update`` imports httpx. ``import local_operator.cli``
             # must not (``tests/unit/test_import_graph.py``).
             from local_operator.update import update_command

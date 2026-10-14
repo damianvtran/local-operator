@@ -14,9 +14,11 @@ So these cells drive the PRODUCTION machinery around a real runtime:
 * the real install-and-flip (``update.install_into_generation`` →
   ``update.flip_pointer``), with a fake ``uv`` runner — a full wheel build is
   minutes of the e2e budget and the property under test is where uv is AIMED and
-  what happens to the running process, not what uv compiles. Busy admission
-  remains mandatory even with immutable generations; no live busy-fleet install
-  or real signed-artifact proof is claimed by this fixture;
+  what happens to the running process, not what uv compiles. The generation layout
+  makes busy admission unnecessary: a promotion lands in its OWN tree and moves a
+  pointer, never rewriting a running runtime's imports, so the busy-fleet install
+  and flip PROCEED and the running runtime is left uninterrupted. No real
+  signed-artifact proof is claimed by this fixture;
 * the real stable launchers, and the real console script behind them, for the cell
   that resolves the generation ``current`` names — a console script the fixture
   writes with an absolute shebang, exactly as ``uv`` does.
@@ -404,13 +406,20 @@ def _install_new_generation() -> Path:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks and signals")
 def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> None:
-    """The incident prevented: busy refuses; only actual idle admits the swap.
+    """The incident prevented: the fleet stays up while the install proceeds.
 
     A runtime parked on a real ``bash`` tool (``sleep 8``, issued by the mock
-    provider) must retain its pid/current/tree when the installer refuses. Its
-    real turn then finishes before a NEW generation may be installed/flipped.
-    Asserted on what the operator would have lost: the same pid, a turn that
-    finishes, and NO ``runtime-killed`` / ``install-mid-update`` incident.
+    provider) must survive a real install-and-flip of a NEW generation: the
+    promotion lands in its OWN tree and moves a pointer, never rewriting the
+    imports of this process, so busy admission is unnecessary and the install
+    SUCCEEDS while the fleet is busy. The old runtime keeps its pid, its
+    current and its ROOT, and its in-flight turn FINISHES (the runtime returns
+    to not-busy) without the process dying — asserted on what the operator
+    would have lost: the same pid, a turn that finishes, and NO
+    ``runtime-killed`` / ``install-mid-update`` incident. This is the operator
+    decision recorded on the branch: 24x7 users must still update, so central
+    components promote promptly, a running session keeps running and rolls onto
+    the new build at its own idle, and a NEW start uses the new build at once.
 
     The child is launched through ``<gen>/tools/local-operator/bin/python3``
     (see :func:`_spawn`), and the tree it started from is asserted from the
@@ -423,6 +432,17 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> N
     assertion passes for the wrong reason (review round 2, R2-1). The spawn NAME
     itself is asserted in
     :func:`test_an_engage_after_a_flip_lands_on_the_generation_current_names`.
+
+    THE ROLL-AT-IDLE ARM IS NOT MEASURED HERE, and the reason is structural
+    rather than a choice: this fixture's generation links THIS checkout's
+    site-packages, so the child's own dist-info is the checkout's EDITABLE one
+    and its build watch answers ``disk_build() is None`` by design (the
+    developer-worktree rule, ``design-build-skew.md`` §6.5) — it can never see
+    the pointer move. What this cell asserts is the part that must hold
+    regardless: the old runtime is still ALIVE and on its own root after the
+    flip and after its turn ends. The retirement itself is pinned against a real
+    move in ``tests/e2e/test_runtime_refresh_e2e.py``
+    (:func:`test_a_busy_runtime_waits_and_refreshes_when_its_turn_ends`).
     """
     config = layout_home
     session_id = "genbusy001"
@@ -457,32 +477,53 @@ def test_a_busy_runtime_survives_a_real_install_and_flip(layout_home: Path) -> N
         _wait_for(config, session_id, lambda found: found.busy, timeout=90, what="a busy runtime")
         assert child.poll() is None, "the runtime died before the swap"
 
-        # Immutable generations do NOT waive admission. Refuse the real busy
-        # turn without moving current or cutting it off; only actual idle allows
-        # the production install path. No force/admission fixture suppression.
-        with pytest.raises(update_mod.UpdateError, match="sessions are busy"):
-            _install_new_generation()
-        assert update_mod.current_generation() == first
-        assert child.poll() is None and _wait_for_record(config, session_id).pid == record.pid
-        assert _incidents(directory) == []
-        _wait_for(
-            config,
-            session_id,
-            lambda found: not found.busy,
-            timeout=90,
-            what="actual idle before permitted install",
-        )
+        # Immutable generations make busy admission unnecessary: the promotion
+        # lands in its OWN tree and moves the POINTER, so it never rewrites the
+        # imports of a running process. The install therefore SUCCEEDS while this
+        # runtime is genuinely busy (a live ``bash`` turn), and the real
+        # install-and-flip machinery below is exercised as-is — no stub, no
+        # force, no admission fixture suppression. The mutable/in-place refusal
+        # (``_admit_install``) is deliberately NOT on this path; it is kept for
+        # the pip/pipx shape only (``perform_upgrade``).
         second = _install_new_generation()
         print(
-            f"ACTUAL busy admission refused; idle install admitted; pid={child.pid} "
-            f"old_current_preserved=True new_current={second.name}"
+            f"ACTUAL busy install succeeded; pid={child.pid} old_current={first.name} "
+            f"new_current={second.name}"
         )
         assert second != first
-        assert update_mod.current_generation() == second
+        # The NEW generation becomes current promptly, so a fresh start resolves
+        # it at once — the convergence half of the operator decision. ``current``
+        # is narrowed to a non-optional local: pyright cannot know the real
+        # promotion above left the pointer resolvable, and the assertion is what
+        # says so (the ``.name`` read was redundant with the equality).
+        current = update_mod.current_generation()
+        assert current is not None, "the pointer must resolve after a real promotion"
+        assert current == second
+        # But the OLD runtime is left entirely alone: same pid, still alive, still
+        # on the root it launched from. A promotion must not move a live runtime's
+        # world out from under it.
         assert child.poll() is None, "the runtime died during the install and flip"
+        assert _wait_for_record(config, session_id).pid == record.pid
+        assert (
+            Path(_wait_for_record(config, session_id).install_root).resolve() == launched_from
+        ), "the swap moved the runtime's own view of its install root"
+        assert _incidents(directory) == [], "an install must not cut a turn off"
 
-        # The turn finishes rather than being cut off, and the process it runs
-        # in is the SAME process: no successor was spawned under it.
+        # A fresh resolution of the pointer - what a NEW engage does - names the
+        # new generation's own interpreter, resolved CONCRETELY, so the fleet
+        # converges onto it one start at a time rather than through the mutable
+        # link.
+        resolved = update_mod.current_interpreter()
+        assert resolved is not None, "the pointer must resolve after a real promotion"
+        # The generation's OWN interpreter path, spelled concretely rather than
+        # through ``current`` — the same value a fresh spawn would hand the child.
+        assert resolved == second / "tools" / "local-operator" / "bin" / "python3"
+
+        # The in-flight turn FINISHES rather than being cut off, and the process
+        # it runs in is the SAME process: no successor was spawned under it, no
+        # incident was recorded, and the old runtime is STILL ALIVE once it goes
+        # idle - it rolls onto the new build at its own next idle, it is not
+        # killed the moment it stops being busy.
         _wait_for(
             config, session_id, lambda found: not found.busy, timeout=120, what="the turn to finish"
         )

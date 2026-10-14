@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -1307,8 +1309,13 @@ def test_update_command_moves_the_services_on_the_upgrade_path(
         "check_latest",
         _check_latest_double("0.2.0", "0.2.0", False),
     )
+    # A generation install now moves its serve daemons through the rolling
+    # reload request (its own no-kill contract), not the legacy restart_services
+    # path. The regression's INTENT is unchanged: the caller that performed the
+    # upgrade must not be refused, and the fleet must be asked to move.
     monkeypatch.setattr(
-        "local_operator.services.restart_services", lambda **k: ran.append("ran") or []
+        "local_operator.services.reload_serve_daemons",
+        lambda **k: ran.append("ran") or [],
     )
     assert update.update_command() == 0
     assert ran == ["ran"], "the stage refused the caller that performed the upgrade"
@@ -4834,12 +4841,50 @@ def test_the_nothing_to_install_exit_queues_no_roll(
     assert rollouts.latest_active(root=root) is None
 
 
+def test_perform_upgrade_never_collects_previous_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PyPI tail, like the shared snapshot tail, must never collect A."""
+    collections: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    generation = tmp_path / "owned-generation"
+    generation.mkdir()
+    # Match the real positional-source call, while observing the tail's intent;
+    # this is not installer/publication/signature proof.
+    installs: list[tuple[str | Path | None, dict[str, Any]]] = []
+
+    def install(source: str | Path | None, **kwargs: Any) -> Path:
+        installs.append((source, kwargs))
+        return generation
+
+    monkeypatch.setattr(update_mod, "install_into_generation", install)
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
+    assert (
+        update_mod.perform_upgrade(
+            target="0.70.19", kind=update_mod.InstallKind.UV_TOOL, on_prune=notices.append
+        )
+        == "0.70.19"
+    )
+    assert installs == [
+        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+    ]
+    assert collections == [] and notices == []
+
+
 def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[Any] = []
     monkeypatch.setattr(update_mod, "_print_current_generation", lambda: None)
-    monkeypatch.setattr(update_mod, "prune_generations", lambda **kwargs: None)
+    # Automatic collection is frozen: promotion does not retire loaded A roots.
+    # Recording calls (rather than raising in a best-effort prune) detects even
+    # a swallowed GC failure being attempted by this snapshot/shared tail.
+    collections: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        update_mod, "prune_generations", lambda **kwargs: collections.append(kwargs)
+    )
     monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: ())
     monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: [])
     monkeypatch.setattr(
@@ -4862,6 +4907,7 @@ def test_the_generation_tail_orders_the_hook_between_services_and_the_report(
         )
         == 0
     )
+    assert not collections
     assert [item if isinstance(item, str) else item[0] for item in order] == [
         "services",
         "roll",
@@ -4885,3 +4931,192 @@ def test_main_dispatches_the_no_roll_flag_and_the_default_rolls(
         with patch("local_operator.update.update_command", return_value=0) as cmd:
             assert main() == 0
             assert cmd.call_args.kwargs["roll"] is expected, (argv, cmd.call_args)
+
+
+def test_a_generation_install_refreshes_the_supervised_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generation path no longer short-circuits the supervised repairs.
+
+    A generation install USED to return every unit `pending` here. It now runs the
+    same stage body the mutable path runs, because a supervisor bounce does not
+    kill session runtimes (they are separate child processes).
+    """
+    ran: list[str] = []
+    restored = update_mod.DaemonRefresh(
+        "service daemons", statuses=(update_mod.DaemonStatus("network relay", "refreshed"),)
+    )
+    monkeypatch.setattr(update_mod, "_is_generation_install", lambda _root=None: True)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_service_daemons_after_upgrade",
+        lambda **k: ran.append("services") or restored,
+    )
+    monkeypatch.setattr(
+        update_mod, "refresh_mobile_after_upgrade", lambda **k: ran.append("mobile") or None
+    )
+    monkeypatch.setattr(
+        update_mod,
+        "_mobile_daemon_refresh",
+        lambda _result: update_mod.DaemonRefresh(
+            "mobile", statuses=(update_mod.DaemonStatus("mobile", "refreshed"),)
+        ),
+    )
+
+    out = update_mod.refresh_daemons_after_upgrade()
+    assert "services" in ran, "the supervised services unit did not run on a generation install"
+    statuses = {status.status for refresh in out for status in getattr(refresh, "statuses", ())}
+    assert "pending" not in statuses, "a generation install still reported a unit pending"
+    assert statuses == {"refreshed", "refreshed"} or statuses == {"refreshed"}
+
+
+def test_a_session_runtime_is_spawned_detached() -> None:
+    """Provenance anchor: a session runtime is spawned DETACHED — the real fact.
+
+    Survival across a supervisor bounce rests on the CHILD's own detachment, NOT
+    on launchd abandoning descendants (round-4 corrected exactly that claim: the
+    generated plists carry no ``AbandonProcessGroup``, so launchd's default would
+    reap a same-group descendant). This asserts the detachment itself — a phone
+    session's spawn calls ``detached_popen_kwargs()``, whose POSIX arm is
+    ``start_new_session=True`` (``setsid``) — so a future edit that drops the
+    detachment is caught here rather than silently making the continuity claim
+    false. The behaviour it implies is exercised by the synthetic group-signal
+    controls below; this cell is the SOURCE fact, not a bounce.
+    """
+    import inspect
+
+    from local_operator import procstate
+    from local_operator.mobile import daemon as daemon_mod
+
+    spawn = inspect.getsource(daemon_mod.MobileDaemon._spawn_session)
+    assert (
+        "detached_popen_kwargs()" in spawn
+    ), "the session spawn stopped detaching; the continuity claim is now false"
+    assert procstate.detached_popen_kwargs() == {"start_new_session": True}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_detached_child_survives_a_supervisor_bounce(tmp_path: Path) -> None:
+    """A DETACHED child (``setsid``) outlives a supervisor bounce.
+
+    WHAT THIS IS: a SYNTHETIC process-group proof. It models the killing
+    semantics the real bounce uses — ``bootout``+``bootstrap``
+    (``launchd.reload_job``) and ``kickstart -k`` (``restart_if_build_moved``) —
+    by signal-killing the supervisor's WHOLE PROCESS GROUP (``killpg`` on the
+    supervisor's pgid), which is the shape that reaches an undetached child. It
+    is NOT an actual launchd bounce and does not exercise ``launchctl``; that is
+    stated plainly rather than implied, and real launchd coverage is a QA item.
+
+    WHAT IT PROVES: with the group signalled, the child that called ``os.setsid()``
+    (its own session — the shape ``process._install_sighup_ignore`` gives a session
+    runtime) keeps working. Liveness is proven by WORK, not ``kill(pid, 0)`` (a
+    zombie still answers that): the heartbeat file must keep GROWING. The paired
+    :func:`test_a_nondetached_child_dies_with_the_supervisor_group` is the negative
+    control that makes this discriminating — without it, this would pass with or
+    without ``setsid``.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os.setsid()\n"
+        "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert (
+            beat.stat().st_size > grown_at
+        ), "the detached child stopped writing after the supervisor bounce"
+    finally:
+        # REAP THE DETACHED CHILD TOO: it survived the bounce on purpose, so
+        # nothing else will end it. Its own pid is the only handle — it is in its
+        # own session, so the supervisor's group never covered it.
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX")
+def test_a_nondetached_child_dies_with_the_supervisor_group(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL (synthetic): an UNDETACHED child does NOT survive.
+
+    Same shape as its sibling EXCEPT the child never calls ``os.setsid()``, so it
+    stays in the supervisor's process group. When that group is signal-killed (the
+    ``killpg`` shape of a real bounce), a child that did not detach is reaped —
+    which is exactly why survival rests on the child's OWN ``setsid`` and not on
+    any launchd courtesy. This is what makes the sibling test discriminating.
+    """
+    beat = tmp_path / "beat.txt"
+    running = tmp_path / "running"
+    child_pid_file = tmp_path / "child.pid"
+    unit_main = tmp_path / "unit_main.py"
+    unit_main.write_text(
+        "import os, signal, sys, time\n"
+        "beat, running, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    open(pidfile, 'w').write(str(os.getpid()))\n"
+        "    while True:\n"
+        "        with open(beat, 'a') as handle:\n"
+        "            handle.write('x')\n"
+        "        time.sleep(0.1)\n"
+        "open(running, 'w').write('1'); time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    unit = subprocess.Popen(
+        [sys.executable, str(unit_main), str(beat), str(running), str(child_pid_file)],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(200):
+            if running.exists() and beat.exists() and child_pid_file.exists():
+                break
+            time.sleep(0.05)
+        _bounce_group(unit)
+        grown_at = beat.stat().st_size
+        time.sleep(0.5)
+        assert beat.stat().st_size == grown_at, (
+            "the undetached child kept writing after a group kill — the control is not "
+            "discriminating, so the sibling test proves nothing"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            unit.kill()
+
+
+def _bounce_group(unit: subprocess.Popen[bytes]) -> None:
+    """Signal-kill the supervisor's WHOLE PROCESS GROUP, as a real bounce does.
+
+    ``unit`` is spawned ``start_new_session=True``, so its pgid IS its pid; this
+    reaches an undetached descendant (the detached one has left the group).
+    """
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(os.getpgid(unit.pid), signal.SIGTERM)
+    with contextlib.suppress(Exception):
+        unit.wait(timeout=10)

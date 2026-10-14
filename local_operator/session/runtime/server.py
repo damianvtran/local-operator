@@ -2755,7 +2755,13 @@ class RuntimeServer:
             logger.debug("stop announcement did not reach viewers before the teardown")
 
     async def announce_retiring(
-        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+        self,
+        reason: str,
+        *,
+        to: str = "",
+        draining: bool = False,
+        leaving: str = "",
+        checkpoint_id: str = "",
     ) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
@@ -2851,16 +2857,28 @@ class RuntimeServer:
             await asyncio.wrap_future(
                 asyncio.run_coroutine_threadsafe(
                     self._announce_retiring_on_loop(
-                        reason, to=to, draining=draining, leaving=leaving
+                        reason,
+                        to=to,
+                        draining=draining,
+                        leaving=leaving,
+                        checkpoint_id=checkpoint_id,
                     ),
                     loop,
                 )
             )
             return
-        await self._announce_retiring_on_loop(reason, to=to, draining=draining, leaving=leaving)
+        await self._announce_retiring_on_loop(
+            reason, to=to, draining=draining, leaving=leaving, checkpoint_id=checkpoint_id
+        )
 
     async def _announce_retiring_on_loop(
-        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+        self,
+        reason: str,
+        *,
+        to: str = "",
+        draining: bool = False,
+        leaving: str = "",
+        checkpoint_id: str = "",
     ) -> None:
         """The retiring announcement, on the runtime's own loop.
 
@@ -2895,6 +2913,12 @@ class RuntimeServer:
             "from": self._boot_build.label(),
             "to": to,
             "draining": bool(draining),
+            # The checkpoint a successor may resume from, or "" — the
+            # ready-to-resume signal for a coordinator driving a busy-turn
+            # move. Additive on the wire like ``draining``: an older viewer
+            # ignores the unknown key, and "" is exactly "no readable resume
+            # record", which never advertises a continuation that cannot happen.
+            "checkpoint_id": checkpoint_id,
             # The trigger's own words, for the sentence a viewer paints: see the
             # ``leaving`` paragraph above. ``""`` means THIS FRAME NAMED NO
             # TRIGGER — it is what every runtime older than this key sends, this
@@ -7011,7 +7035,17 @@ class RuntimeServer:
 
             # 6. RETIRE.
             self._queued_move_stage = "retiring"
-            await self.announce_retiring("moved", to=to_name)
+            # READY-TO-RESUME, published WITH the retirement so the coordinator
+            # learns the move is ready in the same frame the session declares
+            # it is leaving for. The value is the checkpoint id a successor may
+            # resume from, or "" when there is no readable resume record — a
+            # deferred/absent checkpoint must NOT advertise readiness, so the
+            # coordinator does not claim a continuation that cannot happen.
+            ready = ""
+            ready_probe = getattr(self._handle, "ready_to_resume", None)
+            if callable(ready_probe):
+                ready = await self._handle_call_on_session_loop(ready_probe)
+            await self.announce_retiring("moved", to=to_name, checkpoint_id=ready or "")
             self._retirement_committed = True
             # THE RETIREMENT SUPERSEDES THE LATCH: past the announcement the
             # session is LEAVING, so an ``end_retire`` would be wrong — the

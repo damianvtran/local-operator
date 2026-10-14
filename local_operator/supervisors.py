@@ -375,8 +375,13 @@ def render_systemd_unit(
         # systemd's default (``control-group``) made every relay restart kill
         # them — sessions included the command that asked for the restart.
         # Under ``process`` a survivor reparents to ``systemd --user`` and
-        # re-attaches at the relay's next start, which is macOS parity (a
-        # launchd job's children survive it) and the concrete meaning of the
+        # re-attaches at the relay's next start, and the same holds on macOS —
+        # because the relay's session-runtime children are spawned DETACHED
+        # (``start_new_session=True``/``setsid``), they leave the unit's process
+        # group and survive its restart on BOTH platforms. Survival rests on that
+        # DETACHMENT, not on launchd abandoning descendants: launchd's default
+        # would reap a same-process-group child, and these plists carry no
+        # ``AbandonProcessGroup``. That is the concrete meaning of the
         # never-forced rule: the relay's lifecycle never owns session death.
         #
         # DELIBERATELY NO ExecStop/ExecStopPost REAPER, recorded so nobody adds

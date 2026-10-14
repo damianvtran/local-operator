@@ -2948,6 +2948,18 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # BUSY-TURN CHECKPOINT LATCH (ready-successor handoff). A coordinator asks
+        # a BUSY runtime to move; ordinary retirement only ever fires on idle, so
+        # this is the one path that carries a mid-turn session across a swap. An
+        # empty phase means no request; the record rides the next turn-pair
+        # commit, and nothing here cancels the in-flight worker.
+        self._checkpoint_pending: bool = False
+        self._checkpoint_phase: str = ""
+        self._checkpoint_turn_id: str = ""
+        self._checkpoint_boot_build: str = ""
+        self._checkpoint_target_build: str = ""
+        self._checkpoint_completed_effects: list[dict[str, Any]] = []
+        self._checkpoint_inbox_ids: list[str] = []
         # THE JOURNAL IS THE FALLBACK EVIDENCE SOURCE, consulted only when the
         # attention import repaired nothing. Both describe the same kind of
         # event — a run whose owner went away mid-turn — so they must feed ONE
@@ -18385,7 +18397,59 @@ class Session:
         except Exception:  # noqa: BLE001 — durability is best-effort
             logger.warning("could not persist turn progress", exc_info=True)
 
-    async def _persist_new_messages(self, messages: Sequence[AgentMessage]) -> None:
+    def request_checkpoint(
+        self,
+        *,
+        turn_id: str = "",
+        target_build: str = "",
+        boot_build: str = "",
+        phase: str = "resume",
+        completed_effects: "list[dict[str, Any]] | None" = None,
+        inbox_consumed_ids: "list[str] | None" = None,
+    ) -> bool:
+        """Latch a busy-turn checkpoint request; the RECORD lands on next commit.
+
+        A coordinator asking a BUSY runtime to move calls this: it latches the
+        request (never cancels the in-flight worker) and the coordinator's own
+        retirement admission refuses NEW work via ``_spool_for_successor``. The
+        durable record is written by :meth:`_persist_new_messages` inside the
+        next turn-pair commit — the verified fsync boundary — so the checkpoint
+        and the batch it describes are one atomic write.
+
+        ``phase`` is ``resume`` when the coordinator can carry the turn forward
+        and ``deferred`` when it cannot; a deferred request still records, it
+        just refuses to claim continuation. Returns False (and latches nothing)
+        for an unknown phase, or when the runtime is shutting down, so a bad
+        request never becomes a half-written record.
+        """
+        from local_operator.service_handoff import CHECKPOINT_PHASES
+
+        if phase not in CHECKPOINT_PHASES:
+            return False
+        if getattr(self, "_disposed", False) or getattr(self, "_disposing", False):
+            return False
+        self._checkpoint_phase = phase
+        self._checkpoint_turn_id = turn_id
+        self._checkpoint_target_build = target_build
+        self._checkpoint_boot_build = boot_build
+        self._checkpoint_completed_effects = list(completed_effects or [])
+        self._checkpoint_inbox_ids = list(inbox_consumed_ids or [])
+        self._checkpoint_pending = True
+        return True
+
+    def cancel_checkpoint(self) -> None:
+        """Drop a latched request whose window could not open.
+
+        A coordinator that latches a request and then fails to open the admission
+        window must leave nothing half-promised: the next turn-pair commit would
+        otherwise write a checkpoint for a move nobody is performing.
+        """
+        self._checkpoint_pending = False
+        self._checkpoint_phase = ""
+
+    async def _persist_new_messages(
+        self, messages: Sequence[AgentMessage], *, checkpoint_phase: str = ""
+    ) -> None:
         """Append every message not already in the transcript, in order.
 
         Idempotent by message id, which is what lets the mid-turn compaction
@@ -18393,12 +18457,40 @@ class Session:
         without the post-run persistence pass writing them a second time. The
         transcript stores a message under its OWN id, so "already stored" is
         an exact check rather than a heuristic.
+
+        ``checkpoint_phase`` rides the SAME atomic commit as this batch, so the
+        checkpoint and the pair it describes are never split: ``resume`` when a
+        coordinator asked this busy runtime to move (see
+        :meth:`request_checkpoint`) and the turn can be carried forward here;
+        ``deferred`` when work on this turn cannot be checkpointed (a provider
+        stream, a PTY, a native child, a non-idempotent effect). Empty means no
+        request is latched and nothing is written — ordinary turns are unchanged.
         """
+        # A latched checkpoint rides the NEXT commit that has no explicit phase:
+        # the coordinator asked for "checkpoint_at=committed-pair", so any pair
+        # boundary serves — the mid-turn gate as much as the settle tail. The
+        # record names the batch that has just become durable.
+        if not checkpoint_phase and self._checkpoint_pending:
+            checkpoint_phase = self._checkpoint_phase
         fresh = [
             message
             for message in messages
             if _is_persistable_message(message) and not self._transcript.has_entry(message.id)
         ]
+        checkpoint = None
+        if checkpoint_phase:
+            from local_operator.service_handoff import checkpoint_record
+
+            checkpoint = checkpoint_record(
+                session_id=self._session_id,
+                turn_id=self._checkpoint_turn_id,
+                committed_message_ids=[message.id for message in fresh],
+                boot_build=self._checkpoint_boot_build,
+                target_build=self._checkpoint_target_build,
+                completed_effects=list(self._checkpoint_completed_effects),
+                inbox_consumed_ids=list(self._checkpoint_inbox_ids),
+                phase=checkpoint_phase,
+            )
         # ARM THE RUN'S "PRODUCED SOMETHING" MARK (v3, 2026-09-30) on what is
         # about to become durable. The disposal's post-completion arm settles a
         # run neutrally only while this mark is unarmed, so it must record
@@ -18425,7 +18517,11 @@ class Session:
         # This list is a paired prefix at mid-turn gates and a closed run at
         # settlement. One durable commit preserves the same admission/fork
         # boundary while avoiding an fsync for every already-paired result.
-        await self._transcript.append_messages(fresh)
+        # A latched checkpoint rides THIS commit, so the record and its batch
+        # are never split (see `_persist_new_messages`).
+        await self._transcript.append_messages(fresh, checkpoint=checkpoint)
+        if checkpoint is not None:
+            self._checkpoint_pending = False
 
     async def _on_turn_end(self, messages: list[AgentMessage]) -> list[AgentMessage] | None:
         """Mid-turn compaction gate — runs INSIDE the tool loop, at the safe
