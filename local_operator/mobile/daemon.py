@@ -7953,7 +7953,9 @@ class _UnreadableAuthStore:
     def active_local_credential(self, provider: str, endpoint: str) -> Any:
         raise self._unavailable("active_local_credential")
 
-    async def get_oauth_access(self, provider: str) -> Any:
+    async def get_oauth_access(self, provider: str, *, read_only: bool = False) -> Any:
+        # ``read_only`` is accepted only to match ``ControllerAuthStore`` (the
+        # authoring catalogue passes it); this stand-in raises either way.
         raise self._unavailable("get_oauth_access")
 
     async def list_oauth_accesses(self, provider: str) -> list[Any]:
@@ -7962,7 +7964,8 @@ class _UnreadableAuthStore:
     def list_oauth_identities(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_identities")
 
-    async def get_api_key(self, provider: str) -> str | None:
+    async def get_api_key(self, provider: str, *, read_only: bool = False) -> str | None:
+        # Intentionally ignored, as in ``get_oauth_access`` above.
         raise self._unavailable("get_api_key")
 
 
