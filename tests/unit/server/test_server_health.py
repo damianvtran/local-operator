@@ -88,4 +88,9 @@ def test_the_identity_fields_are_additive_for_an_older_client() -> None:
         "pid",
         "prefix",
         "install_kind",
+        # The rolling-continuity contract, additive like the four above: an older
+        # client drops the key, and a server that predates it (the old payload
+        # asserted below) still validates. Pinned so the key cannot silently
+        # disappear from the fresh-serving-process health report.
+        "rolling_reload_contract",
     }

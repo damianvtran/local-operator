@@ -1921,6 +1921,50 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "nonce/PID-validated INSTALLROOT/generation attempt FILE only; unlink refuses directories",
         1,
     ),
+    # The durable update-operation RECORD: an atomic staged-FILE write under the
+    # node-local INSTALLROOT/.update-operations directory, never a session store.
+    # Both calls are dir_fd-relative to the O_NOFOLLOW/O_DIRECTORY handle this
+    # function validates by (st_dev, st_ino, st_uid) before writing, and both
+    # name a regular JSON FILE — the staged temp and the record — so neither can
+    # remove a directory.
+    (
+        "local_operator/install_transaction.py::_persist_operation",
+        "os.replace",
+        "staged operation JSON FILE -> INSTALLROOT/.update-operations/<id>.json FILE; "
+        "dir_fd-relative to a validated non-session directory, and replace cannot remove one",
+    ),
+    (
+        "local_operator/install_transaction.py::_persist_operation",
+        "os.unlink",
+        "the staged operation temp FILE only (FileNotFoundError suppressed); unlink refuses "
+        "directories",
+    ),
+    # Candidate publication: the same node-local generation authority. The replace
+    # swaps a staged regular FILE onto the attempt FILE, and the unlink removes
+    # only that staged temp; ``generation`` is an INSTALLROOT/generations/<id> tree
+    # and neither name is ever a session directory or derived from a session id.
+    (
+        "local_operator/install_transaction.py::preserve_publication",
+        "<path>.replace",
+        "owned staged attempt JSON FILE -> INSTALLROOT/generation attempt FILE; "
+        "file replacement cannot replace a directory",
+    ),
+    (
+        "local_operator/install_transaction.py::preserve_publication",
+        "<path>.unlink",
+        "the staged attempt temp FILE only (missing_ok); unlink refuses directories",
+    ),
+    # The bootstrap snapshot cleanup: ``snapshot.temporary`` is set ONLY by
+    # ``resolve_snapshot``'s own ``tempfile.mkdtemp(prefix="lop-snapshot-")``
+    # archive, so this rmtree removes a directory THIS module created under the
+    # system temp root — never a session directory, a config root, or any
+    # caller-supplied source tree (the ``temporary`` flag is the guard).
+    (
+        "local_operator/update_bootstrap.py::controller",
+        "shutil.rmtree",
+        "resolve_snapshot's own creator-owned temporary archive dir (temporary=True); "
+        "never a user source/installed generation and never under sessions/",
+    ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
     # The install-provenance marker, written atomically after an upgrade. Both

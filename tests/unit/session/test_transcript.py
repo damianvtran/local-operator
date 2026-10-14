@@ -131,6 +131,10 @@ async def test_checkpoint_rides_the_same_atomic_write_as_its_pair(transcript):
     assert len(rows) == 3 and rows[-1].payload["custom_type"] == CHECKPOINT_CUSTOM_TYPE
     assert len(transcript.path.read_text().splitlines()) == 3
     on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    # ``read_latest_custom`` is ``dict | None`` (it answers None when no row of
+    # that type exists). The old form relied on a bare subscript that pyright
+    # rejects; the assert pins non-None so the reads below narrow.
+    assert on_disk is not None
     assert on_disk["committed_message_ids"] == [assistant.id, tool_result.id]
     assert on_disk["phase"] == "resume"
 
@@ -147,7 +151,9 @@ async def test_checkpoint_only_write_is_allowed_and_is_bookkeeping(transcript):
         [], checkpoint={"session_id": "s", "turn_id": "t", "phase": "deferred"}
     )
     assert len(rows) == 1 and is_bookkeeping_entry(rows[0])
-    assert read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)["phase"] == "deferred"
+    on_disk = read_latest_custom(transcript.directory, CHECKPOINT_CUSTOM_TYPE)
+    assert on_disk is not None, "the bookkeeping row must be durable on disk"
+    assert on_disk["phase"] == "deferred"
 
 
 @pytest.mark.asyncio

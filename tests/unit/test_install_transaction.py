@@ -82,6 +82,10 @@ def test_immutable_install_records_durable_operation_at_real_mutation_boundary(
     operation = tx.operation_for_generation(generation)
     assert operation is not None, "actual immutable installer must persist its operation identity"
     row = tx.operation_status(update.stable_root(), operation.identifier)
+    # ``operation_status`` answers None for an unreadable/absent record; the
+    # assert pins the non-None case so the field reads below narrow (a None here
+    # is exactly the failure this test exists to catch).
+    assert row is not None
     assert row["phase"] == "promoted" and row["candidate"] == str(generation)
     assert row["target"] == "0.70.7" and update.current_generation() == generation
 

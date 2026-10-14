@@ -7,6 +7,7 @@ lands on the ADMISSION and the latch rather than on a runtime boot.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +24,7 @@ class LatchSession:
         from types import SimpleNamespace
 
         self.transcript = SimpleNamespace(directory=directory)
-        self.latched: list[dict] = []
+        self.latched: list[dict[str, Any]] = []
         self.cancelled = 0
 
     def request_checkpoint(self, **kwargs) -> bool:
@@ -46,7 +47,13 @@ class MoveHost(WindowHost):
 def _host(tmp_path: Path) -> tuple[MoveHost, LatchSession]:
     session = LatchSession(tmp_path / "sessions" / "s1")
     session.transcript.directory.mkdir(parents=True, exist_ok=True)
-    return MoveHost(session), session
+    # ``cast`` because ``WindowHost.__init__`` is annotated for the drain test's
+    # ``PromptSession``, while THIS file needs a stub that also carries
+    # ``request_checkpoint``/``cancel_checkpoint`` (the latch under test). Only the
+    # two production handle methods drive this session, and neither reaches the
+    # real prompt surface, so the cast records a deliberate duck-typed stand-in
+    # rather than hiding a mismatch.
+    return MoveHost(cast(Any, session)), session
 
 
 async def test_request_checkpointed_move_latches_and_opens_the_window(tmp_path):

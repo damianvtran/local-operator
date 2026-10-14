@@ -123,7 +123,11 @@ class SchedulerService:
         verbosity_level: VerbosityLevel,
         job_manager: JobManager,
         event_broker: "EventBroker | None" = None,
-        occurrence_recorder: "Callable[[str, str], None] | None" = None,
+        # Three positional arguments, matching every caller and the injected
+        # test lambdas: (occurrence_id, state, terminal). The earlier two-arg
+        # annotation was narrower than the calls, which pyright reports at the
+        # call site.
+        occurrence_recorder: "Callable[[str, str, str], None] | None" = None,
         occurrence_suppressor: "Callable[[], set[str]] | None" = None,
     ) -> None:
         self.agent_registry = agent_registry

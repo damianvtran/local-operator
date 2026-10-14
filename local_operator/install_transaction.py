@@ -484,7 +484,13 @@ def record_occurrence(
         record = read_record(path)
         if record is None or record.get("operation_id") != identifier:
             raise InstallTransactionError("occurrence has no durable operation; preserving work")
-        handoff = record.get("handoff") if isinstance(record.get("handoff"), dict) else {}
+        # ``record.get("handoff")`` is split out and NARROWED into a typed local: the
+        # inline conditional makes pyright read ``handoff`` as ``object | None``,
+        # which then fails every read and write below it. ``raw`` keeps the
+        # runtime rule (a non-dict handoff is discarded, not trusted) while giving
+        # the analyzer the dict it can subscript.
+        raw_handoff = record.get("handoff")
+        handoff: dict[str, Any] = raw_handoff if isinstance(raw_handoff, dict) else {}
         occurrences = handoff.get("occurrences")
         if not isinstance(occurrences, dict):
             occurrences = {}
@@ -535,9 +541,14 @@ def note_capacity(
         record = read_record(path)
         if record is None or record.get("operation_id") != identifier:
             raise InstallTransactionError("capacity has no durable operation; preserving roots")
-        handoff = record.get("handoff") if isinstance(record.get("handoff"), dict) else {}
-        previous = handoff.get("capacity") if isinstance(handoff.get("capacity"), dict) else {}
-        entry = dict(previous)
+        raw_handoff = record.get("handoff")
+        handoff: dict[str, Any] = raw_handoff if isinstance(raw_handoff, dict) else {}
+        raw_previous = handoff.get("capacity")
+        previous: dict[str, Any] = raw_previous if isinstance(raw_previous, dict) else {}
+        # Annotated so ``update``/``return`` see a ``dict[str, Any]`` rather than the
+        # ``dict[Unknown, Unknown]`` a bare ``dict(previous)`` infers from the
+        # narrowed value.
+        entry: dict[str, Any] = dict(previous)
         entry.update(
             state=state,
             threshold=threshold,

@@ -125,16 +125,52 @@ class ReloadAdmissionMiddleware:
 
     def __init__(self, app: ASGIApp, *, owner: Any) -> None:
         self.app = app
-        self.state = owner.state
-        setattr(self.state, REQUESTS_ATTR, 0)
-        setattr(self.state, ADMISSION_ATTR, False)
-        setattr(self.state, FENCE_ATTR, True)
+        # The OWNER, not its ``state`` object. ``app.state`` is a Starlette
+        # ``State`` that a test fixture (``restore_app_state`` deletes every key
+        # and restores the saved ones), a rebuilt app or a lifespan teardown can
+        # CLEAR or REPLACE. A captured reference would then count admissions
+        # into an object nobody reads — and, worse, would ``KeyError`` on the
+        # first request after the reset. Read the live state per call instead.
+        self.owner = owner
+        self._init_state()
+
+    @property
+    def state(self) -> Any:
+        """The state object the owner holds NOW, never a construction-time capture."""
+        return self.owner.state
+
+    def _init_state(self) -> None:
+        """(Re)initialize the loop-local admission cells, idempotently.
+
+        A State that LOST these attributes — a cleared fixture state, a replaced
+        State object — must not break a request, so every entry point calls this
+        first. The writes are conditional on ABSENCE for a reason: re-zeroing an
+        existing counter would forget the in-flight admissions it holds and let a
+        reload cut live daemon-owned work. Absent ⇒ a safe default; present ⇒ left
+        exactly as it is.
+
+        The FENCE is re-armed because it is the flag the reload's inventory read
+        consults: with the middleware in the ASGI stack the admission counter IS
+        being maintained, so a reset fence is "trusted again", not "unavailable".
+        """
+        state = self.state
+        if getattr(state, REQUESTS_ATTR, None) is None:
+            setattr(state, REQUESTS_ATTR, 0)
+        if getattr(state, ADMISSION_ATTR, None) is None:
+            setattr(state, ADMISSION_ATTR, False)
+        if getattr(state, FENCE_ATTR, None) is None:
+            setattr(state, FENCE_ATTR, True)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Before ANY read below: a reset/replaced State is re-initialized here so
+        # a request can never fail on a missing admission cell. ``_init_state`` is
+        # idempotent and never resets an existing counter (see its docstring).
+        self._init_state()
+        state = self.state
         if scope["type"] != "http" or scope.get("path") == "/health":
             await self.app(scope, receive, send)
             return
-        if getattr(self.state, ADMISSION_ATTR, False):
+        if getattr(state, ADMISSION_ATTR, False):
             from starlette.responses import JSONResponse
 
             await JSONResponse(
@@ -153,14 +189,21 @@ class ReloadAdmissionMiddleware:
                 and parts[4] == "events"
             )
         )
-        setattr(self.state, REQUESTS_ATTR, getattr(self.state, REQUESTS_ATTR) + 1)
+        setattr(state, REQUESTS_ATTR, int(getattr(state, REQUESTS_ATTR, 0)) + 1)
         counted = True
 
         def release() -> None:
             nonlocal counted
             if counted:
                 counted = False
-                setattr(self.state, REQUESTS_ATTR, getattr(self.state, REQUESTS_ATTR) - 1)
+                # Floored at 0: ``release`` can legitimately run after a state
+                # reset (the increment it pairs with was lost), and a NEGATIVE
+                # counter reads as truthy work to the reload's inventory — a
+                # reload that never fires. The floor only ever fires on that
+                # reset case, so it masks no double-release (the ``counted``
+                # guard already makes release exactly-once per request).
+                remaining = int(getattr(state, REQUESTS_ATTR, 0)) - 1
+                setattr(state, REQUESTS_ATTR, remaining if remaining > 0 else 0)
 
         async def relay(message: Message) -> None:
             if replayable and message["type"] == "http.response.start":
@@ -527,8 +570,15 @@ class ReloadWatch:
                     return reason
             if getattr(state, FENCE_ATTR, False) is not True:
                 return "request admission inventory is unavailable"
-            requests = int(getattr(state, REQUESTS_ATTR))
-            if requests:
+            # An ABSENT counter under a live fence is still unreadable inventory,
+            # not "zero requests": a fixture or a rebuilt app can leave the fence
+            # set and the counter gone, and reading that as 0 would let a reload
+            # exec over work it cannot see. Same fail-closed direction as the
+            # fence guard above.
+            requests = getattr(state, REQUESTS_ATTR, None)
+            if requests is None:
+                return "request admission inventory is unavailable"
+            if int(requests):
                 return f"{requests} daemon-owned request(s)"
             scheduler = getattr(state, "scheduler_service", None)
             if scheduler is not None:
