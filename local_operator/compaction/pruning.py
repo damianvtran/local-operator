@@ -69,6 +69,7 @@ __all__ = [
     "prune_stale_frames",
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
+    "reclaim_captures_to_wire_budget",
     "shed_frames_to_wire_budget",
     "shed_stale_frames",
 ]
@@ -557,6 +558,81 @@ def partition_captures(messages: Sequence[Message]) -> CapturePartition:
             )
         )
     return CapturePartition(reclaimable=tuple(reclaimable), protected=tuple(protected))
+
+
+def reclaim_captures_to_wire_budget(
+    messages: Sequence[Message], *, budget: int
+) -> tuple[list[Message], int]:
+    """Elide SUPERSEDED captures, oldest first, until the request fits ``budget``.
+
+    The FIRST recovery rung for image byte pressure, and deliberately the
+    narrowest one: it consumes only a prefix of :func:`partition_captures`'
+    ``reclaimable`` list -- captures a producer superseded, carrying harness
+    provenance -- and never touches unannotated images, any stream's LATEST
+    capture, text blocks, or tool pairing. General frame shedding
+    (:func:`shed_frames_to_wire_budget`) stays a separate, later rung for the
+    pressure this cannot clear. The caller derives ``budget`` (the byte
+    ceiling to land at-or-below) from the same wire trigger/recovery band the
+    auto-continue gate uses (``cleared_wire_headroom`` semantics), so both
+    sides measure with ONE ruler.
+
+    Behaviour mirrors the shed rung in the ways that matter:
+
+    - Early return: at or under ``budget`` nothing is recomputed and the
+      input list is returned, so every session under budget behaves
+      byte-identically to one without this function.
+    - Oldest first, deterministic: elisions follow the partition's
+      canonical-arrival order, so a replay of the same source consumes the
+      same prefix -- the property the replay watermark depends on.
+    - A block is never elided if it is its message's ONLY remaining block:
+      an empty content list breaks wire and transcript invariants, and the
+      skip is itself deterministic (the next-oldest eligible elision is
+      tried). If the eligible elisions cannot clear the budget the function
+      returns without pretending: the caller re-measures and records "no
+      eligible relief" rather than a fabricated success.
+
+    Elision REMOVES the block from the projected copy; the source message
+    objects stay untouched, which is what lets a later replay rebuild the
+    exact same projection from the source plus the persisted frontier.
+
+    Returns ``(messages, elided)``; ``elided`` is 0 and the input list is
+    returned when nothing was over budget or nothing eligible could run.
+    """
+    if budget <= 0:
+        return list(messages), 0
+    if estimate_wire_bytes(messages) <= budget:
+        return list(messages), 0
+
+    partition = partition_captures(messages)
+    if not partition.reclaimable:
+        return list(messages), 0
+
+    working = list(messages)
+    contents: dict[int, list[Content]] = {}
+    elided = 0
+    for candidate in partition.reclaimable:
+        message_index = candidate.message_index
+        content = contents.get(message_index)
+        if content is None:
+            content = list(messages[message_index].content)
+            contents[message_index] = content
+        # Identity, not equality: two captures may compare equal by VALUE, and
+        # earlier elisions from the same message shift positions -- so the
+        # SOURCE address is resolved through the original block object.
+        block = messages[message_index].content[candidate.content_index]
+        if not any(item is block for item in content):
+            continue
+        if len(content) <= 1:
+            # Never-empty guard (see docstring); deterministic skip.
+            continue
+        content[:] = [item for item in content if item is not block]
+        working[message_index] = messages[message_index].model_copy(
+            update={"content": list(content)}
+        )
+        elided += 1
+        if estimate_wire_bytes(working) <= budget:
+            break
+    return working, elided
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

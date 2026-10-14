@@ -11,8 +11,9 @@ from local_operator.compaction.pruning import (
     partition_captures,
     prune_stale_frames_in_place,
     prune_tool_outputs,
+    reclaim_captures_to_wire_budget,
 )
-from local_operator.compaction.tokens import estimate_tokens
+from local_operator.compaction.tokens import estimate_tokens, estimate_wire_bytes
 from local_operator.harness.types import (
     CapturedFrame,
     ImageContent,
@@ -685,5 +686,108 @@ def test_partition_is_pure_and_deterministic():
     first = partition_captures(messages)
     second = partition_captures(messages)
 
+    assert first == second
+    assert [message.model_dump() for message in messages] == before
+
+
+def _big_capture(*, stream: str, revision: str, scope: str) -> ImageContent:
+    """A capture whose payload dominates the wire estimate."""
+    return ImageContent(
+        data="aGVsbG8=" * 30000,
+        mime_type="image/png",
+        captured_frame=CapturedFrame(stream_id=stream, revision_id=revision, producer_scope=scope),
+    )
+
+
+def test_reclaim_elides_superseded_captures_until_under_budget():
+    """One superseded capture is enough: elide it, stop, leave the rest alone."""
+    messages = [
+        Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user(
+            "again", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]
+        ),
+    ]
+    full = estimate_wire_bytes(messages)
+    # Mirror exactly what one elision produces, measured by the SAME ruler, so
+    # the budget sits strictly between "before" and "after".
+    elided_once = [
+        messages[0].model_copy(update={"content": [messages[0].content[0]]}),
+        messages[1],
+    ]
+    after_one = estimate_wire_bytes(elided_once)
+    assert after_one < full, "the capture payload must dominate the estimate"
+    budget = (after_one + full) // 2
+
+    out, count = reclaim_captures_to_wire_budget(messages, budget=budget)
+
+    assert count == 1
+    assert estimate_wire_bytes(out) <= budget
+    assert [type(block).__name__ for block in out[0].content] == ["TextContent"]
+    assert out[1] is messages[1], "untouched messages keep sharing their objects"
+    assert len(messages[0].content) == 2, "the SOURCE is never mutated"
+
+
+def test_reclaim_below_budget_is_byte_identical_and_free():
+    messages = [
+        Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user(
+            "again", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]
+        ),
+    ]
+    full = estimate_wire_bytes(messages)
+
+    out, count = reclaim_captures_to_wire_budget(messages, budget=full + 1)
+
+    assert count == 0
+    assert out[0] is messages[0] and out[1] is messages[1]
+
+
+def test_reclaim_refuses_when_only_protected_images_remain():
+    """A single latest capture and an unannotated image are untouchable."""
+    messages = [
+        Message.user("only", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("doc", images=[ImageContent(data="aGVsbG8=" * 30000, mime_type="image/png")]),
+    ]
+
+    out, count = reclaim_captures_to_wire_budget(messages, budget=1)
+
+    assert count == 0
+    assert estimate_wire_bytes(out) == estimate_wire_bytes(messages)
+    assert out[0] is messages[0] and out[1] is messages[1]
+
+
+def test_reclaim_never_empties_a_message():
+    """A superseded capture that is its message's ONLY block is skipped.
+
+    An empty content list breaks wire and transcript invariants, so the
+    function refuses deterministically and the caller records no-relief
+    rather than receiving a message nothing can carry.
+    """
+    only = Message(role="user")
+    only.content = [_big_capture(stream="screen", revision="1", scope="mcp:s:a")]
+    latest = Message.user(
+        "x", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]
+    )
+    messages = [only, latest]
+
+    out, count = reclaim_captures_to_wire_budget(messages, budget=1)
+
+    assert count == 0
+    assert len(out[0].content) == 1
+    assert out[0] is only
+
+
+def test_reclaim_is_deterministic_and_pure():
+    messages = [
+        Message.user("go", images=[_big_capture(stream="screen", revision="1", scope="mcp:s:a")]),
+        Message.user("mid", images=[_big_capture(stream="screen", revision="2", scope="mcp:s:a")]),
+        Message.user("now", images=[_big_capture(stream="screen", revision="3", scope="mcp:s:a")]),
+    ]
+    before = [message.model_dump() for message in messages]
+
+    first, count = reclaim_captures_to_wire_budget(messages, budget=1)
+    second, count_again = reclaim_captures_to_wire_budget(messages, budget=1)
+
+    assert count == count_again == 2  # the two superseded captures; latest stays
     assert first == second
     assert [message.model_dump() for message in messages] == before
