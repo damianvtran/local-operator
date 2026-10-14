@@ -489,6 +489,17 @@ def _render(
     return "".join(out)
 
 
+def is_passthrough_message(source: str) -> bool:
+    """A single unformatted argument is external prose, not locale-owned copy.
+
+    Use the cached ICU parser rather than source regexes: apostrophe quoting and
+    escaped braces must not turn authored literal text into an opaque payload.
+    This narrow provenance guard does not infer directions inside mixed messages.
+    """
+    nodes = parse_message(source)
+    return len(nodes) == 1 and isinstance(nodes[0], _Arg) and nodes[0].kind == "simple"
+
+
 def render_message(source: str, params: Mapping[str, Any], locale: str) -> str:
     """Render ``source`` with ``params`` for ``locale``.
 

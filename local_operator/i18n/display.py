@@ -1,0 +1,98 @@
+"""Opt-in display projection; raw messages, catalogues and wire bytes stay clean.
+
+This source-only prototype intentionally takes explicit offsets AFTER ICU has
+formatted native values. It is not a regex tokenizer, a second ICU renderer or
+full parameter-span support. Token ownership belongs to the narrow paint caller;
+ASCII human names must not be labelled technical merely because they are ASCII.
+No bidi reordering/shaping is performed: terminal support must be validated later.
+"""
+
+from __future__ import annotations
+
+import unicodedata
+from dataclasses import dataclass
+from typing import Sequence
+
+from .messages import RenderedMessage
+
+_RLI, _LRI, _PDI = "\u2067", "\u2066", "\u2069"
+_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
+@dataclass(frozen=True)
+class TechnicalSpan:
+    """Owner-declared complete ASCII token at Python string offsets, not bytes.
+
+    Expected bytes pin a hint to THIS rendered record; stale offsets cannot
+    silently isolate a different value. Include leading flags/slashes and paired
+    technical quotes/braces. Overlaps, controls, multiline and partial tokens
+    are rejected rather than guessed or repaired.
+    """
+
+    start: int
+    end: int
+    expected: str
+
+
+def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalSpan] = ()) -> str:
+    """Project plain Urdu-source status prose, balancing isolates on every line.
+
+    Never feed this projection to Markdown/ANSI parsing, logs, receipts or copy
+    semantics. This is only text for a plain Rich paint adapter. English fallback
+    and unknown/passthrough output remain byte-identical, even if preference is ur.
+    Existing controls/escape sequences are rejected on this opt-in boundary so
+    external input cannot close an isolate or smuggle terminal control state.
+    """
+    text = record.text
+    if any(c in _BIDI_CONTROLS or (unicodedata.category(c) == "Cc" and c != "\n") for c in text):
+        raise ValueError("status display requires plain text without control sequences")
+    if any(
+        not isinstance(span, TechnicalSpan)
+        or type(span.start) is not int
+        or type(span.end) is not int
+        for span in technical
+    ):
+        raise ValueError("technical status hints require integer-offset TechnicalSpan records")
+    spans = sorted(technical, key=lambda span: span.start)
+    previous = 0
+    for span in spans:
+        if (
+            type(span.start) is not int
+            or type(span.end) is not int
+            or not 0 <= span.start < span.end <= len(text)
+            or span.start < previous
+            or not isinstance(span.expected, str)
+            or not span.expected
+            or not all(0x21 <= ord(c) <= 0x7E for c in span.expected)
+            or text[span.start : span.end] != span.expected
+        ):
+            raise ValueError("invalid or overlapping technical status span")
+        paired = {"'": "'", '"': '"', "{": "}", "[": "]", "(": ")"}
+        if span.expected[0] in paired and (
+            len(span.expected) < 2 or span.expected[-1] != paired[span.expected[0]]
+        ):
+            raise ValueError("technical status quotes/braces must be complete")
+        # A token cannot begin inside --force, /session, quoted IDs or {names}.
+        # End punctuation may belong to the prose; quotes/braces belong to the
+        # technical island and must be supplied in full by its owner.
+        if span.start and not text[span.start - 1].isspace():
+            raise ValueError("technical status span must include its whole prefix")
+        suffix = span.end
+        while suffix < len(text) and text[suffix] in ".,;:!?)]":
+            suffix += 1
+        if suffix < len(text) and not text[suffix].isspace():
+            raise ValueError("technical status span must include its whole suffix")
+        previous = span.end
+    if record.source_locale != "ur":
+        return text
+    chunks: list[str] = []
+    cursor = 0
+    for span in spans:
+        chunks.extend((text[cursor : span.start], _LRI, span.expected, _PDI))
+        cursor = span.end
+    chunks.append(text[cursor:])
+    # split('\n'), not splitlines(): retain exact delimiters and trailing empty
+    # lines. Controls are inserted only within a line, never across paragraphs.
+    return "\n".join(_RLI + line + _PDI for line in "".join(chunks).split("\n"))
