@@ -64,6 +64,7 @@ from local_operator.config_writer import config_write_lock, serialized_config_wr
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
+from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.model.effort import EFFORT_ORDER, FALLBACK_EFFORTS
@@ -72,6 +73,11 @@ from local_operator.providers.local import (
     LOCAL_PRESETS,
     model_overrides,
     validate_endpoint_setting,
+)
+from local_operator.ui_console.policy import (
+    DEFAULT_LIVE_LIMIT,
+    DEFAULT_OWNER_LIMIT,
+    DEFAULT_USER_RESERVED,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
@@ -108,6 +114,16 @@ except Exception:  # pragma: no cover - a wheel without the catalogue is broken
 # namespace so carried locales retain their existing source hashes/eligibility.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# The console-admission section reads its copy from its own namespace for the
+# same reason as `wire.aida_cadence`: the section is new, so adding it beside
+# already-translated settings must not move those sources. Without this merge the
+# section's `_cs.*` messages resolve to their bare codes (`wire.console.title`),
+# which is what the byte-identical golden caught.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.console"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -706,6 +722,8 @@ SECTIONS: tuple[Section, ...] = (
     # at click time and an edit lands on the very next click. Nothing is
     # threaded through a running session, which is why this cannot be
     # NEW_SESSIONS like the knobs that gate a session's construction.
+    # Admission changes apply live in the desktop host without terminating work.
+    Section("console", _t(_cs.title()), Scope.LIVE, _t(_cs.description())),
     Section(
         "desktop",
         _t(_ws.desktop_title()),
@@ -4359,6 +4377,40 @@ SETTINGS: tuple[Setting, ...] = (
         # is this codebase's word, not the user's; design round 1 (D1) measured that a
         # user who once saw a suggestion line has no anchor for it.
         help=_t(_ws.classification_notice_help()),
+    ),
+    # -- console admission --------------------------------------------------
+    Setting(
+        key="console.max_live",
+        path=("console", "max_live"),
+        section="console",
+        label=_t(_cs.max_live_label()),
+        kind=Kind.INT,
+        default=DEFAULT_LIVE_LIMIT,
+        minimum=32,
+        maximum=256,
+        help=_t(_cs.max_live_help()),
+    ),
+    Setting(
+        key="console.max_owner",
+        path=("console", "max_owner"),
+        section="console",
+        label=_t(_cs.max_owner_label()),
+        kind=Kind.INT,
+        default=DEFAULT_OWNER_LIMIT,
+        minimum=1,
+        maximum=32,
+        help=_t(_cs.max_owner_help()),
+    ),
+    Setting(
+        key="console.user_reserved",
+        path=("console", "user_reserved"),
+        section="console",
+        label=_t(_cs.user_reserved_label()),
+        kind=Kind.INT,
+        default=DEFAULT_USER_RESERVED,
+        minimum=4,
+        maximum=32,
+        help=_t(_cs.user_reserved_help()),
     ),
     Setting(
         key="desktop.launch_command",

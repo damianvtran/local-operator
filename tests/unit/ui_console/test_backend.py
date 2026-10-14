@@ -38,6 +38,103 @@ from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
 from local_operator.ui_console import backend, state
 
 
+@pytest.mark.asyncio
+async def test_completed_owner_cleanup_skips_old_host_without_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OldClient:
+        def __init__(self, root: Path | None = None) -> None:
+            del root
+
+        def capabilities(self) -> Any:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(methods=())
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            pytest.fail(f"old host cleanup must not call transport: {method} {params}")
+
+    monkeypatch.setattr(backend, "ConsoleHostClient", OldClient)
+    assert await backend.cleanup_owner_completed("synthetic-owner") is None
+
+
+@pytest.mark.asyncio
+async def test_completed_owner_cleanup_is_owner_scoped_and_never_enumerates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class NewClient:
+        def __init__(self, root: Path | None = None) -> None:
+            del root
+
+        def capabilities(self) -> Any:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(methods=("console_cleanup",))
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            calls.append((method, params))
+            return {"released": 2, "protected": 3, "running": 1}
+
+    monkeypatch.setattr(backend, "ConsoleHostClient", NewClient)
+    assert await backend.cleanup_owner_completed("synthetic-owner") == {
+        "released": 2,
+        "protected": 3,
+        "running": 1,
+    }
+    assert calls == [("console_cleanup", {"session_id": "synthetic-owner"})]
+
+
+def test_capacity_projection_never_accepts_foreign_identity_or_nonfinite_values() -> None:
+    projected = backend.aggregate_console_metrics(
+        {
+            "generation": 3,
+            "sampled_at": 1234,
+            "surface": "con:999:synthetic-foreign",
+            "command": "synthetic-private-command",
+            "resources": {
+                "ptys": 64,
+                "log_bytes": float("nan"),
+                "fd_available": None,
+                "command": "private",
+            },
+            "states": {"running": {"user": 6, "agent": 58, "session_id": "synthetic-foreign"}},
+            "caps": {"maxLive": 128, "maxOwner": True, "userReserved": 10**1000},
+        }
+    )
+    assert projected["resources"] == {"ptys": 64, "fd_available": None}
+    assert projected["caps"] == {"maxLive": 128}
+    text = json.dumps(projected)
+    assert "synthetic-foreign" not in text
+    assert "command" not in text
+    assert "NaN" not in text
+
+
+def test_console_epoch_projection_is_a_single_defined_uuid4_field() -> None:
+    epoch = "abcdef12-abcd-4abc-8abc-abcdef123456"
+    assert backend.aggregate_console_metrics(
+        {
+            "host_epoch": epoch,
+            "started_at": 1000,
+            "generation": 7,
+            "sampled_at": 1001,
+            "instance_id": "synthetic-private-instance",
+            "session_id": "synthetic-private-session",
+        }
+    ) == {"host_epoch": epoch, "started_at": 1000, "generation": 7, "sampled_at": 1001}
+    for malformed in (
+        "con:999:synthetic-private",
+        "synthetic-command",
+        epoch + " private",
+        epoch.upper(),
+        "11111111-1111-1111-8111-111111111111",
+        {"command": "private"},
+    ):
+        assert "host_epoch" not in backend.aggregate_console_metrics({"host_epoch": malformed})
+    assert backend.aggregate_console_metrics({"started_at": True, "sampled_at": float("inf")}) == {}
+
+
 def publish(tmp_path: Path, **updates: Any) -> state.ConsoleHostState:
     values: dict[str, Any] = {
         "pid": os.getpid(),
@@ -220,7 +317,10 @@ def test_every_console_method_has_a_budget_and_a_name() -> None:
     """A method without a budget silently takes the unknown-method fallback, and a
     name outside the frozen vocabulary is a call the app will refuse."""
     assert set(backend.CONSOLE_METHODS) == set(backend.CONSOLE_TIMEOUTS)
-    assert len(backend.CONSOLE_METHODS) == 10
+    # Twelve after the capacity/cleanup wave added `console_resources` and
+    # `console_cleanup` (design §10.2 methods grew from ten). The count is the
+    # real tuple length, not a restatement: a new method must update this.
+    assert len(backend.CONSOLE_METHODS) == 12
 
 
 def test_the_discovery_helpers_never_raise(monkeypatch: pytest.MonkeyPatch) -> None:
