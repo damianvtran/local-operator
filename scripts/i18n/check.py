@@ -191,6 +191,19 @@ def _call_violations(call: ast.Call) -> list[tuple[str, ast.expr]]:
     ):
         for arg in call.args:
             take("Text", arg)
+    # Textual constructors and input hints are visible copy even when no
+    # Rich Text/append call follows. Keep this constructor set narrow: generic
+    # title/label fields also carry machine identifiers outside these widgets.
+    if name in ("Static", "Label", "Input"):
+        for arg in call.args:
+            take(f"textual.{name}", arg)
+    take("placeholder=", _keyword(call, "placeholder"))
+    # SDK validation failures cross the public session boundary as human copy;
+    # unrelated developer exceptions are not a product-copy sink. Match both
+    # bare and qualified constructors through the same canonical name resolver.
+    if name in ("SessionSpecError", "SessionIsolationError"):
+        for arg in call.args:
+            take("SDK session error", arg)
     take("help=", _keyword(call, "help"))
     if name == "HTTPException":
         take("HTTPException", _keyword(call, "detail"))
