@@ -18437,6 +18437,16 @@ class Session:
         self._checkpoint_pending = True
         return True
 
+    def cancel_checkpoint(self) -> None:
+        """Drop a latched request whose window could not open.
+
+        A coordinator that latches a request and then fails to open the admission
+        window must leave nothing half-promised: the next turn-pair commit would
+        otherwise write a checkpoint for a move nobody is performing.
+        """
+        self._checkpoint_pending = False
+        self._checkpoint_phase = ""
+
     async def _persist_new_messages(
         self, messages: Sequence[AgentMessage], *, checkpoint_phase: str = ""
     ) -> None:

@@ -2249,6 +2249,65 @@ class ServingSessionHandle(SessionHandle):
     # announce, exactly as ``process._begin_drain`` announces before it latches. A
     # window opened after the exit was committed would be a queue nobody drains.
 
+    def request_checkpointed_move(
+        self, pair: str, *, turn_id: str = "", boot_build: str = "", phase: str = "resume"
+    ) -> bool:
+        """Ask a BUSY runtime to move at its next committed pair. False: refused.
+
+        The busy-turn sibling of :meth:`begin_update`: that window is opened only
+        from the IDLE decision (``begin_retire``/``may_refresh`` fire on idle), so
+        it cannot carry a turn that is mid-flight. This path deliberately does
+        NOT sample idleness and does NOT cancel the worker — it opens the SAME
+        admission window (new work spools via ``_spool_for_successor``) and
+        latches a checkpoint request on the session, whose record lands at the
+        next turn-pair commit.
+
+        Returns False when the window cannot be opened (already open, empty pair)
+        or the session cannot latch a request; a refusal leaves the runtime and
+        its worker exactly as they were.
+        """
+        if not pair:
+            return False
+        latch = getattr(self._session, "request_checkpoint", None)
+        if not callable(latch):
+            return False
+        if not latch(
+            turn_id=turn_id, boot_build=boot_build, target_build=pair, phase=phase
+        ):
+            return False
+        # Open the admission window WITHOUT the idle gate. If the window cannot
+        # open, the request we just latched must not be left half-promised.
+        if not self.begin_update(pair, handler="checkpointed-move"):
+            if self._updating == pair:
+                return True  # already open for this pair: the request stands
+            getattr(self._session, "cancel_checkpoint", lambda: None)()
+            return False
+        return True
+
+    def ready_to_resume(self) -> str:
+        """The checkpoint id a successor may resume from, or "" when there is none.
+
+        Reports only a READABLE record in ``resume`` phase; an unreadable or
+        deferred record yields "" (the refusal to claim continuation), and the
+        successor is expected to report the move deferred rather than continue.
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return ""
+        try:
+            from local_operator.service_handoff import resumable
+            from local_operator.session.transcript import (
+                CHECKPOINT_CUSTOM_TYPE,
+                read_latest_custom,
+            )
+
+            record = read_latest_custom(directory, CHECKPOINT_CUSTOM_TYPE)
+        except Exception:  # noqa: BLE001 — unreadable is not permission to continue
+            return ""
+        if not resumable(record):
+            return ""
+        return str(record.get("turn_id") or "") if record else ""
+
     def begin_update(self, pair: str, handler: str = "stale-build") -> bool:
         """Open the admission window for a move to ``pair``. False: not ours.
 

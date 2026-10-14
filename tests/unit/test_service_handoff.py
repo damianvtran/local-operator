@@ -218,3 +218,50 @@ def test_checkpoint_phase_vocabulary_matches_the_transcript_module() -> None:
     from local_operator.session import transcript as transcript_mod
 
     assert handoff.CHECKPOINT_PHASES == transcript_mod.CHECKPOINT_PHASES
+
+
+def test_resume_plan_skips_committed_and_replays_the_uncommitted_effect() -> None:
+    record = handoff.checkpoint_record(
+        session_id="s",
+        turn_id="t",
+        committed_message_ids=["m1", "m2"],
+        completed_effects=[{"tool": "read", "call_id": "c1", "result_digest": "d"}],
+        pending_effect={"tool": "write", "call_id": "c2"},
+        inbox_consumed_ids=["i1", "i2"],
+    )
+    plan = handoff.resume_plan(record)
+    assert plan.deferred is False and plan.reason == ""
+    assert plan.skip_call_ids == frozenset({"c1"})
+    assert plan.replay_effect == {"tool": "write", "call_id": "c2"}
+    assert plan.inbox_consumed_ids == frozenset({"i1", "i2"})
+
+
+def test_resume_plan_defers_unreadable_and_deferred_records() -> None:
+    for bad in (
+        None,
+        handoff.checkpoint_record(
+            session_id="s", turn_id="t", committed_message_ids=[], phase="deferred"
+        ),
+    ):
+        plan = handoff.resume_plan(bad)
+        assert plan.deferred is True
+        assert plan.replay_effect == {} and plan.skip_call_ids == frozenset()
+
+
+def test_resume_plan_refuses_to_rerun_an_effect_without_a_stable_id() -> None:
+    record = handoff.checkpoint_record(
+        session_id="s",
+        turn_id="t",
+        committed_message_ids=[],
+        pending_effect={"tool": "write"},  # no call_id: cannot prove it did not commit
+    )
+    plan = handoff.resume_plan(record)
+    assert plan.deferred is True and plan.replay_effect == {}
+
+
+def test_resume_plan_with_no_pending_effect_replays_nothing() -> None:
+    record = handoff.checkpoint_record(
+        session_id="s", turn_id="t", committed_message_ids=["m1"]
+    )
+    plan = handoff.resume_plan(record)
+    assert plan.deferred is False and plan.replay_effect == {}
