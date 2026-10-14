@@ -125,18 +125,22 @@ _VERDICT_HEADING = re.compile(r"^\s*#{2,4}\s*\**\s*verdict\s*\**\s*:?\s*$", re.I
 #:
 #: A backtick may wrap the WHOLE range or sit on just one side of the ``..``: real
 #: reviews write ``(`82adb042eb`..`3ea522cc21`)`` as readily as ``` `a..b` ```, and
-#: the per-token spelling is the shape a base-first fallback used to misread as the
-#: reviewed head (local-operator#2345, comment 6152890889).
+#: the per-token spelling is the shape a base-first fallback misread as the reviewed
+#: head (local-operator#2345, comment 6152890889). Git's three-dot ``A...B`` is a
+#: range as well, and its right-hand side is still the head (review round 2, F7).
 #:
-#: THE LEADING ``\b`` AND THE TWO DOT LOOKAROUNDS ARE LOAD-BEARING. Without ``\b``
-#: the alternation can begin a match mid-token and backtrack combinatorially: a 32 kB
-#: Scope line measured **11.4 s** against **1.2 ms** with the anchor (QA round 1, Q1),
-#: on a parse that runs inline on the event loop over forge-supplied bodies — a stall
-#: any commenter on a tracked PR could trigger. The lookarounds stop a prose ellipsis
-#: (``main... `sha` ``) from being read as a range.
+#: EVERY GUARD HERE IS LOAD-BEARING, and two review rounds had to teach it. The
+#: lookbehind stops a match starting mid-token. The POSSESSIVE whitespace runs
+#: (``[ \t]*+``) are what make the scan linear — they cannot hand space back, so the
+#: engine cannot re-try the same alignment combinatorially. The base is bounded, and
+#: the separator is ``..``/``...`` with non-dot lookarounds so a longer dot run is not
+#: one. Without these a ``Scope:`` line of ``a-a-a-…`` measured **18.2 s at 32 kB and
+#: 72.9 s at 64 kB** against ~1.3 ms / 2.5 ms here (review round 2, F5; QA round 2,
+#: Q6), on a parse that runs inline on the event loop over forge-supplied bodies.
 _SHA_RANGE = re.compile(
-    r"`?\s*\b(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]+?)\s*`?\s*(?<!\.)\.\.(?!\.)\s*`?\s*"
-    r"(?P<head>[0-9a-f]{7,40})\s*`?"
+    r"`?[ \t]*+(?<![0-9A-Za-z._/-])(?P<base>[0-9a-f]{7,40}|[A-Za-z0-9._/-]{1,100}?)"
+    r"[ \t]*+`?[ \t]*+(?<!\.)\.{2,3}(?!\.)[ \t]*+`?[ \t]*+"
+    r"(?P<head>[0-9a-f]{7,40})[ \t]*+`?"
 )
 _SHA = re.compile(r"\b(?P<sha>[0-9a-f]{7,40})\b")
 
@@ -695,16 +699,60 @@ def classify_verdict(verdict: str) -> str:
     return STATE_UNSTATED
 
 
+#: A bare SHA is hex, and only hex may be compared by prefix.
+_HEX_ONLY = re.compile(r"[0-9a-f]{7,40}")
+
+#: A run of spaces costs the range pattern one scan per start position, so a 32 kB run
+#: measured 3 s even with possessive quantifiers (review round 2, F5). Collapsing runs
+#: first makes the scan linear and changes nothing about which hashes are found.
+_WHITESPACE_RUN = re.compile(r"[ \t]{2,}")
+
+#: No real ``Scope:`` field comes close to this — the longest on the fleet is 1081
+#: characters — so a longer one is a payload, not a scope, and is treated as absent
+#: rather than scanned.
+_MAX_FIELD = 4096
+
+#: A hash introduced by one of these labels names something OTHER than the reviewed
+#: head — the base of a diff, its parent, the merge commit, the tree — so it must not
+#: compete for the single-hash rule. Reading the label is not a guess; guessing the
+#: order instead was wrong-stale on 29 of 45 real passes (QA round 2, Q4).
+_LABELLED_ELSEWHERE = re.compile(
+    r"(?i)\b(?:base|parent|merge(?:[- ]base)?|tree|root|onto)\b[^0-9a-f]{0,12}$"
+)
+
+
+def _collapse(text: str) -> str:
+    """Runs of spaces collapse to one — see :data:`_WHITESPACE_RUN`."""
+    return _WHITESPACE_RUN.sub(" ", text or "")
+
+
+def _bare_heads(text: str) -> list[str]:
+    """Hashes in the field that no label marks as something other than the head."""
+    kept: list[str] = []
+    for match in _SHA.finditer(text):
+        prefix = text[max(0, match.start() - 40) : match.start()]
+        if _LABELLED_ELSEWHERE.search(prefix):
+            continue
+        kept.append(match.group("sha").lower())
+    return kept
+
+
 def _same_sha(left: str, right: str) -> bool:
     """One commit written twice: a SHA and any longer spelling of it agree.
 
-    The same head is routinely named at two prefix lengths in one comment —
-    ``ec9a5e628f4`` and ``ec9a5e628f4d0e1…`` — and treating those as two heads
-    threw away a correct reading (review round 1, F2; QA round 1, Q2).
+    Prefixes compare as prefixes only when BOTH sides are hex: a branch named ``b``
+    must never chain through a head that merely starts with ``b`` (review round 2, F9).
+    The same head is routinely named at two prefix lengths — ``ec9a5e628f4`` and
+    ``ec9a5e628f4d0e1…`` — and treating those as two heads threw away a correct
+    reading (review round 1, F2; QA round 1, Q2).
     """
     left = left.lower()
     right = right.lower()
-    return left.startswith(right) or right.startswith(left)
+    if left == right:
+        return True
+    if _HEX_ONLY.fullmatch(left) and _HEX_ONLY.fullmatch(right):
+        return left.startswith(right) or right.startswith(left)
+    return False
 
 
 def _distinct_heads(heads: Sequence[str]) -> list[str]:
@@ -738,6 +786,7 @@ def _chain_head(ranges: Sequence[tuple[str, str]]) -> str | None:
         remaining[0],
     )
     chain = [root]
+    seen_heads = {root[1]}
     while True:
         tail = chain[-1][1]
         following = next(
@@ -746,13 +795,15 @@ def _chain_head(ranges: Sequence[tuple[str, str]]) -> str | None:
         )
         if following is None:
             break
+        if any(_same_sha(following[1], seen) for seen in seen_heads):
+            return None
+        seen_heads.add(following[1])
         chain.append(following)
     if len(chain) != len(remaining):
         return None
-    final = chain[-1][1]
-    if _same_sha(final, chain[0][0]):
+    if _same_sha(chain[-1][1], chain[0][0]):
         return None
-    return final
+    return chain[-1][1]
 
 
 def _reviewed_head(scope: str, head: str) -> str | None:
@@ -765,34 +816,45 @@ def _reviewed_head(scope: str, head: str) -> str | None:
 
     **Scope.** Well-formed ranges decide it: one distinct head after collapsing the same
     commit written at two prefix lengths; otherwise the ranges must form a single fold
-    chain (``old..new + fold new..final``), whose final head is the answer. Ranges that
-    do not form one chain, a scope naming several different bare hashes, and a scope with
-    no hash at all all give ``None`` → freshness ``unknown``.
+    chain (``old..new + fold new..final``), whose final head is the answer. Short of a
+    range, the field's bare hashes decide — but only those no label marks as something
+    else (``base``, ``parent``, ``merge``, ``tree`` …), so a scope that names the head
+    beside its base keeps the head (QA round 2, Q4).
 
-    **Head.** That field names ONE head, and its standard spelling quotes the head first
-    and any earlier head after it — ``\"X\" (was \"Y\")``, ``X (one commit on top of Y)`` —
-    so the LEADING hash is the head (review round 1, F1: applying the scope's set rule here
-    dropped 116 correct heads across 49 real PRs).
+    **Head.** Consulted when Scope is empty or says nothing decisive (review round 2,
+    Q5). It names ONE head, and its standard spelling quotes the head first and any
+    earlier head after it — ``\"X\" (was \"Y\")``, ``X (one commit on top of Y)`` — so the
+    LEADING hash is the head (review round 1, F1: applying the scope's set rule here
+    dropped 116 correct heads across 49 real PRs); if the field quotes a range, that
+    range's head wins (review round 2, F6).
 
     The cost of every rejection is recall, never safety: a rejected shape degrades to
     ``unknown``, and no rejected shape can report a stale round as fresh.
     """
     if scope:
+        scope_text = _collapse(scope)
+        if len(scope_text) > _MAX_FIELD:
+            scope_text = ""
         ranges = [
             (match.group("base").lower(), match.group("head").lower())
-            for match in _SHA_RANGE.finditer(scope)
+            for match in _SHA_RANGE.finditer(scope_text)
         ]
         if ranges:
             heads = _distinct_heads([head_sha for _, head_sha in ranges])
             if len(heads) == 1:
                 return heads[0]
-            return _chain_head(ranges)
-        found = _distinct_heads([match.group("sha").lower() for match in _SHA.finditer(scope)])
-        if len(found) == 1:
-            return found[0]
-        if found:
-            return None
-    leading = _SHA.search(head or "")
+            chained = _chain_head(ranges)
+            if chained is not None:
+                return chained
+        else:
+            found = _distinct_heads(_bare_heads(scope_text))
+            if len(found) == 1:
+                return found[0]
+    head_text = _collapse(head or "")[: _MAX_FIELD + 1]
+    quoted = _SHA_RANGE.search(head_text)
+    if quoted is not None:
+        return quoted.group("head").lower()
+    leading = _SHA.search(head_text)
     return leading.group("sha").lower() if leading else None
 
 
