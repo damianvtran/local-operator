@@ -71,8 +71,16 @@ class PushRefused(RuntimeError):
     before any request. Messages never carry tenant or credential bytes.
     """
 
-    def __init__(self, code: str, message: str = "") -> None:
+    def __init__(self, code: str, message: str = "", *, outage: bool = False) -> None:
         self.code = code
+        #: True when the hub produced NO DECISION for this request: a transport
+        #: failure or an HTTP 5xx. Classified from the STATUS (or the absence of
+        #: one), NEVER from the server's body code string -- a 5xx whose body
+        #: says ``hub-unavailable`` is the same outage as one with no body at
+        #: all (round-3 delta QN10). Outage refusals refund their attempt and are
+        #: paced by the outbox's consecutive-outage streak; deterministic
+        #: refusals (a 4xx, a malformed 200) consume attempts and dead-letter.
+        self.outage = outage
         super().__init__(message or f"the hub refused the publication ({code})")
 
 
@@ -231,12 +239,18 @@ class HttpPushTransport:
             raise
         except Exception as exc:  # noqa: BLE001 - any transport failure is a named refusal
             raise PushRefused(
-                "hub-error", f"the hub request failed ({type(exc).__name__})"
+                "hub-error", f"the hub request failed ({type(exc).__name__})", outage=True
             ) from exc
         if response.status_code == 412:
             raise RemoteRevisionChanged()
         if response.status_code >= 400:
-            raise PushRefused(self._refusal_code(response))
+            # The STATUS decides the attempt class; the body code is preserved
+            # for the user-facing reason only.
+            raise PushRefused(
+                self._refusal_code(response),
+                f"the hub refused the request (HTTP {response.status_code})",
+                outage=response.status_code >= 500,
+            )
         return _unwrap_result(response)
 
     @staticmethod
@@ -412,7 +426,7 @@ async def push_item(
     except RemoteRevisionChanged:
         return _settle_conflict(outbox, operation_id, generation)
     except PushRefused as exc:
-        return _settle_refused(outbox, operation_id, generation, exc.code)
+        return _settle_refused(outbox, operation_id, generation, exc.code, outage=exc.outage)
     except OperationDeadlineExceeded:
         # A PREVIEW-stage deadline owes NOTHING: no commit was dispatched, so
         # nothing can have been written. Retry with backoff -- an intent-less
@@ -470,7 +484,7 @@ async def push_item(
     except RemoteRevisionChanged:
         return _settle_conflict(outbox, operation_id, generation)
     except PushRefused as exc:
-        return _settle_refused(outbox, operation_id, generation, exc.code)
+        return _settle_refused(outbox, operation_id, generation, exc.code, outage=exc.outage)
     except OperationDeadlineExceeded:
         # The commit may have landed server-side; never replay it as a fresh
         # create. Same op/pin/body on reconciliation.
@@ -535,7 +549,7 @@ async def _replay_verbatim(
     except RemoteRevisionChanged:
         return _settle_conflict(outbox, operation_id, generation)
     except PushRefused as exc:
-        return _settle_refused(outbox, operation_id, generation, exc.code)
+        return _settle_refused(outbox, operation_id, generation, exc.code, outage=exc.outage)
     except OperationDeadlineExceeded:
         outbox.mark_pending_reconciliation(operation_id, generation=generation)
         return PushOutcome("pending-reconciliation", operation_id=operation_id, reason="deadline")
@@ -639,31 +653,44 @@ def _projection_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _is_outage(code: str) -> bool:
-    """Whether a refusal means the hub produced NO decision (round-3 QN8).
+def _settle_refused(
+    outbox: Outbox,
+    operation_id: str,
+    generation: int,
+    code: str,
+    *,
+    outage: bool = False,
+) -> PushOutcome:
+    """Settle a named refusal, refunding and pacing OUTAGES correctly.
 
-    A transport failure (``hub-error``) or a server-side 5xx (``http-5xx``) is
-    the outage class: nothing about the request was answered, so retrying the
-    SAME bytes can plausibly succeed once the hub returns. Those outcomes MUST
-    NOT exhaust the attempt cap -- five failed requests during an outage used to
-    permanently dead-letter a healthy link (QA QN8) -- so they REFUND their
-    attempt like conflicts do, while the exponential backoff still spaces the
-    retries (one request per backoff window, never per tick). Deterministic
-    refusals (the server's own codes) keep consuming attempts and still
-    dead-letter: those ARE answers, and re-sending an answered request would be
-    paid work with a known outcome.
+    ``outage`` rides the refusal itself (set at the transport from the HTTP
+    STATUS or a transport exception -- never inferred from ``code``, round-3
+    delta QN10). Outages REFUND their attempt -- nothing about the request was
+    answered, and five of them used to dead-letter a healthy link (QN8) -- so
+    their pacing comes from the outbox's consecutive-outage streak instead of
+    the refunded counter (R22): the window still doubles (900s, 1800s, 3600s,
+    ... capped) while the cap is never approached. Deterministic refusals (a
+    4xx, a malformed answer) keep consuming attempts and still dead-letter:
+    those ARE answers, and re-sending one would be paid work with a known
+    outcome.
     """
 
-    return code == "hub-error" or code.startswith("http-5")
+    if outage:
+        record = outbox.read(operation_id)
+        streak = (record.outage_streak if record is not None else 0) + 1
+        from datetime import datetime, timedelta, timezone
 
-
-def _settle_refused(outbox: Outbox, operation_id: str, generation: int, code: str) -> PushOutcome:
+        due = datetime.now(timezone.utc) + timedelta(seconds=push_backoff_seconds(streak))
+        next_at = due.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        next_at = _retry_at(generation, outbox, operation_id)
     outbox.settle(
         operation_id,
         generation=generation,
         error_class=code,
-        refund_attempt=_is_outage(code),
-        next_retry_at=_retry_at(generation, outbox, operation_id),
+        refund_attempt=outage,
+        outage=outage,
+        next_retry_at=next_at,
     )
     return PushOutcome("refused", operation_id=operation_id, reason=code)
 

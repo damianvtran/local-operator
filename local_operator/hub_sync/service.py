@@ -798,17 +798,54 @@ def _advance_baseline(ctx: HubSyncContext, c: chk.ItemCheck, recorded_by: str) -
     if c.remote_revision:
         record = replace(record, remote_revision=c.remote_revision)
     prov.write_baseline(ctx.config_dir, record)
-    _mark_integrated(ctx, c)
+    _mark_integrated(ctx, c, integrated=True)
 
 
-def _mark_integrated(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
+def _agreement_is_genuine(c: chk.ItemCheck) -> bool:
+    """Whether the CHECK itself proves genuine canonical L == R (round-3 delta R21).
+
+    The verdict alone is NOT that proof: the check maps classification
+    ``local-only`` (L != R, R == B -- a locally edited row) to the SAME
+    ``up-to-date`` verdict an equal pair gets, and an equality read that could
+    not expose a revision (the zip fallback) gives a conditional write nothing
+    to stand on. A genuine agreement is exactly: the classification says
+    ``up-to-date``, the fingerprints are equal, and a live revision exists.
+    """
+
+    state = c.classification.state if c.classification is not None else None
+    return bool(
+        state == "up-to-date"
+        and c.local_fp is not None
+        and c.local_fp == c.remote_fp
+        and c.remote_revision
+    )
+
+
+def _mark_integrated(
+    ctx: HubSyncContext,
+    c: chk.ItemCheck,
+    *,
+    integrated: bool = False,
+    agreement: bool = False,
+) -> None:
     """Record that remote content from the link's OWN origin integrated here.
 
     THE LINEAGE LIFECYCLE, in one place (round-3 QN7): ``resolve_source`` can
     only ever say ``unknown`` -- it proves who the origin is, not that content
-    from it ever landed. A pull/apply (or an L == R agreement with a live
+    from it ever landed. A pull/apply (or a genuine L == R agreement with a live
     revision) that read through the link's OWN recorded base IS that landing, so
-    the record advances to ``clean``. Guards, all refusals:
+    the record advances to ``clean``. The CALLER must state which proof it has;
+    no claim is refused, because an unqualified ``up-to-date`` verdict is not
+    evidence (round-3 delta R21: ``local-only`` rides it too):
+
+    * ``integrated=True`` -- this call WROTE remote-derived content (the
+      baseline advance / the skill write). A real integration event.
+    * ``agreement=True`` -- the caller proved genuine canonical L == R; the
+      gate re-checks ``_agreement_is_genuine`` anyway (defense in depth), so a
+      local-only verdict can never mark, lineage or revision, no matter which
+      path arrives here.
+
+    Guards, all refusals:
 
     * no identity, or no corroborated ``served_by`` -> no write;
     * a base that is not the recorded ``hub_source`` -> no write (an integration
@@ -824,6 +861,8 @@ def _mark_integrated(ctx: HubSyncContext, c: chk.ItemCheck) -> None:
 
     from dataclasses import replace as dc_replace
 
+    if not integrated and not (agreement and _agreement_is_genuine(c)):
+        return
     if not c.served_by:
         return
     record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
@@ -956,7 +995,10 @@ def _apply_skill(
     # local document exactly (the remote and local already agree on content).
     if merged.to_json() == local_doc.to_json() and replace is None:
         if not dry_run:
-            _mark_integrated(ctx, c)
+            # This site compared the FULL documents (stronger than the check's
+            # fingerprints), but the mark still goes through the agreement gate:
+            # a classification that is not a genuine equal pair refuses.
+            _mark_integrated(ctx, c, agreement=True)
             _seed_receipt_if_agreed(ctx, c, merged.to_json())
         fold(st.settle_unchanged)
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "unchanged")
@@ -1008,7 +1050,7 @@ def _apply_skill(
 
     # The merged document IS the remote's canonical text when the pull integrated
     # it (fingerprint equality decides); that is the skill's agreed point.
-    _mark_integrated(ctx, c)
+    _mark_integrated(ctx, c, integrated=True)
     _seed_receipt_if_agreed(ctx, c, merged.to_json())
     summary = _summary(results)
     fold(lambda item: st.settle_applied(item, summary, None))
@@ -1058,12 +1100,15 @@ def apply_one(
         and c.local_fp != c.remote_fp
     )
     if c.verdict == "up-to-date" and not replace_differs:
-        if not dry_run:
-            # L == R and a live revision: the agreed point (round-3 QN7). A pull
-            # that finds nothing to change still IS the integration event that
-            # establishes the origin's lineage and the (A, P) receipt the first
-            # unattended push derives from.
-            _mark_integrated(ctx, c)
+        if not dry_run and _agreement_is_genuine(c):
+            # GENUINE L == R with a live revision: the agreed point (round-3
+            # QN7). A pull that finds nothing to change still IS the integration
+            # event that establishes the origin's lineage and the (A, P) receipt
+            # the first unattended push derives from. A ``local-only``
+            # classification lands on the same verdict and is NOT this: it has
+            # its own explicit-replace semantics and must never mark or seed
+            # (round-3 delta R21).
+            _mark_integrated(ctx, c, agreement=True)
             _seed_receipt_if_agreed(ctx, c, c.local)
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "up-to-date")
 

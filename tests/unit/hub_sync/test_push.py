@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeVar, overload
 
 import httpx
 import pytest
@@ -29,6 +29,7 @@ from local_operator.hub_sync.push import (
     HttpPushTransport,
     PushOutcome,
     PushRefused,
+    PushTransport,
     RemoteRevisionChanged,
     push_item,
     receipt_for,
@@ -120,10 +121,32 @@ class FakeTransport:
         }
 
 
+#: The transport a ``_run`` call passed comes back as itself, so a REAL
+#: (MockTransport-backed) run can assert on it without a cast, while the
+#: default-selecting overload keeps ``FakeTransport`` for the fake-based tests.
+T = TypeVar("T", bound=PushTransport)
+
+
+@overload
 async def _run(
-    tmp_path: Path, *, transport: FakeTransport | None = None, expected: str | None = "rev-a", **kw
-) -> tuple[PushOutcome, Outbox, FakeTransport]:
-    server = transport or FakeTransport()
+    tmp_path: Path, *, transport: None = None, expected: str | None = "rev-a", **kw: Any
+) -> tuple[PushOutcome, Outbox, FakeTransport]: ...
+
+
+@overload
+async def _run(
+    tmp_path: Path, *, transport: T, expected: str | None = "rev-a", **kw: Any
+) -> tuple[PushOutcome, Outbox, T]: ...
+
+
+async def _run(
+    tmp_path: Path,
+    *,
+    transport: PushTransport | None = None,
+    expected: str | None = "rev-a",
+    **kw: Any,
+) -> tuple[PushOutcome, Outbox, PushTransport]:
+    server = transport if transport is not None else FakeTransport()
     out = Outbox(tmp_path)
     pushed: dict[str, Any] = {
         "kind": "agent",
@@ -704,31 +727,119 @@ def test_five_conflicts_refund_their_attempts_and_a_quiet_remote_proceeds(
     assert quiet.state == "pushed" and len(server2.commit_calls) == 1
 
 
-@pytest.mark.parametrize("outage_code", ["http-503", "hub-error"])
+@pytest.mark.parametrize("outage_code", ["http-503", "hub-error", "hub-unavailable"])
 def test_hub_outages_refund_their_attempts_and_a_healthy_hub_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outage_code: str
 ) -> None:
-    """QN8: an outage -- a 503 reply or a transport failure -- must never
-    permanently exhaust the cap; the bytes were never answered."""
+    """QN8 + QN10 + R22: an outage -- a 5xx under ANY body code, or a transport
+    failure -- never exhausts the cap, and its window still grows.
+
+    ``outage=True`` is the classification the transport derives from the STATUS
+    (or the absence of a response); ``hub-unavailable`` is the reviewer's coded
+    5xx, whose body code must not change the attempt class.
+    """
 
     from local_operator.hub_sync import outbox as outbox_mod
+    from local_operator.hub_sync.outbox import push_backoff_seconds
 
+    previous_window: str | None = None
     for i in range(5):
         future = [f"2099-01-0{i + 1}T00:00:00Z"]
         monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
         outcome, _out, _srv = asyncio.run(
-            _run(tmp_path, transport=FakeTransport(fail_commit=PushRefused(outage_code, "outage")))
+            _run(
+                tmp_path,
+                transport=FakeTransport(
+                    fail_commit=PushRefused(outage_code, "outage", outage=True)
+                ),
+            )
         )
         assert outcome.state == "refused" and outcome.reason == outage_code
+        record = _stored(Outbox(tmp_path), "op1")
+        assert record.attempts == 0, "an outage is not an attempt"
+        assert record.outage_streak == i + 1
+        assert record.next_retry_at is not None
+        if previous_window is not None:
+            # R22: the refunded counter cannot pace; the STREAK still doubles it.
+            assert record.next_retry_at > previous_window, record.next_retry_at
+        previous_window = record.next_retry_at
 
-    record = _stored(Outbox(tmp_path), "op1")
-    assert record.attempts == 0, "an outage is not an attempt"
-    assert record.state == "failed" and record.next_retry_at  # still spaced by backoff
+    # The window grows to the six-hour cap, never past it.
+    assert push_backoff_seconds(5) == 14400.0
+    assert push_backoff_seconds(6) == 21600.0
 
     future = ["2099-02-01T00:00:00Z"]
     monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
     pushed, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
     assert pushed.state == "pushed" and len(server.commit_calls) == 1
+    assert _stored(Outbox(tmp_path), "op1").outage_streak == 0, "success resets the streak"
+
+
+def test_a_real_coded_5xx_refunds_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QN10's exact repro over REAL HTTP: 503 + {error:{code:'hub-unavailable'}}
+    x5, backoff elapsed each time, then a healthy UNCHANGED input publishes."""
+
+    from local_operator.hub_sync import outbox as outbox_mod
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"code": "hub-unavailable"}})
+
+    for i in range(5):
+        future = [f"2099-01-0{i + 1}T00:00:00Z"]
+        monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+        outcome, _out, _srv = asyncio.run(
+            _run(tmp_path, transport=_transport(_dispatcher(handler)))
+        )
+        assert outcome.state == "refused" and outcome.reason == "hub-unavailable"
+
+    record = _stored(Outbox(tmp_path), "op1")
+    assert record.attempts == 0 and record.outage_streak == 5
+
+    future = ["2099-02-01T00:00:00Z"]
+    monkeypatch.setattr(outbox_mod, "now_iso", lambda future=future: future[0])
+    pushed, _o2, server = asyncio.run(_run(tmp_path, transport=FakeTransport()))
+    assert pushed.state == "pushed" and len(server.commit_calls) == 1
+
+
+def test_a_coded_5xx_is_classified_by_status_not_the_body_code() -> None:
+    """QN10 root: outage-ness derives from the HTTP STATUS; the body code stays
+    the user-facing reason. A 4xx with a code is NOT an outage."""
+
+    def handler_503(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503, json={"error": {"code": "hub-unavailable", "message": "down for maintenance"}}
+        )
+
+    async def run_503() -> PushRefused:
+        disp = _dispatcher(handler_503)
+        transport = _transport(disp)
+        with pytest.raises(PushRefused) as raised:
+            await transport.preview(
+                document={"instructions": "x"}, expected_revision=TOKEN, budget=_budget()
+            )
+        await disp.aclose()
+        return raised.value
+
+    refused = asyncio.run(run_503())
+    assert refused.code == "hub-unavailable" and refused.outage is True
+
+    def handler_422(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"error": {"code": "invalid_skill_document"}})
+
+    async def run_422() -> PushRefused:
+        disp = _dispatcher(handler_422)
+        transport = _transport(disp)
+        with pytest.raises(PushRefused) as raised:
+            await transport.preview(
+                document={"instructions": "x"}, expected_revision=TOKEN, budget=_budget()
+            )
+        await disp.aclose()
+        return raised.value
+
+    refused_422 = asyncio.run(run_422())
+    assert refused_422.code == "invalid_skill_document" and refused_422.outage is False
 
 
 def test_a_deterministic_refusal_still_consumes_attempts_and_dead_letters(

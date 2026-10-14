@@ -110,6 +110,13 @@ class OutboxRecord:
     #: makes "wait for input change" and "a deliberate edit re-arms the cap"
     #: decidable without reading the registries.
     input_fp: str | None = None
+    #: CONSECUTIVE outage outcomes (round-3 delta R22). Outages REFUND their
+    #: attempt (they are not the client's failure), so the refunded counter can
+    #: no longer pace them -- without this streak every outage window would be
+    #: the same 900s. It counts only consecutive outage-class outcomes and is
+    #: reset by any other outcome (including success), so it costs nothing on
+    #: the healthy path.
+    outage_streak: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -129,6 +136,7 @@ class OutboxRecord:
             "intent": dict(self.intent) if self.intent is not None else None,
             "waiting_input": self.waiting_input,
             "input_fp": self.input_fp,
+            "outage_streak": self.outage_streak,
         }
 
 
@@ -236,6 +244,7 @@ class Outbox:
                 intent=raw.get("intent") if isinstance(raw.get("intent"), Mapping) else None,
                 waiting_input=bool(raw.get("waiting_input") or False),
                 input_fp=str(raw["input_fp"]) if raw.get("input_fp") is not None else None,
+                outage_streak=int(raw.get("outage_streak") or 0),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -278,6 +287,7 @@ class Outbox:
         next_retry_at: str | None = None,
         refund_attempt: bool = False,
         waiting_input: bool = False,
+        outage: bool = False,
     ) -> bool:
         """Record the outcome, fenced by generation. False = rejected or skipped.
 
@@ -296,6 +306,12 @@ class Outbox:
         refusal whose retry needs the projection INPUT to change; with it set the
         record carries no backoff and ``_skip_reason`` answers
         ``awaiting-input-change``.
+
+        ``outage`` marks an outcome the hub never DECIDED (a transport failure or
+        a 5xx, classified from the status at the transport, never from the body
+        code). It advances ``outage_streak`` so the backoff still grows while the
+        refunded attempt counter stays put; any other settlement resets the
+        streak.
         """
         with self._locked() as held:
             if not held:
@@ -309,6 +325,7 @@ class Outbox:
                 # replay is the worker that owns that same generation.
                 return False
             attempts = max(0, record.attempts - 1) if refund_attempt else record.attempts
+            outage_streak = record.outage_streak + 1 if outage else 0
             settled = OutboxRecord(
                 operation_id=record.operation_id,
                 kind=record.kind,
@@ -325,6 +342,7 @@ class Outbox:
                 intent=None,
                 waiting_input=bool(waiting_input),
                 input_fp=record.input_fp,
+                outage_streak=outage_streak,
             )
             self._atomic_write(settled)
         return True
@@ -356,6 +374,7 @@ class Outbox:
                 error_class=record.error_class,
                 attempts=record.attempts,
                 next_retry_at=record.next_retry_at,
+                outage_streak=record.outage_streak,
                 intent=dict(intent),
                 input_fp=record.input_fp,
             )
@@ -458,6 +477,7 @@ class Outbox:
             updated_at=at,
             attempts=attempts,
             input_fp=input_fp if input_fp is not None else record.input_fp,
+            outage_streak=record.outage_streak,
         )
         self._atomic_write(nxt)
         return Attempt(generation=nxt.generation, attempts=attempts)
@@ -492,6 +512,7 @@ class Outbox:
                 error_class=record.error_class,
                 attempts=record.attempts,
                 next_retry_at=record.next_retry_at,
+                outage_streak=record.outage_streak,
                 intent=record.intent,
                 input_fp=record.input_fp,
             )
@@ -520,6 +541,7 @@ class Outbox:
                 updated_at=now_iso(),
                 attempts=record.attempts + 1,
                 input_fp=record.input_fp,
+                outage_streak=record.outage_streak,
             )
             self._atomic_write(nxt)
         return nxt.generation

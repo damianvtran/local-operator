@@ -1237,3 +1237,77 @@ def test_seeding_guards_lineage_for_public_and_mixed_origins(env) -> None:
     stored = prov.read_baseline(root, "agent", "aorg")
     assert stored is not None and stored.outbound is not None
     assert stored.outbound.remote_revision == '"rev-1"'
+
+
+def test_a_local_only_check_never_marks_or_seeds_integration(env) -> None:
+    """R21: ``local-only`` rides the same ``up-to-date`` verdict an equal pair
+    gets, and must never establish lineage, a revision or a receipt."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+    # The LOCAL edit: L != R while R == B -- classification 'local-only'.
+    agents.set_agent_system_prompt(row.id, BASE + "\n\nLOCAL-ONLY")
+
+    checks = svc.check_items(ctx, kinds=("agent",))
+    (c,) = checks
+    assert c.classification is not None and c.classification.state == "local-only"
+    assert c.verdict == "up-to-date"
+    svc.record_checks(ctx, checks)
+    report = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert report.reports[0].outcome == "up-to-date"
+
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    assert stored.lineage == "unknown", "a local edit is not an integration"
+    assert stored.remote_revision is None, "no revision may be borrowed"
+    assert stored.outbound is None, "no receipt may be seeded"
+    assert stored.recorded_by == "adopt-unknown"
+
+
+def test_an_equal_read_without_a_revision_never_marks(env, monkeypatch) -> None:
+    """R21: the zip fallback (detail read dead, no live revision) is equality
+    WITHOUT anything a conditional write could stand on -- not an agreement."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source="https://hub.test/v1",
+        visibility="public",
+        tenant_id=None,
+    )
+
+    calls: list[int] = []
+
+    def detail_is_down(*_a: Any, **_k: Any) -> Any:
+        calls.append(1)
+        raise RuntimeError("detail read is down")
+
+    monkeypatch.setattr(hub, "get_agent", detail_is_down)
+
+    checks = svc.check_items(ctx, kinds=("agent",))
+    (c,) = checks
+    assert calls, "the test must actually break the DETAIL read"
+    assert c.remote_revision is None  # the zip cannot expose one
+    assert c.verdict == "up-to-date"
+    assert c.served_by == "https://hub.test/v1"
+    svc.record_checks(ctx, checks)
+    svc.apply_items(ctx, kind="agent", allow_llm=False)
+
+    stored = prov.read_baseline(root, "agent", row.id)
+    assert stored is not None
+    assert stored.lineage == "unknown"
+    assert stored.remote_revision is None
+    assert stored.outbound is None
+    # And the push path refuses by name rather than writing unconditionally.
+    assert svc.push_eligibility(ctx, stored)["can_auto_push"] is False
