@@ -27,10 +27,13 @@ order they will rely on it:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import re
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
+import httpx
 import pytest
+from jsonschema import Draft202012Validator
 
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.adapters.api import (
@@ -272,6 +275,156 @@ def test_every_admitted_action_kind_is_offered_and_no_other() -> None:
     ):
         expected = {model.model_fields["kind"].default for model in surface.models}
         assert _offered_kinds(action_tool_parameters(surface)) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "nonblank"),
+    [
+        ("", False),
+        (" ", False),
+        ("\t\n", False),
+        ("\u00a0", False),
+        ("\r\n", False),
+        ("a\n", True),
+        ("\na", True),
+        ("\na\n", True),
+        ("\U0001f600", True),
+        ("s", True),
+        ("screen", True),
+        ("0", True),
+        ("a\nb", True),
+        (" \nscreen\t", True),
+    ],
+)
+def test_nonblank_offer_has_the_same_search_and_fullmatch_meaning(
+    value: str, nonblank: bool
+) -> None:
+    """An implicitly anchored provider must not turn nonblank into one character."""
+    members = action_tool_parameters(SURFACE)["properties"]["actions"]["items"]["anyOf"]
+    click = next(member for member in members if member["properties"]["kind"]["const"] == "click")
+    field = click["properties"]["frame_id"]
+    assert Draft202012Validator(field).is_valid(value) is nonblank
+    assert bool(re.search(field["pattern"], value)) is nonblank
+    assert bool(re.fullmatch(field["pattern"], value)) is nonblank
+
+
+def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
+    """Every affected field keeps its bounds; protocol/schema identities stay put."""
+    surface = ActionSurface(paste_text=True, drag=True)
+    before = {model: model.model_json_schema() for model in surface.models}
+    offered = action_tool_parameters(surface)["properties"]["actions"]["items"]["anyOf"]
+    fields = {
+        (member["properties"]["kind"]["const"], name): field
+        for member in offered
+        for name, field in member["properties"].items()
+    }
+    rewritten: set[tuple[str, str]] = set()
+    from local_operator.evaluation.runner.public_reply import _inlined_action_schema
+
+    for model, protocol_schema in before.items():
+        kind = model.model_fields["kind"].default
+        for name, field in _inlined_action_schema(model)["properties"].items():
+            if name == "observation_id":
+                continue
+            expected = dict(field)
+            if field.get("pattern") == r"\S":
+                expected["pattern"] = r"^[\s\S]*\S[\s\S]*$"
+                rewritten.add((kind, name))
+            assert fields[(kind, name)] == expected
+        assert model.model_json_schema() == protocol_schema
+    assert rewritten == {
+        ("click", "frame_id"),
+        ("double_click", "frame_id"),
+        ("drag", "frame_id"),
+        ("scroll", "frame_id"),
+        ("type", "text"),
+        ("finish", "reason"),
+        ("ask_user", "request_id"),
+        ("ask_user", "question"),
+    }
+    frame = fields[("click", "frame_id")]
+    assert Draft202012Validator(frame).is_valid("x" * 256)
+    assert not Draft202012Validator(frame).is_valid("x" * 257)
+    # A search without the anchors retries a greedy prefix at every position:
+    # a valid-length whitespace-only type payload would become quadratic work.
+    text = fields[("type", "text")]
+    assert text["pattern"].startswith("^") and text["pattern"].endswith("$")
+    assert not Draft202012Validator(text).is_valid(" " * text["maxLength"])
+    assert Draft202012Validator(text).is_valid("\n" + "x" * (text["maxLength"] - 2) + "\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_id", ["screen", "0"])
+async def test_fragmented_native_sse_preserves_frame_id_and_validated_refusal(
+    frame_id: str,
+) -> None:
+    """Projection portability must not become argument repair in the decoder."""
+    from local_operator.harness.types import MessageEndEvent, ToolExecutionStartEvent
+    from local_operator.providers.clients import OpenAICompatClient
+
+    offline = _Offline(_observation(frames=(_frame("screen"),)))
+    raw = json.dumps({"actions": [{"kind": "click", "frame_id": frame_id, "x": 1, "y": 2}]})
+    split = raw.index(frame_id) + 1
+    fragments = (raw[:split], raw[split:])
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        if len(captured) == 1:
+            deltas = [
+                {
+                    "tool_calls": [
+                        {"index": 0, "id": "literal", "function": {"name": ACTION_TOOL_NAME}}
+                    ]
+                },
+                *[
+                    {"tool_calls": [{"index": 0, "function": {"arguments": fragment}}]}
+                    for fragment in fragments
+                ],
+            ]
+            reason = "tool_calls"
+        else:
+            deltas = [{"content": "Boundary control paused."}]
+            reason = "stop"
+        payloads = [
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": reason if i == len(deltas) - 1 else None,
+                    }
+                ]
+            }
+            for i, delta in enumerate(deltas)
+        ]
+        sse = "".join(f"data: {json.dumps(payload)}\n\n" for payload in payloads)
+        return httpx.Response(200, content=(sse + "data: [DONE]\n\n").encode())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://openrouter.ai/api/v1", http_client=http)
+
+        class NativeSse(_ScriptedStream):
+            async def __call__(
+                self, request: ChatRequest, signal: Any
+            ) -> AsyncGenerator[StreamEvent, None]:
+                async for event in client.stream(request, "synthetic-no-network-key"):
+                    yield event
+
+        events = await _drive(offline.tool, offline.token, NativeSse([]))
+    call = next(
+        call
+        for event in events
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, Message)
+        for call in event.message.tool_calls
+    )
+    assert call.raw_arguments == raw
+    assert call.arguments["actions"][0]["frame_id"] == frame_id
+    start = next(event for event in events if isinstance(event, ToolExecutionStartEvent))
+    assert start.args["actions"][0]["frame_id"] == frame_id
+    assert _tool_results(events)[0].is_error is (frame_id != "screen")
+    assert len(offline.execute.batches) == (1 if frame_id == "screen" else 0)
+    assert captured[0]["tools"][0]["function"]["parameters"] == offline.tool.parameters
 
 
 def test_the_projection_drops_every_identity_field() -> None:
