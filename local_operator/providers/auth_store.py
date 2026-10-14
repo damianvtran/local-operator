@@ -1809,6 +1809,52 @@ class AuthStore:
         ).fetchone()
         return self._row_to_credential(row) if row else None
 
+    def record_muse_usage(self, access: OAuthAccess, value: object) -> bool:
+        """Retain a passive receipt only on the account/key that actually served.
+
+        A snapshot must not reseal an inference key or overwrite a concurrent
+        login/logout. Compare-and-swap the metadata row, preserving its other
+        fields; a newer request's receipt must also win over a delayed stream.
+        """
+        from local_operator.providers.meta_muse_credentials import REF_FIELD
+        from local_operator.providers.meta_muse_usage import subscription_observation
+
+        if self._read_only or not access.raw:
+            return False
+        receipt = subscription_observation(value)
+        if receipt is None:
+            return False
+        receipt["source"] = "responses"
+        row = self.get_credential(access.credential_id)
+        ref = access.raw.get(REF_FIELD)
+        if row is None or row.provider != "meta-muse" or not ref or row.data.get(REF_FIELD) != ref:
+            return False
+        previous = row.data.get("subscription_observation") or {}
+        stamp = value.get("observedAtMs") if isinstance(value, dict) else None
+        if not isinstance(stamp, int) or isinstance(stamp, bool) or not 0 < stamp <= self._now_ms():
+            return False
+        receipt["observedAtMs"] = stamp
+        if (
+            isinstance(previous, dict)
+            and previous.get("source") == "responses"
+            and previous.get("observedAtMs", 0) >= stamp
+        ):
+            return False
+        # Compare against the exact stored encoding, not a re-serialization:
+        # auth rows written by older versions may have different whitespace.
+        original = self._conn.execute(
+            "SELECT data FROM auth_credentials WHERE id = ?", (row.id,)
+        ).fetchone()
+        if original is None or json.loads(original[0]) != row.data:
+            return False
+        data = {**row.data, "subscription_observation": receipt}
+        changed = self._conn.execute(
+            "UPDATE auth_credentials SET data = ? WHERE id = ? AND data = ?",
+            (json.dumps(data), row.id, original[0]),
+        ).rowcount
+        self._conn.commit()
+        return bool(changed)
+
     def disable_credential(self, credential_id: int, cause: str) -> None:
         """Soft-delete tombstone (keeps history, blocks selection)."""
         self._conn.execute(

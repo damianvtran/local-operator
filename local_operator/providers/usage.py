@@ -2486,25 +2486,37 @@ async def fetch_usage(
 # These are local, fixed provenance statements, not arbitrary upstream notes.
 # Public usage serialization may safely retain ONLY these strings for Muse;
 # other providers' notes can contain untrusted endpoint/error vocabulary.
-META_MUSE_ALLOWANCE_NOTE = "Last sign-in allowance; refresh does not query Muse."
-META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded."
-META_MUSE_USAGE_NOTES = frozenset({META_MUSE_ALLOWANCE_NOTE, META_MUSE_NO_OBSERVATION_NOTE})
+META_MUSE_ALLOWANCE_NOTE = (
+    "Stale sign-in allowance; current usage unknown; refresh does not query Muse."
+)
+META_MUSE_PASSIVE_NOTE = "Last response allowance; refresh does not query Muse."
+META_MUSE_STALE_NOTE = (
+    "Stale response allowance; current usage unknown; refresh does not query Muse."
+)
+META_MUSE_NO_OBSERVATION_NOTE = "No allowance observation recorded; refresh does not query Muse."
+META_MUSE_USAGE_NOTES = frozenset(
+    {
+        META_MUSE_ALLOWANCE_NOTE,
+        META_MUSE_PASSIVE_NOTE,
+        META_MUSE_STALE_NOTE,
+        META_MUSE_NO_OBSERVATION_NOTE,
+    }
+)
+META_MUSE_OBSERVATION_TTL_MS = 5 * 60 * 1000
 
 
 def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
-    """Read a stored allowance receipt without turning its age into a live probe.
+    """Expose recent passive Responses quota, never a login snapshot as current.
 
-    Meta's observed sources are key-mint ``subs_usage`` and the Responses SSE
-    ``response.subscription_usage`` event (see ``meta_muse_usage``). Neither is
-    a read-only quota API, and only the sign-in receipt is stored on the OAuth
-    row; SSE receipts remain request provenance. Reuse their sanitizer, but
-    retain the receipt's own timestamp: the sanitizer timestamps NEW
-    observations, whereas /usage is
-    only reading one. An absent/undated receipt says unknown, never zero usage.
+    The real account's key-mint receipt remained 0/0 while Responses SSE carried
+    47/72 used-percent. No inference is purchased merely to refresh /usage:
+    failover persists receipts from ordinary requests on their owning auth row.
+    Limit their display lifetime to five minutes (or their reset, if sooner),
+    preserving the actual observation timestamp even when meters become unknown.
     """
     from local_operator.providers.meta_muse_usage import subscription_observation
 
-    note = META_MUSE_ALLOWANCE_NOTE
+    note = META_MUSE_PASSIVE_NOTE
     # No observation is not a just-fetched reading. Zero is the existing
     # non-observation stamp: freshness/quota consumers require fetched_at > 0.
     unknown = UsageReport(provider="meta-muse", fetched_at=0, notes=META_MUSE_NO_OBSERVATION_NOTE)
@@ -2525,12 +2537,31 @@ def meta_muse_usage_report(creds: dict[str, Any] | None) -> UsageReport:
         return unknown
     if receipt is None:
         return unknown
+    # A sign-in receipt is not evidence of current quota, even when it
+    # contains explicit zeros. Hide unverified/expired meters rather than
+    # letting them look like fresh capacity; keep the stamp for the age label.
+    stale_note = None
+    if raw.get("source") != "responses":
+        stale_note = META_MUSE_ALLOWANCE_NOTE
+    elif time.time() * 1000 - observed_at > META_MUSE_OBSERVATION_TTL_MS:
+        stale_note = META_MUSE_STALE_NOTE
+    elif any(
+        isinstance(entry, dict)
+        and entry.get("resetsAtMs") is not None
+        and entry["resetsAtMs"] <= time.time() * 1000
+        for entry in (receipt.get("window"), receipt.get("weekly"))
+    ):
+        stale_note = META_MUSE_STALE_NOTE
+    if stale_note:
+        return UsageReport(provider="meta-muse", fetched_at=int(observed_at), notes=stale_note)
     limits: list[UsageLimit] = []
     for name in ("window", "weekly"):
         entry = receipt.get(name)
         if not isinstance(entry, dict):
             continue
-        duration = entry.get("windowDurationMins")
+        # Meta omits the duration on its weekly receipt; the named weekly
+        # bucket is seven days, not a missing/unmapped second allowance.
+        duration = entry.get("windowDurationMins", 10080 if name == "weekly" else 300)
         label = _window_label(
             duration * 60 if duration is not None else None,
             "Weekly" if name == "weekly" else "Window",

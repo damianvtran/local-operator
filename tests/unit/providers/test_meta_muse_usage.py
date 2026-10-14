@@ -17,6 +17,7 @@ from local_operator.providers.controller import ProviderController
 from local_operator.providers.usage import (
     META_MUSE_ALLOWANCE_NOTE,
     META_MUSE_NO_OBSERVATION_NOTE,
+    META_MUSE_PASSIVE_NOTE,
     UsageReport,
     fetch_usage,
     meta_muse_usage_report,
@@ -30,7 +31,8 @@ from local_operator.server.utils.desktop_auth import DesktopAuth
 
 def receipt() -> dict[str, Any]:
     return {
-        "observedAtMs": int(time.time() * 1000) - 7_200_000,
+        "observedAtMs": int(time.time() * 1000) - 1000,
+        "source": "responses",
         "window": {"usedPercent": 31, "windowDurationMins": 300, "resetsAtMs": 1_800_000_000_000},
         "weekly": {"usedPercent": 105, "windowDurationMins": 10080},
     }
@@ -45,7 +47,7 @@ def test_receipt_keeps_observation_age_and_account_windows():
     assert all(limit.shared for limit in report.limits)
     assert report.limits[0].resets_at_ms == 1_800_000_000_000
     assert report.limits[1].effective_status() == "exhausted"
-    assert "Last sign-in allowance" in (report.notes or "")
+    assert "Last response allowance" in (report.notes or "")
     assert "refresh does not query Muse" in (report.notes or "")
     assert raw["observedAtMs"] == report.fetched_at
 
@@ -129,7 +131,7 @@ async def test_controller_shared_cache_and_desktop_payload_include_muse(
     monkeypatch.setattr(httpx, "AsyncClient", fixture_client)
     try:
         for account, observation in (("1234", receipt()), ("5678", None)):
-            store.upsert_credential(
+            row = store.upsert_credential(
                 "meta-muse",
                 {
                     "type": "oauth",
@@ -139,6 +141,16 @@ async def test_controller_shared_cache_and_desktop_payload_include_muse(
                     "subscription_observation": observation,
                 },
             )
+            if observation:
+                from local_operator.providers.auth_store import OAuthAccess
+
+                # Ordinary login receipts are deliberately not live usage.
+                # Simulate the serving account's later passive SSE observation.
+                observation["observedAtMs"] = int(time.time() * 1000)
+                assert store.record_muse_usage(
+                    OAuthAccess(access_token="fixture", credential_id=row.id, raw=row.data),
+                    observation,
+                )
         store.upsert_credential("deepseek", {"type": "api_key", "key": "synthetic"})
         assert controller.usage_reportable_providers() == ["deepseek", "meta-muse"]
         reports = await controller.fetch_usage(force_refresh=True)
@@ -169,7 +181,7 @@ async def test_controller_shared_cache_and_desktop_payload_include_muse(
                 assert [row["state"] for row in rows] == ["available", "available", "unavailable"]
                 assert [row["notes"] for row in rows] == [
                     None,
-                    META_MUSE_ALLOWANCE_NOTE,
+                    META_MUSE_PASSIVE_NOTE,
                     META_MUSE_NO_OBSERVATION_NOTE,
                 ]
                 assert rows[2]["fetched_at"] == 0
