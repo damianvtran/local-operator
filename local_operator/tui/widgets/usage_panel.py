@@ -32,7 +32,7 @@ offset and the focus.
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from rich.cells import cell_len
@@ -540,6 +540,23 @@ def _account_status_note(  # noqa: ANN001
     """
     unavailable = bool(getattr(report, "usage_unavailable", False))
     fetched_at = int(getattr(report, "fetched_at", 0) or 0)
+    if (
+        report.provider == "meta-muse"
+        and fetched_at
+        and not getattr(report, "credential_invalid", False)
+    ):
+        from local_operator.providers.usage import (
+            META_MUSE_ALLOWANCE_NOTE,
+            META_MUSE_OBSERVATION_TTL_MS,
+            META_MUSE_STALE_NOTE,
+        )
+
+        # Unknown Muse rows intentionally have no meters; their vintage is
+        # still load-bearing, even beside a fresher provider's title stamp.
+        if report.notes in {META_MUSE_ALLOWANCE_NOTE, META_MUSE_STALE_NOTE} or (
+            now_ms - fetched_at > META_MUSE_OBSERVATION_TTL_MS
+        ):
+            return f"last known {format_age(max(0.0, now_ms - fetched_at))}"
     if getattr(report, "credential_invalid", False):
         # The provider is named because the panel lists several accounts and
         # the note sits under one block; `/login kimi` is runnable as printed,
@@ -808,10 +825,27 @@ def build_usage_body(  # noqa: ANN001
     # paint must not pull httpx/the provider stack onto every app startup.
     from local_operator.providers.usage import (
         META_MUSE_ALLOWANCE_NOTE,
-        META_MUSE_NO_OBSERVATION_NOTE,
+        META_MUSE_OBSERVATION_TTL_MS,
+        META_MUSE_PASSIVE_NOTE,
+        META_MUSE_STALE_NOTE,
         META_MUSE_USAGE_NOTES,
     )
 
+    # A panel can remain open past the passive receipt's lifetime. Re-evaluate
+    # on paint too, so its clock never ages a verified 0% into apparently-current
+    # free capacity. Replace locally; do not mutate shared cached report objects.
+    visible_reports = []
+    for report in reports:
+        if report.provider == "meta-muse" and report.limits:
+            if report.notes != META_MUSE_PASSIVE_NOTE:
+                report = replace(report, limits=[], notes=META_MUSE_ALLOWANCE_NOTE)
+            elif now_ms - report.fetched_at > META_MUSE_OBSERVATION_TTL_MS or any(
+                limit.resets_at_ms is not None and limit.resets_at_ms <= now_ms
+                for limit in report.limits
+            ):
+                report = replace(report, limits=[], notes=META_MUSE_STALE_NOTE)
+        visible_reports.append(report)
+    reports = visible_reports
     columns = _measure_columns(reports, width, now_ms)
 
     dim = Style(color=theme_mod.semantic_color("dim"))
@@ -883,19 +917,31 @@ def build_usage_body(  # noqa: ANN001
             and report.notes in META_MUSE_USAGE_NOTES
             else None
         )
-        if muse_note and cell_len(muse_note) + 2 > width:
-            # A passive snapshot's source is a correctness qualifier, not
-            # decoration. Compact the WORDS before the layout drops meters.
-            # Fold an ordinary age into the same retained row on short panes;
-            # re-auth/unavailable remedies keep their separate status priority.
+        if muse_note:
+            # The title dates the newest provider, not this account. Carry
+            # this receipt's own age at every width and for empty-limit rows;
+            # passive age is useful BEFORE its five-minute lifetime expires.
+            age = format_age(max(0.0, now_ms - report.fetched_at)) if report.fetched_at else ""
+            vintage = f" ({age})" if age else ""
             if muse_note == META_MUSE_ALLOWANCE_NOTE:
-                age = ""
-                if account_note.startswith("last known "):
-                    age = f" ({account_note.removeprefix('last known ')})"
-                    account_note = ""
-                muse_note = f"Sign-in snapshot{age}; r won't update Muse"
-            elif muse_note == META_MUSE_NO_OBSERVATION_NOTE:
-                muse_note = "No sign-in allowance observed"
+                muse_note = (
+                    f"Stale sign-in allowance{vintage}; current usage unknown; r won't query Muse"
+                )
+            elif muse_note == META_MUSE_STALE_NOTE:
+                muse_note = (
+                    f"Stale response allowance{vintage}; current usage unknown; r won't query Muse"
+                )
+            elif muse_note == META_MUSE_PASSIVE_NOTE:
+                muse_note = f"Last response allowance{vintage}; r won't query Muse"
+            else:
+                muse_note = "Usage unknown; r won't query Muse; next Muse reply updates it"
+            if account_note.startswith("last known"):
+                account_note = ""  # The provenance row already carries that age.
+            if cell_len(muse_note) + 2 > width:
+                if report.notes == META_MUSE_PASSIVE_NOTE:
+                    muse_note = f"Response{vintage}; r won't query Muse"
+                else:
+                    muse_note = f"Unknown{vintage}; r won't query Muse"
         if account_note:
             # The two-cell indent is part of the budget the note has to fit in.
             account_note = _fit_status_note(account_note, max(1, width - 2))
@@ -925,7 +971,10 @@ def build_usage_body(  # noqa: ANN001
                 cuts.add(len(lines))
                 notes.add(len(lines) - 1)
         if not report.limits:
-            lines.append(Text("  no windows reported", style=dim))
+            # Unknown quota is not evidence that the account has no limits.
+            # The retained Muse qualifier already states the unknown outcome.
+            if not muse_note:
+                lines.append(Text("  no windows reported", style=dim))
             cuts.add(len(lines))
             blocks.append((block_start, len(lines)))
             continue
@@ -1011,6 +1060,7 @@ class UsagePanel(Static):
         # receiving `UsageDismissed`.
         self._request_generation = 0
         self._clock: float = 0.0
+        self._muse_clock_signature: tuple[tuple[int, int, bool, bool], ...] | None = None
         # Screen size plus the live bottom-dock ceiling used for the last
         # paint. The dock can grow without resizing this overlay, so Textual
         # emits no resize event for the panel itself.
@@ -1971,6 +2021,34 @@ class UsagePanel(Static):
             out.append_text(row)
         self.update(out)
 
+    def _refresh_muse_clock(self) -> None:
+        """Repaint on a Muse age step/expiry, without fetching or repaint churn."""
+        if not self.display:
+            return
+        from local_operator.providers.usage import META_MUSE_OBSERVATION_TTL_MS
+
+        now = self._now()
+        signature = tuple(
+            (
+                report.fetched_at,
+                int(max(0, now - report.fetched_at) // 60_000),
+                now - report.fetched_at > META_MUSE_OBSERVATION_TTL_MS,
+                any(
+                    limit.resets_at_ms is not None and limit.resets_at_ms <= now
+                    for limit in report.limits
+                ),
+            )
+            for report in self._reports
+            if report.provider == "meta-muse"
+        )
+        if signature and signature != self._muse_clock_signature:
+            self._muse_clock_signature = signature
+            self._repaint()
+
     def on_mount(self) -> None:
+        # The wall clock advancing emits no resize/scroll event. Poll only a
+        # cheap signature; actual paint happens on minute steps or TTL/reset
+        # crossings, and hidden/non-Muse panels do no work or network I/O.
+        self.set_interval(1, self._refresh_muse_clock)
         if self.display:
             self._repaint()

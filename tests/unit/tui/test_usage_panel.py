@@ -2728,7 +2728,10 @@ async def test_the_scrolled_panel_never_leads_with_an_annotation() -> None:
 
 @pytest.mark.parametrize("stale", [False, True])
 def test_muse_source_survives_compaction_with_its_meters(stale) -> None:
-    from local_operator.providers.usage import META_MUSE_ALLOWANCE_NOTE
+    from local_operator.providers.usage import (
+        META_MUSE_PASSIVE_NOTE,
+        META_MUSE_STALE_NOTE,
+    )
 
     now = 200 * 60_000
     report = _report(
@@ -2737,18 +2740,22 @@ def test_muse_source_survives_compaction_with_its_meters(stale) -> None:
         provider="meta-muse",
     )
     report.fetched_at = now - (120 * 60_000 if stale else 0)
-    report.notes = META_MUSE_ALLOWANCE_NOTE
+    report.notes = META_MUSE_STALE_NOTE if stale else META_MUSE_PASSIVE_NOTE
+    if stale:
+        report.limits = []
     body = build_usage_body([report], 48, now, now)
     panel = UsagePanel()
     panel._offset = 0
     rows, _ = panel._window_rows(body, 4)
     text = "\n".join(row.plain for row in rows)
-    assert "Sign-in snapshot" in text and "r won't update Muse" in text
-    assert "31%" in text and "12%" in text
     if stale:
-        assert "2h ago" in text
-    source = next(row for row in body.lines if "Sign-in snapshot" in row.plain)
-    assert source.style == Style(color=theme_mod.semantic_color("fg"))
+        assert "Unknown (2h ago)" in text and "r won't query Muse" in text
+        assert "31%" not in text and "12%" not in text
+    else:
+        assert "Response (just now)" in text and "r won't query Muse" in text
+        assert "31%" in text and "12%" in text
+        source = next(row for row in body.lines if "Response (just now)" in row.plain)
+        assert source.style == Style(color=theme_mod.semantic_color("fg"))
 
 
 def test_unknown_muse_explanation_survives_compaction_without_inventing_numbers() -> None:
@@ -2760,7 +2767,7 @@ def test_unknown_muse_explanation_survives_compaction_without_inventing_numbers(
     panel._offset = 0
     rows, _ = panel._window_rows(body, 2)
     text = "\n".join(row.plain for row in rows)
-    assert "No allowance observation recorded." in text
+    assert "Unknown; r won't query Muse" in text
     assert "%" not in text
     assert body.notes
     assert rows[1].style == Style(color=theme_mod.semantic_color("fg"))
