@@ -411,7 +411,6 @@ class HubSyncRunner:
                         only_ids=ids.get(kind, set()),
                         record=False,
                     )
-                    )
                 )
 
         await asyncio.gather(one("agent"), one("team"), one("skill"))
@@ -453,24 +452,28 @@ class HubSyncRunner:
                 # multi-tick source outage burned the dead-letter cap on a
                 # healthy link -- round-2 R12b). Skip with the check's own named
                 # reason; nothing is attempted and nothing is settled.
-                self._mark_push_skipped(ctx, c, str(c.reason or "unavailable"))
+                await self._offload(self._mark_push_skipped, ctx, c, str(c.reason or "unavailable"))
                 continue
             item = doc.get("items", {}).get(st.item_key(c.kind, c.local_id), {})
             if not st.push_due(item, settings.interval_min) or not st.auto_apply_due(item):
                 continue
-            record = await asyncio.to_thread(read_baseline, ctx.config_dir, c.kind, c.local_id)
-            eligibility = await asyncio.to_thread(svc.push_eligibility, ctx, record)
+            # Every blocking worker we add goes through ``_offload``: the
+            # reload admission counts shield-owned futures, and a raw
+            # ``to_thread`` future would leave a cancelled tick's reader/writer
+            # invisible to ``reload_blocker`` (the update lane's no-kill gate).
+            record = await self._offload(read_baseline, ctx.config_dir, c.kind, c.local_id)
+            eligibility = await self._offload(svc.push_eligibility, ctx, record)
             if not eligibility.get("can_auto_push"):
-                await asyncio.to_thread(
+                await self._offload(
                     self._mark_push_skipped,
                     ctx,
                     c,
                     str(eligibility.get("reason") or "unsupported-precondition"),
                 )
                 continue
-            transporter, refused = self._push_transport(ctx, record)
+            transporter, refused = await self._offload(self._push_transport, ctx, record)
             if transporter is None:
-                await asyncio.to_thread(self._mark_push_skipped, ctx, c, refused or "no-credential")
+                await self._offload(self._mark_push_skipped, ctx, c, refused or "no-credential")
                 continue
             try:
                 await self._push_one(ctx, c, record, transporter, report)
@@ -574,7 +577,7 @@ class HubSyncRunner:
             document_builder=self._document_builder(ctx, c),
         )
         report.skipped = None
-        await asyncio.to_thread(self._record_push, ctx, c, outcome)
+        await self._offload(self._record_push, ctx, c, outcome)
 
     def _document_builder(self, ctx: svc.HubSyncContext, c: Any) -> Any:
         """The per-kind wire-document builder the push closes over (one per attempt)."""
