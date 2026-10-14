@@ -77,6 +77,7 @@ from local_operator.compaction.marker import (
     build_compaction_marker,
     render_compaction_marker,
     replayed_user_message,
+    with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import ApprovalGate, ask_approval
@@ -18812,6 +18813,36 @@ class Session:
             )
             return True
 
+    def _capture_elision_budget(self, compaction_api: Any, plan: _CompactionPlan) -> int | None:
+        """The byte ceiling capture elision targets at a pass, or ``None``.
+
+        The target is the SAME band the auto-continue gate measures against --
+        ``WIRE_RECOVERY_BAND`` x the resolved wire trigger -- because that is
+        the definition of "created real headroom" this package already uses: a
+        pass that lands there schedules its continuation, while one that
+        merely shaved a capture and is still over the trigger would re-fire
+        next turn (the dead-loop the band exists to prevent, restated in the
+        trigger's own units).
+
+        ``None`` when the byte trigger is disabled or the resolvers are
+        absent: a session that never opted into byte pressure keeps exactly
+        its token-only behaviour, and duck-typed test doubles that predate the
+        knob do no elision work at all. A ruler failure is ``None`` too -- the
+        band check's posture: it may never fail a pass.
+        """
+        resolve: Any = getattr(compaction_api, "resolve_wire_bytes_trigger", None)
+        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
+        if not callable(resolve) or band is None:
+            return None
+        try:
+            trigger = int(resolve(plan.settings))
+        except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
+            logger.debug("wire trigger resolution failed; capture elision skipped", exc_info=True)
+            return None
+        if trigger <= 0:
+            return None
+        return int(float(band) * trigger)
+
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
 
@@ -19626,6 +19657,38 @@ class Session:
                 preserved_user_turns = list(capped.turns)
                 preserved_turns_dropped = capped.genuine_dropped
                 preserved_turns_shed = capped.injections_dropped
+            # Capture elision, LIVE half: reclaim SUPERSEDED captures from the
+            # kept window until the recorded recovery band is met, and record
+            # the count on this pass's payload so replay re-applies EXACTLY
+            # this frontier (``build_llm_history`` consumes it via
+            # ``apply_capture_elisions``; both sides then send the same
+            # projection). Only captures carrying harness provenance are
+            # eligible: user uploads, unknown images and every stream's LATEST
+            # frame can never be elided, and the rung runs ONLY here, at a
+            # real pass -- no per-turn churn -- and the source rows stay
+            # untouched because this is a projection, not an edit. The band is
+            # measured on the kept rows; the gate's own fresh render remains
+            # the authority on the whole request.
+            applied_captures = 0
+            elision_budget = self._capture_elision_budget(compaction_api, plan)
+            if elision_budget is not None:
+                from local_operator.compaction.pruning import (
+                    reclaim_captures_to_wire_budget,
+                )
+
+                elision_rows = [message for message in kept if isinstance(message, Message)]
+                if elision_rows:
+                    projected_rows, applied_captures = reclaim_captures_to_wire_budget(
+                        elision_rows, budget=elision_budget
+                    )
+                    if applied_captures:
+                        projected_iter = iter(projected_rows)
+                        kept = [
+                            next(projected_iter) if isinstance(message, Message) else message
+                            for message in kept
+                        ]
+            if applied_captures:
+                preserve_data = with_capture_elision_frontier(preserve_data, applied_captures)
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,
