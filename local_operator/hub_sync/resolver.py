@@ -142,33 +142,26 @@ class MergeModel:
 
 
 def resolve_merge_model(config_manager: Any) -> MergeModel:
-    """``hub.merge_model`` if set, else the user's default model. Never a fallback chain.
+    """The user's CURRENT default model; never a hub-specific override or fallback chain.
+
+    A hub merge is ordinary model work, so it uses whatever the operator has
+    configured as their default right now -- resolved FRESH on each call, as the
+    addendum requires ('remove hub model override, resolve fresh user default
+    only'). There is deliberately no ``hub.merge_model`` pin: a second model
+    preference beside the real one is a silent way for reviews to land on a
+    tier the operator never chose.
 
     Raises:
-        ResolverError: ``model-unavailable`` for a malformed override, no
-            configured default, or an unknown provider. A malformed override is a
-            NAMED refusal (not a silent fall-through) so a typo is not invisible.
+        ResolverError: ``model-unavailable`` when no default is configured or the
+            provider is unknown.
     """
 
-    from local_operator.hub_sync.settings import HubSyncSettings
+    from local_operator.bootstrap import resolve_hosting_model
 
-    # read_fresh, not from_config: ``hub.merge_model`` is a LIVE key and the daemon's
-    # manager is the one it loaded at boot, so an edit from the TUI/CLI would go unseen.
-    override = HubSyncSettings.read_fresh(config_manager).merge_model
-    if override:
-        provider, _, model_id = override.partition("/")
-        if not provider.strip() or not model_id.strip():
-            raise ResolverError(
-                "model-unavailable", f"hub.merge_model={override!r} lacks provider/model"
-            )
-        hosting, model = provider.strip(), model_id.strip()
-    else:
-        from local_operator.bootstrap import resolve_hosting_model
-
-        try:
-            hosting, model = resolve_hosting_model(config_manager, None, None, None)
-        except Exception as exc:  # noqa: BLE001 - ValueError / ModelNotConfiguredError
-            raise ResolverError("model-unavailable", str(exc)) from None
+    try:
+        hosting, model = resolve_hosting_model(config_manager, None, None, None)
+    except Exception as exc:  # noqa: BLE001 - ValueError / ModelNotConfiguredError
+        raise ResolverError("model-unavailable", str(exc)) from None
     try:
         from local_operator.model.configure import build_model_spec
 

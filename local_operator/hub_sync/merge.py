@@ -1239,5 +1239,35 @@ def replace_field(inp: FieldInput, *, take: Literal["local", "remote"]) -> Merge
     )
 
 
+def deletion_covered(result: "MergeResult") -> bool:
+    """Whether a short result is FULLY explained by deterministic ancestry removals.
+
+    The blanket "large-shrink" refusal existed because a much-shorter merge could
+    be a model or an add/add inference silently dropping content. But a
+    predictable one-sided removal (ancestry shows a section was removed and the
+    merge honored it) legitimately shrinks the text. This distinguishes the two
+    WITHOUT letting a model self-certify: it is True only when every dropped span
+    is attributable to a deterministic removal, nothing is unresolved, and no LLM
+    produced the merge (a model's own coverage claim is exactly what the guard
+    exists to distrust). Unexplained loss therefore still fails closed.
+    """
+    if result.unresolved:
+        return False
+    if result.engine.mode == "llm":
+        return False
+    removed = 0
+    for region in result.regions:
+        if region.prov == "unresolved":
+            return False
+        if region.prov == "removal-honored":
+            removed += 1
+            continue
+        # A region that DROPPED text must name the deterministic removal that
+        # accounts for it; anything else is unexplained loss.
+        if region.dropped and region.removed_by not in ("local", "remote", "both"):
+            return False
+    return removed > 0
+
+
 def dumps(result: MergeResult) -> str:
     return json.dumps(result.to_json(), ensure_ascii=False, sort_keys=True)

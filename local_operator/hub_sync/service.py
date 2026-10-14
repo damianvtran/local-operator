@@ -505,6 +505,18 @@ def merge_item(
     )
 
 
+def _deletion_covered(report: ItemMergeReport) -> bool:
+    """True when every field's shrink is explained by deterministic removals.
+
+    The item-level mirror of :func:`merge.deletion_covered`: an item is covered
+    only if EVERY merged field is (a single unexplained field keeps the refusal).
+    """
+    from local_operator.hub_sync.merge import deletion_covered
+
+    merged = [r for r in report.fields if r.outcome == "merged"]
+    return bool(merged) and all(deletion_covered(r) for r in merged)
+
+
 def _missing_roles(ctx: HubSyncContext, results: Sequence[MergeResult]) -> tuple[str, ...]:
     """A roster naming a role nobody has installed is a warning, never a refusal (A7)."""
 
@@ -660,9 +672,10 @@ def apply_one(
             outcome=report.outcome,
         )
     if auto and report.outcome == "merged":
-        # Auto-update only ever applies a clean merge (B3.1): a large shrink or an
-        # unknown baseline waits for a human.
-        if "large-shrink" in report.warnings:
+        # Auto-update only ever applies a clean merge (B3.1): an UNEXPLAINED large
+        # shrink or an unknown baseline waits for a human. A shrink fully explained
+        # by deterministic ancestry removals is NOT unexplained loss and applies.
+        if "large-shrink" in report.warnings and not _deletion_covered(report):
             return fail(
                 "merge-refused", "the merged text is much shorter than both sides", "needs-review"
             )
