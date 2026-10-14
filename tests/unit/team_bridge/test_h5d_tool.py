@@ -19,7 +19,6 @@ from local_operator.team_bridge.tool import (
     build_bridge_tool,
     execute_bridge,
 )
-
 from tests.unit.team_bridge.test_client import FakeStore, _ok
 
 TENANT = "ten_1"
@@ -44,9 +43,7 @@ def _gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
-    monkeypatch.setattr(
-        host_mod, "admission_refusal", lambda runtime, *, is_read=False: None
-    )
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 
 def _owner() -> OwnerSnapshot:
@@ -110,9 +107,7 @@ async def test_the_tool_refuses_the_decide_word_outright(tmp_path) -> None:
         owner=_owner(),
         session_id="s1",
     )
-    outcome = await execute_bridge(
-        runtime, {"op": "decide", "message_id": "bmsg_1"}
-    )
+    outcome = await execute_bridge(runtime, {"op": "decide", "message_id": "bmsg_1"})
     assert outcome["ok"] is False and outcome["code"] == "not_permitted"
     assert "human" in outcome["error"]
 
@@ -129,14 +124,18 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
         owner=owner,
         session_id="s1",
     )
-    working = await execute_bridge(runtime, {"op": "ack", "message_id": "bmsg_1", "state": "working"})
+    working = await execute_bridge(
+        runtime, {"op": "ack", "message_id": "bmsg_1", "state": "working"}
+    )
     assert working["ok"] is True and "bmsg_1" in runtime.claims
 
     # A second session (different runtime) cannot grab the same message.
     other = BridgeRuntime(
         client=runtime.client, config_dir=tmp_path, tenant_id=TENANT, owner=owner, session_id="s2"
     )
-    contended = await execute_bridge(other, {"op": "ack", "message_id": "bmsg_1", "state": "working"})
+    contended = await execute_bridge(
+        other, {"op": "ack", "message_id": "bmsg_1", "state": "working"}
+    )
     assert contended["ok"] is False and contended["code"] == "claimed"
 
     done = await execute_bridge(runtime, {"op": "ack", "message_id": "bmsg_1", "state": "done"})
@@ -151,7 +150,10 @@ async def test_a_reply_pairs_thread_and_to_and_the_send_confirms_in_the_outbox(t
     requests: list[httpx.Request] = []
     runtime = BridgeRuntime(
         client=_client(
-            lambda request: (requests.append(request), _ok({"message": {"id": "bmsg_9"}}, status=201))[1]
+            lambda request: (
+                requests.append(request),
+                _ok({"message": {"id": "bmsg_9"}}, status=201),
+            )[1]
         ),
         config_dir=tmp_path,
         tenant_id=TENANT,

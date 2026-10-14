@@ -458,9 +458,11 @@ _PRODUCER_DDL_STATEMENTS = (
     "recipient_account_id TEXT NOT NULL, recipient_endpoint_id TEXT NOT NULL, "
     "body_sha256 TEXT NOT NULL, template_sha256 TEXT NOT NULL, prompt_version TEXT NOT NULL, "
     "model TEXT NOT NULL, verdict TEXT NOT NULL, categories_digest TEXT NOT NULL, "
-    "envelope_digest TEXT NOT NULL, admission_revision TEXT NOT NULL, policy_epoch INTEGER NOT NULL, "
-    "creator_generation INTEGER NOT NULL, claim_hash TEXT NOT NULL, claim_session_id TEXT NOT NULL, "
-    "claim_generation INTEGER NOT NULL, claim_expires_at REAL NOT NULL, display_digest TEXT NOT NULL, "
+    "envelope_digest TEXT NOT NULL, admission_revision TEXT NOT NULL, "
+    "policy_epoch INTEGER NOT NULL, creator_generation INTEGER NOT NULL, "
+    "claim_hash TEXT NOT NULL, claim_session_id TEXT NOT NULL, "
+    "claim_generation INTEGER NOT NULL, claim_expires_at REAL NOT NULL, "
+    "display_digest TEXT NOT NULL, "
     "fingerprint TEXT NOT NULL, phase TEXT NOT NULL, created_at REAL NOT NULL, "
     "UNIQUE (owner_key, message_id))",
 )
@@ -476,14 +478,10 @@ def _ensure_producer_table(conn: sqlite3.Connection) -> None:
 
     existing = {
         row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     }
     if "screened_request_deliveries" in existing:
-        columns = {
-            r[1] for r in conn.execute("PRAGMA table_info(screened_request_deliveries)")
-        }
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(screened_request_deliveries)")}
         if not _PRODUCER_COLUMNS <= columns:
             raise StoreRefused(
                 "schema_damaged",
@@ -1086,9 +1084,10 @@ class Store:
                 r[1] for r in conn.execute("PRAGMA table_info(screened_request_deliveries)")
             }
             if not _PRODUCER_COLUMNS <= producer_columns:
+                missing = sorted(_PRODUCER_COLUMNS - producer_columns)
                 raise StoreRefused(
                     "schema_damaged",
-                    f"screened_request_deliveries lacks {sorted(_PRODUCER_COLUMNS - producer_columns)}",
+                    f"screened_request_deliveries lacks {missing}",
                 )
             return
 
@@ -2343,10 +2342,12 @@ class Store:
                 "credential_id, designated_session_id, consent_version, consent_ref, thread_id, "
                 "message_kind, request_state, request_expires_at, request_ref, sender_account_id, "
                 "sender_endpoint_id, recipient_account_id, recipient_endpoint_id, body_sha256, "
-                "template_sha256, prompt_version, model, verdict, categories_digest, envelope_digest, "
-                "admission_revision, policy_epoch, creator_generation, claim_hash, claim_session_id, "
-                "claim_generation, claim_expires_at, display_digest, fingerprint, phase, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "template_sha256, prompt_version, model, verdict, categories_digest, "
+                "envelope_digest, admission_revision, policy_epoch, creator_generation, "
+                "claim_hash, claim_session_id, claim_generation, claim_expires_at, "
+                "display_digest, fingerprint, phase, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     str(delivery_ref),
                     key,
@@ -2534,8 +2535,7 @@ class Store:
                 or str(receipt["admission_revision"])
                 != str(envelope.get("admission_revision") or "")
                 or int(receipt["policy_epoch"]) != int(envelope.get("policy_epoch", -1))
-                or int(receipt["creator_generation"])
-                != int(envelope.get("creator_generation", -2))
+                or int(receipt["creator_generation"]) != int(envelope.get("creator_generation", -2))
             ):
                 return ("proof_drift", "the stored screening proof changed")
             policy = conn.execute(

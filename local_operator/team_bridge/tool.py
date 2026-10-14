@@ -33,11 +33,11 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from local_operator.harness.types import AgentTool, ToolContext, ToolResult
+from local_operator.harness.types import AgentTool, TextContent, ToolContext, ToolResult
 
 from .client import TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
@@ -130,9 +130,7 @@ def body_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-async def execute_bridge(
-    runtime: BridgeRuntime, args: dict[str, Any]
-) -> dict[str, Any]:
+async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
 
@@ -175,9 +173,7 @@ async def execute_bridge(
         if not params.message_id or not params.body_sha256:
             return _error("take_up needs message_id and body_sha256 (S-20)")
         try:
-            result = await runtime.client.message(
-                params.message_id, tenant_id=runtime.tenant_id
-            )
+            result = await runtime.client.message(params.message_id, tenant_id=runtime.tenant_id)
         except Exception as failure:  # BridgeRefusal/BridgeUnreachable -> model-readable
             return _error(f"could not fetch the message: {failure}", code="fetch_failed")
         text = _full_body_text(result)
@@ -200,10 +196,11 @@ async def execute_bridge(
     if params.op == "ack":
         if not params.message_id or params.state is None:
             return _error("ack needs message_id and state (working|done)")
-        from .store import Store, StoreRefused
         import time as _time
 
-        store = Store(runtime.config_dir)
+        from .store import Store, StoreRefused
+
+        store = Store(Path(runtime.config_dir))
         if params.state == "working":
             token = str(uuid.uuid4())
             try:
@@ -237,7 +234,10 @@ async def execute_bridge(
         return {"ok": True, "state": "done", "message_id": params.message_id}
 
     if params.op in ("send", "reply"):
-        if not params.to or len([k for k in ("endpoint_id", "account_id") if params.to.get(k)]) != 1:
+        if (
+            not params.to
+            or len([k for k in ("endpoint_id", "account_id") if params.to.get(k)]) != 1
+        ):
             return _error("send/reply name `to` as exactly one of endpoint_id/account_id")
         if not params.text.strip():
             return _error("send/reply need non-empty text")
@@ -255,7 +255,9 @@ async def execute_bridge(
             expires_at=params.expires_at,
         )
         try:
-            result = await send_from_outbox(runtime.client, outbox, intent, tenant_id=runtime.tenant_id)
+            result = await send_from_outbox(
+                runtime.client, outbox, intent, tenant_id=runtime.tenant_id
+            )
         except Exception as failure:
             return _error(f"the send did not confirm: {failure}", code="send_unconfirmed")
         message = (result or {}).get("message") or {}
@@ -313,13 +315,13 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="bridge",
-                content=[{"type": "text", "text": content}],
+                content=[TextContent(text=content)],
                 details=outcome,
             )
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="bridge",
-            content=[{"type": "text", "text": str(outcome.get("error") or "refused")}],
+            content=[TextContent(text=str(outcome.get("error") or "refused"))],
             details=outcome,
             is_error=True,
         )

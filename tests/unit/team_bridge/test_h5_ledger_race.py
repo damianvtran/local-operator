@@ -14,14 +14,16 @@ ledger construction.
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
 from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import decide as decide_mod
 from local_operator.team_bridge.client import BridgeSignInRequired, BridgeUnreachable
-from local_operator.team_bridge.decide_intents import DecideIntents, attempt_decide_intent
+from local_operator.team_bridge.decide_intents import (
+    DecideIntents,
+    attempt_decide_intent,
+)
 from tests.unit.team_bridge.test_h5_intents_provenance import _record, _runtime
 
 LATE_ERRORS = [BridgeUnreachable, BridgeSignInRequired]
@@ -68,8 +70,12 @@ async def test_a_late_transient_or_signin_cannot_downgrade_a_settled_receipt(
         raise late_error("late settlement")
 
     monkeypatch.setattr(decide_mod, "decide_from_human_answer", barred)
-    first = asyncio.create_task(attempt_decide_intent(runtime.client, intents, intent, runtime=runtime))
-    second = asyncio.create_task(attempt_decide_intent(runtime.client, intents, intent, runtime=runtime))
+    first = asyncio.create_task(
+        attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
+    )
+    second = asyncio.create_task(
+        attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
+    )
     await asyncio.wait_for(asyncio.gather(first, second), 5.0)
     assert entered["n"] == 2  # exactly two transports entered the call
     row = intents.get(intent.intent_id)
@@ -126,8 +132,12 @@ async def test_a_late_failure_then_a_late_success_settles_the_same_canonical_rec
         return {"request": {"receipt": "orig-1"}}
 
     monkeypatch.setattr(decide_mod, "decide_from_human_answer", barred)
-    first = asyncio.create_task(attempt_decide_intent(runtime.client, intents, intent, runtime=runtime))
-    second = asyncio.create_task(attempt_decide_intent(runtime.client, intents, intent, runtime=runtime))
+    first = asyncio.create_task(
+        attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
+    )
+    second = asyncio.create_task(
+        attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
+    )
     await asyncio.wait_for(asyncio.gather(first, second), 5.0)
     assert entered["n"] == 2
     row = intents.get(intent.intent_id)

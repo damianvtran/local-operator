@@ -62,12 +62,10 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-
-import re
-import unicodedata
 
 import httpx
 
@@ -514,9 +512,7 @@ def _require_decision(decision: Any, decided_via: Any) -> tuple[str, str]:
         raise ValueError(f"decision must be one of {VALID_DECISIONS!r}; got {decision!r}")
     via = str(decided_via or "bearer-only")
     if via not in VALID_DECIDED_VIA:
-        raise ValueError(
-            f"decided_via must be one of {VALID_DECIDED_VIA!r} in v1; got {via!r}"
-        )
+        raise ValueError(f"decided_via must be one of {VALID_DECIDED_VIA!r} in v1; got {via!r}")
     return decision, via
 
 
@@ -529,6 +525,7 @@ def _require_send_text(send_type: str, text: str) -> str:
             f"a {send_type} body is at most {cap} bytes of NFC-normalized text; got {size}"
         )
     return normalized
+
 
 #: §6.1's allowlist cap: a bounded replace-set of at most this many entries.
 ALLOWLIST_MAX_ENTRIES = 200
@@ -1175,7 +1172,6 @@ class TeamBridgeClient:
         access = await self._guarded_access(expected_account_id)
         return await self._send("PUT", "/messaging/allowlist", body=body, access=access)
 
-
     async def send(
         self,
         *,
@@ -1209,7 +1205,10 @@ class TeamBridgeClient:
         """
         if type not in SEND_TYPES:
             raise ValueError(f"type must be one of {SEND_TYPES!r}; got {type!r}")
-        if not isinstance(to, Mapping) or len([key for key in ("endpoint_id", "account_id") if to.get(key)]) != 1:
+        if (
+            not isinstance(to, Mapping)
+            or len([key for key in ("endpoint_id", "account_id") if to.get(key)]) != 1
+        ):
             raise ValueError(
                 "every send names `to` as exactly one of {endpoint_id} or {account_id} "
                 "(§6.2) — thread_id never stands alone"
@@ -1359,6 +1358,7 @@ class TeamBridgeClient:
         if limit is not None:
             params["limit"] = int(limit)
         return await self._send("GET", "/messaging/decisions", params=params, access=access)
+
 
 def _require_body_within(body: Mapping[str, Any], cap: int) -> None:
     """Refuse a locally-detected over-bound body with the server's own class.

@@ -49,6 +49,7 @@ def bridge_scope_digest(scope: Mapping[str, Any]) -> str:
 
     return hashlib.sha256(bridge_scope_json(scope).encode("utf-8")).hexdigest()
 
+
 #: The issuance row's lifecycle. ``claimed`` means the durable record exists
 #: and the enqueue attempt is in flight or was interrupted (a retry may still
 #: look the ask up in the ask log); ``raised`` is terminal until the ask is
@@ -310,7 +311,14 @@ class AskIssuance:
             conn.execute(
                 "UPDATE ask_issuance SET state = ?, reason = ?, updated_at = ? "
                 "WHERE owner_key = ? AND message_id = ? AND generation = ?",
-                (STATE_UNRECOVERABLE, str(reason)[:200], time.time(), key, str(message_id), generation),
+                (
+                    STATE_UNRECOVERABLE,
+                    str(reason)[:200],
+                    time.time(),
+                    key,
+                    str(message_id),
+                    generation,
+                ),
             )
 
     def pending(self, owner: Any) -> list[dict[str, Any]]:

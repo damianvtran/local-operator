@@ -9154,8 +9154,7 @@ class Session:
                                 if _raw_scope:
                                     try:
                                         account_display = str(
-                                            _json.loads(_raw_scope).get("sender_account_id")
-                                            or ""
+                                            _json.loads(_raw_scope).get("sender_account_id") or ""
                                         )
                                     except ValueError:
                                         account_display = ""
@@ -9618,10 +9617,7 @@ class Session:
         # asks of a burst arriving while the CoS is mid-turn. Raise the ask
         # from here too; the hook is idempotent by issuance identity, so a
         # re-delivery that ALSO reaches the live arm cannot double-ask.
-        if (
-            isinstance(message, CustomMessage)
-            and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE
-        ):
+        if isinstance(message, CustomMessage) and message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
             try:
                 self._maybe_raise_bridge_ask(message)
             except Exception:  # noqa: BLE001 — TB-07: the row is already
@@ -9798,7 +9794,7 @@ class Session:
             durable = True
         finally:
             queue.finish_row_commit(row_id, durable=durable)
-        if wrote and durable and message.custom_type == ASK_RESPONSE_MESSAGE_TYPE:
+        if wrote and durable and getattr(message, "custom_type", "") == ASK_RESPONSE_MESSAGE_TYPE:
             # H5b: the response row is now DURABLE, and the revision window is
             # closed at consumption (the row above was re-resolved from the
             # fold immediately before the write) — THAT is the moment a
@@ -9868,10 +9864,7 @@ class Session:
             return
         import json as _json
 
-        from local_operator.team_bridge.decide import (
-            NotAHumanDecision,
-            human_decision,
-        )
+        from local_operator.team_bridge.decide import NotAHumanDecision, human_decision
 
         frozen: list[tuple[Any, Mapping[str, Any]]] = []
         for question in details.get("questions") or ():
@@ -9892,9 +9885,7 @@ class Session:
             scope = question.get("bridge")
             if not isinstance(scope, Mapping):
                 continue
-            picks = [
-                str(value) for value in (answers.get(str(question.get("id") or "")) or ())
-            ]
+            picks = [str(value) for value in (answers.get(str(question.get("id") or "")) or ())]
             word = picks[0].lower() if len(picks) == 1 else ""
             try:
                 decision = human_decision(
@@ -9985,9 +9976,7 @@ class Session:
         async def _deliver() -> None:
             for intent in created:
                 try:
-                    await attempt_decide_intent(
-                        runtime.client, intents, intent, runtime=runtime
-                    )
+                    await attempt_decide_intent(runtime.client, intents, intent, runtime=runtime)
                 except Exception:  # noqa: BLE001 — contained: logged, never
                     # raised into the append path; a recorded intent keeps its
                     # state and only an explicit human Retry replays it.
@@ -10108,7 +10097,11 @@ class Session:
             # fenced) is not an authorized source for a human ask — a replayed
             # opaque reference cannot promote it.
             ledger.claim(
-                owner, bound, {}, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, "handoff_not_authorized")
             return
@@ -10116,13 +10109,21 @@ class Session:
             # A forged locator cannot promote a screened note: the STORED kind
             # decides, and a non-request envelope means no ask exists here.
             ledger.claim(
-                owner, bound, {}, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, "stored_kind_not_request")
             return
         if str(envelope["request_state"]) != "pending":
             ledger.claim(
-                owner, bound, {}, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                {},
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, "request_not_pending")
             return
@@ -10175,7 +10176,11 @@ class Session:
         }
         if not scope_matches_runtime(scope, runtime):
             ledger.claim(
-                owner, bound, scope, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, "original_scope_drift")
             return
@@ -10187,7 +10192,11 @@ class Session:
         current_code, _detail = store.verify_original_envelope_current(owner, envelope)
         if current_code:
             ledger.claim(
-                owner, bound, scope, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, current_code)
             return
@@ -10213,7 +10222,11 @@ class Session:
             # received fields and matching the stored one. A copied
             # ref+digest with substituted sender/thread/excerpt lands HERE.
             ledger.claim(
-                owner, bound, scope, delivery_ref=str(envelope["delivery_ref"]), local_row_id=local_row_id
+                owner,
+                bound,
+                scope,
+                delivery_ref=str(envelope["delivery_ref"]),
+                local_row_id=local_row_id,
             )
             ledger.mark_unrecoverable(owner, bound, "display_context_mismatch")
             return
@@ -10231,10 +10244,12 @@ class Session:
             owner,
             bound,
             scope,
-            sender=str(meta.get("sender_name") or "") if use_hints else str(envelope["sender_account_id"]),
-            summary=str(meta.get("thread_id") or "")
-            if use_hints
-            else str(envelope["thread_id"]),
+            sender=(
+                str(meta.get("sender_name") or "")
+                if use_hints
+                else str(envelope["sender_account_id"])
+            ),
+            summary=str(meta.get("thread_id") or "") if use_hints else str(envelope["thread_id"]),
             delivery_ref=str(envelope["delivery_ref"]),
             local_row_id=local_row_id,
         )
@@ -10334,9 +10349,7 @@ class Session:
                 str(result.get("error") or "refused"),
             )
 
-    def _bridge_ask_lookup(
-        self, message_id: str, scope: Mapping[str, Any]
-    ) -> tuple[str, str, str]:
+    def _bridge_ask_lookup(self, message_id: str, scope: Mapping[str, Any]) -> tuple[str, str, str]:
         """TRI-STATE ask identity (S-10): found-exact / absent / unavailable.
 
         A hit must match the question id AND the question's stored bridge
@@ -10389,7 +10402,7 @@ class Session:
 
         return bridge_scope_digest(scope)
 
-    async def _refresh_stale_pending_standing(self, owner: Any) -> dict[str, dict]:
+    async def _refresh_stale_pending_standing(self, owner: Any) -> dict[str, dict[str, Any]]:
         """S-8: ONE explicit trusted-boundary standing read per stale pending.
 
         Runs at the reconcile boundary (never a timer, never a passive poll):
@@ -10406,7 +10419,7 @@ class Session:
         unrelated work.
         """
 
-        self._standing_grants: dict[str, dict] = {}
+        self._standing_grants: dict[str, dict[str, Any]] = {}
         runtime = self.bridge_runtime
         if runtime is None:
             return self._standing_grants
@@ -10485,8 +10498,7 @@ class Session:
                 != str(envelope["recipient_account_id"])
                 or str(getattr(ref, "thread_id", "") or "") != str(envelope["thread_id"])
                 or (
-                    ref.body_hash is not None
-                    and str(ref.body_hash) != str(envelope["body_sha256"])
+                    ref.body_hash is not None and str(ref.body_hash) != str(envelope["body_sha256"])
                 )
             ):
                 # Failed/withdrawn/uncertain rows are held HERE and never reach
@@ -10593,7 +10605,10 @@ class Session:
             return None
         if canonical_display_digest(raw) != str(envelope.get("display_digest") or ""):
             return None
-        return {field: raw[field] for field in raw}
+        # ``str`` here is a NO-OP narrowing for the type checker: the guard
+        # above already proved every value is a true ``str``, so nothing is
+        # coerced into a pass and the five keys stay the canonical set.
+        return {str(field): str(value) for field, value in raw.items()}
 
     def _bridge_display_excerpt(self, record: Mapping[str, Any]) -> str:
         """The bounded excerpt for a RENDER, from the sanctioned store only.
@@ -11210,9 +11225,9 @@ class Session:
             return _refuse(_ask_refusal_copy(None))
         question = None
         for candidate in record.get("questions") or ():
-            if isinstance(candidate, Mapping) and str(
-                candidate.get("question_id") or ""
-            ) == str(question_id):
+            if isinstance(candidate, Mapping) and str(candidate.get("question_id") or "") == str(
+                question_id
+            ):
                 question = candidate
                 break
         if question is None:
@@ -11280,10 +11295,10 @@ class Session:
                 and queue._now() > window_end
             )
         )
-        forged_decline = (
-            status in (_asks_store.STATUS_DECLINED, _asks_store.STATUS_DISMISSED)
-            and queue._is_bridge_ask_record(record)
-        )
+        forged_decline = status in (
+            _asks_store.STATUS_DECLINED,
+            _asks_store.STATUS_DISMISSED,
+        ) and queue._is_bridge_ask_record(record)
         if forged_decline and not bridge_decide_grant_seen(
             session_id=_session_id,
             ask_id=ask_id,

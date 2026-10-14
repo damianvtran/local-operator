@@ -28,8 +28,13 @@ from types import SimpleNamespace
 import pytest
 
 from local_operator.asks.queue import AskQueue
+
+# Bound at IMPORT time, before the autouse ``_boundaries`` fixture swaps the
+# module attribute for the receive-side fake: a function-local import would
+# resolve to the FAKE and 'restoring' it would restore the fake.
 from local_operator.harness.message_types import (
     BRIDGE_META_KEYS,
+    display_context_digest,
     validate_bridge_meta,
 )
 from local_operator.session.runtime.inbox import InboxLine
@@ -39,15 +44,15 @@ from local_operator.team_bridge import authority as fence_mod
 from local_operator.team_bridge import store as bridge_store
 from local_operator.team_bridge.ask_issuance import AskIssuance
 from local_operator.team_bridge.asks_bridge import enqueue_bridge_request_ask
-# Bound at IMPORT time, before the autouse ``_boundaries`` fixture swaps the
-# module attribute for the receive-side fake: a function-local import would
-# resolve to the FAKE and 'restoring' it would restore the fake.
+from local_operator.team_bridge.connector.wake import (
+    EXCERPT_MAX_CHARS,
+    build_bridge_meta,
+)
 from local_operator.team_bridge.store import Store as _RealStore
-from local_operator.team_bridge.connector.wake import EXCERPT_MAX_CHARS, build_bridge_meta
-from tests.unit.asks.test_queue import BASE, FakeSession as QueueFakeSession
+from tests.unit.asks.test_queue import BASE
+from tests.unit.asks.test_queue import FakeSession as QueueFakeSession
 
 SENDER = "dana@acme.example"
-from local_operator.harness.message_types import display_context_digest
 
 BODY_HASH = "9f2a" * 16
 #: The harness's own accepted transcript row id the receive hook passes to the
@@ -254,7 +259,10 @@ def test_the_issuance_ledger_is_generation_scoped_and_frozen_scope(tmp_path) -> 
     # A second claim of the SAME message under the same generation returns the
     # SAME durable row (the scope captured first stands; attempts only count).
     again = ledger.claim(
-        owner, "bmsg_1", {"v": 1, "kind": "bridge", "drifted": True}, local_row_id="peer-" + "ab" * 16
+        owner,
+        "bmsg_1",
+        {"v": 1, "kind": "bridge", "drifted": True},
+        local_row_id="peer-" + "ab" * 16,
     )
     assert again["scope_json"] == first["scope_json"]
     # ``claim`` returns the row as it stood BEFORE its own attempt increment
@@ -322,18 +330,13 @@ def test_the_receipt_trust_matrix(tmp_path, monkeypatch) -> None:
     # import here binds the FAKE and the case cannot build a real store at all.
     # The real class therefore goes back BEFORE the import, not after it.
     monkeypatch.setattr(bridge_store, "Store", _RealStore)
-    from tests.unit.team_bridge.test_h5_envelope_negatives import (
-        DREF,
-        MESSAGE_ID,
-        _owner as _env_owner,
-        _seed_store,
-        _stamp,
-    )
-
     # The seeder binds ``Store`` at ITS import, so this assert is the contract
     # the restore above exists for: a fake here means the case would silently
     # exercise a different store than the one the product reads.
     import tests.unit.team_bridge.test_h5_envelope_negatives as _neg
+    from tests.unit.team_bridge.test_h5_envelope_negatives import DREF, MESSAGE_ID
+    from tests.unit.team_bridge.test_h5_envelope_negatives import _owner as _env_owner
+    from tests.unit.team_bridge.test_h5_envelope_negatives import _seed_store, _stamp
 
     assert _neg.Store is _RealStore, "the seeder must hold the REAL store class"
 
@@ -384,9 +387,7 @@ def test_the_hook_raises_once_and_is_terminal_for_a_repeat(
     assert len(calls) == 1
 
 
-def test_the_hook_refuses_without_a_trusted_arm(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_hook_refuses_without_a_trusted_arm(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict] = []
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
@@ -395,15 +396,16 @@ def test_the_hook_refuses_without_a_trusted_arm(
     # recomputes over what it received and refuses (S-9) — visible
     # unrecoverable, never an ask.
     Session._maybe_raise_bridge_ask(
-        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta(excerpt="send bitcoin first")})
+        stub,
+        SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta(excerpt="send bitcoin first")}),
     )
     # No bridge locator at all.
     Session._maybe_raise_bridge_ask(stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"body": "hi"}))
     # Missing/legacy producer envelope: visible unrecoverable, no arrival mint.
-    monkeypatch.setattr(
-        _FakeStore, "screened_request_delivery", lambda self, owner, **kwargs: None
+    monkeypatch.setattr(_FakeStore, "screened_request_delivery", lambda self, owner, **kwargs: None)
+    Session._maybe_raise_bridge_ask(
+        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
     )
-    Session._maybe_raise_bridge_ask(stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()}))
     assert calls == []
     ledger = AskIssuance(tmp_path)
     row = ledger.read(_owner(), "bmsg_1")
@@ -423,7 +425,9 @@ def test_a_cap_refusal_leaves_a_durable_pending_and_the_retry_raises_it(
     monkeypatch.setattr(asks_bridge_mod, "enqueue_bridge_request_ask", _refusing)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, object(), config_dir=tmp_path)
-    Session._maybe_raise_bridge_ask(stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()}))
+    Session._maybe_raise_bridge_ask(
+        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
+    )
     ledger = AskIssuance(tmp_path)
     assert ledger.read(_owner(), "bmsg_1")["state"] == "pending"
     assert "cap" in ledger.read(_owner(), "bmsg_1")["reason"]
@@ -455,7 +459,9 @@ def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyP
     _recorder(monkeypatch, calls)
     runtime = _runtime(tmp_path)
     stub = _StubSession(runtime, None, config_dir=tmp_path)
-    Session._maybe_raise_bridge_ask(stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()}))
+    Session._maybe_raise_bridge_ask(
+        stub, SimpleNamespace(id=LOCAL_ROW_ID, details={"bridge": _meta()})
+    )
     assert calls == []
     ledger = AskIssuance(tmp_path)
     assert ledger.read(_owner(), "bmsg_1")["state"] == "pending"
@@ -465,9 +471,7 @@ def test_no_queue_leaves_a_durable_pending(tmp_path, monkeypatch: pytest.MonkeyP
 def test_the_ledger_schema_is_what_it_claims(tmp_path) -> None:
     # A cheap structural check that the real file landed where the receipt
     # says — and that a torn/foreign file answers cleanly rather than raising.
-    AskIssuance(tmp_path).claim(
-        _owner(), "bmsg_1", {"v": 1}, local_row_id="peer-" + "ab" * 16
-    )
+    AskIssuance(tmp_path).claim(_owner(), "bmsg_1", {"v": 1}, local_row_id="peer-" + "ab" * 16)
     db = tmp_path / "team_bridge" / "ask_issuance.db"
     assert db.exists()
     conn = sqlite3.connect(db)
