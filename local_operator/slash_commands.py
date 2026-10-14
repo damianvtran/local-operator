@@ -1901,9 +1901,9 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # serves account, billing, usage and agent catalogue only), so a desktop
     # host would have to invent an upstream contract. The terminal command is
     # untouched and still does the whole job.
-    # Detailed optional-price/account grammar lives in the shared setup runner;
-    # retain this translated summary rather than unshipping carried catalogues.
-    SlashCommand("mobile", _tr(wire_slash.mobile()), arguments=ArgumentMode.OPTIONAL),
+    # Keep the default no-argument picker behavior: the optional setup grammar
+    # is parsed after submission, not offered as provider picker completions.
+    SlashCommand("mobile", _tr(wire_slash.mobile())),
     # THE SECOND "this machine's connectivity" command, and the reason it sits
     # beside `/mobile`. One grouped command with a declared vocabulary rather
     # than a word per verb: a mesh has several verbs that are variations of one

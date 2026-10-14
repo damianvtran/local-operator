@@ -753,7 +753,7 @@ def mobile_action(
                 if action == "enable"
                 else await setup.observe(selected)
             )
-            return setup.text(plan, surface="tui")
+            return setup.text(plan, surface="tui", include_receipts=progress is None)
         args = ["tunnel", action]
         if action == "billing" and selected is not None:
             args += ["--credential-id", str(selected)]

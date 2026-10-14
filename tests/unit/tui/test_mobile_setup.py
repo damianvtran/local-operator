@@ -42,6 +42,38 @@ async def test_mobile_status_selected_owner_is_read_only(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["/mobile", "/mobile "])
+async def test_mobile_composer_does_not_offer_provider_arguments(monkeypatch, typed):
+    from local_operator.tui.widgets.editor import Editor
+
+    observe = AsyncMock(
+        return_value={
+            "step": "login",
+            "verified": False,
+            "receipts": [],
+            "credential_choices": [],
+            "remedy": "Run lop login radient",
+        }
+    )
+    monkeypatch.setattr(setup, "observe", observe)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in typed:
+            await pilot.press("slash" if char == "/" else "space" if char == " " else char)
+        await pilot.pause()
+        assert editor.picker.highlighted_name() not in {"radient", "openai", "anthropic"}
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        observe.assert_awaited_once_with(None)
+        assert not app._tunnel_action_busy
+        assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_mobile_enable_progress_and_busy_guard(monkeypatch):
     started = threading.Event()
     release = threading.Event()
@@ -80,7 +112,5 @@ async def test_mobile_enable_progress_and_busy_guard(monkeypatch):
         release.set()
         await pilot.pause(0.2)
         assert not app._tunnel_action_busy
-        assert any(
-            "Mobile setup: failed" in line and "Synthetic reservation saved" in line
-            for line in notices
-        )
+        assert any("Phone access could not finish setup" in line for line in notices)
+        assert sum("Synthetic reservation saved" in line for line in notices) == 1

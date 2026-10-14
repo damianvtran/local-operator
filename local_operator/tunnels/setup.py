@@ -26,7 +26,8 @@ from local_operator import supervisors
 from local_operator.i18n.keys import mobile_setup as ms
 from local_operator.i18n.text import tr
 from local_operator.mobile import install as mobile_install
-from local_operator.providers.auth_store import AuthStore
+from local_operator.network.credentials.offers import mask_label
+from local_operator.providers.auth_store import AuthStore, credential_identity
 from local_operator.tunnels import config, install, report
 from local_operator.tunnels.api import (
     RadientTunnels,
@@ -62,6 +63,11 @@ def _price(value: object) -> str | None:
     return str(amount) if amount.is_finite() and amount >= 0 else None
 
 
+def _same_price(accepted: object, current: object) -> bool:
+    left, right = _price(accepted), _price(current)
+    return left is not None and right is not None and Decimal(left) == Decimal(right)
+
+
 def _cloudflared_preflight(configured: str | None = None) -> str:
     # Existing connector capability probe protects --token-file. Setup also
     # binds the documented minimum version instead of trusting feature text
@@ -75,6 +81,31 @@ def _cloudflared_preflight(configured: str | None = None) -> str:
     if result.returncode or not match or tuple(map(int, match.groups())) < (2025, 4, 0):
         raise ValueError("cloudflared minimum version is 2025.4.0")
     return binary
+
+
+def _identity_label(selected: int) -> str:
+    # Share credential disclosure's whitelist and masking; never serialize a
+    # login payload or the fresh /me response into a setup receipt.
+    with closing(AuthStore()) as store:
+        row = store.get_credential(selected)
+        identity = credential_identity(row) if row is not None else None
+    return mask_label(identity) if identity else _t(ms.identity_unavailable())
+
+
+def _mobile_preflight(value: dict[str, Any], pending: dict[str, Any]) -> bool:
+    # Mirror _prepare_mobile's healthy-origin skip, including its auth gate.
+    # Otherwise require the installer's guard without a build, password write
+    # or service start: source installs prepare mobile with normal tool approval
+    # BEFORE a billing/reservation POST. The existing verifier is bounded.
+    record = value.get("record") or pending.get("payload") or {}
+    mobile = next((h for h in record.get("harnesses", []) if h.get("id") == "local-operator"), None)
+    if mobile and not mobile.get("enabled"):
+        return False
+    port = mobile.get("port") if mobile else mobile_install.DEFAULT_PORT
+    if mobile_install.health(port) and mobile_install.gate_closed(port):
+        return True
+    ok, _private_detail = mobile_install.ensure_bundle(build=False)
+    return ok
 
 
 def _mobile_url(record: dict[str, Any]) -> str | None:
@@ -122,10 +153,14 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             ]
         return _plan(
             "owner_choice" if len(choices) > 1 else "login",
-            _t(ms.choose_login()),
+            _t(ms.choose_login()) if len(choices) > 1 else _t(ms.login()),
             credential_choices=choices,
         )
-    fields: dict[str, Any] = {"credential_id": selected, "configured": bool(value)}
+    fields: dict[str, Any] = {
+        "credential_id": selected,
+        "configured": bool(value),
+        "identity_label": _identity_label(selected),
+    }
     if value.get("stopped"):
         return _plan("stopped", _t(ms.stopped()), **fields)
     if value:
@@ -181,7 +216,7 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         url = _mobile_url(record)
         gateway_healthy = await asyncio.to_thread(install.gateway_answers)
         if (
-            connector.get("state") == "running"
+            connector.get("state") == "connected"
             and record.get("status") == "active"
             and gateway_healthy
             and healthy is not None
@@ -201,6 +236,8 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         return _plan("cloudflared", _t(ms.cloudflared()), **fields)
     if supervisors.supervisor() is None:
         return _plan("supervisor", install.NO_SUPERVISOR_ERROR, **fields)
+    if not await asyncio.to_thread(_mobile_preflight, value, pending):
+        return _plan("mobile_bundle", _t(ms.mobile_bundle()), **fields)
     if fields["activation_required"]:
         if fields["monthly_price_usd"] is None:
             return _plan("quote", _t(ms.price_unavailable()), **fields)
@@ -208,7 +245,7 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             f"lop tunnel setup apply --credential-id {selected} "
             f"--accept-monthly-price {fields['monthly_price_usd']}"
         )
-        return _plan("quote", _t(ms.quote(command=command)), ready=True, **fields)
+        return _plan("quote", _t(ms.quote()), ready=True, apply_command=command, **fields)
     command = f"lop tunnel setup apply --credential-id {selected}"
     return _plan("apply", _t(ms.apply(command=command)), ready=True, **fields)
 
@@ -226,14 +263,31 @@ async def apply(
     plan = await observe(selected)
     if plan["verified"] or not plan["ready"]:
         return plan
-    if plan.get("activation_required") and (
-        _price(accepted) is None or Decimal(str(accepted)) != Decimal(plan["monthly_price_usd"])
-    ):
-        return {**plan, "ready": False}
+    if plan.get("activation_required") and not _same_price(accepted, plan["monthly_price_usd"]):
+        if accepted is None:
+            return {**plan, "ready": False}
+        return {
+            **plan,
+            "step": "quote_changed",
+            "ready": False,
+            "accepted_price_usd": _price(accepted),
+            "remedy": _t(
+                ms.quote_changed(
+                    accepted=str(_price(accepted)), current=str(plan["monthly_price_usd"])
+                )
+            ),
+        }
     selected = plan["credential_id"]
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
     receipts: list[str] = []
+    stage = "prerequisites"
+    billing = "not_activated" if plan.get("activation_required") else "already_active"
+    reservation = "existing" if plan["configured"] else "not_requested"
+
+    def phase(message: str) -> None:
+        if progress:
+            progress(message)
 
     def receipt(message: str) -> None:
         receipts.append(message)
@@ -242,6 +296,9 @@ async def apply(
 
     try:
         if plan.get("activation_required"):
+            stage = "billing"
+            billing = "unconfirmed"
+            phase(_t(ms.activating()))
             # Keep activation as its own receipt: a failed reservation cannot
             # undo billing that the user already accepted and the server applied.
             args = [
@@ -254,9 +311,13 @@ async def apply(
             ]
             await dispatch(parser.parse_args(args))
             receipt(_t(ms.billing_activated()))
+            billing = "activated"
             plan = {**plan, "activation_required": False}
         value = config.load() if plan["configured"] else {}
         if not value:
+            stage = "reservation"
+            reservation = "unconfirmed"
+            phase(_t(ms.reserving()))
             # Reuse the ORIGINAL payload as well as the existing key: hostname
             # changes between attempts must not make a lost response unresumable.
             args = ["tunnel", "create", "--credential-id", str(selected)]
@@ -274,16 +335,23 @@ async def apply(
                 args += ["--accept-monthly-price", accepted]
             await dispatch(parser.parse_args(args))
             receipt(_t(ms.reserved()))
+            reservation = "saved"
         elif plan.get("activation_required") or not plan.get("cloud_active"):
+            stage = "configuration"
+            phase(_t(ms.configuring()))
             args = ["tunnel", "configure", "--enable", "--credential-id", str(selected)]
             if accepted is not None:
                 args += ["--accept-monthly-price", accepted]
             await dispatch(parser.parse_args(args))
             receipt(_t(ms.activated()))
+        stage = "installation"
+        phase(_t(ms.installing()))
         await dispatch(parser.parse_args(["tunnel", "install"]))
         receipt(_t(ms.installed()))
         # Startup is asynchronous. Bound observation without inventing a URL or
         # turning a starting connector into a success claim.
+        stage = "verification"
+        phase(_t(ms.verifying()))
         for attempt in range(5):
             plan = await observe(selected)
             if plan["verified"]:
@@ -292,29 +360,152 @@ async def apply(
                 await asyncio.sleep(1)
         if not plan["verified"]:
             plan = {**plan, "step": "verification", "ready": False, "remedy": _t(ms.verification())}
-    except (ValueError, OSError, httpx.HTTPError):
+    except (ValueError, OSError, httpx.HTTPError, KeyError, TypeError):
         # Error bodies, saved records and connector tokens never enter a receipt.
         # Earlier successes remain visible so retry is not mistaken for rollback.
+        # A lost activation response is NOT proof that billing rolled back.
+        # One fresh observation may confirm eligibility or a moved quote, without
+        # carrying an arbitrary exception/provider response into the transcript.
+        moved_quote = False
+        if stage == "billing":
+            fresh = await observe(selected)
+            if fresh.get("account_valid"):
+                moved_quote = (
+                    accepted is not None
+                    and fresh.get("activation_required")
+                    and not _same_price(accepted, fresh.get("monthly_price_usd"))
+                )
+                if fresh.get("activation_required") is False:
+                    billing = "activated"
+                elif moved_quote:
+                    billing = "not_activated"
+                plan = fresh
+        if stage == "reservation":
+            if (config.directory() / "config.json").exists():
+                reservation = "saved"
+            elif not (config.directory() / "create.json").exists():
+                reservation = "not_requested"
         plan = {
             **plan,
-            "step": "failed",
+            "step": "quote_changed" if moved_quote else "failed",
+            "accepted_price_usd": _price(accepted),
+            "failure_stage": stage,
             "ready": False,
             "verified": False,
             "url": None,
-            "remedy": _t(ms.failed()),
+            "remedy": (
+                _t(
+                    ms.quote_changed(
+                        accepted=str(_price(accepted)), current=str(plan.get("monthly_price_usd"))
+                    )
+                )
+                if moved_quote
+                else _t(ms.failed())
+            ),
         }
-    return {**plan, "receipts": receipts}
+    return {
+        **plan,
+        "receipts": receipts,
+        "billing_outcome": billing,
+        "reservation_outcome": reservation,
+    }
 
 
-def text(plan: dict[str, Any], *, surface: str = "cli") -> str:
-    lines = [_t(ms.title(step=str(plan["step"])))]
-    if plan.get("monthly_price_usd") is not None and plan.get("activation_required"):
+def _apply_command(plan: dict[str, Any], surface: str) -> str:
+    command = "/mobile enable" if surface == "tui" else "lop tunnel setup apply"
+    if plan.get("activation_required") and plan.get("monthly_price_usd") is not None:
+        amount = str(plan["monthly_price_usd"])
+        command += f" {amount}" if surface == "tui" else f" --accept-monthly-price {amount}"
+    if plan.get("credential_id") is not None:
+        command += f" --credential-id {plan['credential_id']}"
+    return command
+
+
+def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool = True) -> str:
+    titles = {
+        "login": ms.title_login,
+        "owner_choice": ms.title_owner_choice,
+        "owner_missing": ms.title_owner_missing,
+        "quote": ms.title_quote,
+        "quote_changed": ms.title_quote_changed,
+        "cloudflared": ms.title_cloudflared,
+        "mobile_bundle": ms.title_mobile_bundle,
+        "supervisor": ms.title_supervisor,
+        "balance": ms.title_balance,
+        "account": ms.title_account,
+        "apply": ms.title_apply,
+        "complete": ms.title_complete,
+        "verification": ms.title_verification,
+        "failed": ms.title_failed,
+        "stopped": ms.title_stopped,
+    }
+    lines = [_t(titles.get(plan["step"], ms.title_failed)())]
+    if plan.get("credential_id") is not None:
+        lines.append(
+            _t(
+                ms.account(
+                    identity=str(plan.get("identity_label") or _t(ms.identity_unavailable())),
+                    id=str(plan["credential_id"]),
+                )
+            )
+        )
+    if plan.get("activation_required") and plan.get("monthly_price_usd") is not None:
         lines.append(_t(ms.price(amount=str(plan["monthly_price_usd"]))))
-    lines.extend(plan["receipts"])
+        if plan["step"] in {"quote", "quote_changed"}:
+            lines.append(_t(ms.consent(amount=str(plan["monthly_price_usd"]))))
+    if plan["verified"]:
+        lines.append(_t(ms.verified_url(url=str(plan["url"]))))
+    if include_receipts:
+        lines.extend(plan["receipts"])
+    stages = {
+        "billing": ms.stage_billing,
+        "reservation": ms.stage_reservation,
+        "configuration": ms.stage_configuration,
+        "installation": ms.stage_installation,
+        "verification": ms.stage_verification,
+        "prerequisites": ms.stage_prerequisites,
+    }
+    if plan.get("failure_stage") in stages:
+        lines.append(_t(ms.failure_stage(stage=_t(stages[plan["failure_stage"]]()))))
+    billing = {
+        "not_activated": ms.billing_not_activated,
+        "already_active": ms.billing_already_active,
+        "activated": ms.billing_activated_status,
+        "unconfirmed": ms.billing_unconfirmed,
+    }
+    reservation = {
+        "saved": ms.reservation_saved,
+        "existing": ms.reservation_existing,
+        "unconfirmed": ms.reservation_unconfirmed,
+    }
+    if plan.get("billing_outcome") in billing:
+        lines.append(_t(billing[plan["billing_outcome"]]()))
+    if plan.get("reservation_outcome") in reservation:
+        lines.append(_t(reservation[plan["reservation_outcome"]]()))
     remedy = plan["remedy"]
+    if plan["step"] == "quote_changed":
+        remedy = _t(
+            ms.quote_changed(
+                accepted=str(plan.get("accepted_price_usd")),
+                current=str(plan.get("monthly_price_usd")),
+            )
+        )
     if surface == "tui":
-        # Keep the shared state/consent binding; only command spelling changes.
-        # A TUI user never needs to copy a generated acceptance into a terminal.
+        specific = {
+            "supervisor": ms.supervisor_tui,
+            "cloudflared": ms.cloudflared_tui,
+            "mobile_bundle": ms.mobile_bundle_tui,
+            "verification": ms.verification_tui,
+            "complete": ms.complete_tui,
+        }
+        if plan["step"] in specific:
+            remedy = _t(specific[plan["step"]]())
+        elif plan["step"] == "failed":
+            remedy = _t(ms.failed_tui(command=_apply_command(plan, surface)))
+        elif plan["step"] == "login" and len(plan.get("credential_choices", [])) < 2:
+            remedy = _t(ms.login_tui())
+        # Only established command tokens are rewritten; no invented slash
+        # equivalent for foreground serve or installing a background supervisor.
         remedy = remedy.replace("lop tunnel setup apply", "/mobile enable")
         remedy = remedy.replace("--accept-monthly-price ", "")
         remedy = remedy.replace("lop tunnel setup --json", "/mobile status")
@@ -323,10 +514,10 @@ def text(plan: dict[str, Any], *, surface: str = "cli") -> str:
         remedy = remedy.replace("lop login radient", "/login radient")
         remedy = remedy.replace("lop tunnel start", "/mobile start")
     lines.append(remedy)
+    if plan.get("activation_required") and plan["step"] in {"quote", "quote_changed"}:
+        lines.append(_apply_command(plan, surface))
     if plan.get("credential_choices"):
         lines.append(_t(ms.credential_ids(ids=", ".join(map(str, plan["credential_choices"])))))
-    if plan["verified"]:
-        lines.append(_t(ms.verified_url(url=str(plan["url"]))))
     return "\n".join(lines)
 
 

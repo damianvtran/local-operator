@@ -10,6 +10,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def account(*, identity: str, id: str) -> Msg:
+    return Msg("mobile.setup.account", {"identity": identity, "id": id})
+
+
 def account_failed() -> Msg:
     return Msg("mobile.setup.account_failed", {})
 
@@ -18,8 +22,16 @@ def activated() -> Msg:
     return Msg("mobile.setup.activated", {})
 
 
+def activating() -> Msg:
+    return Msg("mobile.setup.activating", {})
+
+
 def apply(*, command: str) -> Msg:
     return Msg("mobile.setup.apply", {"command": command})
+
+
+def applying() -> Msg:
+    return Msg("mobile.setup.applying", {})
 
 
 def balance() -> Msg:
@@ -28,6 +40,22 @@ def balance() -> Msg:
 
 def billing_activated() -> Msg:
     return Msg("mobile.setup.billing_activated", {})
+
+
+def billing_activated_status() -> Msg:
+    return Msg("mobile.setup.billing_activated_status", {})
+
+
+def billing_already_active() -> Msg:
+    return Msg("mobile.setup.billing_already_active", {})
+
+
+def billing_not_activated() -> Msg:
+    return Msg("mobile.setup.billing_not_activated", {})
+
+
+def billing_unconfirmed() -> Msg:
+    return Msg("mobile.setup.billing_unconfirmed", {})
 
 
 def busy() -> Msg:
@@ -46,8 +74,24 @@ def cloudflared() -> Msg:
     return Msg("mobile.setup.cloudflared", {})
 
 
+def cloudflared_tui() -> Msg:
+    return Msg("mobile.setup.cloudflared_tui", {})
+
+
 def complete() -> Msg:
     return Msg("mobile.setup.complete", {})
+
+
+def complete_tui() -> Msg:
+    return Msg("mobile.setup.complete_tui", {})
+
+
+def configuring() -> Msg:
+    return Msg("mobile.setup.configuring", {})
+
+
+def consent(*, amount: str) -> Msg:
+    return Msg("mobile.setup.consent", {"amount": amount})
 
 
 def credential_ids(*, ids: str) -> Msg:
@@ -58,8 +102,24 @@ def failed() -> Msg:
     return Msg("mobile.setup.failed", {})
 
 
+def failed_tui(*, command: str) -> Msg:
+    return Msg("mobile.setup.failed_tui", {"command": command})
+
+
+def failure_stage(*, stage: str) -> Msg:
+    return Msg("mobile.setup.failure_stage", {"stage": stage})
+
+
+def identity_unavailable() -> Msg:
+    return Msg("mobile.setup.identity_unavailable", {})
+
+
 def installed() -> Msg:
     return Msg("mobile.setup.installed", {})
+
+
+def installing() -> Msg:
+    return Msg("mobile.setup.installing", {})
 
 
 def invalid_response() -> Msg:
@@ -68,6 +128,18 @@ def invalid_response() -> Msg:
 
 def login() -> Msg:
     return Msg("mobile.setup.login", {})
+
+
+def login_tui() -> Msg:
+    return Msg("mobile.setup.login_tui", {})
+
+
+def mobile_bundle() -> Msg:
+    return Msg("mobile.setup.mobile_bundle", {})
+
+
+def mobile_bundle_tui() -> Msg:
+    return Msg("mobile.setup.mobile_bundle_tui", {})
 
 
 def owner_mismatch() -> Msg:
@@ -86,20 +158,128 @@ def price_unavailable() -> Msg:
     return Msg("mobile.setup.price_unavailable", {})
 
 
-def quote(*, command: str) -> Msg:
-    return Msg("mobile.setup.quote", {"command": command})
+def quote() -> Msg:
+    return Msg("mobile.setup.quote", {})
+
+
+def quote_changed(*, current: str, accepted: str) -> Msg:
+    return Msg("mobile.setup.quote_changed", {"current": current, "accepted": accepted})
+
+
+def reservation_existing() -> Msg:
+    return Msg("mobile.setup.reservation_existing", {})
+
+
+def reservation_saved() -> Msg:
+    return Msg("mobile.setup.reservation_saved", {})
+
+
+def reservation_unconfirmed() -> Msg:
+    return Msg("mobile.setup.reservation_unconfirmed", {})
 
 
 def reserved() -> Msg:
     return Msg("mobile.setup.reserved", {})
 
 
+def reserving() -> Msg:
+    return Msg("mobile.setup.reserving", {})
+
+
+def stage_billing() -> Msg:
+    return Msg("mobile.setup.stage_billing", {})
+
+
+def stage_configuration() -> Msg:
+    return Msg("mobile.setup.stage_configuration", {})
+
+
+def stage_installation() -> Msg:
+    return Msg("mobile.setup.stage_installation", {})
+
+
+def stage_prerequisites() -> Msg:
+    return Msg("mobile.setup.stage_prerequisites", {})
+
+
+def stage_reservation() -> Msg:
+    return Msg("mobile.setup.stage_reservation", {})
+
+
+def stage_verification() -> Msg:
+    return Msg("mobile.setup.stage_verification", {})
+
+
 def stopped() -> Msg:
     return Msg("mobile.setup.stopped", {})
 
 
-def title(*, step: str) -> Msg:
-    return Msg("mobile.setup.title", {"step": step})
+def supervisor_tui() -> Msg:
+    return Msg("mobile.setup.supervisor_tui", {})
+
+
+def title_account() -> Msg:
+    return Msg("mobile.setup.title_account", {})
+
+
+def title_apply() -> Msg:
+    return Msg("mobile.setup.title_apply", {})
+
+
+def title_balance() -> Msg:
+    return Msg("mobile.setup.title_balance", {})
+
+
+def title_cloudflared() -> Msg:
+    return Msg("mobile.setup.title_cloudflared", {})
+
+
+def title_complete() -> Msg:
+    return Msg("mobile.setup.title_complete", {})
+
+
+def title_failed() -> Msg:
+    return Msg("mobile.setup.title_failed", {})
+
+
+def title_login() -> Msg:
+    return Msg("mobile.setup.title_login", {})
+
+
+def title_mobile_bundle() -> Msg:
+    return Msg("mobile.setup.title_mobile_bundle", {})
+
+
+def title_owner_choice() -> Msg:
+    return Msg("mobile.setup.title_owner_choice", {})
+
+
+def title_owner_missing() -> Msg:
+    return Msg("mobile.setup.title_owner_missing", {})
+
+
+def title_quote() -> Msg:
+    return Msg("mobile.setup.title_quote", {})
+
+
+def title_quote_changed() -> Msg:
+    return Msg("mobile.setup.title_quote_changed", {})
+
+
+def title_stopped() -> Msg:
+    return Msg("mobile.setup.title_stopped", {})
+
+
+def title_supervisor() -> Msg:
+    return Msg("mobile.setup.title_supervisor", {})
+
+
+def title_verification() -> Msg:
+    return Msg("mobile.setup.title_verification", {})
+
+
+def unexpected_failure() -> Msg:
+    return Msg("mobile.setup.unexpected_failure", {})
 
 
 def usage() -> Msg:
@@ -110,5 +290,13 @@ def verification() -> Msg:
     return Msg("mobile.setup.verification", {})
 
 
+def verification_tui() -> Msg:
+    return Msg("mobile.setup.verification_tui", {})
+
+
 def verified_url(*, url: str) -> Msg:
     return Msg("mobile.setup.verified_url", {"url": url})
+
+
+def verifying() -> Msg:
+    return Msg("mobile.setup.verifying", {})

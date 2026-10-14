@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,24 +12,47 @@ from local_operator.tunnels import config, setup
 from local_operator.tunnels.arguments import add_parser
 
 
+@pytest.fixture(scope="module")
+def gateway_server():
+    # Exercise the real report producer; only the HTTP health boundary is fake.
+    payload = {"ok": True, "connected": True}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.fixture
-def rig(tmp_path, monkeypatch):
+def rig(tmp_path, monkeypatch, gateway_server):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOP_TUNNEL_NO_REARM", "1")
     monkeypatch.setattr(setup, "credential_id", lambda selected=None: selected or 17)
     monkeypatch.setattr(setup, "usable_credential_id", lambda selected: selected)
     monkeypatch.setattr(setup.supervisors, "supervisor", lambda: "launchctl")
     monkeypatch.setattr(setup, "_cloudflared_preflight", lambda path=None: "/synthetic/cloudflared")
-    monkeypatch.setattr(setup.install, "gateway_answers", lambda: True)
     monkeypatch.setattr(setup.mobile_install, "health", lambda port: {"ok": True})
     monkeypatch.setattr(setup.mobile_install, "gate_closed", lambda port: True)
     monkeypatch.setattr(setup.report, "login_verdict", AsyncMock(return_value={"state": "ok"}))
-    monkeypatch.setattr(
-        setup.report, "connector_state", AsyncMock(return_value={"state": "running"})
-    )
+    gateway_server[1].update(ok=True, connected=True)
     quote = {"eligible": True, "balance_usd": 1, "monthly_price_usd": "0.05"}
     record = {
         "id": "synthetic",
+        "gateway_port": gateway_server[0].server_port,
         "status": "active",
         "harnesses": [
             {
@@ -99,8 +124,75 @@ def test_mobile_grammar_rejects_invalid_or_implicit_mutations(arg):
         setup.parse_mobile(arg)
 
 
+@pytest.mark.parametrize(
+    "left,right,expected",
+    [
+        ("0.050", "0.05", True),
+        ("0.04", "0.05", False),
+        ("NaN", "0.05", False),
+        (None, "0.05", False),
+    ],
+)
+def test_price_comparison_uses_amount_not_string_spelling(left, right, expected):
+    assert setup._same_price(left, right) is expected
+
+
+@pytest.mark.asyncio
+async def test_consent_shows_existing_masked_identity_account_and_price(rig, monkeypatch):
+    from types import SimpleNamespace
+
+    class Store:
+        def close(self):
+            pass
+
+        def get_credential(self, selected):
+            return SimpleNamespace(
+                data={"email": "operator@example.test", "access": "PRIVATE_SENTINEL"}
+            )
+
+    monkeypatch.setattr(setup, "AuthStore", Store)
+    rig[0]["eligible"] = False
+    plan = await setup.observe(17)
+    text = setup.text(plan, surface="tui")
+    assert "o***@example.test" in text and "credential 17" in text
+    assert "USD 0.05/month" in text and "does not purchase credit" in text
+    assert "/mobile enable 0.05 --credential-id 17" in text
+    assert "PRIVATE_SENTINEL" not in json.dumps(plan) + text
+    assert "operator@" not in text
+
+
+def test_failure_summary_is_stage_specific_without_duplicate_streamed_receipts():
+    plan = {
+        "step": "failed",
+        "verified": False,
+        "credential_id": 17,
+        "identity_label": "f***@example.test",
+        "receipts": ["Cloud tunnel reservation saved on this device."],
+        "remedy": "developer fallback",
+        "failure_stage": "installation",
+        "billing_outcome": "activated",
+        "reservation_outcome": "saved",
+    }
+    text = setup.text(plan, surface="tui", include_receipts=False)
+    assert (
+        "background connector installation" in text
+        and "Billing: subscription activation completed" in text
+    )
+    assert "Cloud tunnel reservation saved on this device." not in text
+    assert "retry with /mobile enable --credential-id 17" in text and "retry apply" not in text
+    assert "developer fallback" not in text
+
+
 def save(record, **extra):
-    config.save({"credential_id": 17, "tunnel_id": "synthetic", "record": record, **extra})
+    config.save(
+        {
+            "credential_id": 17,
+            "tunnel_id": "synthetic",
+            "record": record,
+            "gateway_port": record["gateway_port"],
+            **extra,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -126,6 +218,45 @@ async def test_preflight_precedes_every_mutation(rig, monkeypatch, prerequisite)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sources", [False, True])
+async def test_mobile_bundle_preflight_uses_real_nonbuilding_guard(
+    rig, monkeypatch, tmp_path, sources
+):
+    from unittest.mock import Mock
+
+    from local_operator.tunnels import cli
+
+    web = tmp_path / "synthetic-web"
+    web.mkdir()
+    if sources:
+        (web / "package.json").write_text("{}")
+    monkeypatch.setattr(setup.mobile_install, "_WEB_DIR", web)
+    monkeypatch.setattr(setup.mobile_install, "health", lambda port: None)
+    monkeypatch.setattr(setup.mobile_install, "gate_closed", lambda port: False)
+    build = Mock(side_effect=AssertionError("No implicit build/install in observation"))
+    monkeypatch.setattr(setup.mobile_install, "_build_bundle", build)
+    mutation = AsyncMock()
+    monkeypatch.setattr(cli, "dispatch", mutation)
+    rig[0]["eligible"] = False
+    result = await setup.apply(accepted="0.05")
+    assert result["step"] == "mobile_bundle" and not result["ready"]
+    assert all(method == "GET" for method, _ in rig[2])
+    assert not (config.directory() / "config.json").exists()
+    mutation.assert_not_awaited()
+    build.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_healthy_origin_bypasses_mobile_bundle_preparation(rig, monkeypatch):
+    from unittest.mock import Mock
+
+    guard = Mock(side_effect=AssertionError("Healthy origin must not be installed"))
+    monkeypatch.setattr(setup.mobile_install, "ensure_bundle", guard)
+    assert (await setup.observe())["ready"]
+    guard.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_default_plan_never_mutates_even_with_consent_flags(rig, monkeypatch):
     from local_operator.tunnels import cli
 
@@ -148,7 +279,7 @@ async def test_activation_requires_exact_current_quote(rig, monkeypatch, accepte
     mutation = AsyncMock()
     monkeypatch.setattr(cli, "dispatch", mutation)
     result = await setup.apply(accepted=accepted)
-    assert result["step"] == "quote"
+    assert result["step"] == ("quote" if accepted is None else "quote_changed")
     assert result["activation_required"] is True
     mutation.assert_not_awaited()
 
@@ -240,13 +371,11 @@ async def test_healthy_existing_is_noop(rig, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gate", ["cloud", "connector", "mobile", "gateway", "url"])
-async def test_final_verification_fails_closed(rig, monkeypatch, gate):
+async def test_final_verification_fails_closed(rig, monkeypatch, gate, gateway_server):
     if gate == "cloud":
         rig[1]["status"] = "paused"
     elif gate == "connector":
-        monkeypatch.setattr(
-            setup.report, "connector_state", AsyncMock(return_value={"state": "parked"})
-        )
+        gateway_server[1]["connected"] = False
     elif gate == "mobile":
         monkeypatch.setattr(setup.mobile_install, "gate_closed", lambda port: False)
     elif gate == "gateway":

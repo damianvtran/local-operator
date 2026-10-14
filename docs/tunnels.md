@@ -24,7 +24,10 @@ harnesses must remain running and connected to the internet.
 3. Follow prerequisites: cloudflared >=2025.4.0 with token-file support and a
    supported user supervisor. Install software through your normal approved
    package-manager path, not silently through setup (macOS: `brew install
-   cloudflared`). These checks happen **before** cloud writes/billing activation.
+   cloudflared`). If the phone origin is not already healthy/protected, the
+   interface bundle must be ready too; prepare it explicitly with
+   `lop mobile install` under normal tool approval. A plan never builds/installs
+   it. These checks happen **before** cloud writes/billing activation.
 4. Use `lop tunnel setup apply --credential-id <id>` to advance setup. Only
    when activation is required, accept the exact live USD monthly quote and add
    `--accept-monthly-price <amount>`. An eligible subscription does not need
