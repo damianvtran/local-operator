@@ -123,6 +123,9 @@ def test_handoff_transitions_are_ordered_and_survive_reread(tmp_path) -> None:
     )
     tx.advance_handoff(tmp_path, operation.identifier, "ack", listener_ino="1:2")
     row = tx.handoff_status(tmp_path, operation.identifier)
+    # ``handoff_status`` is ``dict | None`` (None when the record or its handoff
+    # sub-map is absent); the assert narrows the reads below.
+    assert row is not None
     assert row["state"] == "ack" and row["inherited"] == ["occ-1"]
     assert row["listener_ino"] == "1:2" and row["nonce"] == "n1"
 

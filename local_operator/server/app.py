@@ -325,6 +325,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # "this daemon is going away" and two tasks that must observe it.
     reload_task: asyncio.Task[None] | None = None
     reload_stop: asyncio.Event | None = None
+    # The reload watch itself: ``install`` answers None on every boot that cannot
+    # be armed, and it is read BELOW this block (the heartbeat that publishes the
+    # rolling contract) as well as inside it. Declaring it here keeps the
+    # outside-block read bound on a boot that published no record at all.
+    reload_watch: serve_reload.ReloadWatch | None = None
     if announced is not None:
         # THE NAMESPACE'S OWN REAPER, ON THE ONE MOMENT A NEW WRITER JOINS IT.
         # ``run/serve`` had no production reaper at all until this call, and

@@ -5110,7 +5110,7 @@ def test_a_nondetached_child_dies_with_the_supervisor_group(tmp_path: Path) -> N
             unit.kill()
 
 
-def _bounce_group(unit: subprocess.Popen) -> None:
+def _bounce_group(unit: subprocess.Popen[bytes]) -> None:
     """Signal-kill the supervisor's WHOLE PROCESS GROUP, as a real bounce does.
 
     ``unit`` is spawned ``start_new_session=True``, so its pgid IS its pid; this

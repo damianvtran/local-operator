@@ -284,8 +284,14 @@ def probe_address(record: Any, *, require_rolling: bool = False) -> AddressProbe
             SQUATTED,
             f"{record.host}:{record.port} answered with something that is not a health report",
         )
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else payload
-    served = result.get("instance_id") if isinstance(result, dict) else None
+    # Narrowed into annotated locals rather than an inline conditional: the
+    # conditional form leaves pyright reading ``result`` as optional, so the
+    # membership read below fails to type-check. The runtime rule is unchanged —
+    # a non-object ``result`` member is treated as absent, falling back to the
+    # whole body.
+    raw_result = payload.get("result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else payload
+    served = result.get("instance_id")
     if not served:
         return AddressProbe(
             SQUATTED,

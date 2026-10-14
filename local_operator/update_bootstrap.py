@@ -320,10 +320,19 @@ def controller(args: argparse.Namespace) -> int:
             raise BootstrapError("canonical root identity changed")
         if update.current_generation() != dest.baseline:
             raise BootstrapError("current changed during bootstrap; check again and retry")
+    # `commit`/`ref` are the SnapshotSource defaults (empty string) rather than
+    # None: `install_into_generation` takes `str`, and "no snapshot" and "a
+    # snapshot with no readable git metadata" are the same answer to it — the
+    # marker records the bare source token. Declared `str` here so the call below
+    # type-checks against the real signature instead of narrowing at the call.
     source = None
-    commit = None
-    ref = None
+    commit = ""
+    ref = ""
     target = version
+    # Bound BEFORE the branch so the `finally` cleanup below sees a name that
+    # exists on every path; the branch is the only writer, and the None guard is
+    # what tells "no snapshot" from "a snapshot to clean up".
+    snapshot: update.SnapshotSource | None = None
     if args.from_snapshot is not None:
         snapshot = update.resolve_snapshot(args.from_snapshot)
         source, commit, ref, target = snapshot.path, snapshot.commit, snapshot.ref, snapshot.version
@@ -349,7 +358,7 @@ def controller(args: argparse.Namespace) -> int:
             ),
         )
     finally:
-        if args.from_snapshot is not None and snapshot.temporary:
+        if snapshot is not None and snapshot.temporary:
             # Only resolve_snapshot's own creator-owned archive, not any user
             # source/installed generation; generation failure cleanup stays guarded.
             shutil.rmtree(snapshot.path)
