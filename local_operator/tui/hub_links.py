@@ -368,7 +368,10 @@ def _render_row(row: LinkRow, width: int, *, selected: bool, tail_style: Any = "
     out = Text.assemble(head)
     for part in details:
         out.append("\n")
-        out.append(indent)
+        # N1 (round-3): the INDENT carries the selection ink too, so a wrapped
+        # row's highlight is a clean block rather than a ragged one with an
+        # unhighlighted gap under the slot column.
+        out.append(indent, style=style)
         out.append(truncate_cells(part, detail_width), style=style)
     return out
 

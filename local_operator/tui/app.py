@@ -46343,30 +46343,20 @@ class OperatorApp(App[None]):
             self._fetch_hub_links_worker(), thread=False, group="hub-links", exclusive=True
         )
 
-    def on_hub_links_panel_policy_requested(self, message: "HubLinksPanel.PolicyRequested") -> None:
-        """The reserved slot's non-toggle action: apply/retry, or a named refusal.
+    def on_hub_links_panel_refusal_raised(
+        self, message: "HubLinksPanel.RefusalRaised"
+    ) -> None:
+        """A policy action was refused: paint it ON the card (round-3 D19).
 
-        ``direction == "auto-push"`` is the ineligible-enable path: the service
-        reports why auto-push cannot be turned on, and this prints that NAMED
-        reason rather than writing anything. A legacy link has no link_id and is
-        refused with the resolve-first notice. Pull/push (available/failure) are
-        not wired in this slice and report an honest notice naming the direction.
+        The old handler printed a transcript notice, which sits BEHIND the
+        overlay the user is looking at — the refusal was invisible. The panel
+        already owns a status line, so the app hands it the message; no literal,
+        the panel's message carries catalogue-rendered copy.
         """
         message.stop()
-        if message.link_id is None:
-            self._system_notice("resolve this link's source before acting on it", "warning")
-            return
-        if message.direction == "auto-push":
-            reason = self._hub_link_eligibility_reason(message.link_id)
-            self._system_notice(
-                f"auto-push is not available for this link: {reason or 'ineligible'}",
-                "warning",
-            )
-            return
-        # A direct apply/retry of one direction is not in this slice's scope; say
-        # so plainly rather than pretending. The toggle and advisory routes are
-        # the two actions this surface owns today.
-        self._system_notice(f"{message.direction} is not offered from this surface yet", "info")
+        panel = self._hub_links_panel()
+        if panel is not None and panel.is_open:
+            panel.show_notice(message.text, message.severity)
 
     def on_hub_links_panel_policy_toggle_requested(
         self, message: "HubLinksPanel.PolicyToggleRequested"
@@ -46383,7 +46373,12 @@ class OperatorApp(App[None]):
         """
         message.stop()
         if message.link_id is None:
-            self._system_notice("resolve this link's source before acting on it", "warning")
+            panel = self._hub_links_panel()
+            if panel is not None and panel.is_open:
+                from local_operator.i18n.keys import tui_hub_links as _k
+                from local_operator.i18n.text import tr
+
+                panel.show_notice(tr("tui.hub_links")(_k.refusal_resolve_first()), "warning")
             return
 
         def work() -> str | None:
@@ -46442,14 +46437,22 @@ class OperatorApp(App[None]):
                     confirm_public_egress=message.confirm_egress,
                 )
             except LinkError as error:
-                return str(error)
+                # Humanize the service code; the raw code in a notice is exactly
+                # what round-3 D19 flags (a code like `policy-revision-changed`
+                # reads as machinery, not a sentence). The message is already
+                # prose, so use it and name the code's words if the message is
+                # thin.
+                detail = str(error).strip() or error.code.replace("-", " ")
+                return detail
             return None
 
         async def run() -> None:
             refusal = await asyncio.to_thread(work)
             panel = self._hub_links_panel()
-            if refusal is not None:
-                self._system_notice(refusal, "warning")
+            # D19: the refusal is painted ON the card the user is looking at, not
+            # a transcript notice hidden behind the overlay.
+            if refusal is not None and panel is not None and panel.is_open:
+                panel.show_notice(refusal, "warning")
             # Re-read either way: a success shows the new policy, a refusal (a
             # CAS mismatch) shows the row that moved under the user.
             if panel is not None and panel.is_open:

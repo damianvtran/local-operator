@@ -447,8 +447,70 @@ async def test_capture_round2_remediation_frames(
         ],
     )
 
+    # D7/D16: the public auto-push consent prompt — captured at BOTH sizes the
+    # designer asked for, so the wrapped block is legible at the tight card.
+    await _capture(
+        "consent-public",
+        contact_sheet="consent",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+                attest_revision_cas=True,
+            )
+        ],
+    )
+    await _capture(
+        "consent-public-40x24",
+        size=(40, 24),
+        contact_sheet="consent",
+        links=[
+            dict(
+                local_id="a1",
+                name="coder",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+                attest_revision_cas=True,
+            )
+        ],
+    )
+    # D18: two links, so the hint row teaches `↑↓ select` (not scroll-only).
+    await _capture(
+        "multi-link-select",
+        links=[
+            dict(
+                local_id=f"a{i}",
+                name=f"agent-{i}",
+                visibility="public",
+                tenant=None,
+                subscribe=True,
+                auto_push=False,
+                state="up-to-date",
+                error=None,
+            )
+            for i in (1, 2)
+        ],
+    )
+
     # Assert THIS test's own round-2 frames by name (shared OUT dir).
-    for name in ("narrow-40x24", "footer-all-three", "footer-door-dropped", "consent-public"):
+    for name in (
+        "narrow-40x24",
+        "footer-all-three",
+        "footer-door-dropped",
+        "consent-public",
+        "consent-public-40x24",
+        "multi-link-select",
+    ):
         svg = OUT / f"{name}.svg"
         assert svg.exists() and "<svg" in svg.read_text()[:200], name
 
@@ -525,8 +587,46 @@ async def test_hint_row_is_painted_from_the_catalogue() -> None:
             assert "esc close" in painted, painted
             assert "s subscribe" in painted, painted
             assert "a auto-push" in painted, painted
+            # D17: `enter opens policy` advertised a dead stub, so it is gone.
+            assert "enter" not in painted, painted
     finally:
         shutil.rmtree(case_root, ignore_errors=True)
+
+
+def test_every_hinted_key_has_a_live_action() -> None:
+    """D17: every key the hint row teaches is a REAL binding, and vice versa.
+
+    The hint row once advertised `enter opens policy` for a stub with no effect.
+    This pins the invariant that the hinted keys and the panel's live key set are
+    the same set (the confirm key excepted: it is taught by the PROMPT, not the
+    ordinary row, because it only acts while the consent is armed).
+    """
+
+    from local_operator.i18n.keys import tui_hub_links as _k
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets import hub_links_panel as panel_mod
+
+    _t = tr("tui.hub_links")
+    bound = {str(binding[0]) for binding in panel_mod.HubLinksPanel.BINDINGS}
+    # The ordinary hint row teaches these ACTIONS; the confirm key is taught by
+    # the armed prompt's own block.
+    taught = {
+        "s": _t(_k.hint_subscribe()),
+        "a": _t(_k.hint_auto_push()),
+        "r": _t(_k.hint_refresh()),
+        "escape": _t(_k.hint_close()),
+    }
+    for key in taught:
+        assert key in bound, f"hinted key {key!r} has no binding"
+    # Every actionable binding is either taught on the row or is the prompt-only
+    # confirm / a navigation key.
+    navigation = {"up", "down"}
+    for key in bound:
+        assert (
+            key in taught or key in navigation or key == panel_mod.CONFIRM_EGRESS_KEY or key == "q"
+        ), f"binding {key!r} is neither hinted nor an intentional per-key exception"
+    # And the dead key is genuinely gone.
+    assert "enter" not in bound
 
 
 async def test_more_rows_indicator_reports_the_window() -> None:

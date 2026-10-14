@@ -1,17 +1,10 @@
-"""Round-2 design remediation regressions for the Hub links surface.
+"""Round-2/3 policy-action regressions for the Hub links overlay.
 
-Three defects independent design review found in the first implementation, each
-pinned here by its EFFECT rather than by a description:
-
-* D7 — the policy action must WRITE (or refuse with a named reason), through the
-  same service path the CLI ``lop hub link set`` and the desktop PATCH route
-  use. The first version printed a stub notice naming the raw link id, so the
-  row's whole purpose ("toggle Subscribe / Auto-push") did nothing.
-* D9 — the footer door must be the FIRST tail fact the sidebar's ladder drops,
-  so it can never be the reason a queued-ask count or the hidden-population chip
-  disappears.
-* D10 — a sidebar binding must not shadow an app-level binding; the removed
-  ``ctrl+n`` hub chord silently took the remappable new-session hotkey.
+The policy action must WRITE through the CLI/desktop ``update_policy`` path, or
+refuse with a NAMED reason — never a stub, and never a write from a stray
+keystroke. Every test drives the REAL app through ``pilot.press`` (never a
+direct ``action_*`` call), because round 3 found the arming key `a` could be
+"confirmed" by typed-ahead text and by a second `a`, which direct calls hid.
 """
 
 from __future__ import annotations
@@ -77,130 +70,263 @@ def _policy_values(root: Path, link_id: str) -> dict[str, Any]:
     return dict(hub.get("links", {}).get(link_id, {}))
 
 
+async def _open_panel(app: OperatorApp, pilot: Any) -> None:
+    """Open the overlay the way a user does and ENGAGE the panel (past typed-ahead)."""
+    app.action_hub_links()
+    await pilot.pause()
+    await pilot.pause()
+    # One navigation key engages the panel (round-3 D15), so subsequent presses
+    # are treated as intent rather than typed-ahead.
+    await pilot.press("down")
+    await pilot.pause()
+
+
 @pytest.mark.asyncio
-async def test_subscribe_toggle_writes_config(
+async def test_subscribe_press_writes_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D7 EFFECT: `s` changes the persisted Subscribe value (a real write)."""
+    """D7 EFFECT via a real keypress: `s` changes the persisted Subscribe value."""
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     identity = _seed_link(tmp_path, subscribe=True)
-    before = _policy_values(tmp_path, identity.link_id)["subscribe"]
-    assert before is True
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is True
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        app.action_hub_links()
-        await pilot.pause()
-        await pilot.pause()
-        panel = app._hub_links_panel()
-        panel._selected = 0
-        panel.action_toggle_subscribe()
+        await _open_panel(app, pilot)
+        await pilot.press("s")
         await pilot.pause()
         await pilot.pause()
 
-    after = _policy_values(tmp_path, identity.link_id)["subscribe"]
-    assert after is False, "the toggle must persist the flipped Subscribe value"
+    assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False
 
 
 @pytest.mark.asyncio
-async def test_auto_push_public_needs_consent_then_writes(
+async def test_private_eligible_auto_push_enables_on_single_press(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D7: a PUBLIC auto-push enable needs the two-step consent, then writes.
-
-    The first press arms consent (no write); only the second, with
-    ``confirm_egress``, writes — the deliberate public-egress acknowledgement the
-    service requires.
-    """
+    """A SINGLE `a` on a PRIVATE eligible link enables (no consent needed)."""
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
-    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
-
+    identity = _seed_link(
+        tmp_path, visibility="org", tenant="acme", auto_push=False, attest_revision_cas=True
+    )
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        app.action_hub_links()
+        await _open_panel(app, pilot)
+        await pilot.press("a")
         await pilot.pause()
         await pilot.pause()
-        panel = app._hub_links_panel()
-        panel._selected = 0
-        # First press: arm consent, NO write.
-        panel.action_toggle_auto_push()
-        await pilot.pause()
-        assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
-        # Second press: the deliberate confirm writes.
-        panel.action_toggle_auto_push()
-        await pilot.pause()
-        await pilot.pause()
-
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
 
 
 @pytest.mark.asyncio
-async def test_auto_push_ineligible_is_refused_named(
+async def test_public_single_a_arms_but_does_not_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D7: an ineligible origin cannot be enabled, and the refusal is NAMED.
-
-    No revision-CAS attestation is recorded, so the service says
-    ``unsupported-precondition``; the toggle must NOT write, and the app must
-    report that reason (not a stub naming the link id).
-    """
+    """A single `a` on a PUBLIC link arms the prompt but never writes (D15)."""
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    identity = _seed_link(tmp_path, attest_revision_cas=False, auto_push=False)
-    notices: list[str] = []
-
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        app.action_hub_links()
+        await _open_panel(app, pilot)
+        await pilot.press("a")
         await pilot.pause()
         await pilot.pause()
-        # Capture the notices the app emits.
-        monkeypatch.setattr(app, "_system_notice", lambda text, *a, **k: notices.append(str(text)))
         panel = app._hub_links_panel()
-        panel._selected = 0
-        panel.action_toggle_auto_push()
-        await pilot.pause()
-        await pilot.pause()
-
-    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False, "no write on refusal"
-    assert any("unsupported-precondition" in n for n in notices), notices
+        assert panel._consent_link_id == identity.link_id, "the prompt must be armed"
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
 
 
 @pytest.mark.asyncio
-async def test_stale_policy_revision_is_a_named_cas_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("other", ["a", "s", "r", "down", "up", "x"])
+async def test_arm_then_other_then_a_never_egresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other: str
 ) -> None:
-    """D7: a stale revision is refused with the CAS error, never clobbered."""
+    """D15: `a`, any OTHER key, `a` must NOT publish (the old bug's core).
+
+    `a,s,a` even flipped Subscribe (a real write) while leaving consent armed,
+    and a second `a` then published. ANY other key disarms, so the trailing `a`
+    only re-arms — it can never complete.
+    """
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    identity = _seed_link(tmp_path, subscribe=True, attest_revision_cas=True)
-    notices: list[str] = []
-
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        app.action_hub_links()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # arm
+        await pilot.pause()
+        await pilot.press(other)  # any other key disarms
+        await pilot.pause()
+        await pilot.press("a")  # re-arms at most
+        await pilot.pause()
+        await pilot.pause()
+    assert (
+        _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+    ), f"`a`,`{other}`,`a` must not publish"
+
+
+@pytest.mark.asyncio
+async def test_typed_ahead_banana_never_egresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D15: typed-ahead 'banana' (two `a`s) must NOT publish.
+
+    `/hub` takes focus while the user may still be typing; every letter of
+    'banana' arrives within the settle window, so the printable-key guard
+    swallows them.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app._editor()
+        editor.focus()
+        editor.load_text("/hub")
+        await pilot.press("enter")
+        for ch in "banana":
+            await pilot.press(ch)
+        await pilot.pause()
+        await pilot.pause()
+        assert app.focused.__class__.__name__ == "HubLinksPanel"
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_key_after_prompt_writes_with_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D15: the NAMED confirm key (`ctrl+y`) after the prompt writes the egress."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # arm the prompt
+        await pilot.pause()
+        # The consent block must be ON the card, naming the confirm key.
+        painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "Publish publicly?" in painted, painted
+        assert "ctrl+y" in painted, painted
+        await pilot.press("ctrl+y")  # the deliberate confirm
+        await pilot.pause()
+        await pilot.pause()
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
+
+
+@pytest.mark.asyncio
+async def test_esc_cancels_the_prompt_not_the_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D15: esc cancels an armed prompt only; the overlay stays open, no write."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # arm
+        await pilot.pause()
+        await pilot.press("escape")  # cancel the PROMPT
+        await pilot.pause()
+        panel = app._hub_links_panel()
+        assert panel.is_open, "esc must cancel the prompt, not close the overlay"
+        assert panel._consent_link_id is None, "esc must disarm"
+        # A following `a` only re-arms.
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.pause()
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+
+
+@pytest.mark.asyncio
+async def test_ineligible_refusal_is_named_on_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D7/D19: ineligible enable is refused with a humanized reason ON the card."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, attest_revision_cas=False, auto_push=False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")
         await pilot.pause()
         await pilot.pause()
         panel = app._hub_links_panel()
-        panel._selected = 0
+        # The refusal is on the CARD (D19), humanized (D19), not a raw code.
+        assert panel._notice, "a refusal must be shown on the card"
+        assert "unsupported precondition" in panel._notice.lower(), panel._notice
+    assert _policy_values(tmp_path, identity.link_id)["auto_push"] is False
+
+
+@pytest.mark.asyncio
+async def test_stale_policy_revision_is_a_named_cas_refusal_on_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D7/D19: a stale revision is refused ON the card, never clobbered."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = app._hub_links_panel()
         # Simulate a concurrent edit: the panel's revision is now stale.
         panel._rows = [
             dataclasses.replace(row, policy_revision="stale-revision") for row in panel._rows
         ]
-        monkeypatch.setattr(app, "_system_notice", lambda text, *a, **k: notices.append(str(text)))
-        panel.action_toggle_subscribe()
+        await pilot.press("s")
         await pilot.pause()
         await pilot.pause()
-
+        assert panel._notice, "a CAS refusal must be shown on the card"
+        assert "changed" in panel._notice.lower(), panel._notice
     assert _policy_values(tmp_path, identity.link_id)["subscribe"] is True, "no clobber"
-    assert any("changed" in n.lower() or "revision" in n.lower() for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_tui_cannot_create_egress_grant_when_an_earlier_check_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OBSERVATION guard: consent only completes AFTER every earlier gate.
+
+    The TUI's ``consent_completes`` path is reachable ONLY when the service
+    reason is ``unsafe-publication``, which ``_eligibility`` returns only after
+    capability, baseline and lineage all pass (service.py). Here the link has
+    NO revision-CAS attestation, so the reason is ``unsupported-precondition``;
+    a ``ctrl+y`` confirm must therefore write nothing and create no grant.
+    """
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, visibility="public", auto_push=False, attest_revision_cas=False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        await pilot.press("a")  # refused (unsupported-precondition), not armed
+        await pilot.pause()
+        await pilot.press("ctrl+y")  # nothing armed; must be inert
+        await pilot.pause()
+        await pilot.pause()
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["auto_push"] is False
+    grants = (
+        ConfigManager(tmp_path).get_config().values.get("hub", {}).get("public_egress_grants", {})
+    )
+    assert identity.link_id not in grants, "no egress grant may be created"
 
 
 def test_footer_drops_the_hub_door_before_the_asks_or_chip() -> None:
@@ -208,10 +334,8 @@ def test_footer_drops_the_hub_door_before_the_asks_or_chip() -> None:
 
     The door is a CONTROL with two surviving routes (the footer note's press and
     ``/hub``); the ask count and the chip are FACTS discoverable from nowhere
-    else on the frame. So the door must yield before either, at every width.
-    Measured through the REAL ladder with all three tail facts seeded: at 29/30
-    (the sidebar's content floor) the door is gone while ``asks: 4`` and the
-    chip survive; at 34 the door fits again, still without displacing a fact.
+    else on the frame. Measured through the REAL ladder with all three tail
+    facts seeded.
     """
 
     from local_operator.tui.widgets.session_sidebar import SessionSidebar
@@ -225,22 +349,13 @@ def test_footer_drops_the_hub_door_before_the_asks_or_chip() -> None:
         return sidebar._footer_line(width)[0]
 
     for focused in (False, True):
-        # The widths where the ask note and chip survive at all (below these the
-        # pre-existing ladder already falls to the bare lead, unrelated to the
-        # door). Measured: unfocused keeps facts from 24, focused from 26.
         fact_widths = (26, 29, 30, 41, 43) if focused else (24, 26, 29, 30, 41, 43)
         for width in fact_widths:
             line = painted(width, focused=focused)
-            # The door NEVER rides without both facts: if it is on the line, so
-            # are the ask count and the chip. So the door is never the reason a
-            # fact vanished.
             if "hub:" in line:
                 assert "asks: 4" in line and "⌥4" in line, (width, focused, line)
-        # At the floor of the fact-bearing band the door is gone while the facts
-        # survive — the door yielded first.
         floor = fact_widths[0]
         line = painted(floor, focused=focused)
         assert "asks: 4" in line and "⌥4" in line, (floor, focused, line)
         assert "hub:" not in line, (floor, focused, line)
-    # At 34 there is room for the door AND both facts, unfocused.
     assert painted(34, focused=False) == "f9 focus · asks: 4 · hub: 1 · ⌥4"

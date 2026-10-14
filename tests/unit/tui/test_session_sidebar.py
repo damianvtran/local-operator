@@ -5569,8 +5569,10 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
         # (see `check_action` below, review round 2 F15).
         "ctrl+f": "fleet door; check_action declines it while an aside is open",
         # The overlay cards share the `/usage` convention: a focused card's own
-        # `r` refresh (the app's `r` is not a command).
-        "r": "focused overlay card refreshes itself (the /usage convention)",
+        # `r` refresh. The app's `r` IS bound (`subagent_root`, app.py:4601) and
+        # this shadow is deliberate and reviewed: while a card holds focus the
+        # root-navigation key is outranked, exactly as `/usage`'s own card does.
+        "r": "focused overlay card refreshes itself; app `r` is subagent_root (deliberate)",
     }
 
     def check(widget: type) -> None:

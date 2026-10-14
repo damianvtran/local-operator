@@ -174,11 +174,6 @@
     "role": "help text",
     "tone": "plain, precise"
   },
-  "tui.hub_links.hint.activate": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
-  },
   "tui.hub_links.hint.close": {
     "role": "control label",
     "tone": "plain, precise",
@@ -194,11 +189,6 @@
     "tone": "plain, precise",
     "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
   },
-  "tui.hub_links.hint.scroll": {
-    "role": "control label",
-    "tone": "plain, precise",
-    "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. Keep each fragment short so the joined row fits a narrow card."
-  },
   "tui.hub_links.hint.auto_push": {
     "role": "control label",
     "tone": "plain, precise",
@@ -208,5 +198,40 @@
     "role": "control label",
     "tone": "plain, precise",
     "note": "Key-hint row for the Hub links overlay: a key and what it does, joined by ' · '. These are taught because the panel holds focus. The range key (hint.range) is the more-rows indicator, spelled like the sessions list's '1–10/21'; it uses the EN DASH U+2013 as the separator, matching that precedent. 's subscribe' and 'a auto-push' name the two source-scoped policy toggles. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.confirm.lead": {
+    "role": "decision lead",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
+  "tui.hub_links.confirm.keys": {
+    "role": "key legend",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
+  "tui.hub_links.hint.confirm": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Public-egress consent, a destructive/irreversible publication decision. The lead is a question; confirm.keys names BOTH keys (confirm = ctrl+y, a control key so typed-ahead text can never press it; cancel = esc, which cancels only the prompt). Wrap, never truncate; the block's line count is counted into the card height so nothing is clipped."
+  },
+  "tui.hub_links.hint.cancel": {
+    "role": "key name",
+    "tone": "plain, precise",
+    "note": "The bare key name ('esc'); the surrounding sentence supplies the verb ('... to cancel'). Do not repeat the verb here."
+  },
+  "tui.hub_links.hint.select": {
+    "role": "control label",
+    "tone": "plain, precise",
+    "note": "Key-hint fragment for the Hub links overlay: a key and what it does, joined by ' · '. '↑↓ select' appears whenever there is more than one link. Keep each fragment short so the joined row fits a narrow card."
+  },
+  "tui.hub_links.refusal.ineligible": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
+  },
+  "tui.hub_links.refusal.resolve_first": {
+    "role": "refusal message",
+    "tone": "plain, precise",
+    "note": "A refusal shown on the card. {reason} is a humanized service eligibility code (hyphens -> spaces), never a raw code and never a link id. Resolve_first is the legacy/unresolved-link case."
   }
 }

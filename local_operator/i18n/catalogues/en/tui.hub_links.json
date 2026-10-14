@@ -9,12 +9,10 @@
   "tui.hub_links.confirm.public": "Future changes to {item} may be published publicly without asking each time. Changes from private sources are paused for review.",
   "tui.hub_links.confirm.title": "Enable auto-push to {source}?",
   "tui.hub_links.detail.title": "Hub links",
-  "tui.hub_links.hint.activate": "enter opens policy",
   "tui.hub_links.hint.auto_push": "a auto-push",
   "tui.hub_links.hint.close": "esc close",
   "tui.hub_links.hint.range": "{first}–{last}/{total}",
   "tui.hub_links.hint.refresh": "r refresh",
-  "tui.hub_links.hint.scroll": "↑↓ scroll",
   "tui.hub_links.hint.subscribe": "s subscribe",
   "tui.hub_links.mark.available": "Update {item} from {source}",
   "tui.hub_links.mark.healthy": "{item}; {source}; Subscribe {subscribe}; Auto-push {auto_push}",
@@ -40,5 +38,12 @@
   "tui.hub_links.state.preview_changed": "The item or hub changed while you were reviewing. Review the latest changes before publishing.",
   "tui.hub_links.state.published": "Published to {source}",
   "tui.hub_links.state.unsubscribed": "Incoming updates paused. Outgoing changes may still be published to {source}.",
-  "tui.hub_links.state.updated": "Updated from {source}"
+  "tui.hub_links.state.updated": "Updated from {source}",
+  "tui.hub_links.confirm.keys": "press {confirm} to publish, {cancel} to cancel",
+  "tui.hub_links.confirm.lead": "Publish publicly?",
+  "tui.hub_links.hint.cancel": "esc",
+  "tui.hub_links.hint.confirm": "ctrl+y",
+  "tui.hub_links.hint.select": "↑↓ select",
+  "tui.hub_links.refusal.ineligible": "Auto-push is not available for this link: {reason}.",
+  "tui.hub_links.refusal.resolve_first": "Resolve this link's source before acting on it."
 }

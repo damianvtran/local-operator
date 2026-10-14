@@ -34,6 +34,14 @@ def confirm_concurrent() -> Msg:
     return Msg("tui.hub_links.confirm.concurrent", {})
 
 
+def confirm_keys(*, confirm: str, cancel: str) -> Msg:
+    return Msg("tui.hub_links.confirm.keys", {"confirm": confirm, "cancel": cancel})
+
+
+def confirm_lead() -> Msg:
+    return Msg("tui.hub_links.confirm.lead", {})
+
+
 def confirm_private(*, item: str, organization: str) -> Msg:
     return Msg("tui.hub_links.confirm.private", {"item": item, "organization": organization})
 
@@ -50,16 +58,20 @@ def detail_title() -> Msg:
     return Msg("tui.hub_links.detail.title", {})
 
 
-def hint_activate() -> Msg:
-    return Msg("tui.hub_links.hint.activate", {})
-
-
 def hint_auto_push() -> Msg:
     return Msg("tui.hub_links.hint.auto_push", {})
 
 
+def hint_cancel() -> Msg:
+    return Msg("tui.hub_links.hint.cancel", {})
+
+
 def hint_close() -> Msg:
     return Msg("tui.hub_links.hint.close", {})
+
+
+def hint_confirm() -> Msg:
+    return Msg("tui.hub_links.hint.confirm", {})
 
 
 def hint_range(*, first: str, last: str, total: str) -> Msg:
@@ -70,8 +82,8 @@ def hint_refresh() -> Msg:
     return Msg("tui.hub_links.hint.refresh", {})
 
 
-def hint_scroll() -> Msg:
-    return Msg("tui.hub_links.hint.scroll", {})
+def hint_select() -> Msg:
+    return Msg("tui.hub_links.hint.select", {})
 
 
 def hint_subscribe() -> Msg:
@@ -127,6 +139,14 @@ def policy_subscribe_help(*, source: str) -> Msg:
 
 def policy_subscribe_label() -> Msg:
     return Msg("tui.hub_links.policy.subscribe.label", {})
+
+
+def refusal_ineligible(*, reason: str) -> Msg:
+    return Msg("tui.hub_links.refusal.ineligible", {"reason": reason})
+
+
+def refusal_resolve_first() -> Msg:
+    return Msg("tui.hub_links.refusal.resolve_first", {})
 
 
 def section_agents() -> Msg:
