@@ -15,6 +15,14 @@ export type MessageParams = {
   "relay.shell.session.waiting": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
+  "wire.console.description": undefined;
+  "wire.console.max_live.help": undefined;
+  "wire.console.max_live.label": undefined;
+  "wire.console.max_owner.help": undefined;
+  "wire.console.max_owner.label": undefined;
+  "wire.console.title": undefined;
+  "wire.console.user_reserved.help": undefined;
+  "wire.console.user_reserved.label": undefined;
   "wire.errors.agents.agent_not_found": undefined;
   "wire.errors.agents.agent_not_found_id": { "agent_id": string };
   "wire.errors.agents.agent_not_found_wrapped": { "error": string };

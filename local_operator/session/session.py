@@ -25982,6 +25982,12 @@ class Session:
             # attribution the queue exists to avoid. Before the hooks, so the event
             # stream is still live when it goes out.
             await self._flush_queued_notices()
+            # The same canonical owner teardown serves agent and subagent
+            # sessions. Console cleanup is completed-only; quitting a turn must
+            # never terminate a live prompt, REPL or background PTY.
+            from local_operator.ui_console.backend import cleanup_owner_completed
+
+            await cleanup_owner_completed(self._session_id, self._config_dir)
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
