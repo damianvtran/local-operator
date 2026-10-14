@@ -20672,6 +20672,33 @@ async def _ownership_lane_host(state: BrowserSurfaceProtocol, resource: Any) -> 
     return ""
 
 
+async def _explicit_open_lane(
+    args: dict[str, Any], state: BrowserSurfaceProtocol, resource: Any
+) -> str:
+    """The host prefix an explicit `backend` hint puts a FRESH `open` on, or "".
+
+    A fresh explicit navigation must reconcile on the host it will actually dial,
+    not on the availability-first peer. Only a FRESH open qualifies: a held
+    handle, an adoption `tab` or a durable pin each already name a host that
+    outranks the hint (the dispatcher refuses a contradicting hint). An
+    unreachable or invalid hint answers "" and is refused by the normal
+    dispatcher, so this never falls through to a host the caller did not name.
+    """
+    if (
+        str(args.get("action", "")).strip().lower() != "open"
+        or state.surface_id
+        or str(args.get("tab", "")).strip()
+        or resource.pinned_host()
+    ):
+        return ""
+    hinted = str(args.get("backend", "")).strip().lower()
+    if hinted == "extension" and await bridge_browser_reachable():
+        return HOST_BRIDGE_PREFIX
+    if hinted == "ui" and await ui_browser_reachable():
+        return HOST_UI_PREFIX
+    return ""
+
+
 def _ui_state() -> Any:
     """This package's state module, imported lazily like every browser import."""
     from local_operator.ui_browser import state as ui_state
@@ -23094,25 +23121,23 @@ async def execute_browser(
         # and of the session's own RECORD first, which is the one answer a
         # resumed session has (see `_ownership_lane_host`).
         lane_host = await _ownership_lane_host(state, resource)
-        # A fresh explicit navigation must reconcile on the host it will dial,
-        # not the availability-first peer. Held/adopted capabilities still win;
-        # an unavailable or invalid hint is refused by the normal dispatcher.
-        hinted = str(args.get("backend", "")).strip().lower()
-        if (
-            str(args.get("action", "")).strip().lower() == "open"
-            and not state.surface_id
-            and not str(args.get("tab", "")).strip()
-            and not resource.pinned_host()
-        ):
-            if hinted == "extension" and await bridge_browser_reachable():
-                lane_host = HOST_BRIDGE_PREFIX
-            elif hinted == "ui" and await ui_browser_reachable():
-                lane_host = HOST_UI_PREFIX
+        lane_host = await _explicit_open_lane(args, state, resource) or lane_host
         if not lane_host:
             return _browser_update_note(
                 state, await _execute_browser(tool_call_id, args, signal, on_update, context)
             )
         resource.select_host(lane_host)
+    else:
+        # A session that already worked on one host and now opens FRESH on the
+        # other by explicit `backend` must move its lane BEFORE the lane runs.
+        # The gate above only runs while `generation` is empty, so without this
+        # the lane stayed on the earlier host: the entry's recovery reconciled
+        # the wrong peer and the hinted host was sent a bare `open` it fences
+        # as stale on a resumed session. A held capability still pins the lane
+        # (`select_host` refuses to contradict it).
+        explicit = await _explicit_open_lane(args, state, resource)
+        if explicit:
+            resource.select_host(explicit)
     # With a generation, the resource already knows its lane and must keep it:
     # `initialize()` loaded the record (whose `host` is the surface's host) and
     # the pinned prefix agrees with it, so re-deciding here would let a probe that
