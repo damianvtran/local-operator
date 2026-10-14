@@ -91,21 +91,26 @@ async def _family(
     *,
     scope: str = "family",
     budget_s: float | None = None,
-) -> service.Family:
+) -> tuple[service.Family, ledger.Snapshot | None]:
     if scope == "self":
-        return service.Family(session_id, directory)
+        return service.Family(session_id, directory), None
+
     # Roster absence is indexed during the SAME resumable pass as files. A sidecar still
     # wins; the indexed fallback cannot reparse a huge no-roster journal before the budget.
-    snapshot = await asyncio.to_thread(
-        ledger.refresh,
-        config_dir,
-        session_id,
-        directory,
-        cwd=service.session_cwd(config_dir, session_id, directory),
-        home=str(Path.home()),
-        deny=service.make_deny(config_dir),
-        budget_s=budget_s,
-    )
+    def refresh_parent() -> ledger.Snapshot | None:
+        # to_thread arguments are evaluated ON the event loop. Keep the real cwd/registry,
+        # HOME and denylist filesystem readers inside the worker, not in its argument list.
+        return ledger.refresh(
+            config_dir,
+            session_id,
+            directory,
+            cwd=service.session_cwd(config_dir, session_id, directory),
+            home=str(Path.home()),
+            deny=service.make_deny(config_dir),
+            budget_s=budget_s,
+        )
+
+    snapshot = await asyncio.to_thread(refresh_parent)
     children, skipped = await asyncio.to_thread(
         contained_descendants,
         config_dir,
@@ -113,11 +118,14 @@ async def _family(
         indexed_roster=snapshot.scan.roster if snapshot else None,
         indexed=True,
     )
-    return service.Family(
-        session_id=session_id,
-        session_dir=directory,
-        children=tuple(children),
-        skipped=skipped,
+    return (
+        service.Family(
+            session_id=session_id,
+            session_dir=directory,
+            children=tuple(children),
+            skipped=skipped,
+        ),
+        snapshot,
     )
 
 
@@ -209,7 +217,7 @@ async def list_session_files(
         return reply(service.empty_listing(query))
 
     deadline = time.monotonic() + service.DEFAULT_BUDGET_S
-    family = await _family(
+    family, discovery = await _family(
         config_dir,
         session_id,
         directory,
@@ -223,6 +231,11 @@ async def list_session_files(
             family,
             query,
             budget_s=max(0.0, deadline - time.monotonic()),
+            # A second parent pass can discover a legacy roster beyond the first slice.
+            # Only the generation used to discover THIS family may certify it as ready.
+            expected_parent_revision=(
+                (discovery.revision if discovery else 0) if query.scope == "family" else None
+            ),
         )
     except service.InvalidCursor:
         raise HTTPException(
@@ -259,7 +272,7 @@ async def materialise_session_file(session_id: SessionID, file_id: FileID, reque
             404,
             _wd.session_files_file_not_found().envelope(code="session_files_file_not_found"),
         )
-    family = await _family(config_dir, session_id, directory)
+    family, _ = await _family(config_dir, session_id, directory)
     try:
         receipt = await asyncio.to_thread(service.materialise, config_dir, family, file_id)
     except service.MaterialiseError as error:

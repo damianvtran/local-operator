@@ -765,6 +765,7 @@ def list_files(
     display: bool = False,
     budget_s: float | None = DEFAULT_BUDGET_S,
     home: str | None = None,
+    expected_parent_revision: int | None = None,
 ) -> dict[str, Any]:
     """The whole answer for one request. Blocking: call from a worker thread.
 
@@ -775,6 +776,14 @@ def list_files(
     deny = make_deny(config_dir)
     states = advance(config_dir, family, query.scope, budget_s=budget_s, home=home, deny=deny)
     merged = merge(states, home=home, deny=deny, revision_scope=query.scope)
+    # Discovery and listing are two bounded passes. If this pass advanced the parent,
+    # its roster may name children absent from the earlier Family input. Report honest
+    # building (and poll) rather than certify a complete list for outdated membership.
+    parent = states[0][3] if states else None
+    if expected_parent_revision is not None and (
+        (parent.revision if parent else 0) != expected_parent_revision
+    ):
+        merged.complete = False
     store_root = Path(config_dir) / "attachments"
 
     cursor_reset = False

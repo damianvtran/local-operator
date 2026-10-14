@@ -718,3 +718,95 @@ async def test_contended_refresh_serves_published_rows_as_building(api, monkeypa
         await owner
     final = (await client.get(URL)).json()["result"]
     assert final["state"] == "ready" and final["total"] == 2
+
+
+async def test_ready_never_certifies_family_discovered_before_legacy_roster_cutoff(
+    api, monkeypatch
+):
+    """Only first discovery stops at the real 64-row deadline stride; listing reaches EOF.
+
+    Membership comes from the first pass, not the second. A ready answer must include the
+    child or signal building so a subsequent poll can discover it; empty-ready is a lie.
+    """
+    import time
+
+    from local_operator.session_files import ledger
+
+    client, _, root = api
+    parent = _session(root)
+    child = _session(root, CHILD, origin="subagent")
+    write_journal(child, generate_image_rows(1, 1, _artifact(5), name="child.png"))
+    rows = [assistant(f"ordinary-{n}", float(n), []) for n in range(64)]
+    rows.append(
+        {
+            "id": "roster-after-boundary",
+            "ts": 100,
+            "type": "custom",
+            "payload": {
+                "custom_type": "subagent_roster",
+                "details": {
+                    "records": [{"session_dir": str(child), "job_id": "legacy-job", "depth": 1}]
+                },
+            },
+        }
+    )
+    write_journal(parent, rows)
+    real = ledger._read_into
+    boundaries = []
+
+    def cutoff_first_discovery(scan, path, offset, deadline):
+        if path == parent / "transcript.jsonl" and not boundaries:
+            boundaries.append(offset)
+            deadline = time.monotonic() - 1
+        return real(scan, path, offset, deadline)
+
+    monkeypatch.setattr(ledger, "_read_into", cutoff_first_discovery)
+    monkeypatch.setattr(desktop_session_files, "_kick", lambda *a: None)
+    first = (await client.get(URL)).json()["result"]
+    assert boundaries == [0], "fixture exercised the actual cold discovery boundary"
+    assert first["state"] == "building" and first["scan"]["complete"] is False
+    # The second pass DID reach EOF and find the child; the route must not certify old family.
+    indexed = ledger.peek(root, SESSION)
+    assert indexed is not None and indexed.complete and indexed.scan.roster is not None
+    second = (await client.get(URL)).json()["result"]
+    assert second["state"] == "ready" and second["scan"]["complete"] is True
+    assert [row["name"] for row in second["rows"]] == ["child.png"]
+    assert second["scan"]["children"] == 1
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_first_http_cwd_and_real_registry_readers_run_off_loop(api, monkeypatch, terminal):
+    """Delegate to REAL readers and record thread identity, not fabricated delay/latency.
+
+    No marker forces the terminal fallback to enumerate the real isolated runtime registry.
+    First request matters: no warmed scan cache may mask a misplaced filesystem lookup.
+    """
+    client, _, root = api
+    directory = _session(root)
+    if terminal:
+        (directory / "desktop.json").unlink()
+    write_journal(directory, [assistant("ordinary", 1, [])])
+    from local_operator.session.runtime import registry
+
+    loop_thread = threading.get_ident()
+    cwd_threads, registry_threads = [], []
+    real_cwd = desktop_session_files.service.session_cwd
+    real_registry = registry.scan
+
+    def cwd(*args, **kwargs):
+        cwd_threads.append(threading.get_ident())
+        return real_cwd(*args, **kwargs)
+
+    def runtime_registry(*args, **kwargs):
+        registry_threads.append(threading.get_ident())
+        return real_registry(*args, **kwargs)
+
+    monkeypatch.setattr(desktop_session_files.service, "session_cwd", cwd)
+    monkeypatch.setattr(registry, "scan", runtime_registry)
+    response = await client.get(URL)
+    assert response.status_code == 200 and response.json()["result"]["state"] == "ready"
+    assert cwd_threads and all(thread != loop_thread for thread in cwd_threads)
+    if terminal:
+        assert registry_threads and all(thread != loop_thread for thread in registry_threads)
+    else:
+        assert registry_threads == [], "desktop marker does not need runtime fallback"
