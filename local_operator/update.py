@@ -3882,6 +3882,33 @@ def _config_roots() -> tuple[Path, ...]:
     return (ambient, default)
 
 
+def live_records_by_root() -> dict[Path, list[tuple[Any, Path]]]:
+    """Per install root, the live records that name it, with their config root.
+
+    THE READER THE CAPACITY CONTROLLER'S COHORTS NEED, factored beside
+    :func:`referenced_install_roots` rather than reimplemented so the two cannot
+    disagree about which namespaces count. ``prune_generations`` wants the FLAT SET
+    of named roots; the controller wants them GROUPED, because it asks ONE cohort
+    — the sessions on ONE root — to checkpoint, and never the whole fleet. Keys are
+    resolved roots (``_real``) so they compare equal to a listed generation name.
+    """
+    grouped: dict[Path, list[tuple[Any, Path]]] = {}
+    for config_root in _config_roots():
+        records, _gaps = _records_under(config_root)
+        for record, value in records:
+            # THE SAME NORMALISATION THE PRUNE MAKES (``prune_generations`` does
+            # ``Path(root).parent.parent``): a record names the VENV
+            # (``<gen>/tools/local-operator``) and the generation is two levels up,
+            # so the two readers must agree about which generation a record names or
+            # the controller would ask the wrong cohort to move.
+            try:
+                generation = _real(Path(value).parent.parent)
+            except OSError:  # pragma: no cover — an unresolvable reference names nothing
+                continue
+            grouped.setdefault(generation, []).append((record, config_root))
+    return grouped
+
+
 @dataclass(frozen=True)
 class _NamespaceRead:
     """One namespace's answer: what it named, and whether it could be READ AT ALL.
@@ -4868,8 +4895,18 @@ def prune_generations(
     referenced: Iterable[str | Path] | ReferencedTrees = (),
     now: float | None = None,
     actor: str = "",
+    dry_run: bool = False,
 ) -> PrunePlan:
     """Delete the generations nothing can still be importing from.
+
+    ``dry_run`` DECIDES WITHOUT DELETING, and it is the same predicate rather than
+    a second one. The capacity controller must ask "what is provably
+    unreferenced?" without acting, and a parallel read-only implementation of the
+    safety rules is exactly how the two would drift and the weaker one would end up
+    doing the deleting. With ``dry_run`` set a candidate that WOULD be removed is
+    recorded as a removal in the returned plan and its tree is left alone; no
+    attestation is written, because there is no act to name (the same reason a kept
+    candidate is never attested).
 
     RETENTION IS STRUCTURAL, NOT A COUNT. A generation is kept when it is the
     pointer's target, when a live or persisted record names its install root,
@@ -5077,6 +5114,13 @@ def prune_generations(
             continue
         if index is None:
             index = _record_index()
+        # DRY RUN STOPS HERE: the decision is made, the tree is not touched, and
+        # no attestation is written — a marker for a tree that survives would be a
+        # false attribution, the same argument the keep paths above make.
+        if dry_run:
+            removed.append(path)
+            decisions.append(PruneDecision(path, True, removal_reason))
+            continue
         # ATTEST BEFORE THE TREE GOES. This is the one place in the harness that
         # deletes an install out from under runtimes that are importing from it,
         # and until this call existed the deletion was silent: the runtimes died
@@ -6224,6 +6268,37 @@ def _run_installer(argv: list[str], *, executable: str | None = None) -> int:
     return install_transaction.run_installer(argv, executable=executable)
 
 
+def _note_capacity_after_promotion(promoted: Path) -> None:
+    """Record capacity pressure on the promoted candidate's own operation, or nothing.
+
+    THE ONLY AUTOMATIC ACTION THIS TAIL TAKES TOWARD DISK, and it is a RECORD, not
+    a deletion: it measures count and free space, and crossing a threshold writes
+    the durable ``handoff.capacity`` sub-map (``note_capacity``) so a controller
+    that can consult the fleet has the request. The candidate's own operation is the
+    right record — ``operation_for_generation`` ties recovery to THIS candidate, not
+    to a latest timestamp a concurrent newer operation could own.
+
+    Silent when the candidate has no operation (an in-place platform that never
+    started one) and silent when there is no pressure: a note that fired on every
+    ordinary install would be noise, and only the crossing is actionable.
+    """
+    from local_operator import capacity_recovery, install_transaction
+
+    measurement = capacity_recovery.measure_capacity(root=stable_root())
+    if not measurement.over:
+        return
+    operation = install_transaction.operation_for_generation(Path(promoted))
+    if operation is None:
+        return
+    install_transaction.note_capacity(
+        stable_root(),
+        operation.identifier,
+        state="requested",
+        threshold=measurement.threshold,
+        cohort=(),
+    )
+
+
 def perform_upgrade(
     *,
     target: str,
@@ -6309,6 +6384,17 @@ def perform_upgrade(
         # install admission or assuming that a successful pointer swap retires A.
         # Explicit maintenance keeps its own guarded policy; this tail never
         # invokes it or the historical on_prune observer.
+        #
+        # WHAT THE TAIL DOES DO ABOUT CAPACITY: measure and RECORD, never delete.
+        # Crossing a threshold writes the durable capacity request on this
+        # candidate's own operation, so a later controller (which CAN see the
+        # fleet) has the pressure on the record. Recording here is best-effort: a
+        # machine whose sandbox denies the write must not be told the upgrade
+        # failed, and nothing observable has been reclaimed by this step.
+        try:
+            _note_capacity_after_promotion(promoted)
+        except Exception:  # noqa: BLE001 — a capacity note never fails an install
+            logger.warning("could not record capacity pressure", exc_info=True)
         return target
     argv, image = installer_invocation(
         detected,
