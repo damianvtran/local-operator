@@ -604,8 +604,8 @@ async def test_capture_round2_remediation_frames(
 
     # Assert THIS test's own round-2 frames by name (shared OUT dir).
     # QN6: TWO links, NOT engaged -- the frame where `↑↓ to begin` and
-    # `↑↓ select` used to stack into "↑↓ to begin · ↑↓ select". The hint row now
-    # shows the arrows ONCE until a bound key engages the card.
+    # `↑↓ select` used to stack into "↑↓ to begin · ↑↓ select". The hint
+    # row now shows the arrows ONCE until a bound key engages the card.
     await _capture(
         "engage-single-hint",
         size=(100, 30),
@@ -1087,7 +1087,9 @@ async def test_capture_round6_frames(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert svg.exists() and "<svg" in svg.read_text()[:200], name
 
 
-async def test_capture_round1_engage_hint_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_capture_round1_engage_hint_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The engage-hint frames (round-1 Q6): the card opened, NOT yet engaged.
 
     The typed-ahead guard is deterministic (a printable key can never engage or

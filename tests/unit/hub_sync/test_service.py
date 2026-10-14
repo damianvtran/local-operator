@@ -11,9 +11,9 @@ import pytest
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
-from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
+from local_operator.hub_sync.identity import Kind
 from local_operator.hub_sync.merge import ConflictProposal, ResolverError
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
