@@ -422,13 +422,13 @@ from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.projects_send import (
-    SEND_FAULT_NOTICE,
     SendTarget,
     amber_notice,
     compose_band,
     error_notice,
     pending_line,
     refusal_notice,
+    send_fault_notice,
     sent_line,
 )
 from local_operator.tui.widgets.projects_start import StartTarget, start_targets
@@ -36835,7 +36835,7 @@ class OperatorApp(App[None]):
             self._quick_send_settled(
                 view,
                 target,
-                SEND_FAULT_NOTICE,
+                send_fault_notice(),
                 text,
             )
             return

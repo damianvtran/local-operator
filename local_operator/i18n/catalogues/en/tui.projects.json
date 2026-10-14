@@ -1,0 +1,20 @@
+{
+  "tui.projects.send.empty": "no targets — esc closes · /project link adds one",
+  "tui.projects.send.no_match": "no matching targets — backspace to widen",
+  "tui.projects.send.compose": "send to: {handle} · esc cancel",
+  "tui.projects.send.pending": "sending to {handle}…",
+  "tui.projects.send.sent": "sent to {handle} · {state_word}",
+  "tui.projects.send.wake_unconfirmed": "wake unconfirmed — don't resend; it may have landed",
+  "tui.projects.send.delivery_unconfirmed": "delivery unconfirmed — check its transcript first",
+  "tui.projects.send.fault": "send faulted on this end — retry",
+  "tui.projects.send.refusal": "could not deliver: {reason}",
+  "tui.projects.send.error": "could not send: {reason}",
+  "tui.projects.send.session": "session {short}",
+  "tui.projects.send.title": "send to",
+  "tui.projects.send.filter": "type to filter",
+  "tui.projects.send.legend": "type to filter · ↑↓ move · ↵ select · esc close",
+  "tui.projects.send.more": "{count, plural, one {+{label} more} other {+{label} more}}",
+  "tui.projects.send.binding_move": "Move",
+  "tui.projects.send.binding_choose": "Choose",
+  "tui.projects.send.binding_close": "Close"
+}
