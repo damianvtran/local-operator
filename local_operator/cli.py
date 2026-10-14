@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 
     from local_operator.agents import AgentData, AgentRegistry
     from local_operator.clients.radient import RadientClient
+    from local_operator.hub_sync.identity import Kind
 
 from local_operator.helpers import setup_cross_platform_environment
 
@@ -693,6 +694,47 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     hub_status.add_argument("--json", action="store_true", help="Emit the desktop route payload")
+    hub_links = hub_subparsers.add_parser(
+        "links",
+        help="List every hub link (healthy or not) with its source, scope and policy",
+        parents=[parent_parser],
+    )
+    hub_links.add_argument("--kind", choices=["agent", "team", "skill"], default=None)
+    hub_links.add_argument("--json", action="store_true", help="Emit the desktop links payload")
+    hub_link_group = hub_subparsers.add_parser(
+        "link",
+        help="Edit one hub link's independent policy",
+    )
+    hub_link_subparsers = hub_link_group.add_subparsers(dest="hub_link_command", required=True)
+    hub_link = hub_link_subparsers.add_parser(
+        "set",
+        help="Set this link's subscribe and/or auto_push policy",
+        parents=[parent_parser],
+    )
+    hub_link.add_argument("link_id", help="The link id from `lop hub links`")
+    hub_link.add_argument(
+        "--subscribe",
+        choices=["true", "false"],
+        default=None,
+        help="Unattended inbound synchronization for this link",
+    )
+    hub_link.add_argument(
+        "--auto-push",
+        choices=["true", "false"],
+        default=None,
+        help="Unattended outbound publication for this link",
+    )
+    hub_link.add_argument(
+        "--expected-revision",
+        default=None,
+        help="The policy revision you last saw (CAS); omitted reads it fresh first",
+    )
+    hub_link.add_argument(
+        "--confirm-public-egress",
+        action="store_true",
+        help="Explicit consent to publish authored changes to a PUBLIC origin",
+    )
+    hub_link.add_argument("--json", action="store_true")
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
@@ -10435,6 +10477,120 @@ def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def _hub_links_snapshot(config_manager: ConfigManager) -> dict[str, Any]:
+    """The links inventory, computed locally (no network)."""
+
+    from local_operator.hub_sync import service as svc
+
+    ctx = svc.HubSyncContext(
+        config_dir=config_manager.config_dir,
+        config_manager=config_manager,
+        client_for_tenant=lambda _tenant: None,
+    )
+    return svc.links_snapshot(ctx)
+
+
+def hub_links_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop hub links`` — every link with its source, scope and independent policy."""
+
+    import json as _json
+
+    config_manager = ConfigManager(base_dir)
+    snapshot = _hub_links_snapshot(config_manager)
+    kind = getattr(args, "kind", None)
+    links = [link for link in snapshot["links"] if kind is None or link["kind"] == kind]
+    if getattr(args, "json", False):
+        print(_json.dumps({**snapshot, "links": links}, indent=2))
+        return 0
+    if not links:
+        print("No hub links.")
+        return 0
+    for link in links:
+        policy = link.get("policy") or {}
+        origin = link.get("hub_source") or "(unresolved origin)"
+        scope = link.get("visibility") or "unknown"
+        pull = link.get("pull") or {}
+        push = link.get("push") or {}
+        eligible = link.get("eligibility") or {}
+        print(
+            f"{link['kind']}:{link['name']}  [pull={pull.get('state')} push={push.get('state')}]\n"
+            f"  link_id: {link.get('link_id') or '(unresolved)'}\n"
+            f"  source:  {origin}  ({scope})\n"
+            f"  policy:  subscribe={policy.get('subscribe')} auto_push={policy.get('auto_push')}\n"
+            f"  eligible: auto_push={eligible.get('can_auto_push')} ({eligible.get('reason')})\n"
+            f"  will: apply={link.get('auto_will_apply')} push={link.get('auto_will_push')}"
+        )
+    for row in snapshot.get("unresolved", []):
+        print(f"{row['kind']}:{row['name']}  [unresolved: {row['reason']}]")
+    return 0
+
+
+def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop hub link set <link_id>`` — edit a link's independent policy under a CAS."""
+
+    import json as _json
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.policies import update_policy
+
+    config_manager = ConfigManager(base_dir)
+    subscribe = None if args.subscribe is None else args.subscribe == "true"
+    auto_push = None if args.auto_push is None else args.auto_push == "true"
+    if subscribe is None and auto_push is None:
+        print("error: pass --subscribe and/or --auto-push")
+        return 2
+
+    record = None
+    for candidate in prov.iter_baselines(config_manager.config_dir):
+        if candidate.identity is not None and candidate.identity.link_id == args.link_id:
+            record = candidate
+            break
+    if record is None or record.identity is None:
+        print(f"error: no link with id {args.link_id!r} is known locally")
+        return 1
+
+    revision = args.expected_revision
+    snapshot = _hub_links_snapshot(config_manager)
+    row = next((link for link in snapshot["links"] if link.get("link_id") == args.link_id), None)
+    if not revision:
+        # Read the current revision unless the caller supplied one (the CAS guard).
+        revision = ((row or {}).get("policy") or {}).get("revision")
+        if not revision:
+            print("error: could not read the current policy revision")
+            return 1
+    eligible = bool((row or {}).get("eligibility", {}).get("can_auto_push"))
+    reason = str((row or {}).get("eligibility", {}).get("reason") or "")
+    try:
+        result = update_policy(
+            config_manager,
+            record.identity,
+            expected_revision=revision,
+            subscribe=subscribe,
+            auto_push=auto_push,
+            # The SERVICE-computed eligibility, same fact the inventory reports;
+            # public enable additionally demands --confirm-public-egress. The
+            # REASON is passed through so ``update_policy`` applies its one
+            # public-consent carve-out for the first grant (round-4 cross-surface
+            # fix), while every earlier gate still refuses.
+            can_enable_auto_push=eligible,
+            confirm_public_egress=getattr(args, "confirm_public_egress", False),
+            ineligible_reason=reason or "unsupported-precondition",
+        )
+    except LinkError as error:
+        print(f"error: {error}")
+        return 1
+    payload = result.to_json()
+    if getattr(args, "json", False):
+        print(_json.dumps({"link_id": args.link_id, "policy": payload}, indent=2))
+    else:
+        print(
+            f"link {args.link_id}: subscribe={payload['subscribe']} "
+            f"auto_push={payload['auto_push']}"
+        )
+    return 0
+
+
 def agents_create_command(name: str, agent_registry: "AgentRegistry") -> int:
     """Create a new agent with the given name."""
 
@@ -11556,12 +11712,87 @@ def _confirm_plan(
     )
 
 
+def _seed_after_publish(
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None", result: Any
+) -> None:
+    """Seed the outbound receipt after an ACCEPTED CLI publish (parent ruling (A)b).
+
+    The accepted result carries the canonical document and the server's opaque
+    ETag; A is the local input that was published. BEST-EFFORT AND SILENT on
+    failure: the publication itself succeeded, and the link honestly stays
+    ``no-receipt`` (the inventory says so) until the next seed point.
+    """
+
+    if not seed or not isinstance(result, Mapping):
+        return
+    config_dir, kind, local_id, local_fields = seed
+    try:
+        from local_operator.hub_sync.service import seed_receipt_after_publish
+
+        seed_receipt_after_publish(
+            config_dir,
+            kind,
+            local_id,
+            accepted=result.get("accepted_document") or {},
+            local_fields=dict(local_fields),
+            revision=str(result.get("revision") or "") or None,
+        )
+    except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
+        return
+
+
+def _seed_context_agent(
+    agent_registry: Any, agent: Any, document: Mapping[str, Any]
+) -> "tuple[Any, Kind, str, Mapping[str, Any]] | None":
+    """The seeding context of an accepted agent publish (None when unknowable)."""
+
+    try:
+        local_id = str(getattr(agent, "id", "") or "")
+        if not local_id:
+            return None
+        return (
+            agent_registry.config_dir,
+            "agent",
+            local_id,
+            {
+                "instructions": str(document.get("instructions") or ""),
+                "description": str(document.get("description") or ""),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _seed_context_team(
+    team_registry: Any, team: Any
+) -> "tuple[Any, Kind, str, Mapping[str, Any]] | None":
+    """The seeding context of an accepted team publish (None when unknowable)."""
+
+    try:
+        from local_operator.hub_sync import provenance as prov
+
+        local_id = str(getattr(team, "id", "") or "")
+        if not local_id:
+            return None
+        fields = prov.team_fields(
+            description=str(getattr(team, "description", "") or ""),
+            manager=str(getattr(team, "manager", "") or ""),
+            members=getattr(team, "members", None),
+            instructions=str(getattr(team, "instructions", "") or ""),
+            project=str(getattr(team, "project", "") or ""),
+        )
+        return team_registry.config_dir, "team", local_id, fields
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _publish_against_old_server(
     client: Any,
     kind: str,
     document: Mapping[str, Any],
     target: _PublishTarget,
     flags: argparse.Namespace,
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None" = None,
 ) -> "tuple[int, Optional[dict[str, Any]]]":
     """The pre-preview hub: warn, confirm with a plain yes/no, publish as before (§4.5).
 
@@ -11602,6 +11833,7 @@ def _publish_against_old_server(
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
+    _seed_after_publish(seed, result)
     return 0, result
 
 
@@ -11612,6 +11844,7 @@ def _publish_with_preview(
     target: _PublishTarget,
     base: Any,
     flags: argparse.Namespace,
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None" = None,
 ) -> "tuple[int, Optional[dict[str, Any]]]":
     """Preview -> show -> confirm -> commit, for every instruction-set transport (§7.3).
 
@@ -11665,7 +11898,7 @@ def _publish_with_preview(
         return 130, None
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         if _is_missing_preview_route(exc):
-            return _publish_against_old_server(client, kind, document, target, flags)
+            return _publish_against_old_server(client, kind, document, target, flags, seed=seed)
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
 
@@ -11686,6 +11919,7 @@ def _publish_with_preview(
     while True:
         try:
             result = _commit_publication(client, kind, target, plan)
+            _seed_after_publish(seed, result)
             return 0, result
         except KeyboardInterrupt:
             # The commit was in flight, so unlike the preview the hub may still
@@ -11813,7 +12047,15 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
             return stop
 
     target = _PublishTarget("org", tenant, hub_id, f"organization '{tenant}'")
-    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "agent",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_agent(agent_registry, agent, document),
+    )
     if code != 0:
         return code
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
@@ -11962,7 +12204,15 @@ def agents_push_public_republish_command(
         return stop
 
     target = _PublishTarget("public", None, hub_id, "the public hub")
-    code, result = _publish_with_preview(client, "agent", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "agent",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_agent(agent_registry, agent, document),
+    )
     if code != 0:
         return code
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
@@ -12247,7 +12497,15 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         if stop is not None:
             return stop
 
-    code, result = _publish_with_preview(client, "team", document, target, None, args)
+    code, result = _publish_with_preview(
+        client,
+        "team",
+        document,
+        target,
+        None,
+        args,
+        seed=_seed_context_team(team_registry, team),
+    )
     if code != 0:
         return code
     info = result.get("team") if isinstance(result, dict) else None
@@ -14776,6 +15034,12 @@ def main() -> int:
         elif args.subcommand == "hub":
             if args.hub_command == "status":
                 return hub_status_command(args, base_dir)
+            if args.hub_command == "links":
+                return hub_links_command(args, base_dir)
+            if args.hub_command == "link":
+                if args.hub_link_command == "set":
+                    return hub_link_set_command(args, base_dir)
+                parser.error(f"Invalid hub link command: {args.hub_link_command}")
             parser.error(f"Invalid hub command: {args.hub_command}")
         elif args.subcommand == "mobile":
             return mobile_command(args)

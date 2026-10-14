@@ -236,3 +236,30 @@ def test_prefer_settles_only_unresolved_groups_and_reports_the_loser() -> None:
     )
     assert r.outcome == "merged" and "plain" in str(r.merged)
     assert "cite" in str(r.regions[0].dropped)
+
+
+def test_conflict_subunits_are_bounded_and_the_remainder_is_unresolved() -> None:
+    """A pathological input cannot make the conflict loop unbounded."""
+    from local_operator.hub_sync import merge as m
+
+    class _CountingResolver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def resolve(self, req):  # a valid proposal each time, so nothing is systemic
+            self.calls += 1
+            return m.ConflictProposal(req.local, covers=("l1", "r1"), notes="counting")
+
+    # 60 genuinely conflicting sections: without the bound the loop would call the
+    # resolver 60 times; with it the residue past 32 stays unresolved.
+    base = "".join(f"## S{i}\nThe rule is alpha {i}.\n\n" for i in range(60))
+    local = "".join(f"## S{i}\nThe rule is beta {i}.\n\n" for i in range(60))
+    remote = "".join(f"## S{i}\nThe rule is gamma {i}.\n\n" for i in range(60))
+    resolver = _CountingResolver()
+    result = _md(base, local, remote, allow_llm=True, resolver=resolver)
+    # The bound is on conflict GROUPS (32), each of which may be re-asked once with
+    # validator feedback, so calls stay within 2x the bound rather than one per
+    # section (60). Without the bound, all 60 sections would be resolved.
+    assert resolver.calls <= m.MAX_CONFLICT_SUBUNITS * 2
+    # The residue past the bound is UNRESOLVED and reported, never dropped.
+    assert sum(1 for r in result.regions if r.provenance == "unresolved") > 0

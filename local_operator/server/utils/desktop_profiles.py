@@ -20,6 +20,7 @@ from local_operator.agent_profiles import (
     seed_divergence,
     seed_origin,
 )
+from local_operator.hub_sync.definition import definition_revision
 
 
 def profile_detail(
@@ -69,6 +70,16 @@ def profile_detail(
         "action_class": normalize_action_class(metadata.action_class),
         "seed_origin": origin,
         "divergent_fields": [],
+        # Opaque revision over the authored editable fields, so an editor can
+        # round-trip the exact snapshot it edited. Absent where the row is a
+        # builtin seed with no installed local editable row.
+        "definition_revision": (
+            None
+            if kind == "seed" or row is None
+            else definition_revision(
+                "agent", str(row.id), registry.definition_revision_fields(str(row.id))
+            )
+        ),
     }
     seed = load_seed(origin) if origin else None
     if seed is not None:

@@ -217,6 +217,12 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # destination whose renderer has no adapter is the
             # offered-and-then-dead-ends row the `/mobile` lesson refuses. The
             # decision is stated on the `highlights` entry in `slash_commands.py`.
+            # `/hub`, added by the hub-streams slice, is withheld in THIS pass
+            # by the same offered-and-then-dead-ends rule: its surface is a
+            # terminal overlay (`/hub` opens the hub-links card), no desktop
+            # destination is built for it yet, and a row offered with no adapter
+            # is the `/mobile` lesson — the decision is to withhold until one
+            # exists.
             # `/info` used to be the
             # other one — its every field describes the PROCESS AND HOST it
             # runs in (install prefix, resolved import path, pid, control port,
@@ -237,6 +243,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # silently missing from the desktop.
             assert withheld == {
                 "highlights",
+                "hub",
                 "keys",
                 "links",
                 "mobile",

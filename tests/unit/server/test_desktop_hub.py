@@ -203,7 +203,16 @@ async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again
     def boom(_client: Any, _hub_id: str, **_kw: Any) -> tuple[str, str]:
         raise RuntimeError("500 Server Error")
 
+    # "The hub went down" is BOTH reads failing: the check reads the DETAIL
+    # first (one consistent content+revision snapshot, round-3 R18) and only
+    # falls back to the zip, so a live detail with a dead zip is not an outage.
+    original_get_agent = hub.get_agent
+
+    def boom_detail(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("500 Server Error")
+
     monkeypatch.setattr("local_operator.agents._fetch_hub_profile", boom)
+    monkeypatch.setattr(hub, "get_agent", boom_detail)
     failed = await client.post("/v1/desktop/hub/updates/check", json=mutation())
     (item,) = failed.json()["result"]["status"]["items"]
     assert item["error_class"] == "hub-error" and item["state"] == "available"
@@ -211,6 +220,7 @@ async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again
     monkeypatch.setattr(
         "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]
     )
+    monkeypatch.setattr(hub, "get_agent", original_get_agent)
     retried = await client.post(
         "/v1/desktop/hub/updates/retry", json=mutation(kind="agent", name="coder")
     )
@@ -248,3 +258,328 @@ async def test_capabilities_advertise_hub_updates() -> None:
     from local_operator.server.features import feature_flags
 
     assert feature_flags()["hub_updates"] == 1
+
+
+async def test_links_inventory_lists_a_healthy_link_with_capability(api):
+    """The inventory enumerates a healthy link (identity+policy+health), not just pending."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)  # a real pulled link with a baseline
+
+    # Capability advertised.
+    caps = (await client.get("/v1/capabilities")).json()["result"]
+    assert caps["features"]["hub_links"] == 1
+
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]
+    assert payload["capability"] == "hub_links:1"
+    # A LEGACY link (no confirmed identity) is listed under `unresolved`, not in
+    # `links`, so a client offers resolve instead of acting on a guessed origin.
+    assert payload["links"] == []
+    assert len(payload["unresolved"]) == 1
+    row = payload["unresolved"][0]
+    assert row["kind"] == "agent" and row["hub_id"] == "h1"
+    assert row["reason"] == "source-unresolved"
+
+
+async def test_link_policy_patch_is_revision_checked(api):
+    """A stale revision is a named 409; the correct one writes both values independently."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)
+
+    link_id = await _resolved_link_id(client, root)
+
+    stale = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_policy_revision="not-the-revision"),
+    )
+    assert stale.status_code == 409, stale.text
+
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"][0]
+    revision = payload["policy"]["revision"]
+
+    ok = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_policy_revision=revision),
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["result"]["policy"]["subscribe"] is False
+    assert ok.json()["result"]["policy"]["auto_push"] is False
+
+
+async def test_link_policy_patch_refuses_enabling_auto_push_without_eligibility(api):
+    """Enabling auto_push demands a server eligibility attestation; refused, not faked."""
+    client, root, hub = api
+    agents = AgentRegistry(root)
+    _pull_agent(agents, hub, root)
+    link_id = await _resolved_link_id(client, root)
+    payload = next(
+        row
+        for row in (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
+        if row["link_id"] == link_id
+    )
+
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(auto_push=True, expected_policy_revision=payload["policy"]["revision"]),
+    )
+    assert refused.status_code == 422, refused.text
+
+
+async def test_link_policy_patch_404s_an_unknown_link(api):
+    client, root, hub = api
+    response = await client.patch(
+        "/v1/desktop/hub/links/deadbeef",
+        json=mutation(subscribe=True, expected_policy_revision="x"),
+    )
+    assert response.status_code == 404
+
+
+async def _resolved_link_id(client: Any, root: Path) -> str:
+    """Resolve the pulled agent's legacy link to a confirmed identity, return its id."""
+    resolved = await client.post(
+        "/v1/desktop/hub/updates/apply",
+        json=mutation(
+            kind="agent",
+            name="coder",
+            resolve_source=True,
+            hub_source="https://api.radienthq.com/v1",
+            visibility="public",
+        ),
+    )
+    assert resolved.status_code == 200, resolved.text
+    return resolved.json()["result"]["link"]["link_id"]
+
+
+def _seed_public_link(
+    root: Path, *, lineage: str = "clean", recorded_by: str = "pull", cas: bool = True
+) -> str:
+    """A CONFIRMED public link as a real pull + capability probe leaves it.
+
+    Baseline record with a source-scoped remote revision and known scope, plus
+    (unless ``cas`` is False) the persisted revision-CAS attestation — the facts
+    ``_eligibility`` reads. ``lineage``/``recorded_by``/``cas`` are varied to
+    reach each earlier gate in order: capability first (unsupported-
+    precondition), then the baseline (baseline-unknown), then lineage.
+    """
+
+    import dataclasses
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkIdentity
+
+    source = "https://api.radienthq.com/v1"
+    identity = LinkIdentity("agent", "synthetic-local", source, "public", None, "h1")
+    record = prov.make_record(
+        "agent", "synthetic-local", "h1", None, {"instructions": "x"}, recorded_by
+    )
+    record = dataclasses.replace(
+        record,
+        identity=identity,
+        remote_revision='"rev-1"',
+        lineage=lineage,
+        scope_known=True,
+        local_alias="coder",
+    )
+    prov.write_baseline(root, record)
+    cm = ConfigManager(root)
+    cm.set_config_value(
+        "hub", {"links": {identity.link_id: {"subscribe": True, "auto_push": False}}}
+    )
+    if cas:
+        svc.record_server_capabilities(
+            svc.HubSyncContext(
+                config_dir=root, config_manager=cm, client_for_tenant=lambda _t: None
+            ),
+            {"revision_cas": 1},
+            source=source,
+        )
+    return identity.link_id
+
+
+def _grant_written(root: Path, link_id: str) -> bool:
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return link_id in (hub.get("public_egress_grants") or {})
+
+
+def _auto_push_persisted(root: Path, link_id: str) -> bool:
+    """N1: the persisted auto_push value (a refusal must leave it False)."""
+
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return bool(((hub.get("links") or {}).get(link_id) or {}).get("auto_push"))
+
+
+async def _revision(client: Any, link_id: str) -> str:
+    payload = (await client.get("/v1/desktop/hub/links")).json()["result"]["links"]
+    return next(row["policy"]["revision"] for row in payload if row["link_id"] == link_id)
+
+
+async def test_desktop_patch_mints_the_first_public_grant_only_with_consent(api):
+    """The cross-surface fix on the REAL ASGI app: consent mints the first grant."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    # WITHOUT confirm: 422, no grant.
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
+    # WITH confirm: 200 and the grant persisted.
+    ok = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["result"]["policy"]["auto_push"] is True
+    assert _grant_written(root, link_id)
+
+
+async def test_desktop_patch_refuses_when_an_earlier_gate_fails_even_with_consent(api):
+    """An unknown baseline refuses even with consent — no grant, 422."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, recorded_by="adopt-unknown")
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == "baseline-unknown"
+    assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
+    assert _auto_push_persisted(root, link_id) is False
+
+
+async def test_desktop_patch_refuses_mixed_lineage_with_consent(api):
+    """D34: a MIXED-LINEAGE public origin refuses even with confirm_public_egress."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, lineage="mixed-lineage")
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == "mixed-lineage"
+    assert not _grant_written(root, link_id)
+    assert _auto_push_persisted(root, link_id) is False
+
+
+async def test_desktop_second_write_after_the_grant_uses_the_served_revision(api):
+    """F1: after a grant is minted, the NEXT write on the SERVED revision succeeds.
+
+    The served revision omitted the egress grant from the digest while
+    ``update_policy`` compared the grant-aware one, so the first write minted the
+    grant and EVERY later write (here: a subscribe flip) 409'd "link policy
+    changed; reload before saving" — forever, on all three surfaces.
+    """
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    minted = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert minted.status_code == 200, minted.text
+    assert _grant_written(root, link_id)
+    # SECOND write, with the revision the inventory serves AFTER the grant.
+    second = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            subscribe=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert second.status_code == 200, second.text
+    stored = _policy_values_desktop(root, link_id)
+    assert stored["subscribe"] is False and stored["auto_push"] is True
+
+
+def _policy_values_desktop(root: Path, link_id: str) -> dict[str, Any]:
+    hub = ConfigManager(root).get_config().values.get("hub", {})
+    return dict((hub.get("links") or {}).get(link_id) or {})
+
+
+async def test_policy_patch_no_confirm_refusal_is_typed_unsafe_publication(api):
+    """F3: the no-consent refusal carries detail.code == "unsafe-publication".
+
+    The renderer reads `detail.code` (a declared code always wins in
+    desktop-api.ts) and the desktop panel branches on `write.error.code`; the
+    old string detail dropped the category entirely.
+    """
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=False,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "unsafe-publication", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()
+
+
+async def test_policy_patch_stale_revision_refusal_is_typed(api):
+    """F3: a stale revision is a 409 whose detail carries policy-revision-changed."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root)
+    stale = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(subscribe=False, expected_policy_revision="not-the-revision"),
+    )
+    assert stale.status_code == 409, stale.text
+    detail = stale.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "policy-revision-changed", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()
+
+
+async def test_policy_patch_no_cas_refusal_is_typed_unsupported_precondition(api):
+    """F3: the FIRST gate's refusal carries its own code even with consent."""
+
+    client, root, _hub = api
+    link_id = _seed_public_link(root, cas=False)
+    refused = await client.patch(
+        f"/v1/desktop/hub/links/{link_id}",
+        json=mutation(
+            auto_push=True,
+            confirm_public_egress=True,
+            expected_policy_revision=await _revision(client, link_id),
+        ),
+    )
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "unsupported-precondition", detail
+    assert isinstance(detail["message"], str) and detail["message"].strip()

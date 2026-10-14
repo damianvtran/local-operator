@@ -87,6 +87,10 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     # pre-slice English for a command that did not exist, so this row pins the
     # text the catalogue shipped with — the same edit-together rule applies.
     "highlights": "Cancel, retry or steer the highlights under an answer",
+    # The hub-streams core slice's `/hub` row: the catalogue key landed first
+    # (shipped ahead), and this row folds it in as the command registers — the
+    # edit-together rule the SHIPPED_AHEAD allowance existed to keep honest.
+    "hub": "Open Hub links — per-link subscribe and auto-push policy",
 }
 
 
@@ -96,7 +100,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # KeyError here rather than passing silently.
     # 50 at S2, +1 with C's `/language` (see the table note); a missing or
     # extra command raises a KeyError either way rather than passing silently.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 51
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) == 52
     for command in SLASH_COMMANDS:
         assert command.description == PREVIOUS_ENGLISH[command.name], command.name
 

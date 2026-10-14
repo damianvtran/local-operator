@@ -12,6 +12,7 @@ from local_operator.agent_profiles import NameTakenError, install_seed
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
+from local_operator.hub_sync.definition import definition_revision
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.auth_store import AuthStore
 from local_operator.server.dependencies import (
@@ -64,6 +65,10 @@ class ProfileSync(Input):
 
 class ProfileEdit(Input):
     request_id: RequestID
+    #: Opaque token from the profile detail this edit was based on. Absent/null
+    #: is the documented legacy unconditional write; stale/malformed is refused
+    #: 409 under the definition writer lock (``hub_sync.definition``).
+    expected_definition_revision: str | None = None
     kind: Literal["role", "specialist"] | None = None
     description: str | None = Field(default=None, max_length=8000)
     instructions: str | None = Field(default=None, max_length=8000)
@@ -105,6 +110,10 @@ class ProfileCreate(Input):
 
 class TeamEdit(Input):
     request_id: RequestID
+    #: Opaque token from the team detail response this edit was based on. Absent
+    #: or null is the documented legacy unconditional write; a stale or malformed
+    #: token is refused 409 under the teams writer lock (``hub_sync.definition``).
+    expected_definition_revision: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = None
     manager: str | None = None
@@ -294,18 +303,34 @@ async def save_profile(
     # `tools.builtin`, and this router is imported by `server.app`, so the tool
     # layer was ~160 ms of every `lop serve` boot for a route that only runs when
     # someone saves a profile (backend load report B-F10).
+    from local_operator.hub_sync.definition import DefinitionRevisionMismatch
     from local_operator.tools.agent_tool import AgentParams, write_profile
 
-    payload = body.model_dump(exclude={"request_id", "name"}, exclude_unset=True)
+    payload = body.model_dump(
+        exclude={"request_id", "name", "expected_definition_revision"}, exclude_unset=True
+    )
+    expected = getattr(body, "expected_definition_revision", None)
     params = AgentParams(op="create" if creating else "update", name=name, **payload)
 
     def mutate() -> dict[str, Any]:
         agents, _ = registries(request)
         agents.require_complete_metadata()
-        # Three values since the class shipped; the third is only used by the
-        # tool's receipt, so the route discards it (its response carries the
-        # profile detail, class included).
-        resolved, _kind, _action_class = write_profile(agents, params, creating=creating)
+        try:
+            # Three values since the class shipped; the third is only used by the
+            # tool's receipt, so the route discards it (its response carries the
+            # profile detail, class included). The definition-CAS token is enforced
+            # inside the registry's definition lock by write_profile's precondition.
+            resolved, _kind, _action_class = write_profile(
+                agents,
+                params,
+                creating=creating,
+                expected_definition_revision=expected,
+            )
+        except DefinitionRevisionMismatch as mismatch:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": mismatch.code, "message": str(mismatch)},
+            ) from None
         return profile_detail(agents, resolved)
 
     return reply(
@@ -343,14 +368,37 @@ async def team(name: str, request: Request):
         found = registries(request)[1].get_team_by_name(name)
         if found is None:
             raise KeyError(name)
-        return found.model_dump(mode="json")
+        data = found.model_dump(mode="json")
+        data["definition_revision"] = definition_revision(
+            "team", str(found.id), found.model_dump(mode="json")
+        )
+        return data
 
     async with errors(request):
         return reply(await asyncio.to_thread(read))
 
 
 async def save_team(name: str, body: TeamEdit | TeamCreate, request: Request, *, creating: bool):
+    from local_operator.hub_sync.definition import (
+        DefinitionRevisionMismatch,
+        require_fresh_revision,
+    )
+
     fields = TeamEditFields(**body.model_dump(exclude={"request_id"}, exclude_unset=True))
+    expected = getattr(body, "expected_definition_revision", None)
+
+    def precondition(current: Any) -> None:
+        # Runs under the teams writer lock against the row re-read there, so a
+        # stale editor cannot overwrite a concurrent save (hub_sync.definition).
+        try:
+            require_fresh_revision(
+                "team", str(current.id), current.model_dump(mode="json"), expected
+            )
+        except DefinitionRevisionMismatch as mismatch:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": mismatch.code, "message": str(mismatch)},
+            ) from None
 
     def mutate() -> dict[str, Any]:
         registry = registries(request)[1]
@@ -362,7 +410,7 @@ async def save_team(name: str, body: TeamEdit | TeamCreate, request: Request, *,
                 raise KeyError(name)
             # Partial update hydrates untouched briefs itself. A metadata DTO
             # sent to save_team would silently replace lazy briefs with blanks.
-            result = registry.update_team(current.id, fields)
+            result = registry.update_team(current.id, fields, precondition=precondition)
         return result.model_dump(mode="json")
 
     return reply(

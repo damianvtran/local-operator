@@ -270,7 +270,7 @@
     {
       "locale": "es",
       "namespace": "wire.slash",
-      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -284,7 +284,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round-2 recheck passed: 5 fix keys verified vs en (add/remove typed subverbs byte-exact; approvals/effort fitted trades kept; workstreams=flujos de trabajo; read typed); changed set = the 5; valns OK; 0 B/M — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Round-2 recheck passed: 5 fix keys verified vs en (add/remove typed subverbs byte-exact; approvals/effort fitted trades kept; workstreams=flujos de trabajo; read typed); changed set = the 5; valns OK; 0 B/M — runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
     },
     {
       "locale": "fr",
@@ -327,7 +327,7 @@
     {
       "locale": "fr",
       "namespace": "wire.slash",
-      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -341,7 +341,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Audit passed: 51 keys; key set/order, typed tokens (add/remove etc.), ICU/UTF-8/U+202F verified; 1 MINOR (btw 'Posez'→'Poser' style, recorded); fit NITs accepted (5 rows wrap at 100-col, mirrors es disposition); approvals keeps scope — correct. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet)."
+      "note": "Audit passed: 51 keys; key set/order, typed tokens (add/remove etc.), ICU/UTF-8/U+202F verified; 1 MINOR (btw 'Posez'→'Poser' style, recorded); fit NITs accepted (5 rows wrap at 100-col, mirrors es disposition); approvals keeps scope — correct. Runs ran deepseek-flash (anthropic quota fallback from pinned sonnet). Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
     },
     {
       "locale": "fr",
@@ -688,7 +688,7 @@
     {
       "locale": "ru",
       "namespace": "wire.slash",
-      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -702,12 +702,12 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Round fix-1 recheck passed: 5/5 keys verified (учётные данные in accounts/logout; sidebar/failovers restructured; notifications names sessions); changed set = exactly the 5; tokens byte-exact; cells ≤74; valns OK. deepseek-flash (anthropic quota fallback)."
+      "note": "Round fix-1 recheck passed: 5/5 keys verified (учётные данные in accounts/logout; sidebar/failovers restructured; notifications names sessions); changed set = exactly the 5; tokens byte-exact; cells ≤74; valns OK. deepseek-flash (anthropic quota fallback). Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
     },
     {
       "locale": "vi",
       "namespace": "wire.slash",
-      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -721,7 +721,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit passed: 51 keys; mechanical/tokens/NFC clean; heavy-row fit re-measured exact; 0 blocker/major, 1 MINOR + 3 NIT accepted (device term, guide records, price phrase); run ran deepseek-flash (anthropic quota fallback from pinned sonnet). Remediation-1: fork 96→81 cells (tokens byte-exact; --window whole from 53-col columns; 46-col parity unreachable keeping tách nhánh+cuộc trò chuyện — deviation recorded in vi.md); recheck passed; sha 4ae7ffca."
+      "note": "Independent audit passed: 51 keys; mechanical/tokens/NFC clean; heavy-row fit re-measured exact; 0 blocker/major, 1 MINOR + 3 NIT accepted (device term, guide records, price phrase); run ran deepseek-flash (anthropic quota fallback from pinned sonnet). Remediation-1: fork 96→81 cells (tokens byte-exact; --window whole from 53-col columns; 46-col parity unreachable keeping tách nhánh+cuộc trò chuyện — deviation recorded in vi.md); recheck passed; sha 4ae7ffca. Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
     },
     {
       "locale": "ru",
@@ -802,7 +802,7 @@
     {
       "locale": "hi",
       "namespace": "wire.slash",
-      "source_sha256": "d845ea63edb7290bce9657a5411df748f78c4ec97bc447ec16395c7a8f2e8658",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
       "translator": {
         "agent": "i18n-translator",
         "model": "deepseek/deepseek-flash",
@@ -816,7 +816,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "Audit passed: 51 keys; tokens byte-exact (flags/placeholders; नाम localised, pid kept); order/BOM/nukta/em-dash clean; fit: fork 66/stop 62/mcp 58 only >54, none >74. 1 MINOR पूर्णताएँ→पूर्ण हुए सत्र; 1 NIT इंस्टॉल/इंस्टॉलेशन; deepseek-flash (sonnet quota fallback)."
+      "note": "Audit passed: 51 keys; tokens byte-exact (flags/placeholders; नाम localised, pid kept); order/BOM/nukta/em-dash clean; fit: fork 66/stop 62/mcp 58 only >54, none >74. 1 MINOR पूर्णताएँ→पूर्ण हुए सत्र; 1 NIT इंस्टॉल/इंस्टॉलेशन; deepseek-flash (sonnet quota fallback). Post-audit EN edit 2026-10-14 (additive; /hub unblock): wire.slash.hub added ahead of the command and carries the en text pending its delta translation. No pre-existing value byte moved; no new translation or audit performed; source_sha256 refreshed to the new en file so the six-locale ship set is unchanged."
     },
     {
       "locale": "hi",

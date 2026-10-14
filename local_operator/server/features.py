@@ -90,6 +90,14 @@ def feature_flags() -> dict[str, Any]:
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
+        # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
+        # with a policy-revision CAS). Its OWN key rather than a bump of
+        # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
+        # pending-only sidebar and never polls this, while a renderer that sees
+        # `hub_links` may show the healthy inventory with a direct source-scoped
+        # toggle. The legacy `/hub/updates` projection stays compatible.
+        "hub_links": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #

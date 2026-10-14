@@ -67,7 +67,7 @@ def classify(
 class ItemCheck:
     """One linked item, compared with the hub. ``remote`` is not persisted."""
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     local_id: str
     name: str
     hub_id: str
@@ -84,6 +84,54 @@ class ItemCheck:
     #: B4.3 failure class when ``verdict == "unavailable"``.
     reason: str = ""
     detail: str = ""
+    #: The confirmed link id when the baseline carries an identity (None for a
+    #: legacy unknown-origin link). The runner keys per-link policy on it.
+    link_id: str | None = None
+    #: The OPAQUE remote revision (ETag token, quotes included) the fetched
+    #: document was read at, when the response carried one. This is the value a
+    #: conditional push must send as If-Match: it is what the merge derived from.
+    #: None when the fetch path cannot expose one (the legacy agent zip pull),
+    #: which makes a push fall back to the recorded baseline revision or refuse.
+    remote_revision: str | None = None
+    #: The server's ``sync_contract`` from this response, when present. Its
+    #: observation is what makes a source's revision-CAS capability ATTESTED (the
+    #: status store records it per source; eligibility reads that record).
+    sync_contract: Mapping[str, Any] | None = None
+    #: The NORMALIZED credential-free base this check's response actually came
+    #: FROM (round-2 R14). The attestation is keyed by this, never by the link's
+    #: recorded source: only the base that answered can be trusted for what the
+    #: answer proved, and eligibility still requires it to equal the link's
+    #: ``hub_source``.
+    served_by: str | None = None
+
+
+def _served_by(client: Any) -> str | None:
+    """The normalized base a response actually came from (None when unreadable)."""
+
+    from local_operator.hub_sync.identity import normalize_source
+
+    try:
+        return normalize_source(str(getattr(client, "base_url", "")).rstrip("/"))
+    except Exception:  # noqa: BLE001 - an unreadable base cannot be credited to anyone
+        return None
+
+
+def _remote_meta(document: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
+    """``(revision, sync_contract)`` from a hub detail/preview result, tolerantly.
+
+    The revision token is copied VERBATIM (it is an opaque ETag including its
+    quotes); the sync contract is passed through only when it is a mapping. Both
+    are additive response facts -- an older server that omits them yields
+    ``None``s, which the push side treats as unverifiable (refuse, never an
+    unconditional write).
+    """
+
+    revision = document.get("revision")
+    contract = document.get("sync_contract")
+    return (
+        str(revision) if isinstance(revision, str) and revision else None,
+        contract if isinstance(contract, Mapping) else None,
+    )
 
 
 def _status_of(error: BaseException) -> int | None:
@@ -186,32 +234,61 @@ def check_hub_agents(
                 )
             )
             continue
+        # ONE CONSISTENT SNAPSHOT (round-3 R18): the hub DETAIL read carries the
+        # agent's instructions+description AND its revision+sync_contract in ONE
+        # response (server source: internal/responses/agent.go AgentResponse), so
+        # the content a push merges from and the ETag it conditions on can never
+        # come from two different moments -- the two-read shape let a CAS write
+        # silently erase an edit made between the reads. The legacy zip read
+        # stays as the fallback; it cannot expose a revision, and a revision is
+        # NEVER borrowed from a later read (that is the same hazard again).
+        detail_payload: Mapping[str, Any] | None = None
         try:
-            if tenant:
-                text, desc = fetcher(
-                    client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
-                )
-            else:
-                text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
-        except Exception as error:  # noqa: BLE001 - classified below
-            reason, detail = _failure_reason(error)
-            checks.append(
-                ItemCheck(
-                    "agent",
-                    agent.id,
-                    name,
-                    hub_id,
-                    tenant,
-                    "unavailable",
-                    local_fp=local_fp,
-                    local=local,
-                    reason=reason,
-                    detail=detail,
-                )
+            fetched = client.get_agent(hub_id, **{"with_credential": bool(tenant)})
+        except Exception:  # noqa: BLE001 - the zip fallback below is the report
+            fetched = None
+        if isinstance(fetched, Mapping):
+            # The hub's API-wide envelope is a mapping with ``result``; a flat
+            # mapping (an older client or a test stub) is the result itself.
+            inner = fetched.get("result")
+            detail_payload = inner if isinstance(inner, Mapping) else fetched
+        if detail_payload is not None and isinstance(detail_payload.get("instructions"), str):
+            remote = _agent_fields(
+                str(detail_payload.get("instructions") or ""),
+                str(detail_payload.get("description") or ""),
             )
-            continue
-        remote = _agent_fields(text, desc)
+            revision, sync_contract = _remote_meta(detail_payload)
+        else:
+            # Content without a revision: the name-refusing push path, never an
+            # unconditional write.
+            try:
+                if tenant:
+                    text, desc = fetcher(
+                        client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
+                    )
+                else:
+                    text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
+            except Exception as error:  # noqa: BLE001 - classified below
+                reason, detail = _failure_reason(error)
+                checks.append(
+                    ItemCheck(
+                        "agent",
+                        agent.id,
+                        name,
+                        hub_id,
+                        tenant,
+                        "unavailable",
+                        local_fp=local_fp,
+                        local=local,
+                        reason=reason,
+                        detail=detail,
+                    )
+                )
+                continue
+            remote = _agent_fields(text, desc)
+            revision, sync_contract = None, None
         remote_fp = prov.fingerprint_agent(remote["instructions"], remote["description"])
+        served_by = _served_by(client)
 
         base_fields: Mapping[str, Any] | None = None
         base_fp: str | None = None
@@ -255,6 +332,14 @@ def check_hub_agents(
                 local=local,
                 remote=remote,
                 base=base_fields,
+                link_id=(
+                    record.identity.link_id
+                    if record is not None and record.identity is not None
+                    else None
+                ),
+                remote_revision=revision,
+                sync_contract=sync_contract,
+                served_by=served_by,
             )
         )
     return checks
@@ -383,6 +468,7 @@ def check_hub_teams(
                     local=local,
                     reason=reason,
                     detail=detail,
+                    served_by=_served_by(client),
                 )
             )
             continue
@@ -401,6 +487,7 @@ def check_hub_teams(
                     local=local,
                     reason="hub-error",
                     detail=f"the hub now reports this team under organization {owner}",
+                    served_by=_served_by(client),
                 )
             )
             continue
@@ -419,6 +506,7 @@ def check_hub_teams(
         remote_name = str(document.get("name") or "")
         if remote_name and remote_name != meta.name:
             note = "remote-renamed"
+        revision, sync_contract = _remote_meta(document)
         checks.append(
             ItemCheck(
                 "team",
@@ -437,7 +525,11 @@ def check_hub_teams(
                 local=local,
                 remote=remote,
                 base=record.fields if known else None,
+                link_id=record.identity.link_id if record.identity is not None else None,
                 detail=note,
+                remote_revision=revision,
+                sync_contract=sync_contract,
+                served_by=_served_by(client),
             )
         )
     return checks
@@ -445,13 +537,199 @@ def check_hub_teams(
 
 @dataclass(frozen=True)
 class Link:
-    """A linked item, without any network: enough to order and bound a tick."""
+    """A linked item, without any network: enough to order and bound a tick.
 
-    kind: Literal["agent", "team"]
+    ``link_id`` is present only when the record carries a confirmed source+scope
+    (an identity). A legacy row with a hub id but no identity has ``link_id=None``
+    and is enumerated by ``(kind, local_id)`` instead -- the two are never mixed.
+    """
+
+    kind: Literal["agent", "team", "skill"]
     local_id: str
     name: str
     hub_id: str
     tenant_id: str | None
+    link_id: str | None = None
+
+    @property
+    def item_key(self) -> str:
+        """The (kind, local_id) key a store row and a check both address by."""
+        return f"{self.kind}:{self.local_id}"
+
+
+def check_hub_skills(
+    *,
+    config_dir: Path,
+    client_for_tenant: ClientFor,
+    names: Sequence[str] | None = None,
+    only_ids: "set[str] | None" = None,
+    fetch: Callable[..., dict[str, Any]] | None = None,
+) -> list[ItemCheck]:
+    """Compare every LINKED skill (one with a baseline record) with the hub.
+
+    A skill's local content lives in a managed alias directory, read through
+    ``ManagedSkillStorage.snapshot`` (which recovers a crashed transaction first).
+    The remote document is a strict manifest; its canonical projection is
+    ``adapters.SkillAdapter.canonical_fields`` so a check and an outbound
+    projection exclude the same local-only bytes. A skill with no baseline was
+    never linked (or was made locally) and is not touched.
+    """
+
+    from local_operator.hub_sync.adapters import SkillAdapter
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    adapter = SkillAdapter()
+    storage = ManagedSkillStorage(config_dir)
+    wanted = {str(n).strip().lower() for n in names} if names else None
+    checks: list[ItemCheck] = []
+    for record in prov.iter_baselines(config_dir):
+        if record.kind != "skill":
+            continue
+        alias = record.local_alias or record.local_id
+        if wanted is not None and alias.strip().lower() not in wanted:
+            continue
+        if only_ids is not None and record.local_id not in only_ids:
+            continue
+        tenant = record.tenant_id
+        try:
+            snapshot = storage.snapshot(record.local_id)
+        except Exception as error:  # noqa: BLE001
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    reason="local-concurrent-edit",
+                    detail=f"could not read the local skill: {error}",
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                )
+            )
+            continue
+        local = adapter.canonical_fields(snapshot.document.to_json())
+        local_fp = prov.fingerprint_snapshot("skill", local)
+        client = client_for_tenant(tenant)
+        if client is None:
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason="no-credential",
+                    detail="skills need `lop login radient` (organization sign-in)",
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                )
+            )
+            continue
+        fetcher = fetch or _fetch_skill
+        try:
+            document = fetcher(client, record.hub_id, timeout=REQUEST_TIMEOUT_S)
+        except Exception as error:  # noqa: BLE001
+            reason, detail = _failure_reason(error)
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason=reason,
+                    detail=detail,
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                    served_by=_served_by(client),
+                )
+            )
+            continue
+        try:
+            remote = adapter.canonical_fields(document)
+        except Exception as error:  # noqa: BLE001 - one bad payload stays ONE item
+            # A malformed/unknown-key remote payload is a named per-item
+            # 'unavailable', never an exception out of check_items: before this
+            # guard, ONE metadata key in a skill GET crashed the whole tick and
+            # took the agent/team checks with it (round-2 QN1).
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "unavailable",
+                    local_fp=local_fp,
+                    local=local,
+                    reason="invalid-remote-manifest",
+                    detail=str(error)[:200],
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                    served_by=_served_by(client),
+                )
+            )
+            continue
+        # Source-name space: the local alias is display-only, but the manifest
+        # name is part of the document the engine fingerprints and merges. Rename
+        # the LOCAL copy's name to the remote spelling for comparison so a local
+        # alias rename is not an eternal both-changed, and so the merge/write
+        # layer speaks one name; the write re-renders the alias (see _apply_skill).
+        remote_name = str(document.get("name") or "")
+        if remote_name and str(local.get("name") or "") != remote_name:
+            from local_operator.hub_sync.skill_document import SkillDocument
+
+            local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
+            local_fp = prov.fingerprint_snapshot("skill", local)
+        remote_fp = prov.fingerprint_snapshot("skill", remote)
+        known = record.recorded_by != prov.UNKNOWN_BASELINE
+        base_fp = prov.fingerprint_fields("skill", record.fields) if known else None
+        classification = classify(base_fp, local_fp, remote_fp, baseline_known=known)
+        revision, sync_contract = _remote_meta(document)
+        checks.append(
+            ItemCheck(
+                "skill",
+                record.local_id,
+                alias,
+                record.hub_id,
+                tenant,
+                (
+                    "up-to-date"
+                    if classification.state in ("up-to-date", "local-only")
+                    else "available"
+                ),
+                classification=classification,
+                local_fp=local_fp,
+                remote_fp=remote_fp,
+                local=local,
+                remote=remote,
+                base=record.fields if known else None,
+                link_id=record.identity.link_id if record.identity is not None else None,
+                remote_revision=revision,
+                sync_contract=sync_contract,
+                served_by=_served_by(client),
+            )
+        )
+    return checks
+
+
+def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
+    """Default skill fetch: the client's manifest pull, through the tested seam.
+
+    PUBLIC skill rows are readable UNAUTHENTICATED -- the server registers
+    ``GET /v1/skills/:skillid`` behind optionalAuth (routes.go:453, checked at
+    agent-server@bdd03ab) -- so the anonymous client must not demand a key while
+    the signed-in client still carries its bearer (an org row answers 404 to
+    anyone who cannot prove membership). Before this, a public skill link was
+    'unavailable: Radient API key is required' with zero requests (round-2 QN3).
+    """
+
+    send_bearer = bool(getattr(client, "api_key", None))
+    return client.get_skill(skill_id, timeout=timeout, **{"with_credential": send_bearer})
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
@@ -474,11 +752,41 @@ def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:
                     str(agent.name or ""),
                     hub_id,
                     record.tenant_id if record else None,
+                    link_id=(
+                        record.identity.link_id
+                        if record is not None and record.identity is not None
+                        else None
+                    ),
                 )
             )
     if team_registry is not None:
         for team in team_registry.list_teams():
             record = prov.read_baseline(config_dir, "team", team.id)
             if record is not None:
-                links.append(Link("team", team.id, team.name, record.hub_id, record.tenant_id))
+                links.append(
+                    Link(
+                        "team",
+                        team.id,
+                        team.name,
+                        record.hub_id,
+                        record.tenant_id,
+                        link_id=record.identity.link_id if record.identity is not None else None,
+                    )
+                )
+    # SKILLS: a linked skill IS one with a baseline record; the alias lives on the
+    # record, not on a registry row. One kind adapter's worth of enumeration, kept
+    # here so the runner sees skills through the SAME link list as agents/teams.
+    for record in prov.iter_baselines(config_dir):
+        if record.kind != "skill":
+            continue
+        links.append(
+            Link(
+                "skill",
+                record.local_id,
+                record.local_alias or record.local_id,
+                record.hub_id,
+                record.tenant_id,
+                link_id=record.identity.link_id if record.identity is not None else None,
+            )
+        )
     return links

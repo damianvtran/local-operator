@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
+from local_operator.hub_sync.identity import Kind
+
 ItemOutcome = Literal[
     "up-to-date",
     "available",
@@ -35,7 +37,10 @@ ItemOutcome = Literal[
 class ItemMergeReport:
     """A8's item-level report: one linked item, every field's merge result."""
 
-    kind: Literal["agent", "team"]
+    #: Widened from the legacy agent/team pair when skills joined the same
+    #: report surface; every sibling type (LinkIdentity, the checks) already
+    #: carries the full Kind set.
+    kind: Kind
     local_id: str
     name: str
     hub_id: str

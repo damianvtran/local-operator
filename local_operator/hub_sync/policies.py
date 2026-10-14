@@ -53,11 +53,14 @@ def creation_policy(values: Mapping[str, Any], kind: str) -> LinkPolicy:
     defaults = _mapping(_hub(values).get("auto_update", {}))
     if kind not in ("agent", "team", "skill"):
         raise LinkError("invalid-link-policy", "hub link kind is unsupported")
-    default = (
-        True if kind == "skill" else defaults.get("agents" if kind == "agent" else "teams", True)
-    )
+    # One switch per kind: skills have NO kind-wide shared settings key (adding one
+    # is a settings/i18n catalogue change owned by that lane), so a skill's
+    # creation default follows the SAME ``hub.auto_update.agents`` switch the
+    # runner's ``settings.auto_for('skill')`` ceiling reads. The two cannot
+    # disagree, which is what round-1 QA flagged.
+    default = defaults.get("agents" if kind in ("agent", "skill") else "teams", True)
     # Preserve an explicitly stored BOOL OFF, not truthiness of arbitrary YAML.
-    # Skills have no new shared settings key; missing means the canonical ON.
+    # Missing (or a non-bool spelling) means the ON default.
     return LinkPolicy(subscribe=default if type(default) is bool else True, auto_push=False)
 
 
@@ -102,6 +105,18 @@ def materialize_policy(
         return current
 
 
+def link_policy_for(values: Mapping[str, Any], link_id: str, kind: str) -> LinkPolicy:
+    """The stored per-link policy for a link id, else its kind's creation default.
+
+    Used by the runner, which has a link id (from a baseline identity) but may not
+    have a full :class:`LinkIdentity` at enumeration time.
+    """
+    policies = _mapping(_hub(values).get("links", {}))
+    if link_id in policies:
+        return LinkPolicy.from_json(policies[link_id])
+    return creation_policy(values, kind)
+
+
 def update_policy(
     manager: "ConfigManager",
     identity: LinkIdentity,
@@ -117,8 +132,14 @@ def update_policy(
 
     ``can_enable_auto_push`` is a service attestation, not a request field. It
     must never be derived from preview pin existence or user-supplied scope.
-    Existing ON may remain paused when eligibility changes; turning it OFF or
-    changing Subscribe does not require a working hub/model connection.
+    ``ineligible_reason`` MUST be the SERVICE-computed eligibility reason read
+    from the inventory (``row["eligibility"]["reason"]``), never a caller's free
+    string: the public-consent carve-out below keys on
+    ``ineligible_reason == "unsafe-publication"``, and a caller that could name
+    its own reason could bypass an earlier gate. Treat both as typed attestations
+    from :func:`hub_sync.service._eligibility`. Existing ON may remain paused when
+    eligibility changes; turning it OFF or changing Subscribe does not require a
+    working hub/model connection.
     """
     from local_operator import settings_io
 
@@ -144,7 +165,22 @@ def update_policy(
         )
         grant = current.public_egress_grant
         if auto_push is True:
-            if not can_enable_auto_push:
+            # THE PUBLIC-CONSENT CARVE-OUT (round-4 cross-surface fix). A public
+            # origin with no grant yet reports ``unsafe-publication`` — that is
+            # not an ineligibility to refuse, it is the absence of the very grant
+            # ``confirm_public_egress`` MINTS below. Without this carve-out the
+            # CLI and the desktop PATCH (which pass can_enable_auto_push=False for
+            # such an origin) could never create the FIRST public grant, and the
+            # TUI carried a divergent special case to work around it. ONE rule
+            # here fixes all three surfaces. Every EARLIER gate
+            # (unsupported-precondition / baseline-unknown / mixed-lineage) still
+            # refuses: ``unsafe-publication`` is the LAST reason ``_eligibility``
+            # returns, only after capability, known baseline and clean lineage
+            # all pass.
+            consent_mints_grant = (
+                ineligible_reason == "unsafe-publication" and identity.visibility == "public"
+            )
+            if not can_enable_auto_push and not consent_mints_grant:
                 raise LinkError(
                     ineligible_reason, "automatic publication is not eligible for this origin"
                 )

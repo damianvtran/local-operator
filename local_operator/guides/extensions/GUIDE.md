@@ -62,6 +62,32 @@ A skill you create is readable immediately. The first `read skill://<name>` that
 
 Only the skill name and description enter the system context; `SKILL.md` enters after `read skill://my-skill`, and reference files enter only after their own reads.
 
+## Skills on the Agent Hub
+
+A managed skill can be linked to an Agent Hub origin the same way an agent or team is. Linked skills install under `<config_dir>/skills/<alias>` and are discovered through the same root list above: a root equal to `<config_dir>/skills` is the profile's MANAGED root, so a caller that resolves the active profile passes that directory as (or inside) its root list and reads go through the owned-reader lock and crash-journal recovery rather than a raw tree walk. The manifest is strict UTF-8 text — a `SKILL.md` plus optional `references/`, `scripts/` and `assets/` — with bounded size (64 files, 200 KiB per file, 1 MiB total); a binary or oversized file is refused by name, never silently dropped. Scripts are inert: a pull never executes them and never sets an executable mode.
+
+Pulling and publishing a skill use the same engine as agents and teams. A pull merges the remote manifest per file (local == baseline fast-forwards; both sides changed merges per file; a file that is edited on one side and removed on the other waits for review) and writes through the managed transaction — staged directory swap, backup, concurrent-edit re-check — with the baseline advanced **in the same transaction as the write**, so the recorded ancestor can never run ahead of the bytes on disk. Publishing is gated exactly like an agent's or team's: it needs the two stages of paired projection, a positively attested revision-CAS on the link's own source, a known baseline and (for a public origin) the deliberate egress consent; until the deployed server supplies that attestation the link is reported not eligible for auto-push rather than faking a publication.
+
+## Subscriptions and the policy of a link
+
+Every link to a hub item — agent, team or skill — carries **two independent policies**, both defaulting to `subscribe: true`, `auto_push: false`:
+
+- **subscribe** governs unattended *inbound* updates (the pull side). Off, updates still appear as available and you apply them yourself.
+- **auto_push** governs unattended *outbound* publication. It is **off by default**; enabling it requires the server to positively attest its atomic revision-CAS (plus, for a public origin, a deliberate egress consent). Until a deployed server supplies that attestation the inventory reports the origin as not eligible rather than faking it.
+
+A manual pull or check always works regardless of either policy. List every link, healthy or not, and edit one policy:
+
+```bash
+local-operator hub links                 # every linked agent, team and skill with source, scope and policy
+local-operator hub links --kind skill    # filter by kind
+local-operator hub link set <link-id> --subscribe false    # unattended inbound off
+local-operator hub link set <link-id> --auto-push true     # outbound on (needs eligibility)
+```
+
+`hub link set` writes through the coordinated config writer under a policy-revision check (a stale revision is refused rather than clobbering a concurrent edit); omit `--expected-revision` to read the current one first, and add `--confirm-public-egress` to consent to publishing authored changes to a public origin. One local artifact has ONE writable origin: linking the same skill to a second source is a separate local alias/copy, not an in-place relink. `hub links` lists an identity-less legacy link under `unresolved` (with reason `source-unresolved`) rather than inventing a source for it.
+
+Pulling and pushing **skills**: a skill link pulls through the managed skill storage — the write is journaled and the baseline advances only with the write, so "baseline moved, bytes did not" cannot happen — and pushes through the same revision-CAS preview/commit path as agents and teams. Unattended push needs, beyond the revision-CAS attestation, the **skill family** on that link's source (`sync_contract.skills >= 1`). A link with no agreed point yet reports the named `no-receipt`: an accepted manual publish, an adopt of an equal copy, or a pull that integrates the remote seeds the outbound receipt the first unattended push derives from — nothing is invented client-side, and the inbound baseline is never advanced by a push.
+
 ## Create an executable plugin with MCP
 
 Implement a standard MCP server over stdio or HTTP/SSE, give every tool a narrow schema and useful description, then register it:

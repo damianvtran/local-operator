@@ -31,6 +31,13 @@ AUTO_AGENTS_PATH = ("hub", "auto_update", "agents")
 AUTO_TEAMS_PATH = ("hub", "auto_update", "teams")
 INTERVAL_PATH = ("hub", "check_interval_min")
 MERGE_MODEL_PATH = ("hub", "merge_model")
+#: Deprecated, read but no longer honoured: a hub merge uses the operator's
+#: current default model (``resolver.resolve_merge_model``). Retained as a
+#: read-only key so an existing ``config.yml`` value is silently ignored rather
+#: than erroring. Removing the editable registry entry (``settings_io``) plus its
+#: generated i18n keys is an i18n/shared-settings change that must be coordinated
+#: and regenerated via ``scripts/i18n/generate.py`` in its own commit, not hand-
+#: edited here.
 
 
 def _bool(value: Any, default: bool) -> bool:
