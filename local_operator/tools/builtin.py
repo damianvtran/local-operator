@@ -6627,6 +6627,10 @@ async def execute_read(
     # otherwise answer every scratchpad URL with "the resolver does not handle
     # this URL" — the exact misleading error this branch exists to remove. Below
     # ``spill://`` and http(s), whose prefixes cannot collide.
+    if target.lower().startswith("memory://"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "read", args, context)
     if _has_scratchpad_scheme(target):
         return await _read_scratchpad(tool_call_id, target, params, context)
 
@@ -9792,6 +9796,10 @@ async def execute_edit(
         )
 
     raw = params.path
+    if raw.strip().lower().startswith("memory://"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "edit", args, context)
     # A scheme is refused before the resolver sees it (see ``_scheme_refusal``),
     # and ``scratchpad://`` is resolved here rather than through the workspace
     # resolver, which would treat the scheme as a relative path and hand the
@@ -10226,6 +10234,10 @@ async def execute_write(
     # UNRECOGNISED scheme must not silently become a relative path, which is how
     # ``notes://x.py`` would create a literal ``notes:`` directory here.
     raw = params.path
+    if raw.strip().lower().startswith("memory://"):
+        from local_operator.tools.memory_tools import execute_memory
+
+        return await execute_memory(tool_call_id, "write", args, context)
     refusal = _scheme_refusal(tool_call_id, "write", raw, serves=SCRATCHPAD_SCHEME)
     if refusal is not None:
         return refusal

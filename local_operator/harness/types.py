@@ -1487,6 +1487,12 @@ class ToolContext(BaseModel):
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
     agent_id: str = ""
+    # Registry identity, never a role/team display name. Hosts without a team
+    # leave this empty; memory refuses that scope rather than guessing owners.
+    team_id: str = ""
+    # Resolve once at the host boundary so an injected/configured root cannot
+    # drift to the process-global default on a later tool invocation.
+    memory_config_dir: str | None = None
     # Which BACKGROUND JOB this execution belongs to, so a host can scope an
     # approval decision to the work that provoked it instead of to every
     # request that follows. ``None`` is the foreground: the session's own turn.

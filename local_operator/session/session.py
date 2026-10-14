@@ -15918,7 +15918,12 @@ class Session:
         # must not advertise the tool at all. ``browser`` is the same shape —
         # the surface handle has to survive to the next turn for browsing to
         # work, and for teardown to be able to close the tab.
+        from local_operator.harness.subagent import _session_lineage
+
+        lineage = _session_lineage(self)
         return ToolContext(
+            team_id=lineage[-1] if lineage else "",
+            memory_config_dir=str(self._config_dir),
             cwd=self._cwd,
             # This builder is the real per-turn host boundary, including child
             # sessions. Repeated provider/tool batches share this one context;
