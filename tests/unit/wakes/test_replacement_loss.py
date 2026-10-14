@@ -101,7 +101,7 @@ def _text(result: Any) -> str:
 async def _wake_tool(session: Any, op: str, **args: Any) -> Any:
     """Drive the REAL ``wake`` tool over the real scheduler."""
     context = ToolContext(cwd=str(session._transcript.directory), wake_scheduler=session._wake)
-    result = await builtin.execute_wake(f"red-{op}", {"op": op, **args}, context=context)
+    result = await builtin.execute_wake(f"red-{op}", {"op": op, **args}, None, None, context)
     assert not result.is_error, f"the tool refused ({op}): {_text(result)}"
     return result
 
@@ -167,9 +167,9 @@ async def test_a_create_during_a_drain_does_not_reuse_a_held_handle(
         assert _durable_message_for(directory, "w3") == "OLD", "precondition: OLD took w3"
 
         assert handle.begin_drain("runtime-retired"), "the drain latch must take"
-        assert session._wake_deliver_hook == session._spool_wake_to_inbox, (
-            "a draining runtime spools its fires for the successor"
-        )
+        assert (
+            session._wake_deliver_hook == session._spool_wake_to_inbox
+        ), "a draining runtime spools its fires for the successor"
 
         # OLD's final fire: retire from the live list, queue the successor's
         # one-shot. This is the window the defect lives in.
@@ -177,9 +177,9 @@ async def test_a_create_during_a_drain_does_not_reuse_a_held_handle(
         assert await session._wake.pump() == 1, "OLD's final occurrence fires exactly once"
 
         assert handle.end_drain(), "the abandoned move releases the latch"
-        assert session._wake_deliver_hook != session._spool_wake_to_inbox, (
-            "a runtime that keeps serving must deliver again"
-        )
+        assert (
+            session._wake_deliver_hook != session._spool_wake_to_inbox
+        ), "a runtime that keeps serving must deliver again"
 
         receipt = await _wake_tool(session, "create", message="NEW", **{"in": "75m"})
         details = receipt.details or {}

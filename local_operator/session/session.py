@@ -22214,6 +22214,11 @@ class Session:
         hand_over = getattr(scheduler, "handover_pending", None)
         if not callable(hand_over):
             return 0
+        # ``getattr`` erases the method's type, so the ``cast`` restores the one
+        # thing the call site needs to type-check: that the probed capability is
+        # awaitable. It changes nothing at runtime — the same probe, the same
+        # best-effort ``except`` below (this path must never hold the exit).
+        hand_over = cast("Callable[[], Awaitable[int]]", hand_over)
         try:
             handed = int(await hand_over())
         except Exception:  # noqa: BLE001 — the exit must not wait on a handover

@@ -8,15 +8,17 @@ The reservation under test is central in ``WakeScheduler`` — see
 this expands on, and the module docstring there for the defect's shape.
 
 Case map (decision doc §"Six finite acceptance cases"):
-  C1  normal reuse / no pending                                -> test_normal_reuse_no_pending
-  C2  both collision timings (incl. create after the final      -> test_both_collision_timings
-      pump under a still-latched drain, and the lock interleaving)
-  C3  held create + pre-fire list interleaving (held not        -> test_create_after_final_pump_is_held_not_reused
-      reused, reconcile not corrupted)
-  C4  OLD delivered exactly once across handover + reload,      -> test_old_exactly_once_across_handover
-      not resurrected; NEW keeps its own due across restart
-  C5  cap + cancellation across callers, incl. a cold arm       -> test_cap_and_cancellation_across_callers
-  C6  forced authoritative-append failure retains ownership     -> test_failed_handover_retains_ownership
+  C1  normal reuse / no pending            -> test_normal_reuse_no_pending
+  C2  both collision timings (create after  -> test_both_collision_timings
+      the final pump under a latched drain; and the lock interleaving)
+  C3  held create + pre-fire list           -> test_create_after_final_pump_is_held_not_reused
+      interleaving (held not reused)
+  C4  OLD exactly once across handover +    -> test_old_exactly_once_across_handover
+      reload; NEW keeps its due across restart
+  C5  cap + cancellation across callers     -> test_cap_and_cancellation_across_callers
+      (incl. a cold file-based arm)
+  C6  forced append failure retains         -> test_failed_handover_retains_ownership
+      ownership, refuses success, retries once
 
 Anything the file could NOT express as an assertion is named in its own test's
 docstring and in the PR body's honest-limits section, never faked.
@@ -39,7 +41,6 @@ from local_operator.harness.wake import (
 from local_operator.harness.types import ToolContext
 from local_operator.session import session as session_module
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.video.jobs import VideoWakeHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
@@ -128,8 +129,9 @@ async def test_normal_reuse_no_pending(tmp_path: pathlib.Path, clock: Any) -> No
 
         await _settle(session)
         await session.dispose()
-        reloaded = build_session(directory, ScriptedStream([text_turn("r") for _ in range(3)]),
-                                 cwd=directory)
+        reloaded = build_session(
+            directory, ScriptedStream([text_turn("r") for _ in range(3)]), cwd=directory
+        )
         try:
             assert _messages(reloaded._wake.schedules)["w3"] == "NEW"
         finally:
@@ -156,8 +158,9 @@ async def test_both_collision_timings(tmp_path: pathlib.Path, clock: Any) -> Non
     or re-fired, and the NEW row must survive.
     """
     directory = tmp_path / "sessions" / "c2"
-    session = build_session(directory, ScriptedStream([text_turn("r") for _ in range(5)]),
-                            cwd=directory)
+    session = build_session(
+        directory, ScriptedStream([text_turn("r") for _ in range(5)]), cwd=directory
+    )
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     try:
         await _wake_tool(session, "create", message="KEEP1", **{"in": "1h"})
@@ -214,8 +217,9 @@ async def test_create_after_final_pump_is_held_not_reused(
     schedule takes a DIFFERENT handle — the create's receipt must match durable
     state (no silent discard)."""
     directory = tmp_path / "sessions" / "c3"
-    session = build_session(directory, ScriptedStream([text_turn("r") for _ in range(4)]),
-                            cwd=directory)
+    session = build_session(
+        directory, ScriptedStream([text_turn("r") for _ in range(4)]), cwd=directory
+    )
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     try:
         for message in ("KEEP1", "KEEP2"):
@@ -329,10 +333,13 @@ async def test_cap_and_cancellation_across_callers(tmp_path: pathlib.Path) -> No
     assert "w16" in _messages(scheduler.schedules), "the held row is in the owned view"
 
     # A create at the cap is refused: the held row counts.
+    context = ToolContext(cwd=str(tmp_path), wake_scheduler=scheduler)
     refused = await builtin.execute_wake(
         "cap",
         {"op": "create", "message": "overflow", "in": "1h"},
-        context=ToolContext(cwd=str(tmp_path), wake_scheduler=scheduler),
+        None,
+        None,
+        context,
     )
     assert refused.is_error and "at most 16" in _text(refused), _text(refused)
 
@@ -340,7 +347,9 @@ async def test_cap_and_cancellation_across_callers(tmp_path: pathlib.Path) -> No
     cancelled = await builtin.execute_wake(
         "cancel",
         {"op": "cancel", "id": "w16"},
-        context=ToolContext(cwd=str(tmp_path), wake_scheduler=scheduler),
+        None,
+        None,
+        context,
     )
     assert not cancelled.is_error and "w16" in _text(cancelled), _text(cancelled)
     assert scheduler.pending_ids() == frozenset(), "the hold went with the cancel"
@@ -350,7 +359,9 @@ async def test_cap_and_cancellation_across_callers(tmp_path: pathlib.Path) -> No
     reused = await builtin.execute_wake(
         "reuse",
         {"op": "create", "message": "new", "in": "1h"},
-        context=ToolContext(cwd=str(tmp_path), wake_scheduler=scheduler),
+        None,
+        None,
+        context,
     )
     assert not reused.is_error, _text(reused)
 
@@ -384,7 +395,8 @@ async def test_failed_handover_retains_ownership(tmp_path: pathlib.Path) -> None
 
     scheduler = WakeScheduler(now=lambda: 1, deliver=lambda due: None, persist=flaky_persist)
     scheduler._schedules = [WakeSchedule(id="w1", message="keep", next_due_at=1, created_at=1)]
-    assert scheduler.hold_pending(WakeSchedule(id="w2", message="owed", next_due_at=1, created_at=2))
+    owed = WakeSchedule(id="w2", message="owed", next_due_at=1, created_at=2)
+    assert scheduler.hold_pending(owed)
 
     # First handover: the append fails -> ownership retained, success refused.
     assert await scheduler.handover_pending() == 0, "a failed append must not claim success"
