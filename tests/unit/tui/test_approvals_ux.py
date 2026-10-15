@@ -843,6 +843,7 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # receipt), and the space opens the reserved subcommand vocabulary
         # (`PROJECT_SUBCOMMANDS`) — the words the route validates and the picker
         # will offer; project NAMES are the projects-view slice's argument rows.
+        "memory": ArgumentMode.OPTIONAL,
         "project": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes

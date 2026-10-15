@@ -61,6 +61,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -950,6 +951,9 @@ class _CompactionPlan:
     #: commit: ``_run_compaction`` never reads it, so a hint can never reach the
     #: summarizer or permanent history.
     advisor_hint: Any | None = None
+    # Ephemeral task carrier, not durable state. Speculation may return data but
+    # never persist it; only append_compaction's committed marker authorizes that.
+    memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4250,6 +4254,11 @@ class Session:
         from local_operator.paths import config_dir as _resolve_session_root
 
         self._config_dir = _resolve_session_root()
+        #: Memory-capture bookkeeping (local_operator.memory_capture): the last compaction
+        #: marker a recovery pass claimed, and its (marker, 'ok'|'failed') terminal state.
+        #: Instance state, not durable: the durable truth is the capture watermark row.
+        self._memory_recovery_marker: str | None = None
+        self._memory_terminal: tuple[str, str] | None = None
         self._wake = WakeScheduler(
             now=lambda: int(time.time() * 1000),
             # Deliveries route through the indirection hook: at resume the
@@ -5783,6 +5792,14 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
+        # Live memory belongs in tail deltas, never block zero. Checking at each
+        # provider boundary harvests late captures without opening another turn.
+        from local_operator.memory_capture import session_tail
+
+        memory_tail = await session_tail(self)
+        if memory_tail and len(desired) >= 4:
+            desired = list(desired)
+            desired[3] += "\n\n" + memory_tail
         if self._output_contract is not None:
             # The contract is announced to the model, because otherwise every
             # first attempt is a coin flip — and announced WHOLE (a partial
@@ -17455,7 +17472,12 @@ class Session:
         # must not advertise the tool at all. ``browser`` is the same shape —
         # the surface handle has to survive to the next turn for browsing to
         # work, and for teardown to be able to close the tab.
+        from local_operator.harness.subagent import _session_lineage
+
+        lineage = _session_lineage(self)
         return ToolContext(
+            team_id=lineage[-1] if lineage else "",
+            memory_config_dir=str(self._config_dir),
             cwd=self._cwd,
             # This builder is the real per-turn host boundary, including child
             # sessions. Repeated provider/tool batches share this one context;
@@ -21333,6 +21355,24 @@ class Session:
             self._pending_compaction = None
             self._compaction_pass_in_flight = False
 
+    def _begin_memory_capture(self, plan: _CompactionPlan) -> None:
+        if plan.memory_capture:
+            return
+        from local_operator.memory_capture import extract_messages, policy
+
+        if not getattr(self, "_config_dir", None):
+            return
+        enabled = policy(self._config_dir)
+        if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
+            return
+        # The task returns data only. It is not a session background job and
+        # cannot wake/continue a turn; stale speculative plans simply lose it.
+        task = asyncio.create_task(
+            asyncio.to_thread(extract_messages, plan.llm_history[: plan.cut])
+        )
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        plan.memory_capture.append(task)
+
     async def _summarize_for_compaction(
         self, plan: _CompactionPlan
     ) -> tuple[str, dict[str, Any] | None]:
@@ -21345,6 +21385,7 @@ class Session:
         moves on is discardable at zero cost. Every mutation lives in the
         commit half.
         """
+        self._begin_memory_capture(plan)
         return await self._produce_summary(
             plan.compaction_api, plan.llm_history[: plan.cut], plan.strategy
         )
@@ -21368,6 +21409,7 @@ class Session:
         """
         compaction_api = plan.compaction_api
         try:
+            self._begin_memory_capture(plan)
             to_summarize = plan.llm_history[: plan.cut]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
@@ -21515,7 +21557,7 @@ class Session:
                             ),
                         )
             first_kept_entry_id = kept[0].id
-            await self._transcript.append_compaction(
+            memory_marker = await self._transcript.append_compaction(
                 summary,
                 first_kept_entry_id,
                 plan.context_tokens,
@@ -21530,6 +21572,34 @@ class Session:
                 preserved_turns_dropped=preserved_turns_dropped,
                 preserved_turns_shed=preserved_turns_shed,
             )
+            # Never await speculative capture on the compaction critical path.
+            # Binding it to this *committed* marker prevents cancelled/stale
+            # advisor passes (#413) from ever writing candidates or a watermark.
+            if plan.memory_capture:
+                from local_operator.memory_capture import finish
+                from local_operator.tools.memory_tools import store_for
+
+                self._memory_recovery_marker = memory_marker.id
+
+                async def complete_memory_capture() -> None:
+                    try:
+                        terminal = await finish(
+                            store_for(self._build_tool_context()),
+                            memory_marker.id,
+                            plan.memory_capture[0],
+                            summary if plan.strategy == "context-full" else "",
+                            memory_marker.ts,
+                        )
+                    except asyncio.CancelledError:
+                        # A cancelled capture left no watermark. Re-arm the recovery that
+                        # session_tail runs from the COMMITTED marker on the next boundary,
+                        # instead of waiting for a process restart (QA Q5).
+                        if self._memory_recovery_marker == memory_marker.id:
+                            self._memory_recovery_marker = None
+                        raise
+                    self._memory_terminal = (memory_marker.id, terminal)
+
+                self._spawn_background(complete_memory_capture())
             marker = build_compaction_marker(summary, preserve_data)
             # Rebuild the verbatim user turns as real user messages, reusing
             # each turn's original id so the live context and a resumed

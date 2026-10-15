@@ -338,6 +338,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # inside its own bounded deadline, so it must not run on a link's
             # reader (see ``meshupdate.UPDATE_OP_DEADLINE_S``).
             "net_update",
+            # Trusted-peer memory sync (network/memory.py): a bounded batch apply into the
+            # SQLite store, 60 s like the other whole-bundle appliers.
+            "net_memory",
         }
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S

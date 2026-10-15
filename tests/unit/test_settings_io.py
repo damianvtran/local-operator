@@ -25,6 +25,8 @@ from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
+from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
 from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -270,6 +272,12 @@ def _consumer_defaults() -> dict[str, object]:
         # (``rollouts.rollout_policy`` resolves an absent key against exactly
         # this constant — the reader's own fallback, not a restatement).
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
+        "memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "memory.capture": MEMORY_DEFAULT_ENABLED,
+        "memory.suggest": MEMORY_DEFAULT_ENABLED,
+        "network.memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "network.memory.scopes": list(SCOPES),
+        "network.memory.exclude_devices": list(DEFAULT_EXCLUDED_DEVICES),
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,

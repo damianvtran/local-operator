@@ -295,6 +295,19 @@ def test_send_receipts_have_explicit_per_turn_host_scope(tmp_path) -> None:
     assert ToolContext().send_turn_id is None
 
 
+def test_memory_scope_context_is_derived_for_top_and_child(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    session = _session_for(tmp_path, tmp_path / "sessions" / "abc123")
+    assert session._build_tool_context().team_id == ""
+    assert session._build_tool_context().memory_config_dir == str(session._config_dir)
+    session.active_team = SimpleNamespace(id="registry-team", name="not-an-owner")
+    assert session._build_tool_context().team_id == "registry-team"
+    session.active_team = None
+    session._team_lineage = ("parent-team", "child-team")
+    assert session._build_tool_context().team_id == "child-team"
+
+
 def test_scratchpad_dir_follows_the_transcript_directory(tmp_path) -> None:
     """``scratchpad://`` resolves under the session's OWN directory, so the value
     is derived per turn rather than accepted as a constructor argument — a

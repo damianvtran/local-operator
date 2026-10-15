@@ -24,6 +24,7 @@ from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.lsp import build_lsp_tool
+from local_operator.tools.memory_tools import build_memory_tool
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
     build_project_tool,
@@ -47,6 +48,7 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "read": lambda _context: builtin.build_read_tool(),
     "write": lambda _context: builtin.build_write_tool(),
     "edit": lambda _context: builtin.build_edit_tool(),
+    "memory": lambda _context: build_memory_tool(),
     "glob": lambda _context: builtin.build_glob_tool(),
     "grep": lambda _context: builtin.build_grep_tool(),
     "eval": lambda _context: build_eval_tool(),
@@ -177,6 +179,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "read",
     "write",
     "edit",
+    "memory",
     "glob",
     "grep",
     "eval",

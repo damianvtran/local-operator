@@ -1149,6 +1149,10 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # Memory inspection is this frontend's synced store, like /project. A
+    # follower without registry identity can inspect only session/global; it
+    # never guesses the remote owner's agent/team identity from a role name.
+    "memory",
     # HER WHOLE FAMILY IS LOCAL, for the `/resume` and `/settings` reasons at
     # once. Opening her conversation is a transition THIS frontend performs
     # (the `/new`/`/resume` argument: the session it lands on is opened on this
