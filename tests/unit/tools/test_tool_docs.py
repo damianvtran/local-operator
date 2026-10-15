@@ -234,7 +234,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "agent": 782,
     "ask": 1001,
     "ask_withdraw": 314,
-    "bash": 300,
+    "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
