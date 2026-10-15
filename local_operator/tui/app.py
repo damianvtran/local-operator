@@ -20137,11 +20137,12 @@ class OperatorApp(App[None]):
                 config=root,
                 identity=identity,
                 session_dir=directory,
+                prefix="/memory",
             )
             from local_operator.memory_cli import render_human
 
             loading.restate(
-                "Memory\n" + render_human(text, failed), "warning" if failed else "info"
+                "Memory\n" + render_human(text, failed, "/memory"), "warning" if failed else "info"
             )
 
         self.run_worker(inspect_memory(), exclusive=False, exit_on_error=False)

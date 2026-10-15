@@ -298,6 +298,14 @@ def guard(value: Any, *, opaque: bool = False) -> None:
                 )
 
 
+def origin_label(fact: dict[str, Any]) -> str:
+    """``captured`` = automatic compaction capture still awaiting a human or an explicit
+    store; ``stated`` = anything a user or agent deliberately wrote or corrected.
+    Shown everywhere a fact is listed so unreviewed candidates are never mistaken for
+    verified knowledge (UX round 1: U1)."""
+    return "captured" if fact.get("status") == "candidate" else "stated"
+
+
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -713,7 +721,15 @@ class MemoryStore:
         entity: str | None = None,
         expected_version: str | None = None,
         forget: bool = False,
+        merge: bool = False,
     ) -> dict[str, Any]:
+        """Create, correct (``expected_version``) or forget one fact.
+
+        ``merge`` is the ONLY way to resolve concurrent edits: the new revision parents
+        every current head, so the siblings stop being conflicts. An ordinary correction
+        deliberately leaves unseen siblings alone, so a human who has READ the conflict
+        list (``show``) opts in explicitly.
+        """
         owner = self.identity.owner(scope)
         if entity is not None:
             safe_segment(entity)
@@ -781,6 +797,10 @@ class MemoryStore:
                         "Memory changed concurrently. Read its current revision and retry."
                     )
                 parents = [expected_version]
+                if merge:
+                    parents = list(
+                        dict.fromkeys([expected_version, *(head["op_id"] for head in heads)])
+                    )[:16]
             elif expected_version:
                 raise MemoryError("Memory not found in the authorized scope.")
             else:
@@ -1155,6 +1175,51 @@ class MemoryStore:
             v for pair in pairs for v in pair
         ]
 
+    def resolve(self, target: str, scope: str | None = None) -> tuple[str, str]:
+        """Map what a human copied (``scope/id``, a bare id or a unique prefix) to (scope, id).
+
+        list/search print ``scope/id``, so every command must accept that form (design
+        and UX round 1: D1/U2). Only AUTHORIZED owners are consulted, so a prefix can
+        never reveal another session's or team's facts. A prefix needs >= 8 characters:
+        shorter ones match too much to be a deliberate reference.
+        """
+        if not isinstance(target, str) or not target:
+            raise MemoryError("An explicit memory ID is required.")
+        if "/" in target:
+            named, _, target = target.partition("/")
+            if named not in SCOPES:
+                raise MemoryError("Memory references look like SCOPE/ID, e.g. global/01a1…")
+            if scope not in (None, named):
+                raise MemoryError("The reference's scope differs from --scope.")
+            scope = named
+        safe_segment(target)
+        if not self.path.exists():
+            raise MemoryError("Memory not found in the authorized scope.")
+        where, values = self._where(scope)
+        with self.connection() as db:
+            for table in ("current", "ops"):
+                exact = db.execute(
+                    f"SELECT DISTINCT scope FROM {table} WHERE {where} AND entity_id=?",
+                    [*values, target],
+                ).fetchall()
+                if exact:
+                    return exact[0][0], target
+            if len(target) < 8:
+                raise MemoryError("Memory not found in the authorized scope.")
+            rows = db.execute(
+                f"SELECT DISTINCT entity_id,scope FROM current WHERE {where} "
+                "AND substr(entity_id,1,?)=? LIMIT 4",
+                [*values, len(target), target],
+            ).fetchall()
+        if len(rows) > 1:
+            raise MemoryError(
+                f"'{target}' matches {len(rows)} memories; type more of the ID "
+                "(or use the full SCOPE/ID shown by list)."
+            )
+        if not rows:
+            raise MemoryError("Memory not found in the authorized scope.")
+        return rows[0][1], rows[0][0]
+
     def related(self, scope: str, entity: str) -> list[dict[str, Any]]:
         owner = self.identity.owner(scope)
         self.show(scope, entity)
@@ -1211,6 +1276,10 @@ class MemoryStore:
                             "version": op["op_id"],
                             "title": op["fact"]["title"],
                             "status": op["fact"]["status"],
+                            # Origin + wall time (HLC ms) let a human decide which
+                            # sibling to keep; the revision is what edit/forget need.
+                            "origin": op["origin_device"],
+                            "at": op["hlc"][0] / 1000.0,
                         }
                         for op in heads[1:4]
                     ]
@@ -1256,6 +1325,7 @@ class MemoryStore:
                         "version": row[2],
                         "title": json.loads(row[3])["title"],
                         "status": json.loads(row[3])["status"],
+                        "origin": origin_label(json.loads(row[3])),
                     }
                     for row in rows
                 ],
@@ -1376,6 +1446,7 @@ class MemoryStore:
                     "version": row[2],
                     "title": fact["title"],
                     "status": fact["status"],
+                    "origin": origin_label(fact),
                     "untrusted": True,
                 }
                 if not suggest:
