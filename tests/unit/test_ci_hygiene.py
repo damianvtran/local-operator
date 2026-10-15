@@ -1727,7 +1727,8 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
         ("--max-old-space-size=8192", False),
         ("--max-old-space-size=8192 --max-old-space-size=2048", True),
         ("--max-old-space-size=2048 --max-old-space-size=8192", False),
-        ("--max-old-space-size 8192", False),
+        ("--max-old-space-size 8192", True),
+        ('"--max-old-space-size=8192', True),
         ("--max_old_space_size=8192", False),
     ],
 )
@@ -1767,6 +1768,52 @@ def test_the_bounded_wrapper_raises_the_node_heap_only_when_needed(
             f"--max-old-space-size={run_bounded.NODE_HEAP_MB}"
         )
     assert proc.stdout.rstrip("\n") == expected
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="real heap probe requires node")
+@pytest.mark.parametrize(
+    ("node_options", "expected_cap"),
+    [
+        ('"--max-old-space-size=8192"', 8192),
+        ('--max-old-space-size="8192"', 8192),
+        ('--trace-warnings "--max_old_space_size=8192" --no-warnings', 8192),
+        ("--max-old-space-size=+8192", 8192),
+        ('--title=" --max-old-space-size=8192 "', run_bounded.NODE_HEAP_MB),
+        ('--max-old-space-size=8192 --max-old-space-size="2048"', run_bounded.NODE_HEAP_MB),
+        ('--max-old-space-size=2048 "--max-old-space-size=8192"', 8192),
+    ],
+)
+def test_the_bounded_wrapper_preserves_real_node_heap_semantics(
+    node_options: str, expected_cap: int
+) -> None:
+    """R1: quoting belongs to option tokens, not substrings inside other values.
+
+    Compare real V8 limits with a same-node control rather than hard-coding its
+    non-old-space overhead. These are limit probes, not multi-GB allocations.
+    The old raw regex lowers quoted/positive caps and mistakes --title's value
+    for an option; each of those mutants must fail on an actual node child.
+    """
+    node = shutil.which("node")
+    assert node is not None
+    probe = [node, "-e", 'console.log(require("v8").getHeapStatistics().heap_size_limit/1048576)']
+    env = dict(os.environ)
+    env["NODE_OPTIONS"] = f"--max-old-space-size={expected_cap}"
+    control = subprocess.run(probe, env=env, capture_output=True, text=True, timeout=30)
+    assert control.returncode == 0, control.stderr
+    env["NODE_OPTIONS"] = node_options
+    wrapped = subprocess.run(
+        [sys.executable, str(REPO / "scripts/run_bounded.py"), "--timeout", "15", "--", *probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert float(wrapped.stdout.strip()) == float(control.stdout.strip()), (
+        node_options,
+        wrapped.stdout,
+        control.stdout,
+    )
 
 
 def test_ci_and_make_share_one_classifier_module() -> None:
