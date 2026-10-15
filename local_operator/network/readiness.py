@@ -547,8 +547,14 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                 continue
             has_row: bool | None = None
             has_placement = False
+            diagnostics: dict[str, Any] | None = None
             if transport in ("http", "sse") and url:
-                has_row = None if store_unreadable else _mcp_row_exists(store, url)
+                from local_operator.mcp.auth import mcp_grant_diagnostics
+
+                # One row observation supplies both presence and advisory facts;
+                # neither a registration row nor unreadability proves a login.
+                diagnostics = mcp_grant_diagnostics(url, store, unreadable=store_unreadable)
+                has_row = diagnostics["has_row"]
                 # THIS device's own placement document: does an entry for the
                 # server exist HERE? It is what tells the viewer whether a share
                 # on the owner's books has REACHED this device — the pull is paid
@@ -570,6 +576,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                     "auth_declared": bool(raw.get("oauth") or raw.get("auth")),
                     "has_row": has_row,
                     "has_placement": has_placement,
+                    **({"auth_diagnostics": diagnostics} if diagnostics is not None else {}),
                 }
             )
     finally:
@@ -1936,16 +1943,20 @@ def mcp_credential_rows(
         name = _bounded(server.get("name") or "", 120) or url
         if not url:
             continue
-        rows.append(
-            _mcp_credential_row(
-                member,
-                url=url,
-                name=name,
-                server=server,
-                viewer=viewer,
-                peer_label=peer_label,
-            )
+        row = _mcp_credential_row(
+            member,
+            url=url,
+            name=name,
+            server=server,
+            viewer=viewer,
+            peer_label=peer_label,
         )
+        if isinstance(server.get("auth_diagnostics"), Mapping):
+            row["observed"] = {
+                **(row.get("observed") or {}),
+                "auth_diagnostics": dict(server["auth_diagnostics"]),
+            }
+        rows.append(row)
     return rows
 
 
@@ -1959,6 +1970,29 @@ def _mcp_credential_row(
     peer_label: str,
 ) -> dict[str, Any]:
     has_row = server.get("has_row")
+    diagnostics = server.get("auth_diagnostics")
+    if (
+        isinstance(diagnostics, Mapping)
+        and has_row is True
+        and diagnostics.get("sharing_mode") == "unavailable"
+    ):
+        # A present but dead/expired-unrefreshable grant cannot satisfy the
+        # existing local-login branch. Do not silently fall through to a
+        # placement: the runtime also prioritizes this local grant.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code="local_grant_unavailable",
+            detail=(
+                f"{peer_label}'s stored login for {name} ({url}) is unavailable; "
+                "sign in again there"
+            ),
+            remedies=(mcp_login_remedy(url),),
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url, "auth_diagnostics": dict(diagnostics)},
+        )
     if has_row is True:
         return _capability_row(
             device_id=member.device_id,
