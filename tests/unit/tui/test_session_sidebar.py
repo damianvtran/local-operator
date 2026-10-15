@@ -5633,7 +5633,19 @@ async def test_the_hub_door_answers_press_and_hover_at_100_columns() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)])
+        # A STILL active row. ``_plain(..., active=True)`` sets
+        # ``live_state="busy"``, whose braille spinner advances every
+        # ``SIDEBAR_SPINNER_INTERVAL_S`` (0.15 s); the two renders this test
+        # compares (``resting`` before the hover, ``hovered`` after it) then
+        # straddle a tick and differ by one glyph (⣾→⣽) — a phase flake the
+        # 2026-10-15 CI witness caught, not a hover defect. ``pending`` is
+        # tier 0, so the row stays in Active Sessions with the same id, name
+        # and one-cell mark column, and its needs-you mark (``!``) is static:
+        # the frames are comparable and the assertion stays about the hover.
+        # The same deanimation ``_mixed_entries`` above documents, for the
+        # same reason.
+        still_active = CatalogEntry(SessionRow("a", time.time(), "Session a", pending="ask"))
+        sidebar = await _sidebar_with(pilot, app, [still_active])
         sidebar.set_hub_total(3)
         await pilot.pause()
         resting = sidebar.render()
