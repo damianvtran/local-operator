@@ -270,6 +270,38 @@ toward "no eligible endpoints"; a routing optimisation must never be able to
 make a model unreachable. At the cap the harness stops retiring and says so once
 at debug level.
 
+### Leaving a host that decodes slowly
+
+A host can cache perfectly and still be slow, and the cache strikes above never
+notice. One measured run (DeepSeek v4.1 Flash) sat 63 consecutive requests on a
+host decoding at ~20 tok/s while two other hosts served the same model at
+120-170 tok/s; that host held 93% of the run's request time. The pin made it
+worse: it re-selected the host that had just served.
+
+`SessionStreamFn._score_host_decode_rate` folds the decode rate `_record_stream`
+already measures (output tokens over the first-to-last output delta, so queueing
+and prefill are excluded by construction; no extra clock read or request) into
+per-host strikes:
+
+- only a real turn with **>= 500 output tokens** counts; shorter turns neither
+  strike nor clear;
+- **3 consecutive** qualifying turns under `providers.openrouter.retire_below_tps`
+  (default **25**; `0` turns the check off) retire the host into the same
+  `provider.ignore` set, sharing the **3-host cap**;
+- a qualifying turn at or above the floor clears the host; strikes more than 30
+  minutes apart do not pair;
+- **retirement needs proof of a faster route**: another un-retired host measured
+  at or above the floor. Without one the host's pin is only *released* (it stops
+  being named; nothing is added to `ignore`) and the release is promoted to a
+  retirement when a faster host is measured. This keeps the last viable host, a
+  single-endpoint model, and an all-hosts-slow conversation (a slow model, not a
+  slow host) from ever hitting OpenRouter's "all providers have been ignored";
+- speed retirements survive a compaction (cache retirements do not): decode speed
+  is not a fact about the prefix;
+- a `NoticeEvent` names the host, its measured rate, the floor, and the cold-cache
+  cost. The setting is a harness switch, not a wire key; it never makes the
+  default config emit a `provider` object. Memory-only, like the pin.
+
 Verified live that the two compose: with `order` naming one host and `ignore`
 another, the ordered host served 8/8 calls and the ignored one was never
 attempted.
