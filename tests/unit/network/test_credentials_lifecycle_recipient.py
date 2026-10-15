@@ -436,6 +436,7 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         wire.CREDENTIAL_PLACEMENT_PUSH_V1: "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
+        "memory-sync-v1": "net_memory",
         "mesh-update-v1": "net_update",
         "peer-journal-source-v1": "net_session_history",
     }

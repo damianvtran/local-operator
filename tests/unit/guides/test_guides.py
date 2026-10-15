@@ -41,6 +41,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "i18n",
         "image-generation",
         "mcp",
+        "memory",
         "mobile",
         "monitor",
         "network",
@@ -93,6 +94,9 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set the default provider and model configuration", "configuration"),
         ("create a Local Operator skill or executable plugin", "extensions"),
         ("list available agents or spawn a subagent", "agents"),
+        ("save goals and decisions in scoped memory before compaction", "memory"),
+        ("recall saved files links and contacts from memory", "memory"),
+        ("inspect correct or forget a fact with lop memory", "memory"),
         (
             "allocate bounded engineering delivery and preflight costly evidence "
             "before converging code review and QA",

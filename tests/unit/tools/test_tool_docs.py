@@ -227,11 +227,14 @@ _WALK_DEPTH_CAP = 2
 #: tool:// notes (blocked items are accounted for at the turn boundary). Off the
 #: wire, so ``scripts/bench_context_budget.py`` is untouched and the two ledgers
 #: do NOT move together this time.
+# Re-measured 2026-10-15 through both isolated render arms: the shared intent
+# shape stays "2-6 words, present participle"; only its repeated pointer shrank.
+# Native personal-memory docs are newly accounted for; URL docs remain opt-in.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 786,
-    "ask": 1005,
-    "ask_withdraw": 318,
-    "bash": 304,
+    "agent": 782,
+    "ask": 1001,
+    "ask_withdraw": 314,
+    "bash": 300,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
@@ -245,20 +248,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ack clauses tightened) while this entry kept its H5d value. Measured
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
-    "bridge": 563,
-    "browser": 1312,
+    "bridge": 559,
+    "browser": 1308,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
     # wire (the description keeps one sentence; this holds the rest).
-    "code_requests": 475,
+    "code_requests": 471,
     # RE-MEASURED via this test's own print (the count_text_tokens ledger path):
     # 1096 -> 1232 is the deliberate cost of advertising `console_resources` and
     # `console_cleanup` in the console doc — the ONLY entry that moved. The two
     # new methods and the capacity/cleanup detail are the whole delta.
-    "console": 1232,
-    "edit": 351,
-    "eval": 376,
+    "console": 1228,
+    "edit": 347,
+    "eval": 372,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;
     #: +63 tokens over the 730 the slimming wave measured — re-measured
@@ -276,7 +279,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
-    "generate_image": 935,
+    "generate_image": 931,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -286,9 +289,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # now the contract §2.3 string verbatim (the shipped wording stated the
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
-    "generate_video": 794,
-    "glob": 91,
-    "grep": 337,
+    "generate_video": 790,
+    "glob": 87,
+    "grep": 333,
     # 675 -> 673 (child-attribution v1): the ``message`` field description was
     # rewritten to say that pause/cancel RECORD it as the stop reason. The new
     # wording is SHORTER than the old ("Body. Required for send/ask/steer/resume;
@@ -298,49 +301,50 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 725,
+    "hub": 721,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
-    "jobs": 351,
-    "list_variables": 58,
-    "lsp": 276,
-    "monitor": 357,
-    "network": 874,
+    "jobs": 347,
+    "list_variables": 54,
+    "lsp": 272,
+    "memory": 116,
+    "monitor": 353,
+    "network": 870,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
-    "no_reply": 113,
-    "patience": 334,
-    "project": 1102,
-    "project_delete": 95,
-    "read": 349,
-    "read_variable": 71,
-    "secret": 188,
+    "no_reply": 109,
+    "patience": 330,
+    "project": 1098,
+    "project_delete": 91,
+    "read": 345,
+    "read_variable": 67,
+    "secret": 184,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
-    "send": 783,
-    "sessions": 802,
+    "send": 779,
+    "sessions": 798,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
-    "setting": 191,
-    "task": 620,
-    "team": 489,
-    "team_delete": 90,
-    "todo": 540,
+    "setting": 187,
+    "task": 616,
+    "team": 485,
+    "team_delete": 86,
+    "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
     # read side: states, the at-most-once registration and the watcher handoff.
-    "video_status": 206,
-    "wait": 272,
-    "wake": 312,
-    "web_fetch": 352,
-    "web_read": 225,
-    "web_search": 193,
-    "write": 141,
+    "video_status": 202,
+    "wait": 268,
+    "wake": 308,
+    "web_fetch": 348,
+    "web_read": 221,
+    "web_search": 189,
+    "write": 137,
 }
 
 #: The SAME ledger's other arm: ``agent``/``task`` rendered against a
@@ -355,7 +359,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: intent-description cut as the canonical table above.
 #: 639 -> 635 (and `task` 488 -> 484 above): the sentence the depth gate added to
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 815, "task": 768}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 811, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

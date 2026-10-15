@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import (
     cli_exec_help,
+    cli_exec_runtime,
     mobile_setup,
     relay_login,
     relay_shell,
@@ -32,6 +33,7 @@ from . import (
     wire_errors_settings,
     wire_exec,
     wire_incidents,
+    wire_memory,
     wire_notices,
     wire_settings,
     wire_settings_hub_defaults,
@@ -41,6 +43,7 @@ from . import (
 
 __all__ = [
     "cli_exec_help",
+    "cli_exec_runtime",
     "mobile_setup",
     "relay_login",
     "relay_shell",
@@ -64,6 +67,7 @@ __all__ = [
     "wire_errors_settings",
     "wire_exec",
     "wire_incidents",
+    "wire_memory",
     "wire_notices",
     "wire_settings",
     "wire_settings_hub_defaults",

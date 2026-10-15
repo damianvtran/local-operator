@@ -38,7 +38,8 @@
     "local_operator/tui/widgets/status_line.py",
     "local_operator/tui/widgets/transcript.py",
     "local_operator/tui/widgets/welcome.py",
-    "local_operator/tunnels/setup.py"
+    "local_operator/tunnels/setup.py",
+    "local_operator/headless_print.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -80,7 +81,6 @@
     "local_operator/harness/secret_sinks.py": 11,
     "local_operator/harness/subagent.py": 4,
     "local_operator/harness/wake.py": 1,
-    "local_operator/headless_print.py": 9,
     "local_operator/hub_sync/merge.py": 12,
     "local_operator/hub_sync/report.py": 4,
     "local_operator/hub_sync/resolver.py": 4,

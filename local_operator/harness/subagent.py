@@ -2898,6 +2898,8 @@ async def _construct_child_session(
     # reaching that context, a child would silently be handed its parent's
     # UNSCOPED tool.
     tool_context = ToolContext(
+        team_id=target.team_lineage[-1] if target and target.team_lineage else "",
+        memory_config_dir=str(parent_session._config_dir),
         cwd=cwd,
         session_id=transcript.directory.name,
         agent_id=parent_session.agent_id,
