@@ -96,6 +96,21 @@ class FakeConfigManager:
     def get_config_value(self, key: str, default=None):
         return self.values.get(key, default)
 
+    def get_nested_value(self, path, default=None):
+        """The nested reader ``settings_io.write_setting`` pairs with.
+
+        The composition root reads the bridge section through this method now
+        (``TeamBridgeSettings._derive``), so a double without it fails before the
+        behaviour under test. Mirrors ``ConfigManager.get_nested_value``: a
+        non-mapping partway down reads as absent rather than raising.
+        """
+        current = self.values
+        for part in path:
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        return current
+
     def get_config(self):
         return SimpleNamespace(values=self.values)
 
@@ -4838,10 +4853,15 @@ def test_store_maintenance_thread_retries_after_lock_owner_exits(
         daemon=True,
     )
     worker.start()
+    assert done.wait(5), "single maintenance worker did not retry to completion"
+    # The worker's contract is the COMPLETED maintenance pass, not its exit:
+    # `_run_delegated_sweeps` follows it and runs for the life of the process.
+    # Stop it explicitly, and assert only that it honoured the stop — the old
+    # `not is_alive()` read passed because the policy provider used to raise
+    # inside the thread (the config double could not read the section).
+    stop.set()
     worker.join(timeout=5)
-
-    assert not worker.is_alive(), "single maintenance worker did not retry to completion"
-    assert done.is_set()
+    assert not worker.is_alive(), "worker did not stop when asked"
     assert attempts == 4, "worker abandoned lock retries after its initial contention"
     assert calls == [
         "cleanup",
@@ -4915,6 +4935,7 @@ def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
     publisher.start()
     attempts = 0
     first_busy = threading.Event()
+    stop = threading.Event()
     real_acquire = session_factory._acquire_store_maintenance_lock
 
     def count_attempts(config_dir: Path) -> int | None:
@@ -4929,7 +4950,7 @@ def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
     done = threading.Event()
     worker = threading.Thread(
         target=session_factory._store_maintenance_thread_main,
-        args=(FakeConfigManager(), tmp_path, None, threading.Event(), done),
+        args=(FakeConfigManager(), tmp_path, None, stop, done),
         daemon=True,
     )
     worker.start()
@@ -4943,11 +4964,13 @@ def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
     assert first_busy.wait(5), "contender never observed the busy owner lock"
     assert not done.is_set(), "contender abandoned a busy owner instead of retrying"
     release_owner.set()
+    assert done.wait(5) and published.wait(5), "maintenance pass did not complete"
+    # Same contract as the retry case above: the pass completing is the
+    # observable, and the sweeps that follow live for the process.
+    stop.set()
     worker.join(timeout=5)
     publisher.join(timeout=5)
-
-    assert not worker.is_alive() and not publisher.is_alive()
-    assert done.is_set() and published.is_set()
+    assert not worker.is_alive() and not publisher.is_alive(), "worker did not stop when asked"
     assert attempts >= 2, "contender did not retry after the original busy lock"
     assert calls == [], "fresh owner stamp should suppress every maintenance pass"
 

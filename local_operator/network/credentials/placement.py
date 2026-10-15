@@ -41,10 +41,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, NoReturn, Sequence
 
 from local_operator.network.credentials.types import (
     DEVICE_BOUND_PROVIDERS,
@@ -106,11 +107,11 @@ _FORBIDDEN_PLACEMENT_KEYS: frozenset[str] = frozenset(
 #: also takes an ``flock`` on a lock file beside the document, for the whole
 #: read-modify-write.
 @contextmanager
-def _document_lock(target: Path) -> Iterator[None]:
+def _document_lock(target: Path, *, root: Path) -> Iterator[None]:
     from local_operator.network import store
 
     with store._write_lock(target):
-        with _cross_process_lock(target.parent / PLACEMENT_LOCK_FILENAME):
+        with _cross_process_lock(target.parent / PLACEMENT_LOCK_FILENAME, root=root):
             yield
 
 
@@ -127,7 +128,7 @@ PLACEMENT_LOCK_WAIT_S = 10.0
 
 
 @contextmanager
-def _cross_process_lock(path: Path) -> Iterator[None]:
+def _cross_process_lock(path: Path, *, root: Path) -> Iterator[None]:
     """An exclusive ``flock`` on ``path``, bounded, that REFUSES rather than degrades.
 
     The non-blocking primitive is ``wakes.lock``'s (``session_factory`` shares it the
@@ -137,11 +138,10 @@ def _cross_process_lock(path: Path) -> Iterator[None]:
     timeout would be the lost-revoke this lock exists to close, so a timeout raises.
     """
     from local_operator.network.types import MeshRefusal
-    from local_operator.procstate import O_BINARY
     from local_operator.wakes.lock import _try_lock, _unlock
 
-    _ensure_private_dir(path.parent)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | O_BINARY, FILE_MODE)
+    _ensure_private_dir(path.parent, root=root)
+    fd = _open_lock(path)
     try:
         deadline = time.monotonic() + PLACEMENT_LOCK_WAIT_S
         while not _try_lock(fd):
@@ -182,37 +182,186 @@ def credentials_root(root: Path | None = None) -> Path:
 
 def credentials_dir_for(network_id: str, root: Path | None = None) -> Path:
     """The per-network directory, created 0700. The WRITE path only."""
-    path = credentials_root(root) / network_id
-    _ensure_private_dir(path)
+    from local_operator.network import store
+
+    store.safe_component(network_id)
+    root = _config_root(root)
+    path = root / "network" / "credentials" / network_id
+    _ensure_private_dir(path, root=root)
     return path
 
 
 def _config_root(root: Path | None) -> Path:
-    if root is not None:
-        return Path(root)
-    from local_operator.paths import config_dir
+    # Configuration is an OS path, not a network ID. Resolve trusted aliases and
+    # relative overrides at this public call's cwd; do not cache ambient defaults.
+    if root is None:
+        from local_operator.paths import config_dir
 
-    return config_dir()
+        root = config_dir()
+    return Path(root).resolve()
 
 
-def _ensure_private_dir(path: Path) -> Path:
-    """``mkdir -p`` at 0700, INCLUDING every intermediate directory.
+def _path_refusal() -> NoReturn:
+    from local_operator.network.types import MeshRefusal
 
-    The intermediates matter: ``store._stage_private`` chmods only its target's
-    immediate parent, so ``<config>/network`` created implicitly by
-    ``mkdir(parents=True)`` would take the umask's mode (commonly 0755) and publish
-    the existence and names of the placement documents even though each file is
-    0600. Names here are device ids and credential keys — not material, but not
-    something to leave world-readable either.
+    raise MeshRefusal(
+        "credential_path_invalid",
+        "The credential metadata path changed or is not a safe directory/file; "
+        "preparation refused this path.",
+    )
+
+
+def _checked_info(info: os.stat_result, *, directory: bool, private: bool = True) -> None:
+    # Windows junctions may be directories without S_ISLNK. chmod there requests
+    # legacy writable/private modes; it does NOT establish owner-only ACLs.
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+        or (not directory and info.st_nlink > 1)
+    ):
+        _path_refusal()
+    if private and os.name != "nt" and hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+        _path_refusal()
+
+
+def _same_node(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino, stat.S_IFMT(left.st_mode)) == (
+        right.st_dev,
+        right.st_ino,
+        stat.S_IFMT(right.st_mode),
+    )
+
+
+def _private_mode(path: Path, before: os.stat_result, *, directory: bool) -> None:
+    """Prep-only permission change on an observed private descendant, not a sandbox.
+
+    Descriptor validation/fchmod is preferred on POSIX. Missing optional flags
+    retain checked pathname compatibility (including Windows), with a check/use
+    race. Neither branch confines later path-based payload publication or defeats
+    malicious same-UID namespace replacement. No preexisting chosen root is passed.
     """
-    path.mkdir(parents=True, exist_ok=True)
-    for parent in [path, *path.parents]:
+    _checked_info(before, directory=directory)
+    fd = None
+    use_fd = (
+        os.name != "nt"
+        and hasattr(os, "fchmod")
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and (not directory or bool(getattr(os, "O_DIRECTORY", 0)))
+    )
+    mode = DIR_MODE if directory else FILE_MODE
+    try:
+        if use_fd:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            if directory:
+                flags |= os.O_DIRECTORY
+            fd = os.open(path, flags)
+            actual = os.fstat(fd)
+            _checked_info(actual, directory=directory)
+            if not _same_node(before, actual) or not _same_node(actual, path.lstat()):
+                _path_refusal()
+            os.fchmod(fd, mode)
+        else:
+            if not _same_node(before, path.lstat()):
+                _path_refusal()
+            # Deliberately no ancestor walk; the fallback is not FD confinement.
+            os.chmod(path, mode)
+        after = path.lstat()
+        _checked_info(after, directory=directory)
+        if not _same_node(before, after):
+            _path_refusal()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _ensure_private_dir(path: Path, *, root: Path) -> Path:
+    """Prepare ONLY private descendants beneath one already selected config root.
+
+    Existing root/ancestor modes are configuration, never credentials metadata.
+    Even HOME or '/' is a valid chosen root. Missing leaf roots may be created
+    under an existing parent, but custom ancestors require profile initialization.
+    Readers use pure constructors instead; they never reach this writer helper.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    path, root = Path(path), Path(root)
+    if not root.is_absolute() or ".." in path.parts:
+        _path_refusal()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        _path_refusal()
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError:
         try:
-            if parent.is_dir():
-                os.chmod(parent, DIR_MODE)
-        except OSError:  # pragma: no cover - a parent we do not own
-            break
+            parent_info = root.parent.lstat()
+        except FileNotFoundError:
+            raise MeshRefusal(
+                "profile_parent_missing",
+                "Initialize the selected profile's parent directory "
+                "before writing credential metadata.",
+            ) from None
+        _checked_info(parent_info, directory=True, private=False)
+        created = False
+        try:
+            root.mkdir(mode=DIR_MODE)
+            created = True
+        except FileExistsError:
+            pass
+        root_info = root.lstat()
+        _checked_info(root_info, directory=True, private=False)
+        if created:
+            _private_mode(root, root_info, directory=True)
+    _checked_info(root_info, directory=True, private=False)
+    current = root
+    for component in relative.parts:
+        current = current / component
+        try:
+            current.mkdir(mode=DIR_MODE)
+        except FileExistsError:
+            pass
+        info = current.lstat()
+        _private_mode(current, info, directory=True)
+    # Check the chosen root identity, not its permissions. This is observation,
+    # not a promise against hostile renames between checks or later publication.
+    if not _same_node(root_info, root.lstat()):
+        _path_refusal()
     return path
+
+
+def _open_lock(path: Path) -> int:
+    """Open the stable lock leaf without unlinking it or silently following links."""
+    from local_operator.procstate import O_BINARY
+
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is not None:
+        _checked_info(before, directory=False)
+    flags = os.O_CREAT | os.O_RDWR | O_BINARY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, FILE_MODE)
+    try:
+        actual = os.fstat(fd)
+        _checked_info(actual, directory=False)
+        named = path.lstat()
+        _checked_info(named, directory=False)
+        if not _same_node(actual, named) or (before is not None and not _same_node(before, actual)):
+            _path_refusal()
+        if os.name != "nt" and hasattr(os, "fchmod"):
+            os.fchmod(fd, FILE_MODE)
+        else:
+            # Checked-path fallback: Windows chmod is not an ACL guarantee.
+            os.chmod(path, FILE_MODE)
+        if not _same_node(actual, path.lstat()):
+            _path_refusal()
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def network_credentials_dir(network_id: str, root: Path | None = None) -> Path:
@@ -336,7 +485,7 @@ class PlacementDocument:
     ) -> None:
         self.network_id = network_id
         self.entries: dict[str, CredentialPlacementEntry] = dict(entries or {})
-        self.root = root
+        self.root = _config_root(root)
         self.epoch = epoch
         self.written_by = written_by
 
@@ -442,8 +591,18 @@ class PlacementDocument:
         *,
         scope: str = "session",
         by: str = "",
+        provenance: str = "",
     ) -> CredentialPlacementEntry:
-        """Add ``device`` to ``key``'s holders. OWNER-DEVICE-ONLY."""
+        """Add ``device`` to ``key``'s holders. OWNER-DEVICE-ONLY.
+
+        ``provenance`` (default: the owner, i.e. an explicit share) marks a holder the
+        owner DERIVED from a signed approval (``consent:<approval ref>``, written only
+        by ``reconcile``). It lives in the existing ``Holder.granted_by`` field, so
+        there is no schema change, and it is authority only on the OWNER, read from
+        the owner's own file: a recipient's copy of the string is informational. A
+        re-grant of an existing holder resets it to the owner — an explicit share
+        supersedes a derived grant.
+        """
         from local_operator.network.credentials import github
         from local_operator.network.types import MeshRefusal
 
@@ -483,7 +642,7 @@ class PlacementDocument:
                     device=device,
                     scope=scope,
                     granted_at=time.time(),
-                    granted_by=entry.owner_device,
+                    granted_by=provenance or entry.owner_device,
                 )
             )
         else:
@@ -598,7 +757,7 @@ class PlacementDocument:
         from local_operator.network import store
 
         payload = self.to_json()
-        _ensure_private_dir(self.path.parent)
+        _ensure_private_dir(self.path.parent, root=self.root)
         with store._write_lock(self.path):
             return store._write_private_json(self.path, payload)
 
@@ -618,6 +777,7 @@ class PlacementDocument:
         and the caller's refusal sentence then names the owner as unknown rather
         than serving a credential on a guess.
         """
+        root = _config_root(root)
         path = placement_path(network_id, root)
         document = cls(network_id, root=root, written_by=self_device)
         try:
@@ -660,6 +820,7 @@ class PlacementDocument:
         with me" — the exact state this slice exists to remove — so the files are the
         authority for the question the files answer.
         """
+        root = _config_root(root)
         if not has_any_placement(root):
             return None
         if network_id:
@@ -691,6 +852,7 @@ def placement_for_store(
     """
     from local_operator.network.identity import load as load_identity
 
+    root = _config_root(root)
     if not has_any_placement(root):
         return None
     identity = load_identity(root)
@@ -737,8 +899,9 @@ def mutate(
     lock writes back a document that predates another writer's save, which silently
     REVERTS a share or a revoke. The CLI and the relay are the two writers here.
     """
+    root = _config_root(root)
     path = placement_path(network_id, root)
-    with _document_lock(path):
+    with _document_lock(path, root=root):
         document = PlacementDocument.load(network_id, root, self_device=self_device)
         yield document
         document.save()
@@ -765,8 +928,9 @@ def merge_from_peer(
     :func:`_clear_refusals_the_merge_contradicts`, which is the half of a re-share
     that used to be shadowed by the refusal cache's TTL.
     """
+    root = _config_root(root)
     path = placement_path(network_id, root)
-    with _document_lock(path):
+    with _document_lock(path, root=root):
         document = PlacementDocument.load(network_id, root, self_device=self_device)
         changed = document.merge(incoming, from_device=from_device, self_device=self_device)
         if changed:
@@ -786,6 +950,7 @@ def grant_key_set(
     config: Path,
     self_device: str,
     owner_name: str = "",
+    provenance: str = "",
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Grant ``device`` a holder row for each of ``keys``, through :meth:`grant`.
 
@@ -838,7 +1003,7 @@ def grant_key_set(
                     by=self_device,
                 )
             scope = "device" if github_mod.is_github_key(key) else "session"
-            document.grant(key, device, scope=scope, by=self_device)
+            document.grant(key, device, scope=scope, by=self_device, provenance=provenance)
             granted.append(key)
         except MeshRefusal as refusal:
             skipped.append({"key": key, "reason": refusal.code or "refused"})

@@ -3660,6 +3660,32 @@ class AttachedSession:
             lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by)
         )
 
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        """Decide an agent-messages request from a VIEWER: the verified door, proxied.
+
+        U1 (PR #2378, found by CI on the owner fix that made the dock call
+        this): the dock looks the decision door up on whichever session holds
+        the ask (``tui/app.py::_deliver_owner_answer``), so a facade without the
+        name made a request arriving in a REMOTE session undecidable — and that
+        is the exact surface the plain door's refusal copy names ("the window
+        that runs this session or a paired device"). This is the same door the
+        owner half calls, reached over the wire: the runtime's ``bridge_decide``
+        op, admitted by the authority seam that mints the one-shot grant the
+        decision rides. Not a second decision path, and the triple is forwarded
+        verbatim — the word is the request's option id, which the far side
+        validates against its own closed set.
+
+        Same verdict contract as its three siblings, and for the same reason:
+        the surface renders the sentence rather than the stack trace, and a
+        refusal that crossed the wire (expired grant, already answered) has to
+        read identically on both kinds of holder.
+        """
+        return await self._ask_verdict(
+            lambda: self._ask_client_method(
+                "bridge_decide", ask_id, None, by="desktop", tail=(question_id, word)
+            )
+        )
+
     async def _ask_verdict(self, call: Callable[[], Awaitable[str]]) -> dict[str, Any]:
         """Run one ask op for its VERDICT: ``{"ok": ...}``, never an exception.
 
@@ -3687,6 +3713,7 @@ class AttachedSession:
         *,
         by: str,
         images: Sequence[Mapping[str, Any]] | None = None,
+        tail: tuple[str, ...] = (),
     ) -> str:
         """Bind an owner if needed, then send ONE ask op on the wire.
 
@@ -3694,12 +3721,20 @@ class AttachedSession:
         answer reaches ``AttachClient.ask_respond`` with exactly the call shape it
         always had (a construction-free double or an older client signature keeps
         working) and the frame it writes is byte-identical to today's.
+
+        ``tail`` is the rest of a POSITIONAL op whose arguments are not an answer
+        body — ``bridge_decide``'s ``(question_id, word)``. It forwards verbatim
+        and sends no ``by``: that op takes no actor field, because the request's
+        decision is authorized by the grant the authority seam minted for it,
+        never by a caller-supplied name.
         """
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
         method = getattr(client, name)
+        if tail:
+            return await method(ask_id, *tail)
         if name in ("ask_respond", "ask_revise"):
             body = {
                 str(key): [str(item) for item in (values or ())]

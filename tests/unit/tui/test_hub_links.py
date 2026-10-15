@@ -275,3 +275,56 @@ def test_every_hinted_key_has_a_live_action() -> None:
         ), f"binding {key!r} is neither hinted nor an intentional per-key exception"
     # And the dead key is genuinely gone.
     assert "enter" not in bound
+
+
+def test_sections_are_separated_by_a_blank_line() -> None:
+    """D6 (pre-release batch): a blank line separates the three sections.
+
+    Bold alone left Agents/Teams/Skills reading as one run on the populated
+    frame. The separator is painted BETWEEN sections only — never leading,
+    never trailing — and a single-section body paints none at all, so the
+    reserved-slot row-height property is untouched.
+    """
+
+    rows = core.rows_from_snapshot(
+        _snapshot(
+            _link(kind="skill", local_id="s1", name="deploy"),
+            _link(kind="agent", local_id="a1", name="coder"),
+            _link(kind="team", local_id="t1", name="crew"),
+        )
+    )
+    plains = [str(line) for line in core.render_rows(rows, 80)]
+    assert plains[0] == "Agents"
+    assert plains[2] == "" and plains[3] == "Teams", plains
+    assert plains[5] == "" and plains[6] == "Skills", plains
+    assert len(plains) == 8, plains
+    # Exactly the two INTERIOR separators.
+    assert [i for i, line in enumerate(plains) if line == ""] == [2, 5]
+
+    single = core.render_rows(core.rows_from_snapshot(_snapshot(_link())), 80)
+    assert all(str(line) for line in single), [str(line) for line in single]
+
+
+def test_the_selected_bar_spans_the_full_content_width() -> None:
+    """D7 (pre-release batch): the highlight is the ROW's bar, not the text's.
+
+    The reverse ink covered only the text span, so a short row's selection
+    stopped mid-row. The selected line is padded to the content width in the
+    SAME reverse ink; an unselected line is untouched and a wrapped row's every
+    physical line is a full-width bar.
+    """
+
+    rows = core.rows_from_snapshot(_snapshot(_link(name="coder")))
+    selected_line = core.render_rows(rows, 80, selected=0)[1]
+    assert cell_len(str(selected_line)) == 80, cell_len(str(selected_line))
+    assert selected_line.spans[-1].style == "reverse", selected_line.spans[-1]
+    assert str(selected_line).endswith(" "), str(selected_line)
+
+    unselected_line = core.render_rows(rows, 80)[1]
+    assert cell_len(str(unselected_line)) < 80, cell_len(str(unselected_line))
+
+    narrow = core.render_rows(rows, 24, selected=0)[1]
+    physical = str(narrow).split("\n")
+    assert len(physical) >= 2, physical
+    for line in physical:
+        assert cell_len(line) == 24, (line, cell_len(line))

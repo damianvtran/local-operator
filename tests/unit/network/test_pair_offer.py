@@ -116,7 +116,14 @@ def test_offer_carries_candidates_kinds_labels_defaults(root: Path) -> None:
 
     items = offers.build_items(root)
 
-    assert items == [
+    # Allow precisely the additive diagnostic field on MCP rows, not arbitrary
+    # additions hidden by canonical projection. Every old field/default/order
+    # below still matches exactly; the real-store tests pin diagnostic values.
+    for item in items:
+        assert set(item) == {"key", "kind", "label", "share"} | (
+            {"auth_diagnostics"} if item["kind"] == "mcp-rotating" else set()
+        )
+    assert offers.canonical_rows(items) == [
         {
             "key": "anthropic",
             "kind": "api-key-static",

@@ -1109,8 +1109,17 @@ async def test_disabling_auto_links_leaves_the_painted_frame_identical():
             await pilot.pause()
             await pilot.press("ctrl+b")
             await pilot.pause()
-            assert app._sidebar_timer is not None
-            app._sidebar_timer.pause()
+            # QUIESCE BOTH refresh paths, not just the timer. `ctrl+b` also
+            # launches a ONE-SHOT catalog read whose `set_entries` is gated only
+            # on `_sidebar_refresh_generation`; pausing the timer alone left
+            # that read free to land the real (here: empty) catalog ON TOP of
+            # `_mixed_entries()` under fleet load, so the row lookup below found
+            # no entry on any row and `next(...)` raised `StopIteration` inside
+            # this coroutine — which PEP 479 turns into `RuntimeError: coroutine
+            # raised StopIteration` (CI shard 2, run 38662369900). That is the
+            # failure class this file's own helper docstring names; the bump is
+            # what retires the read already in flight.
+            _quiesce_sidebar_refresh(app)
             sidebar = app._session_sidebar
             sidebar.auto_links = auto_links
             sidebar.set_entries(_mixed_entries())
@@ -1125,9 +1134,16 @@ async def test_disabling_auto_links_leaves_the_painted_frame_identical():
             # link would be highlighted in at all — that is what keeps this
             # able to fail if a link is ever rendered here.
             await pilot.pause()
-            first_row = next(
+            # A LOUD assertion, not a bare `next(...)`: the lookup below is a
+            # premise (the list painted rows to hover), and when it is false the
+            # bare form reports it as `RuntimeError: coroutine raised
+            # StopIteration` — a PEP 479 wrapper that names neither the sidebar
+            # nor the missing rows. This says what happened.
+            entry_rows = [
                 y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None
-            )
+            ]
+            assert entry_rows, "the sidebar painted no entry rows to hover"
+            first_row = entry_rows[0]
             sidebar._set_hover(first_row)
             await pilot.pause()
             painted: list[tuple[str, str]] = []
@@ -5610,3 +5626,81 @@ def test_sidebar_footer_bindings_do_not_shadow_app_bindings() -> None:
 
     check(SessionSidebar)
     check(HubLinksPanel)
+
+
+@pytest.mark.asyncio
+async def test_the_hub_door_answers_press_and_hover_at_100_columns() -> None:
+    """D2 (pre-release batch): the door exists AND is interactive at 100x30.
+
+    The ladder now lets `hub: N` outlive `ctrl+b hide` at the sidebar's
+    29-cell floor (the default 100-column layout), so the door is on screen
+    without a wider terminal. This pins the painted note plus its two pointer
+    affordances: a hover underlines exactly the note's cells, and a press
+    posts the open request (spied at the app level).
+
+    ORDER MATTERS: the press moves the keyboard into the panel (click-to-focus),
+    and the FOCUSED ladder at 29 cells does not carry the note — so the hover
+    assertions run first, on the resting frame, and the press reads the note's
+    cells from the same frame.
+    """
+
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # A STILL active row. ``_plain(..., active=True)`` sets
+        # ``live_state="busy"``, whose braille spinner advances every
+        # ``SIDEBAR_SPINNER_INTERVAL_S`` (0.15 s); the two renders this test
+        # compares (``resting`` before the hover, ``hovered`` after it) then
+        # straddle a tick and differ by one glyph (⣾→⣽) — a phase flake the
+        # 2026-10-15 CI witness caught, not a hover defect. ``pending`` is
+        # tier 0, so the row stays in Active Sessions with the same id, name
+        # and one-cell mark column, and its needs-you mark (``!``) is static:
+        # the frames are comparable and the assertion stays about the hover.
+        # The same deanimation ``_mixed_entries`` above documents, for the
+        # same reason.
+        still_active = CatalogEntry(SessionRow("a", time.time(), "Session a", pending="ask"))
+        sidebar = await _sidebar_with(pilot, app, [still_active])
+        sidebar.set_hub_total(3)
+        await pilot.pause()
+        resting = sidebar.render()
+        footer = resting.plain.splitlines()[-1]
+        match = re.search(r"hub: \d+", footer)
+        assert match is not None, f"the door must be painted at 100 columns: {footer!r}"
+        assert "ctrl+b hide" not in footer, f"the hint yields to the door: {footer!r}"
+        first, end = match.start(), match.end()
+        pad = int(sidebar.styles.padding.left)
+
+        note = footer[first:end]
+        await _footer_gesture(
+            pilot,
+            app,
+            sidebar,
+            (events.MouseMove,),
+            pad + first,
+            sidebar.size.height - 1,
+            button=0,
+        )
+        hovered = sidebar.render()
+        assert hovered.plain == resting.plain, "the hover must not move the ladder"
+        underlined = [
+            span for span in hovered.spans if getattr(span.style, "underline", None) is True
+        ]
+        assert len(underlined) == 1, f"expected exactly the door underlined: {hovered.spans!r}"
+        span = underlined[0]
+        start = hovered.plain.rfind(note)
+        assert (span.start, span.end) == (start, start + len(note)), span
+
+        opened: list[str] = []
+        app.action_hub_links = lambda: opened.append("hub")  # type: ignore[method-assign]
+        await _footer_gesture(
+            pilot,
+            app,
+            sidebar,
+            (events.MouseDown, events.MouseUp, events.Click),
+            pad + first,
+            sidebar.size.height - 1,
+        )
+        await pilot.pause()
+        assert opened == ["hub"], "the door press must open the hub links surface"

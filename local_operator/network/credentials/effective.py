@@ -81,10 +81,19 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
     else:
         state = (
             "owner_unavailable"
-            if result.code in {"owner_offline", "owner_unreachable", "refresh_failed"}
+            if result.code
+            in {"owner_offline", "owner_unreachable", "refresh_failed", "consent_unverifiable"}
             else (
                 "withdrawn"
-                if result.code in {"not_a_holder", "grant_invalid", "no_local_credential"}
+                if result.code
+                in {
+                    "not_a_holder",
+                    "grant_invalid",
+                    "no_local_credential",
+                    "scope_mismatch",
+                    "scope_unknown",
+                    "consent_withdrawn",
+                }
                 else "device_bound" if result.code == "non_portable" else "pending"
             )
         )

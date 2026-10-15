@@ -61,11 +61,18 @@ PURPOSE_DECISION: Final = "supplement_decision"
 
 DEFAULT_ENABLED: Final = True
 DEFAULT_FILES: Final = True
-#: OFF by default in C1, against the memo table's ``true``, on the memo's own §6 ruling:
-#: graphics spend money before any surface can render them, so the flip ships as a one-line
-#: follow-up in the window that carries the first renderer. The C1a decision also has no
-#: generator to hand a "yes" to.
-DEFAULT_GRAPHICS: Final = False
+#: ON by default (the memo table's ``true``). It shipped OFF in C1 on the memo's §6 ruling --
+#: graphics spent money before any surface could render them -- and the desktop UI has
+#: rendered components since v0.34.14, so the ruling's condition is met. What bounds the spend
+#: is the gate in front of it, not the default: a graphic needs (a) a real user turn
+#: (``trigger.refusal``: no wake/monitor/peer/exec/subagent), (b) the deterministic
+#: structured-data signal (``evidence.extract``; the graphics question is not even ASKED
+#: without it, ``decision.decide``), (c) classifier probability >=0.7 for charts
+#: (``GRAPHICS_THRESHOLD``) or >=0.6 for a validated exact summary table only,
+#: and (d) the per-job ``maxCostUsd``/``timeoutS`` caps. The generator runs AFTER the answer
+#: is emitted, so the default never delays a turn. Off switches are unchanged:
+#: ``supplements.graphics: false``, ``supplements.enabled: false`` or ``LOP_SUPPLEMENTS=0``.
+DEFAULT_GRAPHICS: Final = True
 DEFAULT_MODEL: Final = "auto"
 DEFAULT_MAX_TURNS: Final = 2
 MAX_TURNS_BOUNDS: Final = (1, 4)

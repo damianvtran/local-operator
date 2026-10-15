@@ -33,6 +33,9 @@ from local_operator.media import (
     SUPPORTED_VIDEO_MIME_TYPES,
 )
 from local_operator.network.projection import ProjectionRefusal
+
+# Preserve the private import surface while sharing cancellation-safe ownership.
+from local_operator.owned_tasks import join_owned as _join_owned
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
 from local_operator.server.models.desktop_sessions import (
@@ -1658,36 +1661,6 @@ async def _refuse_remote_write(request: Request, session_id: str, *, noun: str) 
 
 def reply(result: Any) -> CRUDResponse[Any]:
     return CRUDResponse(status=200, message="Desktop session result.", result=result)
-
-
-async def _join_owned(operation: "asyncio.Task[dict[str, Any]]") -> dict[str, Any]:
-    """Await an owned operation, joining it even when THIS waiter is cancelled.
-
-    The repeated shield-and-check loop is the point, and a bare
-    ``await asyncio.shield(task)`` is NOT equivalent: shielding protects the TASK
-    from cancellation, but the ``await`` itself is still interruptible, so a
-    cancelled waiter returns while the transaction keeps running — and a second
-    cancellation (a shutdown arriving twice, a client that goes away and the
-    route task being torn down afterwards) would leave it unobserved with its
-    filesystem work in flight. Here the waiter drains the task first and only
-    then propagates the cancellation, and the operation's own exception is
-    re-raised (``task.result()``) rather than swallowed — a failed move must be
-    reported, not hidden behind a cancellation.
-    """
-    cancelled = False
-    result: dict[str, Any]
-    while True:
-        try:
-            result = await asyncio.shield(operation)
-            break
-        except asyncio.CancelledError:
-            cancelled = True
-            if operation.done():
-                result = operation.result()
-                break
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
 
 
 def store_root(request: Request) -> pathlib.Path:
@@ -4214,8 +4187,15 @@ async def asks(request: Request):
     """
     async with errors(request):
         from local_operator.asks.store import index_asks
+        from local_operator.asks.visibility import lapsed_visible_ms
 
-        rows = await asyncio.to_thread(index_asks, store_root(request))
+        root = store_root(request)
+        # ``asks.lapsed_visible_for`` (decision D8). The desktop server starts
+        # no config watcher, so the window is polled fresh per request — ON the
+        # loop, where a poll's listener fan-out belongs (the team-bridge status
+        # route's pattern) — and only the int crosses into the worker thread.
+        window = lapsed_visible_ms(root, poll_now=True)
+        rows = await asyncio.to_thread(index_asks, root, lapsed_visible_ms=window)
         return reply({"asks": rows})
 
 

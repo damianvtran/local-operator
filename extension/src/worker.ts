@@ -88,6 +88,7 @@ const HANDLERS: Record<
   // title that arrived after the tab was created. It drives no tab and reads
   // no page, so unlike every other handler it needs no surface admission.
   retitle,
+  owner_inspect: async () => ({}),
   owner_recover: async () => ({}),
   owner_finish: async () => ({}),
   owner_retain: async () => ({}),
@@ -378,7 +379,7 @@ async function dispatch(
     // owned-tab command; failures never mask the command's real result.
     // `retitle` is excluded because reconciling IS its handler — riding this
     // hook too would run the same serialized reconcile twice per push.
-    if (request.method !== "open" && request.method !== "retitle") {
+    if (request.method !== "open" && request.method !== "retitle" && request.method !== "owner_inspect") {
       await reconcileCommandTab(request.params);
     }
     const result = await withOwnership(request.method, request.params,

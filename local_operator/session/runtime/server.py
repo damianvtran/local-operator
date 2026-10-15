@@ -1417,6 +1417,48 @@ def receives_message_id(target: Any) -> bool:
     return "message_id" in parameters
 
 
+def receives_custom_type(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes a ``custom_type``.
+
+    The ``receives_message_id`` discipline, one field over: the dispatch asks
+    the HANDLE and both hosts ask the SESSION OBJECT their handle wraps before
+    handing the keyword on, so a reduced double or an older build never sees a
+    keyword its literal signature would refuse. VAR_KEYWORD answers NO for the
+    same reason as above (swallowing the type would silently stamp the default
+    and lose the provenance this carriage exists for); no method at all also
+    answers NO — the dispatch refuses that session with its own sentence.
+    """
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "custom_type" in parameters
+
+
+def receives_bridge_meta(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes ``bridge_meta``.
+
+    The ``receives_custom_type`` discipline, one field over (H5 F3): the
+    dispatch asks the HANDLE, and both hosts ask the SESSION OBJECT their
+    handle wraps, before handing the keyword on — so a reduced double or an
+    older build never sees a keyword its literal signature would refuse.
+    VAR_KEYWORD answers NO for the same reason; no method at all also
+    answers NO.
+    """
+
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "bridge_meta" in parameters
+
+
 def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
     """The ``(detail, extra)`` an op's answer contributes to its ack frame.
 
@@ -4855,22 +4897,21 @@ class RuntimeServer:
         must not put a staged write and rename on the far side of a signal.
 
         A NEW DEPARTURE SUPERSEDES THE LAST FAILURE, which is :meth:`note_updating`'s
-        rule one rung over (its NIT 4) and is required here for the same reason plus
-        one of its own. The reason is the window's: without it the record keeps
-        describing an abandoned move after the runtime has started a NEW one, so a
-        fleet row reads "update failed" about a session that is moving right now.
+        rule one rung over (its NIT 4): without it the record keeps describing an
+        abandoned move after the runtime has started a NEW one, so a fleet row reads
+        "update failed" about a session that is moving right now.
 
-        The reason it has one of its own is that the record's OTHER half,
-        ``update_failed``, describes THE HANDOVER THIS PHRASE ANNOUNCES — an abandon
-        keeps the ordinary build phrase by design (``process._abandon_move``), so
-        that field is the only thing separating a handover still waiting from one
-        that was given up, and its readers are the fleet surfaces that print the two
-        columns side by side (``info.collect``, ``cli``'s UPDATING cell, the incident
-        row). A stale failure left beside a freshly latched drain makes that pair
-        report the new attempt as the abandoned one. Cleared here rather than only on
-        a change of phrase, because the second attempt at the same build announces
-        the same words — the case that matters would otherwise be the one it got
-        wrong.
+        WHAT THE SUPERSEDE IS STILL FOR, now that the drain arm publishes no failure
+        (operator ask, 2026-10-15: a drain abandon keeps its departing commitment, so
+        only the WINDOW arm records ``update_failed`` — see :meth:`note_update_failed`).
+        The stale case is a WINDOW failure left on the record when the watch later
+        latches a fresh drain for the same session: ``update_failed`` is the window
+        arm's field alone, so without the clear it would sit beside the new departure
+        phrase and the two columns a fleet surface prints side by side
+        (``info.collect``, ``cli``'s UPDATING cell, the incident row) would report the
+        new attempt as the abandoned one. Cleared here rather than only on a change of
+        phrase, because the second attempt at the same build announces the same words —
+        the case that matters would otherwise be the one it got wrong.
 
         WHAT SURVIVES THE CLEAR, stated exactly: the failure is a DURABLE INCIDENT
         ROW (``note_update_failed`` writes ``UPDATE_FAILED_CAUSE`` with the pair and
@@ -4881,8 +4922,9 @@ class RuntimeServer:
         ``_abandon_update_window`` only, and it is what lets ``begin_update`` make the
         rung's ONE permitted retry: the pair is refused only once ``_update_retried``
         already holds it, so the memo stops a THIRD attempt rather than "re-opening a
-        window that burned its bound") and the drain rung deliberately does
-        not write it (agent review round 1, NIT-2; round 2, R2-NIT-1).
+        window that burned its bound"); the drain rung never writes it
+        (agent review round 1, NIT-2; round 2, R2-NIT-1), and since the operator's ask
+        it does not write the record's field either.
         """
         superseded = bool(phrase) and bool(self._record.update_failed)
         if superseded:
@@ -4965,11 +5007,14 @@ class RuntimeServer:
         from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
 
         # THE BOUND THE CALLER ACTUALLY ENFORCED, which is why it is a parameter
-        # (design review round 1, D2): two arms publish this token with two different
-        # bounds, and the shared sentence names none of them, so the failure reports
-        # its own number here or it reports no number at all. Rendering the window's
-        # constant instead told the operator that an update which had spent fifteen
-        # minutes in the drain gave up "within 5s".
+        # (design review round 1, D2): the shared sentence names no bound, so the
+        # failure reports its own number here or it reports no number at all.
+        # ONE ARM REACHES HERE (operator ask, 2026-10-15): the bounded update WINDOW
+        # with ``buildwatch.UPDATE_LOCK_S``. The build DRAIN's two bounds used to be
+        # the other two callers — rendering the window's constant for them told the
+        # operator that an update which had spent fifteen minutes in the drain gave up
+        # "within 5s" — and they now publish nothing, so the parameter is a fact about
+        # the caller rather than a list of arms.
         rendered = incidents.render_cut_off_reason(
             UPDATE_FAILED_CAUSE, detail=incidents.update_failed_detail(pair, bound)
         )
@@ -5557,6 +5602,20 @@ class RuntimeServer:
         )
         signature = self._operator_signature_verdict(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
+        if admitted and frame.get("op") == "bridge_decide":
+            # TB-02 P1: the one-shot ask-bound grant the decision needs is
+            # minted HERE, on the admission this seam just granted (capability
+            # proof or a verified operator/device signature). The dispatcher
+            # consumes it at the point of effect; without it there is no POST.
+            # Memory-only; see approval.py's grant table.
+            from local_operator.harness.approval import mint_bridge_decide_grant
+
+            mint_bridge_decide_grant(
+                session_id=str(self._record.session_id),
+                ask_id=str(frame.get("ask_id") or ""),
+                question_id=str(frame.get("question_id") or ""),
+                word=str(frame.get("word") or ""),
+            )
         if not admitted:
             # Logged because the two refusals have different causes and only
             # one of them is an attack: a capability miss is a follower or a
@@ -6291,8 +6350,8 @@ class RuntimeServer:
                 # loosening is whatever the client chose. All four are baked into
                 # the signed message, so a challenge cannot be moved between them.
                 action = str(frame.get("action") or "")
-                if action not in ("loosen", "approve"):
-                    raise ValueError("action must be 'loosen' or 'approve'")
+                if action not in ("loosen", "approve", "decide"):
+                    raise ValueError("action must be 'loosen', 'approve' or 'decide'")
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
@@ -7477,6 +7536,24 @@ class RuntimeServer:
             if not inspect.isawaitable(outcome):
                 raise ValueError(f"owner {op} operation must be awaitable")
             return cast("str", await outcome)
+        if op == "bridge_decide":
+            # TB-02 P1: the VERIFIED door for a bridge decision. The authority
+            # seam above has already admitted this frame (capability proof or a
+            # verified operator/device signature for action ``decide`` over the
+            # composite ask#question#word target) and minted the one-shot grant
+            # the dispatcher consumes; a raw ``ask_respond`` on a bridge ask is
+            # refused at the session, so this is the only way one is decided.
+            method = getattr(h, "bridge_decide", None)
+            if not callable(method):
+                raise ValueError("this session's runtime predates verified bridge decisions")
+            outcome = method(
+                str(frame.get("ask_id", "")),
+                str(frame.get("question_id", "")),
+                str(frame.get("word", "")),
+            )
+            if not inspect.isawaitable(outcome):
+                raise ValueError("owner bridge_decide operation must be awaitable")
+            return cast("str", await outcome)
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the
@@ -7555,6 +7632,48 @@ class RuntimeServer:
             # entirely, leaving this op byte-identical.
             if receives_message_id(h):
                 fields["message_id"] = frame.get("message_id")
+            # PROVENANCE CARRIAGE (H4e-render): a sender-declared ``custom_type``
+            # is VALIDATED against the client-local allowlist before anything
+            # is forwarded — an unknown value is a typed refusal, never coerced
+            # (a wrong provenance kind on the receiving card is worse than a
+            # refused send), and a frame without the key stays byte-identical.
+            # The allowlist import is IN-FUNCTION: this module keeps its import
+            # weight off the happy path, and the common frame never carries the
+            # field at all.
+            custom_type = frame.get("custom_type")
+            if custom_type is not None:
+                from local_operator.harness.message_types import (
+                    PEER_DELIVERABLE_CUSTOM_TYPES,
+                )
+
+                if (
+                    not isinstance(custom_type, str)
+                    or custom_type not in PEER_DELIVERABLE_CUSTOM_TYPES
+                ):
+                    raise ValueError(
+                        "peer_message carries an unknown custom_type; "
+                        "refusing to stamp a provenance kind the receiver "
+                        "cannot verify"
+                    )
+                if receives_custom_type(h):
+                    fields["custom_type"] = custom_type
+            # BRIDGE LOCATOR (H5 F3): the internal bounded ``bridge_meta`` is
+            # validated against the closed key set BEFORE anything forwards
+            # it — an unknown/oversized/non-scalar block is a typed refusal,
+            # never a coercion — and a frame without the key stays
+            # byte-identical, exactly like ``custom_type`` above.
+            bridge_meta = frame.get("bridge_meta")
+            if bridge_meta is not None:
+                from local_operator.harness.message_types import validate_bridge_meta
+
+                try:
+                    bridge_meta = validate_bridge_meta(bridge_meta)
+                except ValueError as failure:
+                    raise ValueError(
+                        f"peer_message carries an invalid bridge_meta: {failure}"
+                    ) from failure
+                if receives_bridge_meta(h):
+                    fields["bridge_meta"] = bridge_meta
             return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The

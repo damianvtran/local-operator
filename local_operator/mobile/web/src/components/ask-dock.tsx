@@ -32,7 +32,7 @@
  * badge), so its presence is itself the statement.
  */
 import { cn } from "../lib/cn";
-import { dockAsk, outstandingAsks } from "../lib/asks";
+import { dockAsk, outstandingAsks, questionTally } from "../lib/asks";
 import type { PendingAsk } from "../types";
 
 export function AskDock({
@@ -48,14 +48,23 @@ export function AskDock({
 	const head = dockAsk(rows);
 	/* Count QUESTIONS, not asks: "2 asks waiting" is true but tells a user
 	   nothing about how much they owe, and the design's own line counts
-	   questions (`? 3 questions waiting`). A timed-out ask is still counted —
-	   it is still answerable — which is why this reads the outstanding set
-	   rather than only the open one. */
-	const questions = outstanding.reduce(
-		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
-		0,
-	);
-	const label = questions === 1 ? "1 question waiting" : `${questions} questions waiting`;
+	   questions (`? 3 questions waiting`).
+
+	   ONLY OFFERED QUESTIONS ARE WAITING (design round 1, D1). A lapsed
+	   (`timed_out`) ask is shown read-only, so counting it as waiting put an
+	   accent "1 question waiting" over a card that says there is nothing to
+	   answer — on a stopped conversation, the first thing on screen. A queue of
+	   only lapsed asks keeps the chip, because the sheet behind it is where
+	   Dismiss lives, but in the quiet register and saying what it holds. */
+	const { waiting, lapsed } = questionTally(rows);
+	const quiet = waiting === 0;
+	const label = quiet
+		? lapsed === 1
+			? "1 lapsed question"
+			: `${lapsed} lapsed questions`
+		: waiting === 1
+			? "1 question waiting"
+			: `${waiting} questions waiting`;
 	const preview = String(head?.questions?.[0]?.question ?? "").trim();
 
 	return (
@@ -71,22 +80,33 @@ export function AskDock({
 			   asked is the most legible mark on the line (design round 1, D3). */
 			className={cn(
 				"mx-2 mb-1 flex min-h-11 items-center gap-2",
-				"rounded-md border border-accent bg-accent-wash px-3 py-1.5 text-left active:bg-elevated",
+				"rounded-md border px-3 py-1.5 text-left active:bg-elevated",
+				quiet ? "border-hairline bg-surface" : "border-accent bg-accent-wash",
 			)}
 		>
 			{/* A persistent accent on the glyph, never animated: a pulse would be
 			   the focus steal this design exists to avoid, in colour instead of
 			   keys (§5.0). */}
-			<span aria-hidden className="shrink-0 font-mono text-body-sm text-accent">
+			<span
+				aria-hidden
+				className={cn("shrink-0 font-mono text-body-sm", quiet ? "text-ink-dim" : "text-accent")}
+			>
 				?
 			</span>
 			<span className="shrink-0 text-body-sm text-ink-muted">{label}</span>
 			{preview ? (
-				<span className="min-w-0 flex-1 truncate text-body-sm text-ink">· {preview}</span>
+				<span
+					className={cn(
+						"min-w-0 flex-1 truncate text-body-sm",
+						quiet ? "text-ink-muted" : "text-ink",
+					)}
+				>
+					· {preview}
+				</span>
 			) : (
 				<span className="min-w-0 flex-1" />
 			)}
-			<span aria-hidden className="shrink-0 text-accent">
+			<span aria-hidden className={cn("shrink-0", quiet ? "text-ink-dim" : "text-accent")}>
 				▸
 			</span>
 		</button>

@@ -193,10 +193,15 @@ async def test_a_drain_with_MOVING_work_is_abandoned_at_the_dwell(monkeypatch) -
     with the session refusing admissions for the whole of it.
 
     Red on a tree without the dwell, green with it, and the discrimination is by the
-    PUBLISHED BOUND: the staleness arm cannot have fired here, because its own bound
-    is fifteen minutes and this cell's run is a fraction of a second — so a tree that
-    reached the abandon through silence would have to publish 900 s, while the dwell
-    arm publishes the dwell it ran out of (patched here to 50 ms).
+    LOG LINE rather than by a published bound. (That was the original shape: the arm
+    published the bound it ran out of, and a tree that reached the abandon through
+    silence would have published 900 s while the dwell arm published its own — that
+    claim is GONE with the operator's ask of 2026-10-15, which made a drain abandon a
+    deferral rather than a failure. What remains discriminating off the abandon itself
+    is ``caplog``'s ``dwell bound`` wording, and the staleness arm's line says ``no
+    movement`` instead; the numeric discriminator that survives is that this cell's
+    staleness bound is fifteen minutes against a fraction of a second of wall time, so
+    only the dwell arm can have fired.)
 
     The lane is driven for real — a task stepping the roster every few milliseconds,
     the shape its own comment describes — rather than by moving the clock, because the
@@ -229,10 +234,9 @@ async def test_a_drain_with_MOVING_work_is_abandoned_at_the_dwell(monkeypatch) -
         assert (
             not stop.is_set() and not handle.disposed
         ), "an abandoned handover keeps serving; it never ends the process or its turn"
-        assert runtime.failures, "the abandoned handover was never published"
-        assert runtime.failures[0][1] == pytest.approx(0.05), (
-            "the failure was published with the STALENESS bound, so this cell was "
-            "passed by the wrong arm rather than by the dwell"
+        assert runtime.failures == [], (
+            "the dwell arm published a failure for a runtime that is healthy and still "
+            "committed to the newer build: operator ask, 2026-10-15"
         )
         assert handle.drains == 1, "the drain was latched a second time"
     finally:
@@ -253,9 +257,11 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
     at it, not a silent cut. The shape it asserts now is the whole arm — the latch
     is RELEASED (the double CALLS the production ``end_drain`` — see ``_Handle`` — so a
     tree that keeps refusing admissions fails here), nothing is disposed and ``stop`` stays
-    clear (the process keeps serving), the failure is PUBLISHED, and the ordinary
-    build phrase is still the one on the record rather than a forced-handover
-    phrase that no longer describes what happens.
+    clear (the process keeps serving), NOTHING IS PUBLISHED AS A FAILURE (the operator's
+    ask of 2026-10-15: the departure stays committed, so the runtime is healthy and the
+    earlier requirement that this arm report one was the false alarm busy sessions showed),
+    and the ordinary build phrase is still the one on the record rather than a
+    forced-handover phrase that no longer describes what happens.
 
     The retry is asserted too, and it is a property of the SHAPE rather than of a
     number: the watch's trip is monotone for the process's life, so the next check
@@ -286,10 +292,9 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
         assert not stop.is_set(), "the process must keep serving, not stop"
         assert not handle.disposed, "a runtime that keeps its build is never disposed"
         assert handle.retired is False, "the silent hold is abandoned, not quietly retired"
-        assert runtime.failures, "the failed handover was never published"
-        assert runtime.failures[0][1] == pytest.approx(0.05), (
-            "the failure was published without the bound it ran out of, so no surface "
-            "can say why the update did not happen"
+        assert runtime.failures == [], (
+            "the staleness drain arm published a failure for a runtime that is healthy "
+            "and still committed to the newer build: operator ask, 2026-10-15"
         )
         assert handle.update_failed is None, (
             "the handle remembered the pair, which is the WINDOW rung's memo for not "
@@ -316,3 +321,52 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
     finally:
         stop.set()
         task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_only_the_WINDOW_arm_publishes_a_failure(monkeypatch) -> None:
+    """THE DISCRIMINATOR, at the one function both give-up arms share.
+
+    ``_keep_loaded_build`` is called by ``_abandon_update_window`` (default
+    ``publish_failure=True``) and by ``_abandon_move`` (``publish_failure=False``), and
+    the split is the whole of the operator's ask of 2026-10-15: a WINDOW that gave up
+    has nothing covering its departure, while a build DRAIN that gave up KEEPS its
+    commitment (the drain object stays latched, the record keeps ``LEAVING_FOR_BUILD``,
+    the departure lands at the first idle instant), so only the first may record a
+    failure. This cell drives the production function through both call shapes and
+    asserts the two halves apart, including the half BOTH arms still owe: the spooled
+    work comes back in either way (see the two cell names above for the end-to-end
+    arms; here the two steps are separated so a change that gated the publish by
+    accident, or the re-admission with it, fails on the specific half it moved).
+    """
+    called: list[str] = []
+
+    async def _drain_inbox_into(_handle: object) -> int:
+        called.append("inbox")
+        return 0
+
+    async def _reconcile_owed_asks(_handle: object) -> None:
+        called.append("asks")
+
+    monkeypatch.setattr(child_mod, "_drain_inbox_into", _drain_inbox_into)
+    monkeypatch.setattr(child_mod, "_reconcile_owed_asks", _reconcile_owed_asks)
+
+    window_runtime = _Runtime()
+    await child_mod._keep_loaded_build(object(), window_runtime, OLD.label(), 5.0)
+    assert window_runtime.failures == [(OLD.label(), 5.0)], (
+        "the WINDOW arm's default must keep publishing: it has no departing commitment "
+        "covering it, so its failure is real and reportable"
+    )
+
+    drain_runtime = _Runtime()
+    await child_mod._keep_loaded_build(
+        object(), drain_runtime, OLD.label(), 5.0, publish_failure=False
+    )
+    assert drain_runtime.failures == [], (
+        "the DRAIN arm published a failure for a runtime that is healthy and still "
+        "committed to the newer build: operator ask, 2026-10-15"
+    )
+    assert called == ["inbox", "asks", "inbox", "asks"], (
+        "the re-admission half is owed by BOTH arms and must run whether or not the "
+        f"failure is published: {called}"
+    )

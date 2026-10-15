@@ -110,11 +110,38 @@ def envelope(
     return {"code": code, "params": params, "text": text}
 
 
+@dataclass(frozen=True)
+class RenderedMessage:
+    """Internal raw result plus actual catalogue provenance, never wire metadata.
+
+    A preference is not the direction of fallback copy. None means unknown
+    code, failed render, or opaque passthrough prose: none can claim a catalogue
+    language. No bidi controls are introduced here; only a paint adapter may
+    project these bytes for display. This record is not an envelope/schema change.
+    """
+
+    text: str
+    source_locale: str | None
+
+
 def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -> str:
     """The rendered sentence for ``code``, or the code itself when unknown."""
+    return render_record(code, params, locale=locale).text
+
+
+def render_record(
+    code: str, params: Mapping[str, Any], *, locale: str | None = None
+) -> RenderedMessage:
+    """Source-aware projection using the SAME cached lookup and ICU formatter.
+
+    Raw render/envelope callers continue receiving exactly the old text. Typed
+    numbers and dates reach ICU unchanged; annotation happens only afterwards.
+    This deliberately does not generate parameter offsets or guess technical
+    tokens. A span-aware ICU collector is a separate, larger adoption slice.
+    """
     namespace = _namespace_for(str(catalogues.catalogue_root()), code)
     if namespace is None:
-        return code
+        return RenderedMessage(code, None)
     requested = resolve.eligible_locale(locale)
     source_locale = requested
     source = _lookup(requested, namespace, code)
@@ -122,7 +149,7 @@ def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -
         source = _lookup("en", namespace, code)
         source_locale = "en"
     if source is None:
-        return code
+        return RenderedMessage(code, None)
     if source_locale != requested:
         _logger.debug(
             "i18n fallback code=%s requested=%s source=%s", code, requested, source_locale
@@ -130,13 +157,15 @@ def render(code: str, params: Mapping[str, Any], *, locale: str | None = None) -
     # Formatting follows the source: Russian rules on English copy select
     # "one" for 21, producing "21 job" instead of the English "21 jobs".
     try:
-        return _runtime.render_message(source, params, source_locale)
+        rendered = _runtime.render_message(source, params, source_locale)
+        provenance = None if _runtime.is_passthrough_message(source) else source_locale
+        return RenderedMessage(rendered, provenance)
     except _runtime.MessageError:
         # A catalogue that does not render is a build-time defect (the parity
         # check parses every message); at RUN time the additive contract wins —
         # the envelope still carries code and params, and `text` degrades to the
         # code rather than raising through an old client's read path.
-        return code
+        return RenderedMessage(code, None)
 
 
 def _lookup(locale: str, namespace: str, code: str) -> str | None:

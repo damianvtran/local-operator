@@ -172,6 +172,9 @@ ECHO_POLICY = {
     # answer, and nothing here is words the model is told — the project TOOL is
     # how the model writes project rows, while `/project` is the operator's own
     # surface over the same store.
+    # Inspection/correction of the store, like `/project`: the receipt is the answer and the
+    # arguments (IDs, revisions, JSON) are selectors the model is never told.
+    "memory": False,
     "project": False,
 }
 
@@ -283,6 +286,9 @@ PROMPT_POLICY = {
     # Its argument is a subcommand word plus a project NAME — selectors, never
     # free text a model is given (`/project show payments-migration`). The
     # store, not the model, is what those words act on.
+    # Inspection/correction of the store, like `/project`: the receipt is the answer and the
+    # arguments (IDs, revisions, JSON) are selectors the model is never told.
+    "memory": False,
     "project": False,
 }
 

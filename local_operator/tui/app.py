@@ -105,7 +105,10 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    PEER_MESSAGE_MESSAGE_TYPE,
+    TEAM_BRIDGE_MESSAGE_TYPE,
+)
 from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
@@ -210,6 +213,7 @@ from local_operator.slash_commands import (
     unknown_flag_refusal,
 )
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
+from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
@@ -509,6 +513,11 @@ from local_operator.tui.widgets.tool_card import (
     clean_intent,
     parse_duration,
 )
+
+# Mounted by ``on_peer_message_delivered`` below AND re-exported for the
+# replay fold: ``session_presentation`` imports its block vocabulary from this
+# module (the sibling convention), and a bridge wake must paint the same card
+# live and on replay (§13.4).
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
@@ -518,6 +527,7 @@ from local_operator.tui.widgets.transcript import (
     NoticeKind,
     PeerMessageBlock,
     RichBlock,
+    TeamBridgeBlock,
     TranscriptView,
     UserBlock,
     WakeBlock,
@@ -1005,10 +1015,11 @@ _DRAIN_NOTICES: dict[str, str] = {
 #: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
 #: rather than kept for a wire addition that has not happened.
 #:
-#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
-#: where every other fleet surface already reads it: `lop sessions` prints the phrase
-#: (true — the commitment survives) beside `update failed` in its own column, and the
-#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. `lop sessions` prints the phrase — true,
+#: because the commitment survives — and that phrase plus the build still running is
+#: now the WHOLE of the account (operator ask, 2026-10-15: the drain abandon publishes
+#: no failure, so there is no `update failed` column beside it and no incident row
+#: naming a bound for a runtime nothing failed on). The viewer's row is the
 #: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
 #: drain sentence after the abandon, and **nothing takes that row down** — it is painted
 #: once, through `_notice_for`, which appends a block to the transcript, and the only
@@ -4405,6 +4416,65 @@ class TranscriptScreen(Screen[None]):
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
 AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+
+
+def bridge_decision_target(
+    row: AskRow, answers: Mapping[str, Sequence[str]]
+) -> tuple[str, str, str] | None:
+    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
+
+    ``None`` for every ordinary ask: a decision exists only for a request whose
+    question carries the producer's ``question_id`` AND whose picked value
+    resolves to one of that question's own option ids. The word sent on the
+    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
+    door validates the word against the request's closed set, and a label is
+    display copy that can be re-worded without touching the decision.
+
+    Ambiguity is ``None`` rather than a guess: two picked request questions, or
+    a value that maps to no option id, must fall back to the ordinary door and
+    its refusal rather than decide something the human did not choose.
+    """
+
+    picked: list[tuple[str, str]] = []
+    for question in row.questions:
+        if not isinstance(question, Mapping):
+            continue
+        question_id = str(question.get("question_id") or "")
+        if not question_id:
+            continue
+        selected = answers.get(str(question.get("id") or "")) or ()
+        if len(selected) != 1:
+            continue
+        options = {
+            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
+            for option in (question.get("options") or ())
+            if isinstance(option, Mapping)
+        }
+        value = str(selected[0]).strip()
+        picked.append((question_id, options.get(value.lower()) or value.lower()))
+    if len(picked) != 1:
+        return None
+    return (row.ask_id, picked[0][0], picked[0][1])
+
+
+def _is_bridge_ask_row(row: Any) -> bool:
+    """Whether an ask row is a Team Bridge carriage (D2).
+
+    The predicate is STRUCTURAL, not a status or a label: a bridge question
+    carries the locator seat (``bridge``) and/or the ``question_id`` that only
+    the bridge carriage stamps (the same reading ``_is_bridge_ask_record`` uses
+    on the fold). Anything else is an ordinary ask and keeps the ordinary copy —
+    a name-based test would relabel the user's own asks the moment a string
+    drifted.
+    """
+    for question in getattr(row, "questions", ()) or ():
+        if not isinstance(question, Mapping):
+            continue
+        if question.get("bridge"):
+            return True
+        if str(question.get("question_id") or "").strip():
+            return True
+    return False
 
 
 class OperatorApp(App[None]):
@@ -20151,6 +20221,54 @@ class OperatorApp(App[None]):
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
+    def _cmd_memory(self, arg: str, notice: NoticeFn) -> None:
+        """Human local inspection uses the CLI's optimistic/confirmation runner.
+
+        Like /project list this renders a durable reading receipt. It does not
+        enqueue a model turn or wake an idle owner; correction uses a displayed
+        revision and forgetting requires the explicit --yes token.
+        """
+        from pathlib import Path
+
+        from local_operator.memory import MemoryIdentity
+        from local_operator.memory_cli import run
+        from local_operator.paths import config_dir
+
+        session = self._session
+        builder = getattr(session, "_build_tool_context", None)
+        context: Any = builder() if callable(builder) else None
+        identity = MemoryIdentity(
+            context.session_id if context else str(getattr(session, "session_id", "") or ""),
+            context.team_id if context else "",
+            context.agent_id if context else "",
+        )
+        root = (
+            Path(context.memory_config_dir)
+            if context and context.memory_config_dir
+            else config_dir()
+        )
+        directory = Path(context.session_dir) if context and context.session_dir else None
+
+        loading = NoticeBlock("Memory\nReading…", "info")
+        self._append_block(loading)
+
+        async def inspect_memory() -> None:
+            text, failed = await asyncio.to_thread(
+                run,
+                arg,
+                config=root,
+                identity=identity,
+                session_dir=directory,
+                prefix="/memory",
+            )
+            from local_operator.memory_cli import render_human
+
+            loading.restate(
+                "Memory\n" + render_human(text, failed, "/memory"), "warning" if failed else "info"
+            )
+
+        self.run_worker(inspect_memory(), exclusive=False, exit_on_error=False)
+
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
         """``/project`` — the operator's own verbs over THIS machine's store.
 
@@ -26998,16 +27116,21 @@ class OperatorApp(App[None]):
         should look like.
         """
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         counts: dict[str, int] = {}
         total = 0
-        for session_id, entry in store.read_index(config_dir()).items():
-            asks = entry.get("asks")
-            outstanding = len(store.outstanding_asks(asks if isinstance(asks, list) else []))
-            if outstanding:
-                counts[session_id] = outstanding
-                total += outstanding
+        # Through ``index_asks`` — the SAME reader, window and re-derivation the
+        # fleet list uses (``_load_fleet_asks``) — so a mark or ``asks: N`` never
+        # counts a row the list it opens will not show (``asks.lapsed_visible_for``,
+        # decision D8; review round 1, R1-1).
+        root = config_dir()
+        for row in store.index_asks(root, lapsed_visible_ms=lapsed_visible_ms(root)):
+            if store.is_outstanding(row.get("status")):
+                session_id = str(row.get("session_id") or "")
+                counts[session_id] = counts.get(session_id, 0) + 1
+                total += 1
         return counts, total
 
     def _expand_asks(self, ask_id: str | None = None, *, by_policy: bool = False) -> None:
@@ -27307,17 +27430,29 @@ class OperatorApp(App[None]):
         """The row's questions as the CARD would draw them, or ``None`` when it cannot.
 
         ONE reader for the two seams that must agree about a row (Q-1, round 1):
-        the card mounts only for questions ``AskQuestion`` accepts, and the chat
+        the card mounts only for questions the ROW model accepts, and the chat
         refusal (``_head_ask_wants_a_secret``) may only point at a card that can
         exist. A row carrying something the validator refuses (a secret question
         with options, a truncated question) cannot be drawn anywhere, so a
         refusal would name a door that cannot open while protecting nothing —
         the row is still declinable from the list.
+
+        ``AskRowQuestion`` and NOT ``AskQuestion`` (round 13). The queue's own
+        projection (``asks/queue._question_shape``) stores the FULL question,
+        and a bridge carriage's row carries the seat — ``question_id``,
+        ``bridge``, ``human_required`` and each option's ``id``. Validating the
+        row against the TOOL's model therefore refused every real cross-member
+        ask (``extra="forbid"`` on the seat keys), ``_mount_ask_card`` gave up
+        with "carries questions this surface cannot draw", and no human decision
+        card ever mounted for the one ask kind that cannot be answered anywhere
+        else. The row model declares exactly those fields as optional, so the
+        seat is drawn-from rather than stripped, and the strict tool model stays
+        strict where it guards the model's own asks.
         """
-        from local_operator.harness.types import AskQuestion
+        from local_operator.harness.types import AskRowQuestion
 
         try:
-            return [AskQuestion.model_validate(dict(question)) for question in row.questions]
+            return [AskRowQuestion.model_validate(dict(question)) for question in row.questions]
         except Exception:  # noqa: BLE001 - a malformed row must not break the dock
             return None
 
@@ -27465,10 +27600,16 @@ class OperatorApp(App[None]):
     async def _load_fleet_asks(self) -> None:
         """Read the index off-thread, then mount the ONE list on it."""
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         try:
-            raw = await asyncio.to_thread(store.index_asks, config_dir())
+            # ``asks.lapsed_visible_for`` (decision D8) from the app's started
+            # watcher's snapshot (``_watch_config``), so another
+            # process's edit is already in it; only the int crosses the thread.
+            raw = await asyncio.to_thread(
+                store.index_asks, config_dir(), lapsed_visible_ms=lapsed_visible_ms(config_dir())
+            )
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             raw = []
@@ -27488,10 +27629,13 @@ class OperatorApp(App[None]):
     async def _reload_fleet_rows(self) -> None:
         """Re-read the fleet rows after an answer, keeping the list on them."""
         from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
 
         try:
-            raw = await asyncio.to_thread(store.index_asks, config_dir())
+            raw = await asyncio.to_thread(
+                store.index_asks, config_dir(), lapsed_visible_ms=lapsed_visible_ms(config_dir())
+            )
         except Exception:  # noqa: BLE001 — a broken index is not a crash
             logger.warning("could not read the fleet ask index", exc_info=True)
             return
@@ -27682,7 +27826,17 @@ class OperatorApp(App[None]):
             )
             try:
                 if op == "respond":
-                    await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                    target = bridge_decision_target(row, answers or {})
+                    if target is not None:
+                        # An agent-messages request: the card's answer IS a
+                        # decision and rides the verified door (`bridge_decide`
+                        # — authority-admitted, grant-bearing). The plain ask
+                        # door refuses these asks by construction, so sending it
+                        # here would leave the human with a card that cannot
+                        # answer (TB-02 wiring, PR #2378).
+                        await client.bridge_decide(*target)
+                    else:
+                        await client.ask_respond(row.ask_id, answers or {}, by="terminal")
                 elif op == "decline":
                     await client.ask_decline(row.ask_id, by="terminal")
                 else:
@@ -27885,11 +28039,25 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        bridge = _is_bridge_ask_row(row)
         if row.status == STATUS_TIMED_OUT:
+            if bridge:
+                # D2: a carriage's ask is not this user's own agent. The
+                # timeout line says the same true thing; only the SUBJECT
+                # changes, so a reader is not told their own agent asked when
+                # the request came from another member's.
+                return (
+                    f"{ASK_MARKER} this request timed out — the sender moved on; "
+                    "your answer still reaches them"
+                )
             return (
                 f"{ASK_MARKER} this ask timed out — the agent moved on; "
                 "your answer still reaches it"
             )
+        if bridge:
+            # A cross-member request: the answer travels back to the requester,
+            # so "the agent asked" (this user's own) is the wrong subject.
+            return f"{ASK_MARKER} another member's agent asked — " "your answer goes back to them"
         return f"{ASK_MARKER} the agent asked and moved on — your answer still reaches it"
 
     def _on_queue_ask_settle(self, ask_id: str, answers: dict[str, list[str]] | None) -> None:
@@ -27909,13 +28077,14 @@ class OperatorApp(App[None]):
         submitted = bool(answers) and bool(expected) and expected <= set(answers or {})
         if submitted:
             session = self._queued_ask_session()
-            reader: Any = getattr(session, "respond_ask", None)
-            if callable(reader):
-                try:
-                    outcome: Any = reader(ask_id, answers or {}, by="terminal")
-                except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
-                    logger.warning("could not deliver a queued answer", exc_info=True)
-                    outcome = {"ok": False, "error": "the answer could not be delivered"}
+            outcome: Any = self._deliver_owner_answer(session, row, ask_id, answers)
+            # THE VIEWER'S DOOR IS A COROUTINE, and this is where that is
+            # handled: `_handle_ask_outcome` raises a worker for an awaitable
+            # and renders the verdict when it lands, so a bridge decision from a
+            # paired device is reported in the owner's words too. `is not None`
+            # is the right test (a coroutine is not None) and an inline `await`
+            # here would block the keypress on the wire.
+            if outcome is not None:
                 self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
             # ONE QUEUE COSTS ONE COLLAPSE, not one per answer. The card was
@@ -27957,6 +28126,52 @@ class OperatorApp(App[None]):
         # respect (contract clause 4). A submit is not — answering is the opposite of
         # waving a question off — so it records nothing.
         self._collapse_asks(by_user=not submitted)
+
+    def _deliver_owner_answer(
+        self, session: Any, row: AskRow | None, ask_id: str, answers: dict[str, list[str]] | None
+    ) -> Any:
+        """Hand a settled card to the door its ROW belongs to, on the owner contract.
+
+        TWO DOORS, ONE ROW EACH, and the row is what picks (UX review U1). An
+        ordinary ask rides ``respond_ask`` — verbatim, as it always has. A
+        BRIDGE request rides ``Session.bridge_decide``: the verified decision
+        door the runtime's op serves and the fleet worker's engage route calls
+        (``_fleet_ask_worker``), which consumes the one-shot grant the authority
+        seam minted. ``respond_ask`` refuses every bridge record by construction
+        (``BRIDGE_DECISION_DOOR_REQUIRED``), so leaving these rows on the
+        ordinary door made the ORDINARY CARRIAGE — a request arriving in THIS
+        session — undecidable from the card that asked for the decision, while
+        the refusal named that very card (the owner half of security round 3's
+        TB-02/R3-2; the fleet half was wired and no test covered this one).
+
+        The target is built by the SAME helper the fleet route uses, so the word
+        on the wire is the option ID (``approve``/``deny``), never the drawn
+        label, and an ambiguous pick (``None``) falls back to the ordinary door
+        and its refusal rather than deciding something the human did not choose.
+
+        ``None`` means the session offers neither door — the reduced harnesses
+        the surface tests build — and nothing is delivered, exactly as the old
+        ``callable(reader)`` guard behaved. An owner's op answers with the verdict
+        dict; a viewer's is a COROUTINE (it crosses the wire), and the caller
+        hands either to ``_handle_ask_outcome``, which reports an awaitable from
+        the worker it raises rather than blocking the key.
+        """
+        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        decider: Any = getattr(session, "bridge_decide", None)
+        if target is not None and callable(decider):
+            try:
+                return decider(*target)
+            except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+                logger.warning("could not deliver a queued decision", exc_info=True)
+                return {"ok": False, "error": "the decision could not be delivered"}
+        reader: Any = getattr(session, "respond_ask", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader(ask_id, answers or {}, by="terminal")
+        except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
+            logger.warning("could not deliver a queued answer", exc_info=True)
+            return {"ok": False, "error": "the answer could not be delivered"}
 
     def _next_outstanding_ask(self, ask_id: str) -> AskRow | None:
         """The ask to hand the user after ``ask_id`` settles, or None.
@@ -39583,6 +39798,8 @@ class OperatorApp(App[None]):
             self._cmd_aida(arg, notice, attachments)
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
+        elif command == "/memory":
+            self._cmd_memory(arg, notice)
         elif command == "/project":
             # Every reserved verb runs (slice 3); `_cmd_project` owns the
             # branch so a registered command always has a TUI path.
@@ -46337,8 +46554,16 @@ class OperatorApp(App[None]):
         try:
             snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
         except Exception as error:  # noqa: BLE001 - surfaced IN the panel
+            # U8: the log keeps the raw exception; the card shows catalogue
+            # copy. The old f-string painted the parser's own words into the
+            # overlay (e.g. "config.yml: mapping values are not allowed
+            # here") — machinery, not a sentence, and not translatable.
+            logger.warning("hub links inventory read failed: %s", error)
             if panel.is_open:
-                panel.show_error(f"hub links unavailable: {error}")
+                from local_operator.i18n.keys import tui_hub_links as _k
+                from local_operator.i18n.text import tr
+
+                panel.show_error(tr("tui.hub_links")(_k.state_unavailable()))
             return
         if panel.is_open:
             panel.show_links(snapshot)
@@ -46394,6 +46619,16 @@ class OperatorApp(App[None]):
         self, message: "HubLinksPanel.RefreshRequested"
     ) -> None:
         message.stop()
+        panel = self._hub_links_panel()
+        if panel is not None and panel.is_refreshing:
+            # R2: DEFER (not queue) a refresh while OUR policy write+reread is
+            # unsettled — a second exclusive worker in this group would cancel
+            # the pending worker's re-read while its `to_thread` write keeps
+            # running, so the moved revision would never install before the
+            # next write CASes against it. The guard lives HERE as well as in
+            # `action_refresh` so a programmatic post cannot bypass it; the
+            # pending worker installs the fresh snapshot itself.
+            return
         # A refresh is a state change too; the door follows it (round-2 D12).
         self.refresh_hub_total()
         self.run_worker(
@@ -46499,21 +46734,49 @@ class OperatorApp(App[None]):
             return None
 
         async def run() -> None:
-            refusal = await asyncio.to_thread(work)
             panel = self._hub_links_panel()
+            try:
+                # `work()` converts its own LinkErrors into refusal strings; no
+                # typed clause out here, because `LinkError` is imported INSIDE
+                # `work()` and a bare `except LinkError` here would NameError
+                # while matching (the U1 fix's first draft did exactly that and
+                # `exit_on_error=False` swallowed it).
+                refusal = await asyncio.to_thread(work)
+            except Exception:  # noqa: BLE001 — U1: a failed write/re-read must
+                # NEVER kill the session. A read-only or full config dir (or an
+                # unreadable config) raises OSError/PermissionError/RuntimeError
+                # out of `update_policy` or the snapshot read; before this the
+                # worker's default `exit_on_error` ended the whole TUI and the
+                # conversation with it. The user gets the card's own
+                # save-failed line and keeps everything else.
+                if panel is not None and panel.is_open:
+                    panel.show_save_failed(message.policy, message.link_id, message.local_id)
+                self.refresh_hub_total()
+                return
             # D19: the refusal is painted ON the card the user is looking at, not
             # a transcript notice hidden behind the overlay.
             if refusal is not None and panel is not None and panel.is_open:
                 panel.show_notice(refusal, "warning")
             # Re-read either way: a success shows the new policy, a refusal (a
-            # CAS mismatch) shows the row that moved under the user.
+            # CAS mismatch) shows the row that moved under the user. The re-read
+            # can fail on its own (U1) — the write already landed or not, and a
+            # failed re-read reports through the same in-card line, never by
+            # ending the process.
             if panel is not None and panel.is_open:
-                snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                try:
+                    snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
+                except Exception:  # noqa: BLE001 — U1, see above
+                    panel.show_save_failed(message.policy, message.link_id, message.local_id)
+                    self.refresh_hub_total()
+                    return
                 if panel.is_open:
                     panel.show_links(snapshot)
             self.refresh_hub_total()
 
-        self.run_worker(run(), thread=False, group="hub-links", exclusive=True)
+        # U1: `exit_on_error=False` as the liveness/viewer workers do — the
+        # handler above names its own failure paths, and this flag guarantees
+        # that anything left unexpected is reported, not fatal to the session.
+        self.run_worker(run(), thread=False, group="hub-links", exclusive=True, exit_on_error=False)
 
     # -- the /btw aside ------------------------------------------------------
     #
@@ -48766,29 +49029,41 @@ class OperatorApp(App[None]):
     def _cmd_mobile(self, arg: str, notice: NoticeFn) -> None:
         """A convenience over the same CLI lifecycle, never an implicit login side effect.
 
-        /mobile enable <quoted-monthly-price> makes the billing acceptance
-        explicit. All network and service work runs outside the TUI loop;
-        only the sanitized final receipt returns to the conversation surface.
+        Status observes the shared plan without service side effects. Enable
+        needs a price only for activation, bound to the fresh owning quote.
+        Network/service work runs outside the TUI loop; sanitized progress and
+        accumulated receipts return even when a later step fails.
         """
-        pieces = arg.split()
-        action = pieces[0] if pieces else "status"
-        if action not in {"status", "enable", "start", "stop", "billing"} or len(pieces) > 2:
-            notice("Use /mobile status, billing, enable <monthly price>, start, or stop.")
+        from local_operator.i18n.keys import mobile_setup as ms
+        from local_operator.i18n.text import tr
+        from local_operator.tunnels.setup import parse_mobile
+
+        mobile_text = tr("mobile.setup")
+
+        try:
+            action, accepted, selected = parse_mobile(arg)
+        except ValueError:
+            notice(mobile_text(ms.usage()))
             return
         if getattr(self, "_tunnel_action_busy", False):
-            notice("Mobile setup is already running.")
+            notice(mobile_text(ms.busy()))
             return
         self._tunnel_action_busy = True
+        notice(mobile_text(ms.applying() if action == "enable" else ms.checking()))
 
         async def run() -> None:
             from local_operator.tunnels.cli import mobile_action
 
             try:
                 result = await asyncio.to_thread(
-                    mobile_action, action, pieces[1] if len(pieces) > 1 else None
+                    mobile_action,
+                    action,
+                    accepted,
+                    selected=selected,
+                    progress=lambda message: self.call_from_thread(self._system_notice, message),
                 )
             except Exception:  # noqa: BLE001 — no provider bodies or secrets in a notice
-                result = "Mobile setup failed. Check lop tunnel status and /login radient."
+                result = mobile_text(ms.unexpected_failure())
             finally:
                 self._tunnel_action_busy = False
             self._system_notice(result)
@@ -56251,13 +56526,25 @@ class OperatorApp(App[None]):
             return
         if message.message_id:
             self._live_peer_receipts.add(message.message_id)
-        block = PeerMessageBlock(message.body, message.sender)
-        if message.message_id:
-            # Session._emit_peer_receipt uses the persisted CustomMessage.id,
-            # not the sender or an external alias; match replay's part-zero seat.
-            block.navigation_anchor_id = message.message_id
-            block.navigation_anchor_part = 0
-        self._append_block(block)
+        if message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
+            # §13.4 on the LIVE surface: a bridge wake is its own card here
+            # too — the peer-typed card this used to paint would ALSO dedup
+            # the correct bridge card away on a later replay of this attach
+            # (the replay skips ids in ``_live_peer_receipts``).
+            self._append_block(
+                TeamBridgeBlock(
+                    bridge_card_text(message.details),
+                    bridge_card_sender(message.details),
+                )
+            )
+        else:
+            block = PeerMessageBlock(message.body, message.sender)
+            if message.message_id:
+                # Session._emit_peer_receipt uses the persisted CustomMessage.id,
+                # not the sender or an external alias; match replay's part-zero seat.
+                block.navigation_anchor_id = message.message_id
+                block.navigation_anchor_part = 0
+            self._append_block(block)
 
     def _announce_on_splash(
         self, text: str, kind: NoticeKind, *, headline: str | None = None
@@ -57864,7 +58151,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 146
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 147
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

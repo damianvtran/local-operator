@@ -40,6 +40,14 @@ TRIGGER_INJECTED: Final = "injected"
 ITEM_TEXT_MAX_CHARS: Final = 65_536
 #: The typed user text kept for the decision state (which truncates again to 1.5k).
 USER_TEXT_MAX_CHARS: Final = 4_000
+#: Share of :data:`USER_TEXT_MAX_CHARS` an ask answer may take when it is folded into the
+#: decision's request text; the remainder goes to the session's last typed request.
+ASK_ANSWER_MAX_CHARS: Final = 1_000
+#: ``ask_response`` rows come in three statuses (``asks/store.py``): only ``answered`` is a
+#: person choosing something. ``declined`` is a dismissal and ``late`` an answer to a question
+#: the model already moved past, so neither opens an eligible turn.
+_ASK_ANSWERED: Final = "answered"
+_ASK_RESPONSE_TYPE: Final = "ask_response"
 #: Tool-call argument keys worth keeping, with a bound each. Everything else (above all a
 #: ``write`` call's ``content``, which can be the whole file) is dropped: candidates need the
 #: PATH, the shell/code string and the intent, nothing else.
@@ -93,6 +101,70 @@ class RunProvenance:
     #: bare ``Event`` so a next turn that clears the event first cannot strand the waiter.
     settled_mark: int = 0
     triggers: frozenset[str] = field(default_factory=frozenset)
+    #: Epoch seconds the logical turn's pipeline began (``0.0`` = unknown). Arms the
+    #: pre-filter's touched-directory sweep: a file only counts as "written this turn" when its
+    #: mtime is at or after this, so an unknown start must DISABLE the sweep, not widen it.
+    started_at: float = 0.0
+
+
+def ask_answer_is_person(message: Any) -> bool:
+    """Whether this input is a PERSON's answer to an ask, i.e. a real user turn (rule 1).
+
+    WHY. The turn that resumes after an ask is the one that does the approved work and
+    writes the deliverables (a 296-comment production fix, in the incident that motivated
+    this), but its only input is an ``ask_response`` ``CustomMessage``, and the session
+    classes every non-wake/monitor custom type as ``internal`` -- so no typed row existed
+    and the whole turn was refused as ``no-typed-user-row``. The answer IS the operator's
+    input, so the turn is theirs.
+
+    Narrow on purpose (duck-typed, never raises): the custom type is exactly
+    ``ask_response``, the row is user-attributed (a harness-minted row is ``system``/
+    ``agent``), and ``details.status`` is exactly ``answered``. ``ask_timeout`` is a
+    harness notice nobody typed; ``declined`` and ``late`` are listed on
+    :data:`_ASK_ANSWERED`.
+    """
+    if getattr(message, "custom_type", None) != _ASK_RESPONSE_TYPE:
+        return False
+    if getattr(message, "attribution", None) != "user":
+        return False
+    details = getattr(message, "details", None)
+    return isinstance(details, Mapping) and details.get("status") == _ASK_ANSWERED
+
+
+def ask_answer_text(last_typed: str, details: Mapping[str, Any] | None) -> str:
+    """The decision's request text for a turn opened by an answered ask.
+
+    The session's last real typed request (what the operator actually asked for) plus the
+    answer itself, so the classifier can judge "is this the deliverable?" against a request
+    rather than against a bare "Yes, with ...". Only NON-SECRET questions' answers are folded
+    in: a ``secret`` question's value never reaches this text (the row's own ``text`` is
+    key-substituted by the queue, but this reads the structured answers and so skips the
+    secret cells outright instead of trusting that). Total bound: ``USER_TEXT_MAX_CHARS``.
+    """
+    pairs: list[str] = []
+    if isinstance(details, Mapping):
+        answers = details.get("answers")
+        questions = details.get("questions")
+        secret_ids = {
+            str(q.get("id"))
+            for q in (questions if isinstance(questions, list) else [])
+            if isinstance(q, Mapping) and q.get("secret")
+        }
+        if isinstance(answers, Mapping):
+            for key, values in answers.items():
+                if str(key) in secret_ids or not isinstance(values, (list, tuple)):
+                    continue
+                pairs.append(f"{key}: " + ", ".join(str(v) for v in values))
+    answer = _clip("; ".join(pairs), ASK_ANSWER_MAX_CHARS)
+    if not answer:
+        return last_typed[:USER_TEXT_MAX_CHARS]
+    # ANSWER FIRST: the decision clips this text from the TAIL (``decision._bound``, 1.5k),
+    # so a long original request must lose its end, never the answer that opened the turn.
+    head = f"[answer to the assistant's question] {answer}"
+    if not last_typed:
+        return head
+    head += "\n\n[original request] "
+    return head + last_typed[: max(0, USER_TEXT_MAX_CHARS - len(head))]
 
 
 def _clip(value: Any, limit: int) -> str:

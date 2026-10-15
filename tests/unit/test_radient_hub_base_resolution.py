@@ -114,6 +114,64 @@ def test_agents_delete_addresses_the_versioned_hub_path(
     assert mock_delete.call_args[0][0] == f"{DEFAULT_RADIENT_API_BASE_URL}/agents/{agent_id}"
 
 
+def test_agents_delete_an_org_target_uses_the_tenant_route(
+    isolated_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: ``--org`` routes the delete through the documented tenant path.
+
+    The public route answers 404 for an org-scoped agent (observed on the
+    acceptance pass: the product method 404'd, the documented tenant route
+    answered 204). The public default is untouched -- the test above pins it.
+    """
+    agent_id = "8f14e45f-ceea-467a-9c1c-1f0e2f0a1234"
+    monkeypatch.setattr(
+        radient_credentials,
+        "resolve_radient_credential_sync",
+        lambda *args, **kwargs: SecretStr("test-key"),
+    )
+    response = MagicMock()
+    response.status_code = 204
+    response.text = ""
+    with patch("requests.delete", return_value=response) as mock_delete:
+        result = agents_delete_command(
+            Namespace(name=None, agent_id=agent_id, org="3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f"),
+            MagicMock(),
+            isolated_config_dir,
+        )
+    expected = (
+        f"{DEFAULT_RADIENT_API_BASE_URL}/tenants/"
+        "3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f"
+        f"/agents/{agent_id}"
+    )
+    assert result == 0
+    assert mock_delete.call_args[0][0] == expected
+
+
+def test_agents_delete_refuses_a_traversal_id_before_any_request(
+    isolated_config_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """R3: a dot-dot id must ERROR, never send a DELETE toward the tenant root."""
+
+    monkeypatch.setattr(
+        radient_credentials,
+        "resolve_radient_credential_sync",
+        lambda *args, **kwargs: SecretStr("test-key"),
+    )
+    with patch("requests.delete") as mock_delete:
+        result = agents_delete_command(
+            Namespace(
+                name=None,
+                agent_id="..",
+                org="3f8c2d1e-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+            ),
+            MagicMock(),
+            isolated_config_dir,
+        )
+    assert result == 1
+    mock_delete.assert_not_called()
+    assert "Error deleting agent from Radient" in capsys.readouterr().out
+
+
 def test_the_environment_tier_is_completed_where_it_is_produced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

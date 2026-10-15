@@ -864,6 +864,52 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_revoke.add_argument("--json", action="store_true")
+    # ``inherit`` AUTHORS the standing "may borrow my future native logins of THIS account"
+    # permission as a signed approval (credentials/inheritance.py). Same three-step shape as
+    # the finite-share recovery on ``share``: request -> ``approvals approve`` (the operator's
+    # own signature) -> ``--approval``. ``--status`` is read-only. The three actions are
+    # mutually exclusive and exactly one is required, so a bare ``inherit`` never does
+    # anything -- there is no default act, as ``_guard_credential_subcommand`` demands.
+    cred_inherit = credential_actions.add_parser(
+        "inherit",
+        help=(
+            "Let another device borrow this device's FUTURE sign-ins of one provider account, "
+            "until you revoke it (signed approval; never copies the login)"
+        ),
+    )
+    cred_inherit.add_argument("provider", help="A native OAuth provider name, e.g. openai")
+    cred_inherit.add_argument(
+        "--to",
+        required=True,
+        dest="device",
+        help="The device that may borrow it (name or device id)",
+    )
+    cred_inherit.add_argument(
+        "--account",
+        default="",
+        help="The provider account id (required when several are signed in here)",
+    )
+    cred_inherit.add_argument("--org", default="", help="Optionally constrain to one org id")
+    cred_inherit.add_argument(
+        "--network", default="", help="Network name or id (default: the only one)"
+    )
+    inherit_action = cred_inherit.add_mutually_exclusive_group(required=True)
+    inherit_action.add_argument(
+        "--request-approval",
+        action="store_true",
+        help="File the request for your signature; grants nothing",
+    )
+    inherit_action.add_argument(
+        "--approval",
+        default="",
+        help="Apply an approved request: records the permission (one-shot)",
+    )
+    inherit_action.add_argument(
+        "--status",
+        action="store_true",
+        help="Read-only: the permission's state on this device's disk (not delivery)",
+    )
+    cred_inherit.add_argument("--json", action="store_true")
     cred_mark = credential_actions.add_parser(
         "mark",
         # §4.2's selection marks (S4): these are the operator's standing words
@@ -2083,6 +2129,83 @@ def _github_shareable_row(self_device: str) -> dict[str, Any]:
             f"lop network credential share {github_mod.GITHUB_KEY} --with <device> --scope device"
         ),
     }
+
+
+def _cmd_credential_inherit(args: argparse.Namespace) -> int:
+    """``credential inherit <provider> --to <dev> --request-approval|--approval|--status``.
+
+    The operator-authoring half of the future-login permission. It resolves the SAME network
+    and device the sibling verbs do (``_resolve``/``_resolve_device``), then hands the
+    decision to ``credentials.inheritance``; nothing here reads a credential. A refusal
+    surfaces as the module's own typed sentence (every one says nothing was changed).
+    """
+    from local_operator.network.credentials import inheritance
+    from local_operator.network.identity import load as load_identity
+    from local_operator.network.types import MeshRefusal
+
+    record = _resolve(args.network)
+    identity = load_identity()
+    if identity is None:
+        raise MeshRefusal("no_identity", "this device has no key yet; join a network first")
+    device = _resolve_device(record, args.device)
+    if device is None:
+        raise MeshRefusal(
+            "not_a_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' for "
+            "the member list",
+        )
+    if device == identity.device_id:
+        raise MeshRefusal(
+            "inherit_self",
+            "this device already uses its own login; a permission is for ANOTHER device",
+        )
+    provider = str(args.provider)
+    account = str(getattr(args, "account", "") or "")
+    org = str(getattr(args, "org", "") or "")
+    if getattr(args, "status", False):
+        report = inheritance.status(record.network_id, identity.device_id, device, provider)
+        return _emit(args, {"ok": True, **report}, [*report["lines"], report["scope"]])
+    if getattr(args, "request_approval", False):
+        requested = inheritance.request(
+            record.network_id, identity.device_id, device, provider, account=account, org=org
+        )
+        return _emit(
+            args,
+            {
+                "ok": True,
+                "approval_id": requested["approval_id"],
+                "state": requested["state"],
+                "summary": inheritance.summary(requested),
+                "expires_at": requested["expires_at"],
+            },
+            [
+                *inheritance.details(requested),
+                "Request only; nothing is permitted yet.",
+                f"Approve: lop network approvals approve {requested['approval_id']}",
+            ],
+        )
+    result = inheritance.apply(
+        str(args.approval),
+        {
+            "owner_device": identity.device_id,
+            "network_id": record.network_id,
+            "recipient_device": device,
+            "account": account,
+            "org": org,
+            "provider": provider.strip().lower(),
+        },
+    )
+    return _emit(
+        args,
+        {"ok": True, **result},
+        [
+            f"Permission recorded for {provider.strip().lower()} (account {result['account']}) "
+            f"to {device}, until you revoke it.",
+            "This is permission, not delivery: the owner relay hands out short-lived access on "
+            "its next tick. Check: lop network credential inherit "
+            f"{args.provider} --to {device} --status",
+        ],
+    )
 
 
 def _cmd_credential(args: argparse.Namespace) -> int:
@@ -3338,6 +3461,15 @@ _JOIN_BLOCK_KEYS = (
     "local_only",
 )
 
+#: The ``_JoinAttempt.stage`` values at which a failure is a WIRE failure — the steps
+#: whose death is a genuine peer-side stop, so the parked writer may publish
+#: ``pairing_stopped`` for it. ``ready_send`` (writing the ready frame) and
+#: ``result_read`` (reading the admission) are both wire operations; ``persist`` is the
+#: LOCAL write after the admission is read, whose failure must keep its I/O class
+#: instead of being relabelled a peer-side stop. Spelled positively, so a stage inserted
+#: between the wire ones cannot silently fall outside a negated check.
+_JOIN_WIRE_STAGES = frozenset({"ready_send", "result_read"})
+
 
 @dataclass
 class _JoinAttempt:
@@ -3354,9 +3486,11 @@ class _JoinAttempt:
 
     host: str
     #: ``dial`` -> ``hello`` -> ``challenge`` -> ``auth`` -> ``welcome`` ->
-    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read``; the
-    #: statement boundary last ENTERED, so a failure names the step that was in
-    #: progress rather than the last step that finished.
+    #: ``establish`` -> ``offer_read`` -> ``ready_send`` -> ``result_read`` ->
+    #: ``persist``; the statement boundary last ENTERED, so a failure names the step
+    #: that was in progress rather than the last step that finished. ``persist`` marks
+    #: the LOCAL write after the admission is read, which keeps a disk fault out of the
+    #: wire-failure clause it shares a ``try`` with.
     stage: str = "dial"
     #: The local failure class (``invite``/``dial``/``handshake``/``refused``/
     #: ``link_crypto``/``peer_closed``/``timeout``/``io``) and its finer token
@@ -4232,6 +4366,13 @@ def _finish_pairing(
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
     shares = [str(key) for key in (answer.get("shares") or [])]
+    # THE WIRE READ IS DONE; what follows is LOCAL persistence. Advancing the stage past
+    # ``result_read`` is what lets ``_park_join``'s transport clause tell a death ON THE
+    # WIRE (a transport ``pairing_stopped``) from a LOCAL write failure — an ``OSError``
+    # out of ``_persist_join`` below must keep its own class in the attempt record, not
+    # be relabelled a peer-side stop (review round 1, F2).
+    if attempt is not None:
+        attempt.stage = "persist"
     record = _persist_join(
         answer,
         envelope,
@@ -4336,6 +4477,20 @@ _STALE_RELAY_SHARES_SENTENCE = (
 _JOIN_UNANSWERED_SENTENCE = (
     "nobody confirmed the pairing in time, so it was abandoned and nothing was joined. "
     "The invite is untouched: start again with `lop network join @<token-file> --park --json`."
+)
+
+#: What a parked ceremony says when it STOPPED without reporting — a transport death
+#: during the finish (on the WIRE stages, not a local write), not an unanswered window
+#: and not a refusal the inviter sent. ONE OWNER because two sites have to say it: the
+#: parker that catches its own transport failure during the finish (``_park_join``), and
+#: the answering side that observes a parker which died with its row still
+#: ``awaiting_confirmation`` (``_await_join_result`` — the SIGKILL case the parker cannot
+#: cover for itself). The sentence is the honest one either way: the ceremony is gone,
+#: nothing was sent that could be a pairing, and the invite was not spent.
+_JOIN_STOPPED_SENTENCE = (
+    "the parked ceremony stopped before it reported back, so nothing was joined and "
+    "the invite is untouched. Start again with `lop network join @<token-file> "
+    "--park --json`."
 )
 
 
@@ -4494,7 +4649,7 @@ def _park_join(
     """
     import os
 
-    from local_operator.network import types
+    from local_operator.network import types, wire
     from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
     invite_mod = helpers["invite_mod"]
@@ -4604,6 +4759,39 @@ def _park_join(
             message=refusal.sentence,
         )
         raise
+    except (wire.LinkCryptoError, OSError, TimeoutError):
+        # A TRANSPORT DEATH DURING THE RESULT READ. Without this the exception escapes
+        # to ``_join_one``'s own transport clause, which records the ATTEMPT but has no
+        # ``pending`` in scope — so the parked row stayed ``awaiting_confirmation`` with
+        # a dead holder, and the answering invocation read that as "nothing was joined"
+        # over a ceremony that stopped for a reason. This is the WRITER half (the reader
+        # half in ``_await_join_result`` covers a parker killed before it could run
+        # this). ``pending`` IS in scope here, so no signature changes.
+        #
+        # GATED ON THE STAGE, on purpose: this clause wraps the WHOLE ``_finish_pairing``,
+        # which also does the LOCAL ``_persist_join`` write. A local ``OSError`` from that
+        # write must NOT be reported as a peer-side stop ("the parked ceremony stopped …
+        # the invite is untouched") — it is an I/O fault, and it keeps its own class in
+        # the attempt record via the outer handler (review round 1, F2).
+        #
+        # THE SET IS THE WIRE STAGES, spelled OUT rather than as "not persist":
+        # ``_finish_pairing`` sends the ready frame at ``ready_send`` and reads the
+        # admission at ``result_read`` — BOTH are wire operations whose death is a genuine
+        # peer-side stop — and advances to ``persist`` only after the admission is read
+        # (review round 2, M1: gating on ``result_read`` alone silently dropped the
+        # ready-send death). Naming the wire stages positively means a future stage
+        # inserted between them cannot silently re-open the hole by falling outside a
+        # negated check; it would have to be added here deliberately.
+        if attempt is not None and attempt.stage in _JOIN_WIRE_STAGES:
+            store.clear_join_answer(envelope.invite_id)
+            _parked_outcome(
+                pending,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
+        raise
     store.clear_join_answer(envelope.invite_id)
     _parked_outcome(
         pending,
@@ -4683,12 +4871,11 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
         store.clear_pending_join(chosen.invite_id)
         store.clear_join_answer(chosen.invite_id)
         if outcome is None:
-            raise MeshRefusal(
-                "pairing_abandoned",
-                "the pairing process stopped before it reported back, so nothing was joined and "
-                "the invite is untouched. Start again with `lop network join @<token-file> "
-                "--park --json`.",
-            )
+            # The record itself was gone by the time the parker was observed dead
+            # (``_await_join_result`` publishes a terminal outcome when the row is
+            # still there). The ceremony never reported, so say that truthfully —
+            # one sentence, owned by ``_JOIN_STOPPED_SENTENCE``.
+            raise MeshRefusal("pairing_stopped", _JOIN_STOPPED_SENTENCE)
         if outcome.status == "joined":
             return _emit(args, dict(outcome.result), list(outcome.result_lines))
         raise MeshRefusal(
@@ -4770,12 +4957,30 @@ def _await_join_result(pending: Any, store: Any) -> Any:
             # The parker publishes its outcome BEFORE exiting. It can finish
             # between our awaiting-confirmation read and this liveness probe,
             # so death alone cannot distinguish abandonment from a completed
-            # ceremony. Re-read once after observing death; an absent or still
-            # awaiting row remains abandoned, never an invented success.
+            # ceremony. Re-read once after observing death.
             final = store.pending_join(pending.invite_id)
-            if final is not None and final.status != "awaiting_confirmation":
+            if final is None:
+                # The record went with the ceremony: there is nothing left to read
+                # and nothing truthful to publish. That is the true abandonment.
+                return None
+            if final.status != "awaiting_confirmation":
                 return final
-            return None
+            # THE PARKER DIED WITHOUT PUBLISHING A TERMINAL OUTCOME. This happens when
+            # the child is killed outright (a SIGKILL leaves it no chance to write) or
+            # when a transport death escaped the parker's own publication. The row is
+            # the only channel the answering invocation has, so leaving it
+            # ``awaiting_confirmation`` with a dead holder is exactly the silent death
+            # that reported "nothing was joined" over a ceremony that did in fact
+            # stop for a reason. PUBLISH THE TRUTH HERE, on the reader side, which is
+            # the one side that survives a child that could not run its own writer.
+            _parked_outcome(
+                final,
+                status="refused",
+                store=store,
+                error_code="pairing_stopped",
+                message=_JOIN_STOPPED_SENTENCE,
+            )
+            return final
         time.sleep(0.2)
     return None
 
@@ -8052,11 +8257,15 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     names them, which is the same rule ``member`` states.
     """
     verb = getattr(args, "credential_command", None)
+    if verb == "inherit":
+        return _cmd_credential_inherit(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
         "usage: lop network credential share  <provider|mcp:<url>> --with <device> "
         "[--scope session|device]\n"
+        "       lop network credential inherit <provider> --to <device> [--account A] [--org O] "
+        "--request-approval|--approval <id>|--status\n"
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
@@ -8144,6 +8353,24 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
             "This operation restores only the signed finite share; nothing is installed or joined.",
+        ]
+    from local_operator.network.credentials import inheritance
+    from local_operator.network.types import MeshRefusal
+
+    if inheritance.intent(dict(record)) is not None:
+        # Never fall through to the onboarding card: it would call this "install anchor" and
+        # list "definitions, MCP servers, git identity and logins" as what approval does.
+        try:
+            described = inheritance.details(dict(record))
+        except MeshRefusal:
+            described = [
+                "A credential-permission request this build cannot describe; do not approve it."
+            ]
+        return [
+            *described,
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            "This records a credential permission only; nothing is installed, joined or "
+            "connected.",
         ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
@@ -8385,6 +8612,15 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
         # Presign intent is stderr; JSON stdout remains one complete object.
         for disclosure_line in finite_share.details(record):
             print(disclosure_line, file=sys.stderr)
+    from local_operator.network.credentials import inheritance
+
+    # A credential PERMISSION is described from its own signed record, in full, BEFORE the
+    # signer runs. ``details`` raises for a record this build cannot state, so what cannot
+    # be disclosed is never signed; the generic "onboard/anchor install" card text is not
+    # what a person is approving here.
+    if inheritance.intent(record) is not None:
+        for disclosure_line in inheritance.details(record):
+            print(disclosure_line, file=sys.stderr)
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8459,10 +8695,17 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         # last row read as one block. The JSON half above is what a script
         # parses; this is what a person scans.
         lines: list[str] = []
+        from local_operator.network.credentials import inheritance
+
         for row in rows:
             if lines:
                 lines.append("")
-            lines.extend(_approval_lines(row))
+            # A credential permission is one summary line here; its full disclosure is `show`.
+            lines.extend(
+                inheritance.list_lines(row)
+                if inheritance.intent(row) is not None
+                else _approval_lines(row)
+            )
         return _emit(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)
@@ -8493,6 +8736,15 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             "finite_apply_required",
             "This is finite-share recovery, not onboarding. Use the exact "
             "credential share --approval command shown on its request; no setup ran.",
+        )
+    from local_operator.network.credentials import inheritance
+
+    if inheritance.intent(record) is not None:
+        raise MeshRefusal(
+            "inherit_apply_required",
+            "This is a credential permission, not onboarding: it requires "
+            "`lop network credential inherit ... --approval <id>` (the exact command is on its "
+            "request); no connection, install or SSH ran.",
         )
     state = str(record.get("state") or "")
     if state not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):

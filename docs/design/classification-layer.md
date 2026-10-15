@@ -107,8 +107,17 @@ Notes that matter:
   `{what, includes, not_for}` object form that TypeSafe's own docs show for a `choice` is
   rejected there with `invalid_type: expected string, received object`. Send strings.
 - A `score` question's `criteria` is an **array** of level descriptions, not a map.
-- TypeSafe reports `usage.cost`; OpenRouter does too. If a vendor does not, compute cost from
-  the configured price row; never invent a number.
+- TypeSafe reports `usage.cost`; OpenRouter does too, and that inline figure wins.
+  Radient's decision route does NOT: it sends `{input_tokens, output_tokens}` and states
+  the call's exact charge in a top-level, versioned `cost` object (`{v, amount_usd, basis,
+  units, unit, unit_price_usd, price_version, ...}` — measured on the wire 2026-10-16),
+  which the parser reads through `clients/radient_cost.cost_from_payload`. There is NO
+  configurable price row for a decision model to fall back to (Radient's listing carries
+  no `jev-1.13` row, `/v1/prices` has no inference table, OpenRouter's public listing has
+  no `typesafe/jev-1.13` price, models.dev does not cover the id — all checked 2026-10-16),
+  and none is needed: the server's own figure is the settled charge, a listing is only an
+  estimate of it. When neither source states an amount the figure is UNKNOWN, and is
+  reported as unknown; never invent a number, and never call unknown zero.
 - Rate limit on our OpenRouter key is 0.5 req/s. One call per user message, plus the session
   cache and the circuit breaker, is what keeps that honest.
 
@@ -147,6 +156,11 @@ class DecisionResponse:
     input_tokens: int | None = None     # None = the vendor sent no usage, NEVER a fabricated 0
     output_tokens: int | None = None    # (0 is a real figure: Radient bills with output zero)
     cost_usd: float | None = None
+    #: `usage.cost` and the top-level `cost.amount_usd` are ABSOLUTE USD for THIS call
+    #: (micro-USD = x1e6), not token rates — no per-1k/per-1M conversion on this path.
+    #: Carries the leg's own basis when it stated one (a `quote` is `estimated` and must
+    #: never print as a charge); `None` for the inline `usage.cost` path.
+    cost_basis: str | None = None
     latency_s: float = 0.0
 
 class DecisionVendorError(RuntimeError):
@@ -525,6 +539,40 @@ line of context, not a wrong action.
 
 Degradation: if the classifier is disabled, unavailable, timed out or returned nothing, the
 block is empty and the prompt is byte-identical to today's. This is asserted by a test.
+
+### Channel accounting (2026-10-14)
+
+The service now emits into the session's existing `classification` channel through
+`Session.record_channel_spend`, bound after session construction by
+`session_factory.attach_classification_spend`. Both public service methods use
+`_call_cascade` → `_metered_decide`: message recommendations, monitor checks,
+title-fit checks and the two supplements questions share this accounting point.
+No decision is routed through the chat SDK or recorded as an inference request.
+
+One channel record describes one **leg attempt**, not the whole cascade. Its
+`units`/`unit` count actual HTTP POST attempts (`calls`), including credential
+re-sends inside a leg. This avoids hiding fallback requests behind the winning
+vendor's receipt. The counter is task-local because the shared service can answer
+concurrent questions. Cache hits, disabled classification and credential-only
+resolution produce no records. A service without a bound session sink is a no-op.
+
+A successful `usage.cost` is recorded as reported micro-USD (explicit zero stays
+zero), and so is the top-level `cost.amount_usd` the Radient decision route sends
+instead — through the one adapter for that object, with its `basis` riding the row
+(`quote` -> `estimated`, so a quote is never presented as a charge). Absent from
+BOTH sources, cost is **unknown**, never zero. A refused request is `failed` under
+the channel ledger's existing unbilled-failure presumption. Timeout/cancellation
+and a response lost after sending are `cancelled` with an unknown amount, so their
+attempts remain countable and their possible charge is not presented as free.
+An unusable 200 is `ok` with an unknown amount because the vendor served it.
+Radient figures are `server_reported`; third-party figures are `provider_reported`.
+These rows persist/replay through the same journal fold as other channel spend,
+and the shared published object supplies TUI, desktop and phone usage surfaces.
+
+This is observation, **not budget admission**: it does not enforce a spend cap or
+recover historical classifications made before this emitter existed. Nor does a
+cancelled row assert that the vendor charged; it states that no charge is known.
+No new await or network hop is added to the turn's `waitMs` path.
 
 ## 8. Configuration keys
 

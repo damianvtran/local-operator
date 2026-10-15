@@ -1,0 +1,77 @@
+{
+  "wire.memory.title": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.description": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.enabled.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.enabled.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.capture.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.capture.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.suggest.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.suggest.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.sync.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.sync.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.scopes.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.scopes.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.exclude.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.exclude.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.command": {
+    "role": "Memory slash-command picker/help description",
+    "tone": "concise, neutral",
+    "note": "English-only until independently translated and audited; kept out of wire.slash so audited locales stay shipped."
+  }
+}

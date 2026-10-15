@@ -19,6 +19,7 @@ import { resumeSession, searchSessions } from "../api";
 import { formatRelative } from "../lib/format";
 import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
+import { messageRuntime } from "../store";
 import type { PastSession } from "../types";
 
 export function PastSessionsScreen() {
@@ -73,19 +74,19 @@ export function PastSessionsScreen() {
 				<button
 					type="button"
 					onClick={() => navigate("/")}
-					aria-label="back"
+					aria-label={messageRuntime.t("relay.session.past.back")}
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
 					‹
 				</button>
-				<h1 className="text-heading">past sessions</h1>
+				<h1 className="text-heading">{messageRuntime.t("relay.session.past.heading")}</h1>
 			</header>
 
 			<div className="px-2 pb-2">
 				<input
 					value={query}
 					onChange={(e) => setQuery(e.target.value)}
-					placeholder="search names and conversations…"
+					placeholder={messageRuntime.t("relay.session.past.search_placeholder")}
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
@@ -102,7 +103,9 @@ export function PastSessionsScreen() {
 				{error ? (
 					<p className="text-body-sm text-danger">{error}</p>
 				) : sessions === null ? (
-					<p className="text-body-sm text-ink-dim">loading…</p>
+					<p className="text-body-sm text-ink-dim">
+						{messageRuntime.t("relay.session.past.loading")}
+					</p>
 				) : sessions.length === 0 ? (
 					<p className="text-body-sm text-ink-dim">
 						{query ? "no matches" : "no past sessions yet"}

@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.network import approvals as approval_store
+from local_operator.network.credentials import inheritance
+from local_operator.network.types import MeshRefusal
 
 
 def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
@@ -36,7 +38,18 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
     without this read writing anything (the asks-store discipline) — the badge
     must not be a writer.
     """
-    return [approval_store.badge_row(record) for record in approval_store.list_records(root=root)]
+    rows: list[dict[str, Any]] = []
+    for record in approval_store.list_records(root=root):
+        row = approval_store.badge_row(record)
+        # OPTIONAL, KEYLESS, BACKEND-DERIVED EXTRAS for a credential permission only: its
+        # plain-language summary/details come from the SIGNED record at read time (never
+        # stored text) so a UI that knows the keys can state what is signed, and one that
+        # does not simply ignores them. Every other kind keeps the frozen row byte for byte.
+        extras = inheritance.row_extras(record)
+        if extras is not None:
+            row.update(extras)
+        rows.append(row)
+    return rows
 
 
 def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
@@ -49,6 +62,19 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
     import time
 
     record = approval_store.load_record(approval_id, root=root)
+    if inheritance.intent(record) is not None:
+        # REFUSED BEFORE THE SIGNER RUNS. The desktop card cannot yet state what a credential
+        # permission signs (it would read the request's operator-key anchor as an
+        # "install anchor" scope and show a blind Approve), and the signature is the
+        # authority-increasing act. The command-line path prints the full disclosure first.
+        # Deny stays available: it is the safe direction and needs no description.
+        raise MeshRefusal(
+            "inherit_terminal_approval_required",
+            "This credential permission can only be approved from the command line on this "
+            "machine for now, where its account, recipient and duration are shown before you "
+            "sign: "
+            f"lop network approvals approve {approval_id}. Nothing was approved.",
+        )
     decided_at = time.time()
     signature_hex = approval_store.sign_decision(
         kind=record["kind"],

@@ -23,6 +23,7 @@ from .messages import Msg, envelope, msg
 from .resolve import (
     DEFAULT_LANGUAGE,
     SUPPORTED_LOCALES,
+    locale_direction,
     resolve_language,
     shipped_locales,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "catalogues",
     "envelope",
     "format",
+    "locale_direction",
     "messages",
     "msg",
     "parse_message",

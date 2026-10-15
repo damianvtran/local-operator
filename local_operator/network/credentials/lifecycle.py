@@ -418,8 +418,8 @@ class LifecycleStore:
     def __init__(self, network_id: str, root: Path | None = None) -> None:
         store.safe_component(network_id)
         self.network_id = network_id
-        self.root = root
-        self.path = lifecycle_path(network_id, root)
+        self.root = placement._config_root(root)
+        self.path = lifecycle_path(network_id, self.root)
         if self.path.parent.is_symlink() or self.path.is_symlink():
             raise MeshRefusal("lifecycle_path_invalid", "credential lifecycle path refused")
 
@@ -427,7 +427,9 @@ class LifecycleStore:
     def locked(self) -> Iterator[None]:
         placement.credentials_dir_for(self.network_id, self.root)
         with store._write_lock(self.path):
-            with placement._cross_process_lock(self.path.with_name(LIFECYCLE_LOCK_FILENAME)):
+            with placement._cross_process_lock(
+                self.path.with_name(LIFECYCLE_LOCK_FILENAME), root=self.root
+            ):
                 yield
 
     def load(self) -> LifecycleDocument:
@@ -1191,15 +1193,45 @@ def lifecycle_tick_step(step_server: Any, device_id: str) -> str | None:
     refusal, so a failed exchange is retried on the next tick rather than parked.
     """
     from local_operator.network import definitions
-    from local_operator.network.credentials import sync as sync_mod
-    from local_operator.network.credentials.types import validate_lifecycle_frame
+    from local_operator.network.credentials import reconcile
 
+    # Project a signed future-login approval into holders BEFORE the capability gate:
+    # it is local, metadata-only and writes no capability. Whether the holders can then
+    # be DELIVERED is decided by the gates below, and a missing capability is a named
+    # ``notready:`` status in ``reconcile`` — never a grant.
+    try:
+        reconcile.project_for(step_server, device_id)
+    except Exception:  # noqa: BLE001 — a reconcile fault must not stop announcements
+        logger.debug("credential reconcile: projection failed", exc_info=True)
     blocked = definitions.unholdable_capability(step_server, device_id, "net_broker")
     if blocked:
         return f"skipped:no_{blocked}"
     link = step_server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
         return "unreachable"
+    # The push is gated on ITS OWN negotiated capability (inside ``deliver``), not on the
+    # lifecycle one: a peer that has only the lifecycle string has no push handler. It runs
+    # BEFORE the lifecycle gate so a peer lacking both is still reported, and its outcome
+    # is part of this step's return so a stuck delivery is never discarded.
+    try:
+        pushed = reconcile.deliver(
+            step_server, link, device_id, getattr(link, "link_id", None) or id(link)
+        )
+    except Exception:  # noqa: BLE001 — delivery is retried on the next tick
+        logger.debug("credential reconcile: delivery failed", exc_info=True)
+        pushed = "failed"
+    outcome = _announce_over(step_server, device_id, link)
+    if pushed.startswith(("skipped", "refused", "failed")):
+        return f"{outcome}+push:{pushed}"
+    return outcome
+
+
+def _announce_over(step_server: Any, device_id: str, link: Any) -> str | None:
+    """The lifecycle announcement itself, over an already dialled ``link`` (see
+    :func:`lifecycle_tick_step`, which owns the doc and the gates before this point)."""
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import validate_lifecycle_frame
+
     if not negotiated(link):
         return "skipped:peer_lacks_lifecycle"
     # Ack evidence belongs to this authenticated connection; a recipient restart

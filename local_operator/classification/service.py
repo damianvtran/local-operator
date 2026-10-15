@@ -108,11 +108,12 @@ import logging
 import random
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from local_operator.classification import accounting
 from local_operator.classification.cascade import (
     DEFAULT_VENDOR,
     classification_section,
@@ -336,8 +337,29 @@ class ClassificationService:
         self._http: httpx.AsyncClient | None = None
         #: The candidate lines, built once per roster (see the class docstring).
         self._roster_cache = RosterCache()
+        #: Where each leg attempt's channel-ledger row goes (``Session.record_channel_spend``
+        #: in production). ``None`` until :meth:`bind_spend_sink` — the service is built
+        #: BEFORE the session exists (``session_factory._attach_classification``), so the
+        #: sink can only be bound late. A service with no sink (a bare unit test, a probe
+        #: script) records nothing and behaves exactly as before.
+        self._spend_sink: accounting.SpendSink | None = None
 
     # -- configuration -----------------------------------------------------
+
+    def bind_spend_sink(self, sink: "accounting.SpendSink | None") -> None:
+        """Bind (or, with ``None``, unbind) the channel-ledger sink for this session.
+
+        WHY A SETTER AND NOT A CONSTRUCTOR ARGUMENT: the factory builds this service
+        during knowledge setup, long before ``Session`` exists, and the session is the
+        only thing that can ingest a record (fold, journal, analytics, publish). The
+        same late-bind shape the tools use for ``ToolContext.record_channel_spend``.
+
+        ONE service serves five call sites (the message path, the monitor gate, the
+        title-fit check, the supplements decision) and they all pass through
+        :meth:`_call_cascade`, so binding here accounts for all of them with no
+        call-site edit — and a new sixth call site is accounted for by construction.
+        """
+        self._spend_sink = sink
 
     @property
     def enabled(self) -> bool:
@@ -696,7 +718,7 @@ class ClassificationService:
             attempts_walk: list[str] = []
             for vendor in legs:
                 try:
-                    response = await vendor.decide(request, timeout_s=timeout_s)
+                    response = await self._metered_decide(vendor, request, timeout_s)
                 except DecisionSchemaError:
                     raise
                 except DecisionVendorError as exc:
@@ -736,6 +758,70 @@ class ClassificationService:
             kind=last.kind,
             attempts=len(attempts),
         )
+
+    async def _metered_decide(
+        self, vendor: DecisionVendor, request: DecisionRequest, timeout_s: float
+    ) -> DecisionResponse:
+        """One leg attempt, with exactly one channel-ledger row for the request(s) it placed.
+
+        THE ONE ACCOUNTING POINT. Every vendor request this layer places — whichever of
+        the five call sites asked — is made by a leg inside this method, so the row is
+        written here and nowhere else. ``self._spend_sink`` bound to nothing makes the
+        whole method a thin pass-through.
+
+        WHAT RECORDS, AND WHAT DOES NOT (each case has a test):
+
+        * answered -> ``ok`` with the amount the leg stated — its inline ``usage.cost``,
+          else the server-reported top-level ``cost`` object Radient's decision route
+          sends instead, else unknown (never zero);
+        * refused / unusable -> ``failed``, ``ok``-unknown or ``cancelled``-unknown per
+          :func:`~local_operator.classification.accounting.failed_record`;
+        * cancelled mid-request (the call's ``timeoutMs`` deadline, a dispose, a caller
+          cancel) -> ``cancelled`` with no amount: the request may already have been
+          billed, and an attempt that is not recorded cannot be counted;
+        * NO request placed (no credential, cancelled while still resolving one) -> NO
+          row: a row is a claim that a request was made, and the meter says none was;
+        * a cache hit never reaches here (the caches are read first), so it records
+          nothing.
+
+        Recording in a ``finally``-shaped handler rather than at each caller keeps a
+        cancellation from dropping its row: ``CancelledError`` is not an ``Exception``
+        and would skip a plain ``except Exception``.
+        """
+        # A bare service has no session ledger; do not even construct rows. Apart
+        # from avoiding work, this prevents bookkeeping faults from changing a
+        # standalone caller's result when there is nowhere to send the record.
+        if self._spend_sink is None:
+            return await vendor.decide(request, timeout_s=timeout_s)
+        meter, token = accounting.begin_attempt()
+        try:
+            response = await vendor.decide(request, timeout_s=timeout_s)
+        except asyncio.CancelledError:
+            if meter.posts:
+                self._emit(
+                    lambda: accounting.interrupted_record(
+                        vendor.name, accounting.model_of(vendor), posts=meter.posts
+                    )
+                )
+            raise
+        except Exception as exc:
+            if meter.posts:
+                self._emit(
+                    lambda error=exc: accounting.failed_record(
+                        vendor.name, accounting.model_of(vendor), error, posts=meter.posts
+                    )
+                )
+            raise
+        else:
+            if meter.posts:
+                self._emit(lambda: accounting.answered_record(response, posts=meter.posts))
+            return response
+        finally:
+            accounting.end_attempt(token)
+
+    def _emit(self, build: Callable[[], Any]) -> None:
+        """Build and hand over one row within the same fail-soft boundary."""
+        accounting.emit(self._spend_sink, build)
 
     async def provider_available(self) -> bool:
         """Whether any leg has a usable credential, without calling anything.

@@ -35,14 +35,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from weakref import WeakSet
 
 from rich.style import Style
 from rich.text import Text
-from textual.binding import Binding
+from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, ScrollableContainer, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_projects as copy
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.projects_render import (
     PROJECTS_MAX,
@@ -87,6 +90,80 @@ from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 #: cycles through it. One tuple so the bindings, the cycle and the title cannot
 #: disagree about what the third view is.
 VIEWS: tuple[str, ...] = ("list", "board", "timeline")
+
+_t = tr("tui.projects")
+# View identifiers drive routing and must stay stable; only their displayed
+# names move with the locale. Weak references never retain dismissed pages.
+_VIEW_LABELS: dict[str, str] = {}
+_pages: WeakSet[ProjectsView] = WeakSet()
+
+
+def _project_bindings() -> list[Binding]:
+    """Rebuild descriptions, never the stable key/action grammar."""
+    return [
+        Binding("1", "show_list", _t(copy.binding_show_list()), show=False),
+        Binding("2", "show_board", _t(copy.binding_show_board()), show=False),
+        Binding("3", "show_timeline", _t(copy.binding_show_timeline()), show=False),
+        Binding("v", "cycle_view", _t(copy.binding_cycle_view()), show=False),
+        # `d` opens the DETAIL page for the selection (S6d parity P2). The
+        # recorded fallback of the spec's D1 — `↵` keeps its shipped meaning
+        # (open the conversation), and the detail takes the free letter.
+        Binding("d", "open_detail", _t(copy.binding_open_detail()), show=False),
+        # `c` opens the CREATE form (P4) — the spec's own key for it, and one
+        # of the letters the canvases left free.
+        Binding("c", "create", _t(copy.binding_create()), show=False),
+        # `m` messages a linked session (P5a): on a session row it sends
+        # straight to it, anywhere else it opens the target picker (spec
+        # §7.5.1). Free in the mode and in the app's focused chain.
+        Binding("m", "message", _t(copy.binding_message()), show=False),
+        # `s` starts a session for the selected/current project (P5b) — the
+        # spec's own key for it (§3.2), free in the mode and in the app's
+        # focused chain. It opens the team/agent picker; the boot itself is the
+        # APP's (the registries and the creation core are not the page's).
+        Binding("s", "start", _t(copy.binding_start()), show=False),
+        # `y` puts the selected attachment's STORED path on the clipboard (spec
+        # §3.2/§7.4) — the one thing a reader can act on when the file is gone
+        # or when the opener is what they want to avoid. Row-scoped like `m` on
+        # a session row: it acts where it applies and is inert elsewhere.
+        Binding("y", "copy_attachment", _t(copy.binding_copy_attachment()), show=False),
+        # `space` shows an image attachment's pixels inline and hides them
+        # again (spec §7.4's deliberately staged half, using the image stack the
+        # transcript already ships). Unbound in this mode and in the app's
+        # focused chain; the row-scoped rule above applies.
+        Binding("space", "preview_attachment", _t(copy.binding_preview_attachment()), show=False),
+        Binding("r", "refresh", _t(copy.binding_refresh()), show=False),
+        # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
+        # of detail" rule); in the other views it is inert and the footer sheds
+        # the hint rather than advertising a key that does nothing.
+        Binding("plus,equals_sign,equal", "zoom_in", _t(copy.binding_zoom_in()), show=False),
+        Binding("minus,underscore", "zoom_out", _t(copy.binding_zoom_out()), show=False),
+        Binding("up", "up", _t(copy.binding_up()), show=False),
+        Binding("down", "down", _t(copy.binding_down()), show=False),
+        Binding("left", "scroll_left", _t(copy.binding_scroll_left()), show=False),
+        Binding("right", "scroll_right", _t(copy.binding_scroll_right()), show=False),
+        # The page keys still PAGE the canvas in board/timeline: with ↑/↓ on the
+        # selection, a reader who wants to read further without moving `↵`'s
+        # target reaches for these.
+        Binding("pageup", "page_up", _t(copy.binding_page_up()), show=False),
+        Binding("pagedown", "page_down", _t(copy.binding_page_down()), show=False),
+        Binding("shift+left", "page_left", _t(copy.binding_page_left()), show=False),
+        Binding("shift+right", "page_right", _t(copy.binding_page_right()), show=False),
+        # Home/End jump to the ends of the CURSOR in the list view and to the
+        # canvas corners elsewhere (org chart's explicit scroll_to, because
+        # Textual's scroll_end reaches the bottom-LEFT, not the right edge).
+        Binding("home", "scroll_home", _t(copy.binding_scroll_home()), show=False),
+        Binding("end", "scroll_end", _t(copy.binding_scroll_end()), show=False),
+        # `↵` opens the SELECTED project's conversation (S3b) — the one action
+        # that reaches outside the page, and the same key in every view.
+        Binding("enter", "jump", _t(copy.binding_jump()), show=False),
+        # Section jumps (S6d parity): the selection moves to the next/previous
+        # team section's first row — clamped at the ends and inert while the
+        # canvas is ungrouped (one binding list; the actions no-op where they
+        # do not apply, the zoom pattern).
+        Binding("shift+down", "next_section", _t(copy.binding_next_section()), show=False),
+        Binding("shift+up", "prev_section", _t(copy.binding_prev_section()), show=False),
+        Binding("escape", "leave", _t(copy.binding_leave()), show=False),
+    ]
 
 
 class ProjectsViewDismissed(Message):
@@ -407,73 +484,11 @@ class ProjectsView(Vertical):
     # scrolls horizontally must keep its pan axis (the settings PANE-cycle
     # convention does not transfer). Shift+arrows page horizontally and
     # PageUp/Down vertically, the org-chart scheme.
-    BINDINGS = [
-        Binding("1", "show_list", "List view", show=False),
-        Binding("2", "show_board", "Board view", show=False),
-        Binding("3", "show_timeline", "Timeline view", show=False),
-        Binding("v", "cycle_view", "Next view", show=False),
-        # `d` opens the DETAIL page for the selection (S6d parity P2). The
-        # recorded fallback of the spec's D1 — `↵` keeps its shipped meaning
-        # (open the conversation), and the detail takes the free letter.
-        Binding("d", "open_detail", "Detail", show=False),
-        # `c` opens the CREATE form (P4) — the spec's own key for it, and one
-        # of the letters the canvases left free.
-        Binding("c", "create", "Create", show=False),
-        # `m` messages a linked session (P5a): on a session row it sends
-        # straight to it, anywhere else it opens the target picker (spec
-        # §7.5.1). Free in the mode and in the app's focused chain.
-        Binding("m", "message", "Message", show=False),
-        # `s` starts a session for the selected/current project (P5b) — the
-        # spec's own key for it (§3.2), free in the mode and in the app's
-        # focused chain. It opens the team/agent picker; the boot itself is the
-        # APP's (the registries and the creation core are not the page's).
-        Binding("s", "start", "Start session", show=False),
-        # `y` puts the selected attachment's STORED path on the clipboard (spec
-        # §3.2/§7.4) — the one thing a reader can act on when the file is gone
-        # or when the opener is what they want to avoid. Row-scoped like `m` on
-        # a session row: it acts where it applies and is inert elsewhere.
-        Binding("y", "copy_attachment", "Copy path", show=False),
-        # `space` shows an image attachment's pixels inline and hides them
-        # again (spec §7.4's deliberately staged half, using the image stack the
-        # transcript already ships). Unbound in this mode and in the app's
-        # focused chain; the row-scoped rule above applies.
-        Binding("space", "preview_attachment", "Preview", show=False),
-        Binding("r", "refresh", "Refresh", show=False),
-        # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
-        # of detail" rule); in the other views it is inert and the footer sheds
-        # the hint rather than advertising a key that does nothing.
-        Binding("plus,equals_sign,equal", "zoom_in", "Finer time", show=False),
-        Binding("minus,underscore", "zoom_out", "Coarser time", show=False),
-        Binding("up", "up", "Up", show=False),
-        Binding("down", "down", "Down", show=False),
-        Binding("left", "scroll_left", "Scroll left", show=False),
-        Binding("right", "scroll_right", "Scroll right", show=False),
-        # The page keys still PAGE the canvas in board/timeline: with ↑/↓ on the
-        # selection, a reader who wants to read further without moving `↵`'s
-        # target reaches for these.
-        Binding("pageup", "page_up", "Page up", show=False),
-        Binding("pagedown", "page_down", "Page down", show=False),
-        Binding("shift+left", "page_left", "Page left", show=False),
-        Binding("shift+right", "page_right", "Page right", show=False),
-        # Home/End jump to the ends of the CURSOR in the list view and to the
-        # canvas corners elsewhere (org chart's explicit scroll_to, because
-        # Textual's scroll_end reaches the bottom-LEFT, not the right edge).
-        Binding("home", "scroll_home", "To start", show=False),
-        Binding("end", "scroll_end", "To end", show=False),
-        # `↵` opens the SELECTED project's conversation (S3b) — the one action
-        # that reaches outside the page, and the same key in every view.
-        Binding("enter", "jump", "Open", show=False),
-        # Section jumps (S6d parity): the selection moves to the next/previous
-        # team section's first row — clamped at the ends and inert while the
-        # canvas is ungrouped (one binding list; the actions no-op where they
-        # do not apply, the zoom pattern).
-        Binding("shift+down", "next_section", "Next section", show=False),
-        Binding("shift+up", "prev_section", "Previous section", show=False),
-        Binding("escape", "leave", "Back", show=False),
-    ]
+    BINDINGS = [*_project_bindings()]
 
     def __init__(self) -> None:
         super().__init__(classes="projects-view")
+        _pages.add(self)
         #: The composed project views (``build_project_view`` payloads), handed
         #: in by the app. Held so view/zoom/cursor repaints never re-read.
         self._views: list[dict[str, Any]] = []
@@ -897,26 +912,32 @@ class ProjectsView(Vertical):
         # timeline's `zoom:` clause, D6): the title Static clips silently —
         # Rich's `overflow="ellipsis"` is inert on it — so the newest clauses
         # yield rather than letting `tracked`/`updated` be cut with no `…`.
-        set_clause = f" · this session ({len(self._associated)})" if self._associated else None
+        set_clause = (
+            _t(copy.this_session(count=str(len(self._associated)))) if self._associated else None
+        )
 
         def build_title(*, with_set: bool, with_zoom: bool = True) -> Text:
             title = Text(no_wrap=True, overflow="ellipsis")
-            title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
-            title.append(f" · {self._view}", style=muted)
+            title.append(
+                _t(copy.title()), style=Style(color=theme_mod.semantic_color("fg"), bold=True)
+            )
+            title.append(_t(copy.active_view(view=_VIEW_LABELS[self._view])), style=muted)
             if with_set and set_clause:
                 title.append(set_clause, style=muted)
             tracked = len(self._views)
-            title.append(f" · {tracked} tracked", style=dim)
+            title.append(_t(copy.tracked(count=str(tracked))), style=dim)
             if with_zoom and self._view == "timeline":
                 # The tier is always stated so an auto-chosen axis explains
                 # itself (the org chart's tier-title rule) — until the row
                 # cannot hold it, which was the pre-existing 60-col clip D6.
-                title.append(f" · zoom: {self._tier}", style=dim)
+                title.append(_t(copy.zoom(tier=self._tier)), style=dim)
             if self._updated_at is not None:
                 import time as _time
 
                 stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
-                title.append(f" · updated {stamp}", style=dim)
+                # Preserve the shipped local HH:MM bytes; this slice owns the
+                # surrounding copy, not the clock's formatting contract.
+                title.append(_t(copy.updated(stamp=stamp)), style=dim)
             return title
 
         from rich.cells import cell_len
@@ -978,8 +999,8 @@ class ProjectsView(Vertical):
         self._form_page.restyle(_style_resolver())
         muted = Style(color=theme_mod.semantic_color("muted"))
         title = Text(no_wrap=True, overflow="ellipsis")
-        title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
-        title.append(" · new project", style=muted)
+        title.append(_t(copy.title()), style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+        title.append(_t(copy.new_project()), style=muted)
         self._title.update(title)
         width = max(self.size.width - 2, 1)
         self._paint_rule(width)
@@ -1020,8 +1041,10 @@ class ProjectsView(Vertical):
 
         def build_title(*, with_name: bool, with_updated: bool) -> Text:
             title = Text(no_wrap=True, overflow="ellipsis")
-            label = display_name(project) or "(unnamed)"
-            title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+            label = display_name(project) or _t(copy.unnamed())
+            title.append(
+                _t(copy.title()), style=Style(color=theme_mod.semantic_color("fg"), bold=True)
+            )
             title.append(" · ", style=muted)
             title.append(label, style=Style(color=theme_mod.semantic_color("fg"), bold=True))
             if with_name and name and name != label:
@@ -1034,7 +1057,9 @@ class ProjectsView(Vertical):
                 import time as _time
 
                 stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
-                title.append(f" · updated {stamp}", style=dim)
+                # Preserve the shipped local HH:MM bytes; this slice owns the
+                # surrounding copy, not the clock's formatting contract.
+                title.append(_t(copy.updated(stamp=stamp)), style=dim)
             return title
 
         from rich.cells import cell_len
@@ -3107,3 +3132,27 @@ class ProjectsView(Vertical):
 
     def _leave(self) -> None:
         self.post_message(ProjectsViewDismissed())
+
+
+def _reload_copy() -> None:
+    """Refresh open chrome without resetting view, cursor, tier or form state."""
+    global _VIEW_LABELS
+    _VIEW_LABELS = {
+        "list": _t(copy.view_list()),
+        "board": _t(copy.view_board()),
+        "timeline": _t(copy.view_timeline()),
+    }
+    ProjectsView.BINDINGS = [*_project_bindings()]
+    # Textual snapshots declarations at class creation; update that snapshot
+    # for future pages and each live instance, as the neighbouring send card does.
+    ProjectsView._merged_bindings = BindingsMap(ProjectsView.BINDINGS)
+    for page in tuple(_pages):
+        page._bindings = ProjectsView._merged_bindings.copy()
+        # Textual's mounted flag survives removal; detached pages may still
+        # be weakly reachable but no longer have an app console to paint with.
+        if page.is_mounted and page.is_attached:
+            page._paint_chrome()
+
+
+_reload_copy()
+register_refresh(_reload_copy)

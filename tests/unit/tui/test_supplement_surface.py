@@ -668,7 +668,7 @@ async def test_settings_shows_the_highlights_section(
         enabled = keys["supplements.enabled"].setting
         assert enabled is not None and enabled.default is True
         graphics = keys["supplements.graphics"].setting
-        assert graphics is not None and graphics.default is False
+        assert graphics is not None and graphics.default is True
         cost = keys["supplements.maxCostUsd"].setting
         assert cost is not None and cost.default == 1.00
         # The section is scoped to new sessions, like `monitor` beside it.

@@ -42,6 +42,16 @@ if TYPE_CHECKING:
     # so a background spawn pays for them once, inside the factory.
     from local_operator.session.protocol import SessionProtocol
 
+from local_operator.i18n.keys import cli_exec_worker_help as _ehw
+from local_operator.i18n.text import tr
+
+#: RFC §3.1 render point for this slice's copy (the mirror flags' help text).
+#: The worker's parser is built for a HUMAN running
+#: ``python -m local_operator.exec_worker --help``; a spawned worker never
+#: renders it, so resolving through the process's active locale is enough and
+#: needs no locale parameter (``exec_mode``'s shape).
+_t = tr("cli.exec_worker_help")
+
 #: Exit code for an interrupted (SIGTERM/SIGINT) run — distinct from the
 #: engine's 0/1 success/error codes so job ledgers can tell them apart.
 EXIT_INTERRUPTED = 130
@@ -53,36 +63,41 @@ def build_parser() -> argparse.ArgumentParser:
         prog="local_operator.exec_worker",
         description="Run one local-operator prompt headless (background exec worker)",
     )
-    parser.add_argument("--prompt", type=str, required=True, help="The prompt to execute")
+    parser.add_argument("--prompt", type=str, required=True, help=_t(_ehw.prompt()))
     parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help="Emit one JSON line per agent event",
+        help=_t(_ehw.json()),
     )
-    parser.add_argument("--yolo", action="store_true", help="Auto-approve all tool tiers")
+    parser.add_argument("--yolo", action="store_true", help=_t(_ehw.yolo()))
     parser.add_argument(
         "--train",
         action="store_true",
-        help="Training mode: append the transcript to the agent directory (legacy --train)",
+        help=_t(_ehw.train()),
     )
-    parser.add_argument("--agent", type=str, default=None, help="Agent name selector")
-    parser.add_argument("--agent-id", type=str, default=None, dest="agent_id", help="Agent id")
+    parser.add_argument("--agent", type=str, default=None, help=_t(_ehw.agent()))
+    parser.add_argument(
+        "--agent-id",
+        type=str,
+        default=None,
+        dest="agent_id",
+        help=_t(_ehw.agent_id()),
+    )
     parser.add_argument(
         "--job-id",
         type=str,
         default=None,
         dest="job_id",
-        help="Ledger job id; when set, the worker appends a terminal record"
-        " (finished_at + exit_code) to the JSONL ledger on exit",
+        help=_t(_ehw.job_id()),
     )
     parser.add_argument(
         "--control",
         action="store_true",
-        help="Publish a session record and serve the control socket for this run",
+        help=_t(_ehw.control()),
     )
-    parser.add_argument("--hosting", type=str, default=None, help="Hosting platform override")
-    parser.add_argument("--model", type=str, default=None, help="Model override")
+    parser.add_argument("--hosting", type=str, default=None, help=_t(_ehw.hosting()))
+    parser.add_argument("--model", type=str, default=None, help=_t(_ehw.model()))
     parser.add_argument(
         "--resume",
         type=str,
@@ -92,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         # to continue a session. Without this the flag was accepted by the front
         # end, dropped at the process boundary, and the worker started a fresh
         # session while reporting success.
-        help="Resume a previous session by id (or '@latest')",
+        help=_t(_ehw.resume()),
     )
     from local_operator.exec_startup import add_startup_arguments
 

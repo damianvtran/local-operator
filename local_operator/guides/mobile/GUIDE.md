@@ -26,35 +26,40 @@ sequence is:
    themselves; marketing is optional. Continue the browser authorization so
    the native login returns to Local Operator. Never accept terms for them or
    ask for their provider password/token in chat.
-2. Select the bracketed Radient credential ID from `lop login-status`. If there
-   are several accounts and the intended owner is unclear, ask which one.
-   Run `lop tunnel billing --credential-id <id> --json`. This refreshes that
-   exact login and checks the cloud account. Require `account_valid: true` and
-   `positive_balance: true`; a cached `/usage` screen or the mere presence of
-   a stored login is insufficient. `/usage` now displays Radient's credit
-   balance, but the setup command must make this fresh check.
-3. Show the quoted `billing.monthly_price_usd`. At the current allocation the
-   tunnel price is **USD 0/month**; verify the actual quote rather than promise
-   it is always free. Positive credit is account credit, not a tunnel setup
-   fee. New accounts may already have starter credit; do not demand a purchase
-   when their fresh balance is positive. If credit is zero, negative or cannot
-   be verified, stop setup, direct them to
-   `https://console.radienthq.com/dashboard/tunnels`, and recheck after they
-   add credit or repair login. Never purchase credit automatically.
-4. Install `cloudflared` 2025.4.0 or newer with the supported package manager
-   if missing. Run `lop tunnel create --credential-id <id> --name "My computer"`
-   then `lop tunnel install`. If a paid quote requires activation, only pass
-   `--accept-monthly-price <amount>` for the exact amount the user accepted.
-   If the console already created the tunnel, use
-   `lop tunnel connect <tunnel-id> --credential-id <id>` instead of creating
-   another. If this machine is already configured, inspect `lop tunnel status`
-   and use `configure`/`install` as needed; don't revoke a working tunnel.
-5. Confirm `lop mobile status` reports healthy with a closed auth gate, and
-   `lop tunnel status` reports the connector running and its cloud route active.
-   On macOS tunnel installation prepares the mobile relay automatically and
-   keeps its existing Keychain password. On Linux prepare `lop mobile serve`
-   with a private password environment and then the connector's user service;
-   see the platform notes below and `guide://tunnel`.
+2. Run `lop tunnel setup --json` (read-only), or `/mobile status` in the TUI.
+   With several Radient accounts choose the intended owner explicitly using
+   `--credential-id <id>`; `/mobile status --credential-id <id>` uses the same
+   selection. A stored tunnel or interrupted reservation stays pinned to its
+   original owner; setup never silently repoints it.
+3. Follow the reported blocker. Setup reads the selected account and billing
+   fresh, requires positive credit for new enrollment, and checks cloudflared
+   **2025.4.0 or newer** plus a supported user supervisor before any cloud
+   mutation. If the phone origin is not already healthy/protected, its bundle
+   must be ready too: prepare it explicitly with `lop mobile install` under
+   normal tool approval. A plan does not build the interface or install services.
+   Install missing software through the supported package manager
+   with normal tool approval (macOS: `brew install cloudflared`); the runner
+   never installs it silently. Cached `/usage` is not permission. Starter credit
+   counts; with zero/unverified credit the human repairs/top-ups in the console.
+   Never purchase credit automatically.
+4. Only when activation is required, show the exact fresh `monthly_price_usd`
+   and obtain acceptance. Run `lop tunnel setup apply --credential-id <id>`;
+   add `--accept-monthly-price <amount>` only for the exact accepted quote.
+   In the TUI use `/mobile enable [amount] --credential-id <id>`—no terminal
+   copy step. Without activation, no price acceptance is required. `setup`
+   defaults to observation even when account/price flags are present; **apply**
+   is the mutation action. Signup/terms/provider consent remain human browser
+   steps; there is no promise of a universally single prompt or no browser.
+5. Read the accumulated receipts and final verification. An interrupted create
+   resumes the same saved idempotency key/payload; later failures preserve the
+   earlier completed receipts, not a claim of rollback. Healthy existing setup
+   is a no-op, deliberately stopped setup stays stopped. Success requires the
+   mobile health check and closed auth gate, running connector, answering
+   gateway and **fresh active** cloud route. The exact URL is returned only
+   after these checks. For a console-created record, use the explicit existing
+   `lop tunnel connect <id> --credential-id <id>` path instead of creating a
+   second record. Linux still needs the relay's private-password prerequisites
+   described below; the setup receipt is not proof of phone reachability.
 6. Give the user the **exact HTTPS URL printed by the tunnel**, not localhost
    or a guessed hostname. They open it on the phone, sign in to the same
    Radient account, and authorize access. Check the session list and opening

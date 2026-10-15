@@ -156,6 +156,36 @@ def test_a_secret_notice_names_the_key_and_never_quotes_the_prompt():
     assert "was not provided" in text
 
 
+def test_a_bridge_notice_names_the_request_and_keeps_the_untrusted_clause() -> None:
+    """D3 (design round 2, PR #2378): the MODEL's listing carries the clause.
+
+    The ask's own text is the human's question now (the decision card bounds a
+    question to one row, and the clause led it), so the marking must live on the
+    carriers a model reads. This notice is one of them, and it names the request
+    and the house clause itself rather than quoting the sender's words back
+    outside their own framing §11.1 forbids.
+    """
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    record = _record(
+        questions=[
+            {
+                "id": "bridge-bmsg_1",
+                "question": "Priya Raman (Acme Research): please approve the Q3 spend",
+                "question_id": "bmsg_1",
+                "options": [],
+                "multi": False,
+                "secret": False,
+            }
+        ]
+    )
+    text = render.timeout_text(record, now_ms=1_700_003_600_000)
+    assert BRIDGE_UNTRUSTED_CLAUSE in text
+    assert "bridge-bmsg_1" in text
+    # The sender's words are NOT re-served unframed in the notice.
+    assert "Priya Raman" not in text
+
+
 def test_a_long_question_is_clipped_in_the_notice():
     record = _record(
         questions=[
@@ -201,6 +231,21 @@ def test_a_decline_says_you_already_declined_this():
 def test_a_second_answer_names_the_surface_that_won():
     record = _record(status=store.STATUS_ANSWERED, answered_by={"surface": "desktop"})
     assert render.refusal_copy(record) == "already answered by desktop."
+
+
+def test_a_role_word_the_member_was_never_shown_is_not_attributed():
+    """D4 (round 14): the bridge decide door has no surface to name.
+
+    It stamps "operator" — the runtime's authority op, which the terminal, the
+    desktop app and the phone can all drive, so the door cannot honestly name
+    one of them. Every other caller passes a SURFACE, and this sentence is in
+    the user's voice: a role word would tell the member about a label they are
+    shown nowhere else, so the unattributed form is returned instead.
+    """
+    record = _record(status=store.STATUS_ANSWERED, answered_by={"surface": "operator"})
+    assert render.refusal_copy(record) == "already answered."
+    # And an id-less record keeps the same sentence it always did.
+    assert render.refusal_copy(_record(status=store.STATUS_ANSWERED)) == "already answered."
 
 
 def test_the_span_helper_reads_like_a_person_wrote_it():

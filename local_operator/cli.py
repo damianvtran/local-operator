@@ -291,6 +291,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
+    # Human inspection shares the TUI runner, not the model tool schema.
+    from local_operator.memory_cli import configure_parser as configure_memory_parser
+
+    memory_parser = subparsers.add_parser("memory", help="Inspect and correct scoped memory")
+    configure_memory_parser(memory_parser)
     # Credential command
     credential_parser = subparsers.add_parser(
         "credential",
@@ -457,6 +462,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         help="ID of the agent to delete from Radient",
         dest="agent_id",
+    )
+    delete_parser.add_argument(
+        "--org",
+        type=str,
+        default=None,
+        help="Delete an agent from this organization's workspace instead of the "
+        "public hub (Agent Hub org sharing; requires `lop login radient`)",
     )
     # Push command
     push_parser = agents_subparsers.add_parser(
@@ -12907,12 +12919,24 @@ def agents_delete_command(
             print("\n\033[1;31mError: RADIENT_API_KEY is required to delete from Radient\033[0m")
             return 1
         radient_client = RadientClient(api_key=api_key, base_url=base_url)
+        org = getattr(args, "org", None)
         try:
-            radient_client.delete_agent_from_marketplace(args.agent_id)
-            print(
-                f"\n\033[1;32mSuccessfully deleted agent with ID: {args.agent_id} "
-                "from Radient\033[0m"
-            )
+            if org:
+                # An org-scoped row answers 404 on the public surface (it does
+                # not know it); the server's org-sharing API documents
+                # DELETE /v1/tenants/:tenantid/agents/:agentid (admin+). The
+                # public route stays the default when no org is named.
+                radient_client.delete_tenant_agent(org, args.agent_id)
+                print(
+                    f"\n\033[1;32mSuccessfully deleted agent with ID: {args.agent_id} "
+                    f"from organization '{org}'\033[0m"
+                )
+            else:
+                radient_client.delete_agent_from_marketplace(args.agent_id)
+                print(
+                    f"\n\033[1;32mSuccessfully deleted agent with ID: {args.agent_id} "
+                    "from Radient\033[0m"
+                )
             return 0
         except Exception as e:
             print(f"\n\033[1;31mError deleting agent from Radient: {e}\033[0m")
@@ -14771,6 +14795,10 @@ def main() -> int:
         # override. It is now created lazily by the paths that actually run a
         # task (session/exec/serve start), through paths.ensure_agent_home_dir.
 
+        if args.subcommand == "memory":
+            from local_operator.memory_cli import main as memory_main
+
+            return memory_main(args)
         if args.subcommand == "credential":
             if args.credential_command == "update":
                 return credential_update_command(args)

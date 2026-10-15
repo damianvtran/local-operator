@@ -46,7 +46,7 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts import ci_scope, shard_tests
+from scripts import ci_scope, run_bounded, shard_tests
 
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
@@ -1665,8 +1665,8 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     Mutations that must fail this: textually unwrap the recipe; change its
     `BOUND_TIMEOUT` default; add a SECOND `BOUND_TIMEOUT` assignment (which wins
     silently, since the token comparison abstracts the value); narrow its
-    payload to a file list; drop the `NODE_OPTIONS=` prefix the wrapper is
-    invoked with; or raise node's heap to a value ci.yml does not set.
+    payload to a file list; or raise the wrapper's node heap floor to a value
+    ci.yml does not set.
     """
     scope = _scope()
     job_tokens = shlex.split(scope.JOB_COMMANDS["type-check"][0])
@@ -1679,26 +1679,12 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     make_tokens = shlex.split(recipe)
     assert "$(BOUND_TIMEOUT)" in make_tokens, make_tokens
 
-    # The recipe wraps the gate in a shell preamble that sizes node's old space
-    # (the CI heap value asserted below), so the GATE is the slice from the
-    # wrapped invocation onward: the interpreter that runs `run_bounded.py`,
-    # preceded by the `NODE_OPTIONS=` prefix the recipe exports for it.
-    # Comparing ONLY that slice keeps the anti-drift comparison exact without
-    # pinning the preamble's shell spelling.
-    wrapper_at = next(
-        index
-        for index, token in enumerate(make_tokens)
-        if Path(token).name == scope.BOUNDED_WRAPPER_NAME
-    )
-    assert wrapper_at >= 2 and make_tokens[wrapper_at - 2].startswith("NODE_OPTIONS="), (
-        "the recipe no longer exports NODE_OPTIONS for the wrapped pyright: "
-        f"{make_tokens[max(0, wrapper_at - 2) : wrapper_at + 1]!r}"
-    )
-    gate_tokens = make_tokens[wrapper_at - 1 :]
-    gate_tokens[gate_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
-    assert gate_tokens == job_tokens, (
+    # Heap sizing lives in the shared wrapper, so compare the entire recipe:
+    # neither spelling may quietly add flags or bypass the wrapper's environment.
+    make_tokens[make_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
+    assert make_tokens == job_tokens, (
         "the Makefile target and JOB_COMMANDS have drifted apart: "
-        f"make={' '.join(gate_tokens)!r} job={' '.join(job_tokens)!r}"
+        f"make={' '.join(make_tokens)!r} job={' '.join(job_tokens)!r}"
     )
     text = MAKEFILE.read_text()
     assignments = re.findall(r"^BOUND_TIMEOUT\s*[:?+]?=", text, re.MULTILINE)
@@ -1713,12 +1699,9 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
         f"the Makefile bounds itself at {default.group(1)}s while the runner uses "
         f"{scope.BOUNDED_GATE_TIMEOUT}s"
     )
-    # The node heap headroom is the same drift class as the bound: a SECOND
-    # copy of a value ci.yml owns, and the recipe raises it precisely when the
-    # caller has none (a bare `make type-check` used to inherit node's ~4 GB
-    # default, which OOMed the analyzer under fleet load). Pin them equal.
-    local_heap = re.search(r"--max-old-space-size=(\d+)", recipe)
-    assert local_heap, "the recipe no longer raises node's old-space cap"
+    # The shared wrapper owns local heap sizing; guard its floor against CI so
+    # the scoped fallback cannot regress to node's OOM-prone default cap.
+    local_heap = run_bounded.NODE_HEAP_MB
     ci_heaps = []
     for step in _steps("type-check"):
         node_options = str((step.get("env") or {}).get("NODE_OPTIONS"))
@@ -1726,57 +1709,111 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
         if match:
             ci_heaps.append(match)
     assert ci_heaps, "ci.yml's type-check job no longer sets a node old-space NODE_OPTIONS"
-    assert local_heap.group(1) == ci_heaps[0].group(1), (
-        f"the Makefile raises node's heap to {local_heap.group(1)} MB while ci.yml "
+    assert local_heap == int(ci_heaps[0].group(1)), (
+        f"the wrapper raises node's heap to {local_heap} MB while ci.yml "
         f"sets {ci_heaps[0].group(1)} MB — the same drift the bound guard exists for"
     )
     assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 
-def test_the_makefile_typecheck_recipe_raises_the_node_heap_only_when_needed() -> None:
-    """A18. The heap branch's CONDITION, driven through /bin/sh.
+@pytest.mark.parametrize(
+    ("node_options", "raise_heap"),
+    [
+        (None, True),
+        ("", True),
+        ("--trace-warnings", True),
+        ("--trace-warnings --max-old-space-size=2048", True),
+        (f"--max-old-space-size={run_bounded.NODE_HEAP_MB}", False),
+        ("--max-old-space-size=8192", False),
+        ("--max-old-space-size=8192 --max-old-space-size=2048", True),
+        ("--max-old-space-size=2048 --max-old-space-size=8192", False),
+        ("--max-old-space-size 8192", True),
+        ('"--max-old-space-size=8192', True),
+        ("--max_old_space_size=8192", False),
+    ],
+)
+def test_the_bounded_wrapper_raises_the_node_heap_only_when_needed(
+    node_options: str | None, raise_heap: bool
+) -> None:
+    """A18. Exercise the child environment, not just A17's constant/command text.
 
-    A17 pins the recipe's strings — the `NODE_OPTIONS=` prefix, the 6144
-    literal, its equality with ci.yml — and a mutant that keeps all of them
-    while gutting the branch logic stays green there: `if true;` (raise always,
-    so a LARGER operator value gets a smaller one appended after it) or a
-    `-z`-only condition (never raise a smaller caller value). So this drives
-    the REAL preamble text, exactly as make hands it to the shell (`$$`
-    expanded, continuations joined), with a probe printing what the branch left
-    in `node_opts`, and asserts the three behaviours the branch exists for:
-    absent -> set, smaller -> raised (appended last: V8 resolves the flag
-    last-wins), larger -> untouched.
-
-    Mutations that must fail this: `if true;`; `-z` without the `-lt 6144`
-    arm; deleting the branch; dropping the caller's value from the append.
+    An always-raise mutant would lower larger operator values; a missing-value-
+    only mutant would leave smaller values exposed. Probe a real wrapped child
+    so deleting Popen's env argument also fails, without allocating node's heap.
     """
-    preamble, marker, _ = _makefile_recipe_blocks()["type-check"].partition(
-        'NODE_OPTIONS="$$node_opts" .venv/bin/python'
+    env = dict(os.environ)
+    env.pop("NODE_OPTIONS", None)
+    if node_options is not None:
+        env["NODE_OPTIONS"] = node_options
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "scripts/run_bounded.py"),
+            "--timeout",
+            "15",
+            "--",
+            sys.executable,
+            "-c",
+            "import os; print(os.environ.get('NODE_OPTIONS', ''))",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
-    assert marker, "the recipe no longer exports NODE_OPTIONS for the wrapped gate"
-    # What make does before /bin/sh sees the recipe: `$$` -> `$`, and the
-    # `\`+newline continuations are one logical line. The probe prints exactly
-    # what the export uses.
-    script = preamble.replace("$$", "$").replace("\\\n", "\n") + "\nprintf '%s' \"$node_opts\"\n"
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+    expected = node_options or ""
+    if raise_heap:
+        expected = (f"{expected} " if expected else "") + (
+            f"--max-old-space-size={run_bounded.NODE_HEAP_MB}"
+        )
+    assert proc.stdout.rstrip("\n") == expected
 
-    def effective(node_options: str | None) -> str:
-        env = dict(os.environ)
-        env.pop("NODE_OPTIONS", None)
-        if node_options is not None:
-            env["NODE_OPTIONS"] = node_options
-        proc = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True, env=env)
-        assert proc.returncode == 0, (proc.returncode, proc.stderr)
-        return proc.stdout
 
-    assert (
-        effective(None) == "--max-old-space-size=6144"
-    ), "an unset NODE_OPTIONS must get ci.yml's heap headroom"
-    assert effective("--max-old-space-size=2048") == (
-        "--max-old-space-size=2048 --max-old-space-size=6144"
-    ), "a smaller caller value must be raised (appended last: V8 last-wins)"
-    assert (
-        effective("--max-old-space-size=8192") == "--max-old-space-size=8192"
-    ), "a larger operator value must pass through untouched"
+@pytest.mark.skipif(shutil.which("node") is None, reason="real heap probe requires node")
+@pytest.mark.parametrize(
+    ("node_options", "expected_cap"),
+    [
+        ('"--max-old-space-size=8192"', 8192),
+        ('--max-old-space-size="8192"', 8192),
+        ('--trace-warnings "--max_old_space_size=8192" --no-warnings', 8192),
+        ("--max-old-space-size=+8192", 8192),
+        ('--title=" --max-old-space-size=8192 "', run_bounded.NODE_HEAP_MB),
+        ('--max-old-space-size=8192 --max-old-space-size="2048"', run_bounded.NODE_HEAP_MB),
+        ('--max-old-space-size=2048 "--max-old-space-size=8192"', 8192),
+    ],
+)
+def test_the_bounded_wrapper_preserves_real_node_heap_semantics(
+    node_options: str, expected_cap: int
+) -> None:
+    """R1: quoting belongs to option tokens, not substrings inside other values.
+
+    Compare real V8 limits with a same-node control rather than hard-coding its
+    non-old-space overhead. These are limit probes, not multi-GB allocations.
+    The old raw regex lowers quoted/positive caps and mistakes --title's value
+    for an option; each of those mutants must fail on an actual node child.
+    """
+    node = shutil.which("node")
+    assert node is not None
+    probe = [node, "-e", 'console.log(require("v8").getHeapStatistics().heap_size_limit/1048576)']
+    env = dict(os.environ)
+    env["NODE_OPTIONS"] = f"--max-old-space-size={expected_cap}"
+    control = subprocess.run(probe, env=env, capture_output=True, text=True, timeout=30)
+    assert control.returncode == 0, control.stderr
+    env["NODE_OPTIONS"] = node_options
+    wrapped = subprocess.run(
+        [sys.executable, str(REPO / "scripts/run_bounded.py"), "--timeout", "15", "--", *probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert float(wrapped.stdout.strip()) == float(control.stdout.strip()), (
+        node_options,
+        wrapped.stdout,
+        control.stdout,
+    )
 
 
 def test_ci_and_make_share_one_classifier_module() -> None:
@@ -2164,11 +2201,11 @@ def test_the_cli_sanity_job_keeps_its_named_script_input() -> None:
 
 
 def test_the_windows_input_set_covers_what_that_job_loads() -> None:
-    """R3. The Windows job loads more than the two test files it names.
+    """R3. The Windows job loads more than the test files it names.
 
     Its pytest run imports the `conftest.py` chain, and the root conftest does
     `from tests import shard_stall_watchdog` at module scope; pytest also imports
-    the `__init__.py` markers for both protected modules. A change to any of
+    the `__init__.py` markers for the selected modules. A change to any of
     them can change that job's behaviour without touching a file it lists, which
     is the "flag narrower than the guard's real input" pattern this classifier
     exists to avoid.
@@ -2186,6 +2223,15 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
         "tests/unit/server/__init__.py",
         "tests/unit/test_agent_import_boundary.py",
         "tests/unit/server/test_edit_workspace_boundary.py",
+        "tests/unit/network/test_credentials_private_paths.py",
+        "tests/unit/conftest.py",
+        "tests/unit/network/conftest.py",
+        "tests/unit/network/test_credential_inherit.py",
+        "tests/unit/network/test_credentials_consent.py",
+        "tests/unit/network/test_approvals_store.py",
+        "tests/unit/network/test_credentials_real_link.py",
+        "tests/unit/network/test_credentials_owner.py",
+        "tests/unit/network/test_relay_e2e.py",
     )
     conftest = (REPO / "conftest.py").read_text()
     assert "from tests import shard_stall_watchdog" in conftest, (
@@ -2201,6 +2247,38 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     # …and a test file with no relationship to that job still skips it: the
     # point is a curated input set, not "anything under tests/".
     assert scope.classify(["tests/unit/test_ci_hygiene.py"])["windows"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "selected"),
+    (
+        ("tests/unit/network/test_credentials_private_paths.py", True),
+        ("tests/unit/conftest.py", True),
+        ("tests/unit/network/conftest.py", True),
+        ("tests/unit/network/test_credential_inherit.py", True),
+        ("tests/unit/network/test_credentials_consent.py", True),
+        ("tests/unit/network/test_approvals_store.py", True),
+        ("tests/unit/network/test_credentials_real_link.py", True),
+        ("tests/unit/network/test_credentials_owner.py", True),
+        ("tests/unit/network/test_relay_e2e.py", True),
+        ("tests/unit/test_ci_hygiene.py", False),
+    ),
+)
+def test_windows_root_input_only_changes_select_the_native_job(path: str, selected: bool) -> None:
+    """A test-only diff must reach its native lane, but not widen all tests/**.
+
+    The helpers are module-level imports of the newly selected module, not
+    optional fixture bodies. Removing one curated input must fail its own row;
+    broadening CAT_TESTS must fail the unrelated-test negative control.
+    """
+    entrypoint = "tests/unit/network/test_credentials_private_paths.py::"
+    assert any(
+        entrypoint in str(step.get("run") or "") for step in _steps("filesystem-boundaries-windows")
+    ), "the ROOT nodes left the Windows command; revisit its curated inputs"
+    scope = _scope()
+    flags = scope.classify([path])
+    assert flags["windows"] is selected
+    assert scope.job_plan(flags)["filesystem-boundaries-windows"] == ("run" if selected else "skip")
 
 
 def test_the_xplat_input_set_covers_what_the_battery_reads() -> None:

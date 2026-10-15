@@ -251,13 +251,17 @@ async def test_no_answer_degrades_to_the_heuristic_never_an_error(service) -> No
         _cand("new.csv", kind="csv", order=5),
         _cand("tool.py", kind="code", order=9),  # source: never a deliverable
         _cand("named.pdf", tier=3, kind="pdf", order=99),  # prose-only: not written this turn
-        _cand("made.csv", tier=2, kind="csv", order=7),  # a shell flag is not "written by write"
+        _cand(
+            "made.csv", tier=2, kind="csv", order=7
+        ),  # a command's output: written, ranks below tier 1
+        _cand("made.py", tier=2, kind="code", order=8),  # tier 2 source: still never a deliverable
     ]
     out = await _decide(service, files, STRUCTURED)
     assert [c.name for c in out.featured] == [
         "new.csv",
         "old.md",
-    ], "tier-1 deliverables, newest first"
+        "made.csv",
+    ], "tier-1 newest first, then tier-2 outputs (a down vendor still surfaces shell files)"
     assert out.graphics is False, "graphics never run without a vendor"
     assert (
         out.vendor == dec.HEURISTIC_VENDOR or service is None and out.vendor == dec.HEURISTIC_VENDOR
@@ -604,3 +608,48 @@ async def test_the_turn_own_paths_never_reach_the_vendor_payload() -> None:
     payload = _vendor_payload(service.asked)
     assert "secret-client-dir" not in payload
     assert "q3 summary.pdf" in payload
+
+
+@pytest.mark.parametrize("probability,allowed", [(0.59, False), (0.60, True)])
+def test_exact_summary_tables_use_explicit_lower_recall_threshold(probability, allowed):
+    from local_operator.supplements.evidence import extract
+
+    evidence = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    assert dec.SUMMARY_TABLE_THRESHOLD == 0.6
+    assert dec.apply_graphics(_graphics_answer(probability), evidence) == (probability, allowed)
+
+
+@pytest.mark.parametrize("probability,allowed", [(0.69, False), (0.70, True)])
+def test_comparable_chart_precision_threshold_is_unchanged(probability, allowed):
+    assert dec.GRAPHICS_THRESHOLD == 0.7
+    assert dec.apply_graphics(_graphics_answer(probability), STRUCTURED) == (probability, allowed)
+    assert dec.apply_graphics(_graphics_answer(probability), Evidence(structured=False))[1] is False
+
+
+def test_table_hint_or_mixed_datasets_do_not_lower_chart_threshold():
+    from dataclasses import replace
+
+    from local_operator.supplements.evidence import extract
+
+    table = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    for invalid in (
+        replace(table, forms=()),
+        replace(table, datasets=table.datasets + STRUCTURED.datasets),
+        replace(STRUCTURED, forms=("labelled-summary",)),
+        replace(table, datasets=(replace(table.datasets[0], rows=(("comments", "296"),)),)),
+    ):
+        assert dec.apply_graphics(_graphics_answer(0.60), invalid) == (0.6, False)
+
+
+@pytest.mark.asyncio
+async def test_no_vendor_still_cannot_select_summary_table_graphics():
+    from local_operator.supplements.evidence import extract
+
+    table = extract(
+        [], "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches."
+    )
+    assert (await _decide(None, [], table)).graphics is False

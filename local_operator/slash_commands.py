@@ -13,7 +13,7 @@ desktop at all (see ``/mobile``).
 
 from typing import Any, Mapping, Sequence
 
-from local_operator.i18n.keys import wire_slash
+from local_operator.i18n.keys import wire_memory, wire_slash
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
@@ -1901,6 +1901,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # serves account, billing, usage and agent catalogue only), so a desktop
     # host would have to invent an upstream contract. The terminal command is
     # untouched and still does the whole job.
+    # Keep the default no-argument picker behavior: the optional setup grammar
+    # is parsed after submission, not offered as provider picker completions.
     SlashCommand("mobile", _tr(wire_slash.mobile())),
     # THE SECOND "this machine's connectivity" command, and the reason it sits
     # beside `/mobile`. One grouped command with a declared vocabulary rather
@@ -2055,6 +2057,13 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # ``server/utils/desktop_commands.OWNER_COMMANDS``: the desktop renders
     # `/project` as a presentation-only native action (the renderer's Projects
     # panel/dialogs), never as an owner-side command (design §5.2).
+    SlashCommand(
+        "memory",
+        _tr(wire_memory.command()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=("list", "show", "search", "edit", "forget", "status"),
+    ),
     SlashCommand(
         "project",
         _tr(wire_slash.project()),

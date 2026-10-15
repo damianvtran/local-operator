@@ -81,6 +81,9 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # display flags, and without this subscriber a running daemon keeps the
     # value from its first read until a restart.
     daemon.watch_display_settings()
+    # Repaint open stopped-conversation screens when `asks.lapsed_visible_for`
+    # changes; live sessions republish on their own (decision D9).
+    daemon.watch_ask_visibility()
     if not dial:
         logger.warning("mobile daemon running in no-dial observer mode")
     app = build_app(daemon)
