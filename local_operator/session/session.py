@@ -10249,14 +10249,24 @@ class Session:
         # M1 (§13.9.10/§12.1.3): the issuance ledger carries REFERENCES only —
         # never third-party body text. The human-readable excerpt is derived
         # from the sanctioned session store at render time (via local_row_id).
+        # D3 (design round 2, PR #2378): the ask's sender line is the member's
+        # DISPLAY identity — the validated name with the organization the
+        # transcript card's identity column also paints
+        # (``Priya Raman (Acme Research)``) — so the human's ONE surviving
+        # question row says whose human is asking. The raw account id is NEVER
+        # that line (it identifies nobody the deciding member can recognise): a
+        # carriage with no validated name sends "" and the ask builder degrades
+        # to its generic sentence. ``summary`` stays below because the ledger
+        # keeps the locator as provenance, but it is no longer composed into the
+        # question text.
+        sender_name = str(meta.get("sender_name") or "") if use_hints else ""
+        organization = str(meta.get("organization") or "") if use_hints else ""
         record = ledger.claim(
             owner,
             bound,
             scope,
             sender=(
-                str(meta.get("sender_name") or "")
-                if use_hints
-                else str(envelope["sender_account_id"])
+                f"{sender_name} ({organization})" if sender_name and organization else sender_name
             ),
             summary=str(meta.get("thread_id") or "") if use_hints else str(envelope["thread_id"]),
             delivery_ref=str(envelope["delivery_ref"]),
@@ -10328,7 +10338,6 @@ class Session:
                 queue,
                 message_id=message_id,
                 sender=str(record.get("sender") or ""),
-                summary=str(record.get("summary") or ""),
                 # M1: derived at RENDER time from the sanctioned session store
                 # via the row's own mapping — the ledger keeps no body text.
                 excerpt=self._bridge_display_excerpt(record),

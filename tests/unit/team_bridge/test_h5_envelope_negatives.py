@@ -489,21 +489,31 @@ def test_two_exact_asks_for_the_same_message_hold_instead_of_duplicating(
         "body_sha256": BODY_HASH,
     }
     queue = AskQueue(QueueFakeSession(), config_dir=tmp_path, session_id="s1", clock=lambda: BASE)
+    # D3 (round 15): the question text no longer carries the thread locator, so
+    # two asks carrying the same wording are refused by the GENERIC door's
+    # duplicate-text check. The bridge path does not use that door: it goes
+    # through the keyed-idempotent one (S-10), whose identity is the preallocated
+    # issuance key — which is also how two authoritative asks for ONE message can
+    # exist in the log at all, the state this cell needs.
+    from local_operator.team_bridge.ask_issuance import bridge_scope_digest
+
     first = _real_enqueue_bridge_request_ask(
         queue,
         message_id=MESSAGE_ID,
         sender="dana@acme.example",
-        summary="one",
         excerpt="",
         scope=scope,
+        issuance_key="iss-dup-1",
+        fingerprint=bridge_scope_digest(scope),
     )
     second = _real_enqueue_bridge_request_ask(
         queue,
         message_id=MESSAGE_ID,
         sender="dana@acme.example",
-        summary="two",
         excerpt="",
         scope=scope,
+        issuance_key="iss-dup-2",
+        fingerprint=bridge_scope_digest(scope),
     )
     assert first["ok"] is True and second["ok"] is True
     # TWO authoritative asks exist for the same message/scope: the tri-state
@@ -603,8 +613,20 @@ def test_the_valid_stamp_enqueues_through_the_real_validator(tmp_path, _no_enque
     # The enqueued scope is the STORED original block, never scope_from_runtime.
     assert kwargs["scope"]["generation"] == "7"
     assert kwargs["scope"]["session_id"] == "s1"
+    # D3: the ask's sender line is the DISPLAY identity the issuer composes from
+    # the display context it VALIDATED — name plus organization, the same
+    # spelling the card's identity column paints. Never the envelope's account id
+    # (``acc_1`` here is the REMOTE sender's) and never a bare name.
+    assert kwargs["sender"] == "dana@acme.example (Acme)"
+    assert "acc_1" not in kwargs["sender"]
+    # The thread locator is no longer composed into the question text; it stays
+    # on the issuance ledger as provenance (S-3).
+    assert "summary" not in kwargs
     ledger = AskIssuance(tmp_path)
-    assert _read(ledger, _owner())["state"] == STATE_RAISED
+    row = _read(ledger, _owner())
+    assert row["summary"] == "t-1"
+    assert row["sender"] == "dana@acme.example (Acme)"
+    assert row["state"] == STATE_RAISED
 
 
 def test_unavailable_lookup_holds_instead_of_enqueueing(tmp_path, monkeypatch) -> None:
@@ -648,7 +670,6 @@ def test_found_exact_ask_terminalizes_without_a_second_enqueue(tmp_path, monkeyp
         queue,
         message_id=MESSAGE_ID,
         sender="dana@acme.example",
-        summary="t-1",
         excerpt="",
         # The SAME block the validator derives from the stored envelope: the
         # owner/session fields PLUS the keyed identity (message id, opaque

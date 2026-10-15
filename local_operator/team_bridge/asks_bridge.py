@@ -19,12 +19,19 @@ invariant:
   ``{ask_id, question_id}`` where ``ask_id`` is the queue's minted ask instance
   and ``question_id`` the message id.
 
-THE STRING IS THE SURFACE. The question text is the contract's stated
-composition: "sender + ask summary + body excerpt" (§10.3), options are the
-two answer options Approve / Deny, and the excerpt is bounded CLIENT-side
-because the ask log is a per-session file and a 64 KiB request body has no
-business riding it — the full body stays on the server, the excerpt is a
-reading aid. The excerpt bound is a constraint of this store, not a wire rule.
+THE STRING IS THE SURFACE. The question text is the human's question, and it
+is composed for the HUMAN reading it: the first line carries WHO is asking and
+WHAT they are asking for ("sender: body excerpt", §10.3), because the picker
+bounds a question to one row (`MIN_QUESTION_ROWS`) and only the leading line
+reliably survives that bound (D3, design round 2, PR #2378). The §11.1 clause
+and the thread locator do NOT ride this text: the clause belongs to every
+carrier the MODEL reads (the wake wrap, the bridge tool result, the ask
+report's preamble, the timeout listing in `asks/render`), and the locator is
+not a summary a human decides on. Options are the two answer options
+Approve / Deny, and the excerpt is bounded CLIENT-side because the ask log is a
+per-session file and a 64 KiB request body has no business riding it — the full
+body stays on the server, the excerpt is a reading aid. The excerpt bound is a
+constraint of this store, not a wire rule.
 """
 
 from __future__ import annotations
@@ -39,6 +46,11 @@ BRIDGE_ASK_OPTIONS: tuple[dict[str, str], ...] = (
     {"id": "deny", "label": "Deny"},
 )
 
+#: What the question's first line names when no validated member name reached
+#: it. NEVER a raw account id: ``acc_…`` identifies nobody the member deciding
+#: can recognise, and the decision card exists to say whose human is asking.
+GENERIC_ASK_SENDER = "another member of your organization"
+
 #: Client-side excerpt bound for the ask question text (chars). The DECIDE
 #: never travels through this text — the receipt carries ids — so this bound
 #: trades only reading comfort against ask-log size.
@@ -49,7 +61,6 @@ def bridge_request_question(
     *,
     message_id: str,
     sender: str,
-    summary: str,
     excerpt: str,
     scope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -59,6 +70,13 @@ def bridge_request_question(
     and ``question_id`` — an ask whose question_id is empty could never mint a
     valid decide receipt (the server binds ``question_id == :messageid``), so
     it is refused here rather than discovered at answer time.
+
+    ``sender`` is the asking member's DISPLAY IDENTITY, composed by the issuer
+    from the display context it VALIDATED — ``<name> (<organization>)``, the
+    same spelling ``TeamBridgeBlock._sender_name`` paints in the card's
+    identity column. It is flattened and tag-neutralised like every other
+    sender-derived line, and an empty value degrades to
+    :data:`GENERIC_ASK_SENDER` rather than to an account id (D3).
 
     ``scope`` is the ORIGINAL authority block
     (``team_bridge.authority.scope_from_runtime``) frozen AT ISSUANCE (S-3):
@@ -70,28 +88,33 @@ def bridge_request_question(
     """
     if not str(message_id or "").strip():
         raise ValueError("a bridge ask needs the request's message id (question_id)")
-    from local_operator.harness.message_types import (
-        BRIDGE_UNTRUSTED_CLAUSE,
-        neutralize_bridge_tag,
-    )
+    from local_operator.harness.message_types import neutralize_bridge_tag
 
-    # S3-6/M1: EVERY sender-derived line is flattened to ONE line and tag-
-    # neutralised — a newline or a wrapper-tag lookalike inside the sender's
-    # name/summary must not open a line of its own outside the framing. The
-    # §11.1 clause comes FIRST, ahead of those words, so the frame is read
-    # before the untrusted content it frames.
+    # D3 (design round 2, PR #2378). The FIRST line is the line the reader needs,
+    # because the decision card bounds a question to ONE row (`MIN_QUESTION_ROWS`
+    # in `tui/widgets/ask_picker.py`) and marks the cut without choosing which
+    # line survives: whatever leads is what the member deciding reads. Leading
+    # with the §11.1 clause put model-facing vocabulary in front of the human and
+    # pushed the sender and the request behind the ``…``, so the card a spend
+    # decision was taken on said who had asked and what was being approved to
+    # nobody. The clause is not lost by leaving this text — it rides unchanged on
+    # every carrier a MODEL reads: the wake wrap (`session.py`, ahead of the
+    # body), the bridge tool result, the ask report's own preamble
+    # (`BRIDGE_ASK_REPORT_PREAMBLE`), and the timeout listing
+    # (`asks/render._timeout_listing_line`), which names the request and the
+    # clause itself instead of quoting this text back to the model.
     #
-    # ``text`` is assigned UNCONDITIONALLY: the sender, the summary and the
-    # excerpt may ALL be absent (the excerpt is designed to degrade to ""), and
-    # an assignment guarded by "did any of them say something" left the name
-    # unbound on exactly that path (round-4 M1). The clause always leads.
+    # The composition is ONE line, so a newline smuggled in the sender or the
+    # excerpt cannot open a line of its own: both are flattened, and a wrapper-tag
+    # lookalike is neutralised, before they meet (S3-6/S3-7 — the sender's words
+    # are untrusted even on a human surface, where the card's own cross-member
+    # title is what marks them as another member's).
     sender_line = neutralize_bridge_tag(" ".join(str(sender or "").split()))
-    summary_line = neutralize_bridge_tag(" ".join(str(summary or "").split()))
-    plain = f"{sender_line} · {summary_line}".strip(" ·")
+    who = sender_line or GENERIC_ASK_SENDER
     bounded = " ".join(str(excerpt or "").split())[:EXCERPT_MAX_CHARS]
     if bounded:
         bounded = neutralize_bridge_tag(bounded)
-    text = "\n".join(line for line in (BRIDGE_UNTRUSTED_CLAUSE, plain, bounded) if line)
+    text = f"{who}: {bounded}" if bounded else who
     question = {
         "id": f"bridge-{message_id}",
         "question": text,
@@ -124,7 +147,6 @@ def enqueue_bridge_request_ask(
     *,
     message_id: str,
     sender: str,
-    summary: str,
     excerpt: str,
     timeout_raw: Any = None,
     scope: Mapping[str, Any] | None = None,
@@ -149,7 +171,7 @@ def enqueue_bridge_request_ask(
     """
 
     question = bridge_request_question(
-        message_id=message_id, sender=sender, summary=summary, excerpt=excerpt, scope=scope
+        message_id=message_id, sender=sender, excerpt=excerpt, scope=scope
     )
     keyed = getattr(queue, "enqueue_idempotent", None)
     if issuance_key and fingerprint and callable(keyed):
@@ -196,6 +218,7 @@ def bridge_pending_count(records: Sequence[Mapping[str, Any]]) -> int:
 __all__ = [
     "BRIDGE_ASK_OPTIONS",
     "EXCERPT_MAX_CHARS",
+    "GENERIC_ASK_SENDER",
     "bridge_ask_ref",
     "bridge_pending_count",
     "bridge_request_question",

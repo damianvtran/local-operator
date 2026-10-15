@@ -151,7 +151,6 @@ async def _answered_bridge_ask(session, tmp_path: Path):
         queue,
         message_id=MESSAGE_ID,
         sender="dana@acme.example",
-        summary="t-1",
         excerpt="please approve",
         scope=scope,
         issuance_key="iss-glue-1",

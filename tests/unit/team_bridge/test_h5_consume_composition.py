@@ -88,7 +88,6 @@ def _answered_queue(tmp_path) -> tuple[AskQueue, str]:
         queue,
         message_id=MESSAGE_ID,
         sender="dana@acme.example",
-        summary="wants your sign-off",
         excerpt="please approve before 1700",
         scope=scope,
     )

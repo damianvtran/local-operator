@@ -46,7 +46,7 @@ def _queue(tmp_path) -> AskQueue:
 
 def _question() -> dict[str, Any]:
     return bridge_request_question(
-        message_id=MESSAGE_ID, sender="dana@acme.example", summary="t-1", excerpt="", scope=SCOPE
+        message_id=MESSAGE_ID, sender="dana@acme.example", excerpt="", scope=SCOPE
     )
 
 
