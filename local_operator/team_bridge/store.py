@@ -865,9 +865,30 @@ RECEIPT_STALE = "receipt_stale"
 RECEIPT_CORRUPT = "proof_corrupt"
 
 
+def _receipt_int(value: Any, default: int) -> int | None:
+    """An INTEGER column's value as an int, or ``None`` when it is not one (R-3).
+
+    SQLite types by AFFINITY rather than enforcement, so TEXT in an INTEGER
+    column is legal STORAGE — and ``int()`` over stored proof then raises. This
+    slice's refusal vocabulary is closed and the read route maps only typed
+    refusals, so a raw ``ValueError`` would leave a read as an untyped 500;
+    text that is not a number is DAMAGE and the caller spells it with
+    :data:`RECEIPT_CORRUPT`.
+
+    The ``or default`` is the history this function replaces (``int(x or -1)``):
+    an absent or empty value means the column's own default, while a present
+    non-numeric one is corruption rather than a number nobody wrote.
+    """
+
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return None
+
+
 def receipt_authority(
     owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
 
     WHY THIS IS ONE FUNCTION, called from two sides of the store: the WRITE-side
@@ -888,23 +909,40 @@ def receipt_authority(
     verdict is a closed value; and an ``allow`` carrying rejection categories is
     internally inconsistent, so it is refused rather than delivered on.
 
-    Returns ``(decoded_receipt, None)``, ``(None, :data:`RECEIPT_STALE`)`` or
-    ``(None, :data:`RECEIPT_CORRUPT`)``. The row's ABSENCE is the caller's
-    business: a cache miss is not damage.
+    Returns ``(decoded_receipt, None, "")``, ``(None, :data:`RECEIPT_STALE`, "")``
+    or ``(None, :data:`RECEIPT_CORRUPT`, note)``. The row's ABSENCE is the
+    caller's business: a cache miss is not damage.
+
+    The third element is the DIAGNOSTIC for a damage the caller reports — the
+    write-side consumption point raised its own specific sentence per damaged
+    field before this function existed, and the refactor must not cost a
+    triaging operator that information (review R-8). It is never a code and is
+    never rendered to a caller: the machine-readable half stays the closed code.
     """
 
     if (
         policy.get("template_sha256") != receipt.get("template_sha256")
         or policy.get("default_model") != receipt.get("model")
         or policy.get("revision") != receipt.get("admission_revision")
-        or int(policy.get("epoch") or 0) != int(receipt.get("policy_epoch") or -1)
-        or int(receipt.get("creator_generation") or -1) != owner.enrollment_generation
     ):
-        return None, RECEIPT_STALE
+        return None, RECEIPT_STALE, ""
+    policy_epoch = _receipt_int(policy.get("epoch"), 0)
+    receipt_epoch = _receipt_int(receipt.get("policy_epoch"), -1)
+    creator_generation = _receipt_int(receipt.get("creator_generation"), -1)
+    if policy_epoch is None or receipt_epoch is None or creator_generation is None:
+        # Text where a number belongs (R-3): the receipt's currency can no
+        # longer be ESTABLISHED at all, which is damage rather than a miss — a
+        # miss would invite a caller to re-screen behind a row nobody can read.
+        return None, RECEIPT_CORRUPT, "epoch or creator generation is not a number"
+    if policy_epoch != receipt_epoch or creator_generation != owner.enrollment_generation:
+        return None, RECEIPT_STALE, ""
     try:
         decoded = _decode_categories_text(receipt.get("categories"))
-    except StoreRefused:
-        return None, RECEIPT_CORRUPT
+    except StoreRefused as refusal:
+        # The decoder's own sentence ("empty categories text" / "categories
+        # decode failed" / "categories not a list"): unchanged from before the
+        # refactor, when it propagated straight out of the consume path.
+        return None, RECEIPT_CORRUPT, str(refusal)
     if (
         not isinstance(decoded, list)
         or not all(isinstance(item, str) for item in decoded)
@@ -912,24 +950,28 @@ def receipt_authority(
     ):
         # Unknown category strings (or wrong shapes) can never be handed to a
         # receipt: typed uncertainty, zero spend.
-        return None, RECEIPT_CORRUPT
+        return None, RECEIPT_CORRUPT, "categories failed validation"
     verdict = receipt.get("verdict")
     if verdict not in ("allow", "reject"):
-        return None, RECEIPT_CORRUPT
+        return None, RECEIPT_CORRUPT, "unknown verdict"
     if verdict == "allow" and decoded:
-        return None, RECEIPT_CORRUPT
-    return {
-        "verdict": verdict,
-        "model": receipt.get("model"),
-        "prompt_version": receipt.get("prompt_version"),
-        "template_sha256": receipt.get("template_sha256"),
-        "body_sha256": receipt.get("body_sha256"),
-        "categories": decoded,
-        "envelope_digest": receipt.get("envelope_digest"),
-        "admission_revision": receipt.get("admission_revision"),
-        "policy_epoch": receipt.get("policy_epoch"),
-        "creator_generation": receipt.get("creator_generation"),
-    }, None
+        return None, RECEIPT_CORRUPT, "allow verdict with categories"
+    return (
+        {
+            "verdict": verdict,
+            "model": receipt.get("model"),
+            "prompt_version": receipt.get("prompt_version"),
+            "template_sha256": receipt.get("template_sha256"),
+            "body_sha256": receipt.get("body_sha256"),
+            "categories": decoded,
+            "envelope_digest": receipt.get("envelope_digest"),
+            "admission_revision": receipt.get("admission_revision"),
+            "policy_epoch": receipt.get("policy_epoch"),
+            "creator_generation": receipt.get("creator_generation"),
+        },
+        None,
+        "",
+    )
 
 
 @dataclass(frozen=True)
@@ -1459,7 +1501,10 @@ class Store:
     # CONTRACT: the invariant they exist for is LOGICAL zero-write (spec M-10):
     # main-file bytes, schema version and rows unchanged, no new database created.
     # SQLite's own WAL side files are tolerated — a reader may need them, and they
-    # are not this surface's write.
+    # are not this surface's write. That distinction is stated wherever the
+    # contract is repeated (``content_proof_readonly``, the read route) rather
+    # than summarised as "zero writes": the side files ARE filesystem changes,
+    # and a claim a hash can contradict is worse than a narrower true one.
 
     @contextmanager
     def _connect_readonly(self) -> Iterator[sqlite3.Connection | None]:
@@ -1577,6 +1622,16 @@ class Store:
         construction. An ABSENT store answers every id with an entry whose fields
         are all ``None`` — "nothing enrolled" is not an error, and a reader must
         never be handed a database created to explain its own absence.
+
+        The claim is the LOGICAL one of the read-only block above (M-10): no
+        table row and no main-file byte changes, and no database is created.
+        SQLite's own ``-wal``/``-shm`` SIDE FILES may appear when the store is in
+        WAL mode — a reader of a WAL database needs them, they are not this
+        slice's write, and a strict whole-tree hash therefore moves where the
+        table digest does not (review Q-3). ``immutable=1`` would suppress them
+        and is deliberately NOT used: it asserts that nobody writes this store at
+        all, which is false for a database the connector owns, and SQLite
+        documents the reads as undefined once that assertion breaks.
 
         The intent's persisted ``categories`` are DECODED here (a list on
         success, ``None`` when the stored text is not the array it must be): the
@@ -3100,10 +3155,13 @@ class Store:
                 # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
                 # index but do not ``.get``, and the shared function takes mappings
                 # exactly as the read path's own decoded rows do.
-                decoded, damage = receipt_authority(owner, dict(policy), dict(row))
+                decoded, damage, note = receipt_authority(owner, dict(policy), dict(row))
                 if damage == RECEIPT_CORRUPT:
+                    # ``note`` is the specific damaged field (R-8): this path
+                    # raised a sentence per field before the checks moved into
+                    # the shared function, and a triaging operator keeps it.
                     raise StoreRefused(
-                        "proof_corrupt", "the stored receipt failed its authority checks"
+                        "proof_corrupt", note or "the stored receipt failed its authority checks"
                     )
                 if decoded is None:
                     return None

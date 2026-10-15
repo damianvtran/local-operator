@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from local_operator.team_bridge.read_context import (
     CURSOR_PATTERN,
     EXCERPT_MAX_CHARS,
     MESSAGE_ID_PATTERN,
+    SCREENING_STATES,
     HistoryReadContext,
     ReadContext,
     ReadInbox,
@@ -38,7 +40,21 @@ from local_operator.team_bridge.read_context import (
     read_message_detail,
     resolve_read_context,
 )
-from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+from local_operator.team_bridge.screening import validate_envelope
+
+# ``_decode_intent_categories`` and ``_owner_key`` are private, and deliberately
+# reached for: the first is the decoder whose ``None`` an admission depends on,
+# and the second is the store's OWN derivation of the key its rows are written
+# under (a copy here would be a second spelling of the thing these cells must
+# match).
+from local_operator.team_bridge.store import (
+    OwnerReceipt,
+    OwnerSnapshot,
+    Store,
+    _decode_intent_categories,
+    _owner_key,
+    state_db_path,
+)
 from tests.unit.server.test_desktop_team_bridge import (
     _access,
     _owner,
@@ -214,6 +230,60 @@ def test_the_predicate_admits_the_body_only_on_the_whole_tuple(tmp_path: Path) -
             "read-intent-different-tuple",
             {"intent_body": "b" * 64},
             "read_intent_mismatch",
+        ),
+        # ONE CELL PER INTENT-TUPLE MEMBER (review R-1). ``_intent_matches``
+        # compares six terms and two of them had a cell; a regression that
+        # stopped comparing any of the other four would have shipped green on the
+        # privacy boundary, so each of them now moves ONE member of the intent and
+        # nothing else.
+        ("read-intent-different-model", {"intent_model": "m-2"}, "read_intent_mismatch"),
+        (
+            "read-intent-different-prompt-version",
+            {"intent_prompt_version": "bridge-screen-v2"},
+            "read_intent_mismatch",
+        ),
+        (
+            "read-intent-different-template",
+            {"intent_template": "cd" * 32},
+            "read_intent_mismatch",
+        ),
+        (
+            "read-intent-different-categories",
+            {"intent_categories": ("spam",)},
+            "read_intent_mismatch",
+        ),
+        (
+            "read-intent-different-verdict",
+            {"intent_verdict_text": "reject"},
+            "read_intent_mismatch",
+        ),
+        # The decoder's ``None`` travels the same path: text that is not the array
+        # it claims to be is proof that cannot admit, never "the tuples differ".
+        (
+            "read-intent-categories-unreadable",
+            {"intent_categories_text": "not-json"},
+            "read_intent_mismatch",
+        ),
+        # The two RECEIPT validators that had no cell of their own: an unknown
+        # category string on a REJECT (the only shape where the closed-set check
+        # is not already covered by the allow-with-categories rule) and a verdict
+        # outside the closed pair.
+        (
+            "unknown-category-on-a-reject",
+            {
+                "verdict": "reject",
+                "categories_text": '["not_a_closed_category"]',
+                "intent": None,
+            },
+            "proof_corrupt",
+        ),
+        ("unknown-verdict", {"verdict": "maybe", "intent": None}, "proof_corrupt"),
+        # TEXT where the schema says INTEGER: legal SQLite storage, and the only
+        # shape in which ``int()`` over stored proof raises (review R-3).
+        (
+            "receipt-epoch-is-text",
+            {"receipt_epoch_text": "not-a-number"},
+            "proof_corrupt",
         ),
         (
             "verdict-reject",
@@ -464,3 +534,142 @@ async def test_a_detail_answer_for_another_message_is_refused(
         )
 
     assert refusal.value.code == "malformed_page"
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: the properties the admission cells above cannot show —
+# that the snapshot connection is read-only in the ENGINE (R-1), that one
+# snapshot is a committed image beside a live writer (R-5), that the WRITE-side
+# consumer of the shared authority function is pinned too (Q-1), and what the
+# screening vocabulary is allowed to say (R-4).
+# ---------------------------------------------------------------------------
+
+
+def test_the_snapshot_reads_through_a_connection_that_cannot_write(tmp_path: Path) -> None:
+    """The read-only connection refuses a write, in SQLite's own judgement (R-1).
+
+    A mutant that opens the snapshot ``?mode=rw`` leaves every other cell in this
+    file green — the absent-store cells still answer all-``None``, because a
+    missing file is caught before the connect — so the property needs a cell that
+    WRITES and must be refused. The row is planted first, because reading an
+    absent file is the other cells' business.
+    """
+
+    owner = _enroll(tmp_path, enabled=True)
+    _plant_proof(tmp_path, owner, _wire_item())
+
+    with Store(tmp_path)._connect_readonly() as conn:
+        assert conn is not None
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_holds "
+                "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+                ("readonly-probe", "bmsg_1", "envelope_refused:x", None, 1_700_000_000.0),
+            )
+
+
+def test_the_snapshot_is_one_committed_image_beside_a_held_writer(tmp_path: Path) -> None:
+    """One reader, one live writer, no block and no leak (R-5).
+
+    ``BEGIN`` is DEFERRED for exactly this: a writer holding the write lock must
+    neither stall a read nor become half-visible to it. QA measured the timing
+    out of band; this pins the property in-process, with the negative control
+    that the same lock DOES refuse a second writer — without that half, a cell in
+    which nothing was ever locked would pass for the same reason.
+    """
+
+    owner = _enroll(tmp_path, enabled=True)
+    _plant_proof(tmp_path, owner, _wire_item())
+    db = state_db_path(tmp_path)
+
+    writer = sqlite3.connect(db, timeout=0.15)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT OR REPLACE INTO screening_holds "
+            "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+            (_owner_key(owner), "bmsg_1", "envelope_refused:in-flight", None, 1_700_000_000.0),
+        )
+        rival = sqlite3.connect(db, timeout=0.15)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                rival.execute("BEGIN IMMEDIATE")
+        finally:
+            rival.close()
+        snapshot = Store(tmp_path).content_proof_readonly(owner, ["bmsg_1"])
+        assert snapshot["bmsg_1"]["hold"] is None, "an uncommitted row was visible to the read"
+    finally:
+        writer.rollback()
+        writer.close()
+
+    # And the NEXT read sees the committed truth: the snapshot is a moment, not a
+    # cache of one.
+    with sqlite3.connect(db, timeout=5.0) as other:
+        other.execute(
+            "INSERT OR REPLACE INTO screening_holds "
+            "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+            (_owner_key(owner), "bmsg_1", "envelope_refused:committed", None, 1_700_000_000.0),
+        )
+    after = Store(tmp_path).content_proof_readonly(owner, ["bmsg_1"])
+    assert after["bmsg_1"]["hold"]["hold_code"] == "envelope_refused:committed"
+
+
+def test_the_write_side_consumption_refuses_a_receipt_from_another_generation(
+    tmp_path: Path,
+) -> None:
+    """The shared authority function's WRITE-side consumer, pinned (Q-1).
+
+    ``creator_generation`` was pinned only through this read slice: removing the
+    term left the whole ``tests/unit/team_bridge`` package green at the base,
+    because the consumption point's own calls had no cell that moved it. This is
+    that cell — a receipt minted by an EARLIER enrollment is not consumable by the
+    current one, on either side of the store.
+    """
+
+    owner = _enroll(tmp_path, enabled=True)
+    item = _wire_item()
+    envelope, code = validate_envelope(owner, item)
+    assert code is None and envelope is not None
+    _plant_proof(tmp_path, owner, item, generation=owner.enrollment_generation - 1)
+
+    consumed = Store(tmp_path).consume_screening_receipt(
+        owner,
+        body_sha256=envelope.body_sha256,
+        template_sha256="ab" * 32,
+        model="m-1",
+        admission_revision="r-1",
+        envelope_digest=envelope.envelope_digest,
+    )
+
+    assert consumed is None
+
+
+def test_the_intent_category_decoder_answers_none_for_unreadable_text() -> None:
+    """Unreadable intent categories are proof that cannot admit (R-1).
+
+    The snapshot decodes this column and answers ``None`` — never a partial list,
+    never an exception — because the caller compares tuples and has no repair.
+    Four shapes: valid, the legitimate empty array, wrong item types, and text
+    that is not JSON at all (plus the empty column).
+    """
+
+    assert _decode_intent_categories('["spam"]') == ["spam"]
+    assert _decode_intent_categories("[]") == []
+    assert _decode_intent_categories('["spam", 7]') is None
+    assert _decode_intent_categories("not-json") is None
+    assert _decode_intent_categories(None) is None
+    assert _decode_intent_categories("") is None
+
+
+def test_the_screening_vocabulary_stays_closed_and_receipt_free() -> None:
+    """R-4's resolution, pinned: no state is derived from a receipt.
+
+    An admitted row still reads ``unreviewed``, and that is the contract rather
+    than an oversight — the field is THIS machine's recorded hold state, never a
+    verdict about anybody's screening — while the vocabulary is the three M0
+    states. A receipt-derived name (``reviewed``, or M0's removed ``allowed``) is
+    what M-12a forbids, and it would be a change to the surface contract's closed
+    vocabulary rather than something this layer may introduce.
+    """
+
+    assert SCREENING_STATES == ("unreviewed", "held", "blocked")

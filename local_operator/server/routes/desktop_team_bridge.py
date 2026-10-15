@@ -677,7 +677,7 @@ async def get_inbox(
     sender_account_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """One page of this machine's agent messages: METADATA ONLY, zero writes.
+    """One page of this machine's agent messages: METADATA ONLY, logically read-only.
 
     READ means what the person can see, never what the machine may receive: the
     answer is ids, delivery state, hashes and this machine's coarse screening
@@ -696,7 +696,12 @@ async def get_inbox(
     enrolled answers without a database being made for it (review R-1/M-9).
     (Reading the signed-in credential row can still create the SHARED ``auth.db``
     side files, exactly as ``/status`` does; that store is not this surface's, and
-    the invariant here is the bridge store.) Unknown query names are refused, not
+    the invariant here is the bridge store.) The claim is the LOGICAL one (spec
+    M-10) and is stated rather than summed up: no table row and no main-file byte
+    of ``state.sqlite3`` changes, while SQLite's own ``-wal``/``-shm`` side files
+    DO appear when the store is in WAL mode — a reader needs them, they are not
+    this route's write, and a whole-tree hash therefore moves where the table
+    digest does not (review Q-3). Unknown query names are refused, not
     dropped — see :data:`READ_QUERY_PARAMS`.
 
     Two standing modes answer honestly through ``mode``/``read_only``: ENABLED
@@ -813,9 +818,13 @@ async def get_message(
     The message id is validated by grammar BEFORE any upstream path is built
     (review S-RSA-5) and a value outside it is this family's 404, so a caller
     cannot use a malformed id to make the transport build a path of its choosing.
-    The whole read stays zero-write: one read-only proof snapshot, no ``_init``,
-    no migration, no ``merge_refs``, no checkpoint, no ACK intent, no screening
-    call, and no database created to answer for a machine that has none.
+    The whole read is logically read-only in the sense the store's read-only
+    accessors define (M-10, review Q-3): one read-only proof snapshot, no
+    ``_init``, no migration, no row and no main-file byte of
+    ``team_bridge/state.sqlite3`` changed, no ``merge_refs``, no checkpoint, no
+    ACK intent, no screening call, and no database created to answer for a
+    machine that has none. SQLite's own ``-wal``/``-shm`` side files are the one
+    exception, and they are declared: a reader of a WAL store needs them.
     """
 
     from pydantic import ValidationError
