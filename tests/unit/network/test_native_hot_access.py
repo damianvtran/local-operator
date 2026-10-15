@@ -316,8 +316,10 @@ async def test_hot_native_access_reaches_subscription_host_and_identity(
 
 
 @pytest.mark.asyncio
-async def test_readiness_tool_carries_active_selector_and_session(
+@pytest.mark.parametrize("peer", ["synthetic-peer", ""])
+async def test_readiness_tool_carries_selector_without_claiming_requester_session(
     monkeypatch: pytest.MonkeyPatch,
+    peer: str,
 ) -> None:
     from local_operator.harness.types import ToolContext
     from local_operator.network import tool
@@ -331,13 +333,15 @@ async def test_readiness_tool_carries_active_selector_and_session(
     monkeypatch.setattr(tool, "_run_cli", cli)
     await tool.execute_network(
         "synthetic-call",
-        {"action": "ready", "peer": "synthetic-peer"},
+        {"action": "ready", "peer": peer},
         None,
         None,
         ToolContext(cwd=".", session_id="same-session", session_model_label="openai/gpt-6.1-sol"),
     )
     assert calls
-    assert calls[0][-4:] == ["--model", "openai/gpt-6.1-sol", "--session", "same-session"]
+    assert calls[0][-2:] == ["--model", "openai/gpt-6.1-sol"]
+    assert "--session" not in calls[0]
+    assert "same-session" not in calls[0]
 
 
 @pytest.mark.parametrize(
