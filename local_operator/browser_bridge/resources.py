@@ -477,10 +477,69 @@ class BrowserResource:
         pending_host = str(record.get("pending_access_host", ""))
         if pending_host in (HOST_UI, HOST_BRIDGE):
             return pending_host
+        return self._obligation_only_host(record)
+
+    @classmethod
+    def _obligation_only_host(cls, record: Mapping[str, Any]) -> str:
+        """The `host` a record names ONLY because it still owes that host a cleanup.
+
+        Neither a held handle nor a pending approval: the record holds no tab on
+        that host and no approval is waiting on it. What remains is the debt itself
+        (a `terminal` intent left by `finish`, a retention, `resumed_scope`,
+        `release_pause`, unevidenced `unresolved_surface_id`), which only that
+        host's `owner_recover` can discharge. It pins the lane so the cleanup
+        reaches its owner, but it must not also decide where a LATER fresh `open`
+        lands: the tool uses this to reconcile the old host first and then
+        re-decide the fresh open from the caller's explicit `backend`.
+        """
         host = str(record.get("host", ""))
-        if host and self._record_owes_reconciliation(record):
+        if host and cls._record_owes_reconciliation(record):
             return host
         return ""
+
+    def obligation_pin_host(self) -> str:
+        """The host pinning this session by an obligation alone, or "".
+
+        "" whenever a handle or a pending approval names the host instead, so those
+        pins keep their existing precedence. Reads the loaded record, or the file
+        when the lane has not run yet (the tool asks before `initialize()`).
+        """
+        record = self.record
+        if not record:
+            try:
+                record = self._load()
+            except (BrowserOwnershipError, OSError, ValueError):
+                return ""
+        if surface_host(str(record.get("surface_id", ""))):
+            return ""
+        if str(record.get("pending_access_host", "")) in (HOST_UI, HOST_BRIDGE):
+            return ""
+        return self._obligation_only_host(record)
+
+    async def move_lane_after_obligation(self, host: str) -> bool:
+        """Re-decide a FRESH open's lane once the host that was owed has been reconciled.
+
+        The tool keeps the lane on an obligation-only pin for the first recovery, so
+        the debt (a finished scope's `terminal`, a retention, `release_pause`...)
+        reaches the host that owns it; dropping it, or letting an explicit `backend`
+        win straight away, would strand that host's cleanup. This runs after that
+        recovery, under the caller's lock, and answers whether the open may go on:
+
+        * a HELD handle still names a host -> True without moving: the dispatcher
+          owns that refusal (a hint cannot contradict a held tab), as before;
+        * a debt is STILL owed -> False: the old host did not discharge it, and
+          sending the destination an `open` anyway would dispatch to a host that
+          is mismatched with the session's own record;
+        * otherwise the lane moves to `host` and that peer is reconciled exactly
+          once (`ensure_recovered` is per lane) BEFORE anything allocates there.
+        """
+        if self._obligation_host():
+            return True
+        if self.obligation_pin_host():
+            return False
+        self.select_host(host)
+        await self.ensure_recovered()
+        return True
 
     def client(self) -> Any:
         """A client for this session's host, built fresh per call (as before).
