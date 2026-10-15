@@ -610,6 +610,7 @@ async def _build_session(
             has_ui=(mode == "attach"),
             cwd=str(roots.cwd_path),
             world_root=world_root,
+            mcp_servers=dict(spec.mcp_servers) if spec.mcp_servers else None,
         )
     except HostingNotConfiguredError as error:
         if mode != "attach":
@@ -967,6 +968,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
             ("goal", spec.goal),
             ("birth_effort", spec.birth_effort),
             ("world_root", spec.world_root),
+            ("mcp_servers", spec.mcp_servers),
         )
         if value is not None
     ]
@@ -1030,6 +1032,10 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
             ("name", spec.name),
             ("goal", spec.goal),
             ("world_root", spec.world_root),
+            # Session-only MCP servers live in the owning process's manager;
+            # a spawned child is composed from its environment and has no
+            # channel that could carry them.
+            ("mcp_servers", spec.mcp_servers),
         )
         if value not in (None, False)
     ]

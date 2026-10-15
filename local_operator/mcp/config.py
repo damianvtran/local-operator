@@ -604,6 +604,16 @@ def load_all_mcp_configs(
     return configs, sources
 
 
+def coerce_server_config(raw: Mapping[str, Any]) -> MCPServerConfig | None:
+    """Parse one raw server entry exactly as the file loader does.
+
+    Public for the one caller that holds entries no file carries — a session's
+    own servers (``McpManager(extra_configs=...)``) — so they get the same
+    transport inference and validation rather than a second parser.
+    """
+    return _coerce_server_config(dict(raw))
+
+
 # ---------------------------------------------------------------------------
 # CLI helpers (`mcp list|add|remove`)
 # ---------------------------------------------------------------------------

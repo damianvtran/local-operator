@@ -266,6 +266,9 @@ def test_spec_field_surface_is_pinned() -> None:
         # The model-world boundary (additive; construction/discovery-scoped,
         # never through the namespace — see sdk._resolve_world_root).
         "world_root",
+        # Session-only MCP servers (additive; handed to the session's own
+        # McpManager, never written to disk — the `lop acp` seam).
+        "mcp_servers",
     }
 
 
