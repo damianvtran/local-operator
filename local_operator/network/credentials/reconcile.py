@@ -176,7 +176,13 @@ def push_negotiated(link: Any) -> bool:
     ) and wire.CREDENTIAL_PLACEMENT_PUSH_V1 in getattr(link, "capabilities", ())
 
 
-def _provider_ok(provider: str) -> bool:
+def provider_ok(provider: str) -> bool:
+    """Is ``provider`` a native OAuth class the reconciler may ever derive a holder for?
+
+    Public because ``inheritance`` (the operator's authoring verb) must refuse the exact
+    classes the projector would silently skip: a card the operator signs for a provider
+    that can never be projected is a permission that never delivers anything.
+    """
     from local_operator.network.credentials.github import GITHUB_KEY
     from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
 
@@ -365,6 +371,30 @@ def _record_for(root: Path, device_id: str) -> Any:
     return None
 
 
+def transport_gap(record: Any, network_id: str, device_id: str) -> str:
+    """``""`` when both broker rows exist, else the exact ``notready:<remedy>`` sentence.
+
+    ONE OWNER FOR THE PRECONDITION AND ITS WORDS. The 15 s tick and the offline
+    ``credential inherit`` request/apply/status all ask "may the owner's relay carry this
+    recipient's borrow at all", and an operator told two different remedies for one
+    missing row would fix the wrong one. Reads two member rows; writes nothing (a signed
+    approval of *credentials* is not a signed approval of *dial authority*).
+    """
+    if "broker_credential" not in record.self_capabilities:
+        return (
+            "notready:owner_lacks_broker_credential "
+            f"(on this device: lop network member grant {network_id} {device_id} "
+            "broker_credential is NOT enough; this device's own row needs it)"
+        )
+    member = record.member(device_id)
+    if member is None or "broker_credential" not in member.capabilities:
+        return (
+            f"notready:recipient_lacks_broker_credential (grant it: lop network member "
+            f"grant {network_id} {device_id} broker_credential)"
+        )
+    return ""
+
+
 def project_for(server: Any, device_id: str) -> ReconcileResult:
     """One recipient's reconcile pass. Never raises for a refusal; mutates only by adding
     derived holders, or removing its own when approval is absent (see module docstring)."""
@@ -405,26 +435,12 @@ def project_for(server: Any, device_id: str) -> ReconcileResult:
         _purge_derived(server, network_id, self_device, device_id, root, authority)
         return ReconcileResult(_set_status(server, device_id, "idle"))
     # TRANSPORT CAPABILITIES ARE PRECONDITIONS, NEVER OUTPUTS. Read both rows; write none.
-    if "broker_credential" not in record.self_capabilities:
-        return ReconcileResult(
-            _set_status(
-                server,
-                device_id,
-                "notready:owner_lacks_broker_credential "
-                f"(on this device: lop network member grant {network_id} {device_id} "
-                "broker_credential is NOT enough; this device's own row needs it)",
-            )
-        )
+    gap = transport_gap(record, network_id, device_id)
+    if gap:
+        return ReconcileResult(_set_status(server, device_id, gap))
     member = record.member(device_id)
-    if member is None or "broker_credential" not in member.capabilities:
-        return ReconcileResult(
-            _set_status(
-                server,
-                device_id,
-                f"notready:recipient_lacks_broker_credential (grant it: lop network member "
-                f"grant {network_id} {device_id} broker_credential)",
-            )
-        )
+    if member is None:  # unreachable: ``transport_gap`` names an absent row. Narrows the type.
+        return ReconcileResult(_set_status(server, device_id, "idle"))
     inv = inventory(root)
     if inv is None:
         # Unreadable / locked / not-yet-created auth.db: retry, never a decision.
@@ -443,7 +459,7 @@ def project_for(server: Any, device_id: str) -> ReconcileResult:
     # An explicit `local-only` mark is the operator's kill switch: the serve path refuses
     # such a key, so advertising a holder for it would promise what can never be served.
     local_only = frozenset(p for p in inv if marks.mark_for(p) == MARK_LOCAL_ONLY)
-    candidates = sorted(p for p in inv if _provider_ok(p) and p not in local_only)
+    candidates = sorted(p for p in inv if provider_ok(p) and p not in local_only)
     held = tuple(
         (p, document.is_holder(p, device_id)) for p in candidates if document.entry(p) is not None
     )
@@ -938,7 +954,7 @@ def accept_push(
         key = row["key"]
         if (
             row["owner_device"] != sender
-            or not _provider_ok(key)
+            or not provider_ok(key)
             or row["provider"] != key
             or row["kind"] != "oauth-rotating"
         ):

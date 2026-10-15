@@ -2381,3 +2381,85 @@ async def test_a_pending_app_approval_refuses_a_conflicting_extension_open_befor
     )
     assert not honoured.is_error, honoured.text
     assert any(step == "ext.open" for step in order), order
+
+
+@pytest.mark.asyncio
+async def test_a_refused_recover_surfaces_only_the_sanitized_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extension's refusal receipt (booleans and counts) reaches the error text.
+
+    Without this the extension's `data.diagnostic` is built and then dropped, because
+    the session maps `refusal` to a fixed sentence. Only a WHITELIST of keys with
+    bool/int values is rendered: a peer (or a hostile page in the middle) must not be
+    able to put free text, identifiers or a URL into an error the model reads and the
+    log keeps. A peer without the key keeps today's message exactly, so an older
+    extension stays an explicit ambiguous refusal rather than being read as a cure.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, ErrorCode
+    from local_operator.browser_bridge.resources import BrowserOwnershipError
+
+    class _Refusing:
+        host = "extension"
+
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.data = data
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            raise BridgeError(
+                ErrorCode.OWNER_REFUSED, "browser owner generation is stale", self.data
+            )
+
+    async def refused(name: str, data: dict[str, Any]) -> str:
+        resource = BrowserResource(tmp_path / name, f"session:{name}")
+        resource.initialize()
+        monkeypatch.setattr(resource, "client", lambda: _Refusing(data))
+        with pytest.raises(BrowserOwnershipError) as caught:
+            await resource.recover()
+        return str(caught.value)
+
+    stale = await refused(
+        "stale",
+        {
+            "refusal": "stale",
+            "diagnostic": {
+                "version": 1,
+                "session_match": True,
+                "request_ancestry_count": 2,
+                "request_previous_supplied": False,
+                "allocations_total": 3,
+                "allocations_live": 1,
+                "allocations_pending": 0,
+                "unknown_reservations": 0,
+            },
+        },
+    )
+    assert "stale" in stale
+    for fragment in ("session_match=true", "request_ancestry_count=2", "allocations_live=1"):
+        assert fragment in stale, stale
+
+    foreign = await refused(
+        "foreign", {"refusal": "foreign", "diagnostic": {"version": 1, "session_match": False}}
+    )
+    assert "different owner" in foreign and "session_match=false" in foreign, foreign
+
+    hostile = await refused(
+        "hostile",
+        {
+            "refusal": "stale",
+            "diagnostic": {
+                "version": 1,
+                "session_match": True,
+                "allocations_total": "https://evil.example/leak?token=abc",
+                "note": "free text must not be rendered",
+                "request_ancestry_count": 10**9,
+                "stored_generation": 5,
+            },
+        },
+    )
+    for forbidden in ("evil.example", "token=abc", "free text", "stored_generation"):
+        assert forbidden not in hostile, hostile
+    assert len(hostile) < 400, "a hostile receipt cannot inflate the error"
+
+    legacy = await refused("legacy", {"refusal": "stale"})
+    assert "session_match" not in legacy and "stale" in legacy, "older peers keep today's message"

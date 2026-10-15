@@ -59,8 +59,8 @@ INTENT_MAX_CHARS = 200
 #: self-sufficient wording ran ~41 tokens x 24 tools = ~980 tokens of the
 #: tools array, restating what ``prompts_md/system.md`` ("Most tools take
 #: `i`...") already says at greater length and with the negative examples.
-#: One copy in the system prompt and a pointer here costs a fraction of that
-#: and contradicts nothing.
+#: One full rule in the system prompt and its shape here cost a fraction of
+#: that and contradict nothing.
 #:
 #: Deliberately NOT reduced to oh-my-pi's bare ``"concise intent"``: the
 #: failure this field exists to fix IS the model narrating the mechanism, and
@@ -72,7 +72,10 @@ INTENT_MAX_CHARS = 200
 #: Shortened once more by the context diet (71 -> 46 chars, on every published
 #: tool): "Concise" and the sentence scaffolding restated what "2-6 words" says.
 #: The rule's SHAPE is kept, per the paragraph above.
-INTENT_DESCRIPTION = "Intent: 2-6 words, present participle; see system prompt."
+# The repeated pointer adds no constraint: the unchanged system rule already
+# supplies goal-vs-mechanism examples. Keep the emission-local shape (not a
+# bare "goal") while funding restored, independently pinned safety clauses.
+INTENT_DESCRIPTION = "Intent: 2-6 words, present participle."
 
 #: The exact property injected into every tool schema. Compared by VALUE in
 #: :func:`intent_is_injected` to tell our field apart from a tool that

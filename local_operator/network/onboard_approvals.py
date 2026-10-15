@@ -295,6 +295,18 @@ def begin_run(
             "Use the exact credential share --approval command; "
             "this finite request does not authorize onboarding",
         )
+    if "credential_inheritance" in view.what and operation != "credential_inheritance":
+        # The same seam, the same reason: a signed future-login permission is metadata-only
+        # authority and its approval names NO host, install or connect scope. Without this,
+        # ``approvals run`` would launch the generic SSH ``OnboardRun`` over an approved
+        # inheritance record (the card carries a device block). Only the authoring flow
+        # (``credentials.inheritance.apply``) may open a run on it.
+        raise MeshRefusal(
+            "inherit_apply_required",
+            "This is a credential permission, not onboarding: it requires "
+            "`lop network credential inherit ... --approval <id>` (shown on its request); "
+            "no connection, install or SSH ran",
+        )
     if view.state == "denied":
         raise _denied_refusal(approval_id, view)
     _call("verify_for_run", approval_id, root=root)

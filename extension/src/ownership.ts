@@ -113,6 +113,47 @@ export async function recordAllocation(params: Params, tab: string, state: strin
   });
 }
 
+/** A small, identifier-free receipt for a refused `owner_recover`, or `undefined`.
+ *
+ * WHY it exists: both refusals used to arrive as the same bare "generation is
+ * stale", so a field failure could not be classified without reading this peer's
+ * private state. From the caller's side the two cases need opposite next steps:
+ * the stored scope belongs to ANOTHER session (nothing to repair, and nothing the
+ * caller may learn about it), or it is this session's own scope at a generation
+ * the caller never listed (its ancestry is behind, which only the operator can
+ * judge). This answers that and nothing more.
+ *
+ * WHAT it carries: booleans and counts only. The caller already knows what IT
+ * sent, so `request_*` echoes lengths of its own input; `allocations_*` and
+ * `unknown_reservations` count the scope it is entitled to (same proof AND same
+ * session). It never contains a proof, session, generation, allocation id, tab
+ * handle or URL, because a refusal is rendered to the model and logged.
+ *
+ * WHAT it must not do: a caller whose session differs gets no scope counts at all
+ * (`session_match: false` and nothing else), so a holder of the proof but not of
+ * the session cannot use a refusal to size or probe a scope it does not own. A
+ * proof that names no scope never reaches here (that path answers `unresolved`).
+ * It reads only; the refusal that follows mutates nothing, so diagnosing is not a
+ * repair, a rotation or a rebind. Additive on the wire: an older consumer drops
+ * unknown `data` keys, and an older PEER simply omits it, which the consumer must
+ * keep reading as an ambiguous refusal, never as a licence to upgrade or retry.
+ */
+async function recoverRefusalDiagnostic(scope: Scope, sessionMatches: boolean, params: Params): Promise<Record<string, unknown>> {
+  if (!sessionMatches) return { version: 1, session_match: false };
+  const surfaces = await getSurfaces();
+  const allocations = Object.values(scope.allocations);
+  return {
+    version: 1,
+    session_match: true,
+    request_ancestry_count: Array.isArray(params.previous_generations) ? params.previous_generations.length : 0,
+    request_previous_supplied: typeof params.previous_generation === "string" && params.previous_generation !== "",
+    allocations_total: allocations.length,
+    allocations_live: allocations.filter(a => a.tab && surfaces[a.tab]).length,
+    allocations_pending: allocations.filter(a => ["allocating", "allocated", "cleanup_pending"].includes(a.state)).length,
+    unknown_reservations: scope.unknownReservations ?? 0,
+  };
+}
+
 /** Serialize owner commands per owner through the entire side effect, not just
  * the map write. A finish cannot overtake an in-flight allocation and then let
  * its late navigation resurrect the tab. The daemon's deadlines remain bounded;
@@ -148,10 +189,14 @@ export function withOwnership(
         if (!scope) return { ownership_version: 1, state: "unresolved" };
         const predecessors = Array.isArray(params.previous_generations) ? params.previous_generations : [];
         if (scope.session !== session) {
-          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "foreign" });
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", {
+            refusal: "foreign", diagnostic: await recoverRefusalDiagnostic(scope, false, params),
+          });
         }
         if (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation)) {
-          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", { refusal: "stale" });
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale", {
+            refusal: "stale", diagnostic: await recoverRefusalDiagnostic(scope, true, params),
+          });
         }
         // A resume retires the ended scope. Keying this on the generation
         // CHANGING was unreachable for an in-process child: that path

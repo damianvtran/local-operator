@@ -1,0 +1,57 @@
+{
+  "cli.exec_runtime.thinking": {
+    "role": "headless runtime thinking",
+    "tone": "terse, factual",
+    "note": "Once per reasoning phase; fixed short label, no private reasoning text."
+  },
+  "cli.exec_runtime.tool_interrupted": {
+    "role": "headless runtime tool interrupted",
+    "tone": "terse, factual",
+    "note": "name is a sanitized opaque tool name; keep glyph; one short row."
+  },
+  "cli.exec_runtime.tool_failed": {
+    "role": "headless runtime tool failed",
+    "tone": "terse, factual",
+    "note": "name is a sanitized opaque tool name; keep glyph; one short row."
+  },
+  "cli.exec_runtime.output_check_failed": {
+    "role": "headless runtime output check failed",
+    "tone": "terse, factual",
+    "note": "format is a machine identifier; attempt/max_attempts are counts rendered without locale digit changes; reason is sanitized model-influenced prose, never markup. Keep one line and punctuation."
+  },
+  "cli.exec_runtime.retry": {
+    "role": "headless runtime retry",
+    "tone": "terse, factual",
+    "note": "attempt is the retry number; error is opaque error data. Preserve dim tags; short progress row."
+  },
+  "cli.exec_runtime.model_fallback": {
+    "role": "headless runtime model fallback",
+    "tone": "terse, factual",
+    "note": "selector is opaque provider/model id; complete fallback sentence, not an English verb fragment. Preserve dim tags; one row."
+  },
+  "cli.exec_runtime.model_switched": {
+    "role": "headless runtime model switched",
+    "tone": "terse, factual",
+    "note": "selector is opaque provider/model id; deliberate switch, not recovery. Preserve dim tags; one row."
+  },
+  "cli.exec_runtime.model_returned": {
+    "role": "headless runtime model returned",
+    "tone": "terse, factual",
+    "note": "selector is opaque provider/model id; route recovery. Preserve dim tags; one row."
+  },
+  "cli.exec_runtime.compacting": {
+    "role": "headless runtime compacting",
+    "tone": "terse, factual",
+    "note": "Fixed short progress row; preserve dim tags and ellipsis."
+  },
+  "cli.exec_runtime.error": {
+    "role": "headless runtime error",
+    "tone": "terse, factual",
+    "note": "sentence is opaque provider error plus external recovery helpers; never markup. Preserve prefix and existing wrapping."
+  },
+  "cli.exec_runtime.aborted": {
+    "role": "headless runtime aborted",
+    "tone": "terse, factual",
+    "note": "Fixed short terminal outcome; preserve red tags."
+  }
+}

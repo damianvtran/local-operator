@@ -24,6 +24,7 @@ import sys
 from typing import Any, Awaitable, Callable
 
 from rich.console import Console
+from rich.markup import escape
 
 from local_operator.ansi import sanitize_prompt_line, strip_control_sequences
 from local_operator.harness.types import (
@@ -45,7 +46,24 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
+from local_operator.i18n.keys import cli_exec_runtime as copy
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.session.protocol import SessionProtocol
+
+_t = tr("cli.exec_runtime")
+
+
+def _reload_copy() -> None:
+    # Backend language moves must refresh fixed chrome too; parameterized rows
+    # resolve at emission so a long-lived REPL never caches English sentences.
+    global _THINKING, _COMPACTING, _ABORTED
+    _THINKING = _t(copy.thinking())
+    _COMPACTING = _t(copy.compacting())
+    _ABORTED = _t(copy.aborted())
+
+
+_reload_copy()
+register_refresh(_reload_copy)
 
 #: One-line tool rows get truncated to this many columns (TUI minimalism).
 _TOOL_LINE_WIDTH = 100
@@ -294,7 +312,7 @@ class PrintRenderer:
             # model-authored, and a ``[`` in it would otherwise be Rich markup.
             if event.delta and not self._reasoning_announced:
                 self._reasoning_announced = True
-                self.console.print("· thinking…", style="dim", highlight=False, markup=False)
+                self.console.print(_THINKING, style="dim", highlight=False, markup=False)
         elif isinstance(event, MessageEndEvent):
             if self.stream_text and self._streaming_assistant:
                 self._streaming_assistant = False
@@ -363,11 +381,14 @@ class PrintRenderer:
                 fault = details.get(FAULT_KEY) if isinstance(details, dict) else None
                 if fault in INTERRUPTED_FAULTS:
                     self.console.print(
-                        f"⊘ {name} interrupted", style="dim", highlight=False, markup=False
+                        _t(copy.tool_interrupted(name=name)),
+                        style="dim",
+                        highlight=False,
+                        markup=False,
                     )
                 else:
                     self.console.print(
-                        f"✗ {name} failed", style="red", highlight=False, markup=False
+                        _t(copy.tool_failed(name=name)), style="red", highlight=False, markup=False
                     )
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
@@ -423,8 +444,14 @@ class PrintRenderer:
             if not event.ok:
                 reason = sanitize_prompt_line(event.error)
                 self.console.print(
-                    f"! output check failed ({event.format}, attempt "
-                    f"{event.attempt}/{event.max_attempts}): {reason}",
+                    _t(
+                        copy.output_check_failed(
+                            format=event.format,
+                            attempt=str(event.attempt),
+                            max_attempts=str(event.max_attempts),
+                            reason=reason,
+                        )
+                    ),
                     style="dim",
                     highlight=False,
                     markup=False,
@@ -435,7 +462,11 @@ class PrintRenderer:
                     soft_wrap=True,
                 )
         elif isinstance(event, RetryStartEvent):
-            self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
+            # Only catalogue markup is trusted; provider error data is not Rich.
+            self.console.print(
+                _t(copy.retry(attempt=str(event.attempt), error=escape(event.error))),
+                highlight=False,
+            )
         elif isinstance(event, ModelChangeEvent) and event.context_metadata:
             # A context-metadata refresh (turn start/end, or a per-request
             # window read) re-announces the model already in force. It is a
@@ -451,18 +482,20 @@ class PrintRenderer:
             # run needs to know which model produced the output from here on.
             # The verbs pair with the failure notice's "falling back to"
             # (design D2): "serving from" reads as a location, not a route.
-            selector = f"{event.provider}/{event.model_id}"
+            # Escape only the opaque placeholder, retaining the catalogue's dim
+            # wrapper without granting model identifiers markup privileges.
+            selector = escape(f"{event.provider}/{event.model_id}")
             if event.is_fallback:
-                verb = "fell back to"
+                line = _t(copy.model_fallback(selector=selector))
             elif event.reason == "model switched":
                 # A deliberate switch (`/model`, the phone, a peer) is not a
                 # recovery: "back to" would claim a model this run never left.
-                verb = "switched to"
+                line = _t(copy.model_switched(selector=selector))
             else:
-                verb = "back to"
-            self.console.print(f"[dim]{verb} {selector}[/dim]", highlight=False)
+                line = _t(copy.model_returned(selector=selector))
+            self.console.print(line, highlight=False)
         elif isinstance(event, CompactionStartEvent):
-            self.console.print("[dim]compacting context…[/dim]", highlight=False)
+            self.console.print(_COMPACTING, highlight=False)
         elif isinstance(event, AgentEndEvent):
             if event.error:
                 # ``markup=False`` for the same reason as the notice branch
@@ -513,14 +546,14 @@ class PrintRenderer:
                 # that scoping this to all errors changed unenforced-run stderr,
                 # and an unenforced run must stay byte-identical.
                 self.console.print(
-                    f"Error: {sentence}",
+                    _t(copy.error(sentence=sentence)),
                     style="red",
                     highlight=False,
                     markup=False,
                     soft_wrap=self.output_contract_failed,
                 )
             elif event.aborted:
-                self.console.print("[red]aborted[/red]", highlight=False)
+                self.console.print(_ABORTED, highlight=False)
 
 
 async def _call_before_dispose(hook: Callable[..., Awaitable[None]], failed: bool) -> None:

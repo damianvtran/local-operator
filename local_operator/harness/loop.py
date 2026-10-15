@@ -861,6 +861,12 @@ def _tool_start_event(
     ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
     move a counter that is already running.
     """
+    if tool_name in ("read", "write", "edit", "memory"):
+        from local_operator.memory_privacy import retained_arguments
+
+        args, _, masked = retained_arguments(tool_name, args)
+        if masked:
+            intent = "Inspecting scoped memory"
     return ToolExecutionStartEvent(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
@@ -1387,6 +1393,11 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     that check is not in play — but returning a copy unconditionally would leave
     a refused turn in history the moment one of them grew a call.
     """
+    # The executor still holds the original assistant/calls. Only the retained
+    # copy changes, following this function's existing secret-argument contract.
+    from local_operator.memory_privacy import retained_message
+
+    message = retained_message(message)
     if redact is None or not message.tool_calls:
         return message
     calls: list[ToolCall] = []
@@ -2054,7 +2065,9 @@ class AgentLoop:
                             # continued turn streams prose. Every other continuing
                             # path in this loop reaches a TurnEndEvent; this one
                             # must too.
-                            yield TurnEndEvent(message=assistant, tool_results=[])
+                            yield TurnEndEvent(
+                                message=_scrub_history_arguments(assistant, None), tool_results=[]
+                            )
                             # The notice states what HAS happened, not what is
                             # hoped for, and it is WRITTEN FOR BOTH FAMILIES the
                             # branch serves: our own connection dying, and a
@@ -2348,7 +2361,9 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                         )
-                        yield TurnEndEvent(message=assistant, tool_results=[])
+                        yield TurnEndEvent(
+                            message=_scrub_history_arguments(assistant, None), tool_results=[]
+                        )
                         yield AgentEndEvent(
                             messages=new_messages,
                             aborted=aborted,
@@ -2741,14 +2756,20 @@ class AgentLoop:
                         # request, and the reply to it, on a turn the user
                         # stopped: the stop would read as "it kept going, and
                         # then answered".
-                        yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                        yield TurnEndEvent(
+                            message=_scrub_history_arguments(assistant, None),
+                            tool_results=tool_results,
+                        )
                         yield AgentEndEvent(
                             messages=new_messages, aborted=True, generation=generation
                         )
                         self._discard_pending_custom(pending)
                         return
 
-                    yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                    yield TurnEndEvent(
+                        message=_scrub_history_arguments(assistant, None),
+                        tool_results=tool_results,
+                    )
                     fingerprint = _error_batch_fingerprint(assistant.tool_calls, tool_results)
                     repeated_error_batches = (
                         repeated_error_batches + 1
@@ -3699,9 +3720,24 @@ class AgentLoop:
         except ImportError:
             pass
 
+        from local_operator.memory_privacy import retained_message
+
+        # The object published at MessageStartEvent is this same ``assistant``, and every
+        # subscriber holds it by reference, so anything assigned onto it is readable by
+        # them later. For a memory call carrying a recognised sensitive value, publish the
+        # REDACTED shape on that shared object and give the executor a private raw copy: the
+        # memory guard must still see the original to refuse it honestly. Ordinary turns
+        # take the identity branch and are untouched (message identity is a pinned contract).
+        executing = assistant
+        retained = retained_message(assistant)
+        if retained is not assistant:
+            executing = assistant.model_copy()
+            assistant.tool_calls = retained.tool_calls
+            assistant.content = retained.content
+            assistant.provider_payload = retained.provider_payload
         yield MessageEndEvent(message=assistant)
         yield _ModelTurnResult(
-            message=assistant,
+            message=executing,
             stop_reason=stop_reason,
             error=error,
             connectivity_loss=connectivity_loss,
@@ -3720,7 +3756,7 @@ class AgentLoop:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
                     arguments = parsed
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 # Leave arguments empty; validation reports the bad JSON. The
                 # warning is the ONE record of where a replay-salvaged fragment
                 # was born: from here on ``_replayable_tool_arguments`` salvages
@@ -3730,13 +3766,15 @@ class AgentLoop:
                 # -- is invisible. Seen live: an audit could count 221 salvage
                 # lines for 8 calls and still not say when or why the fragments
                 # formed.
+                # This runs BEFORE retained-copy redaction. Never log a raw
+                # prefix or the provider-controlled name: either can carry a
+                # credential, even when the incomplete JSON cannot be decoded.
                 logger.warning(
                     "tool call assembled from streamed deltas does not parse "
-                    "(%d bytes, starts %r, name %r); arguments stay empty, raw "
-                    "kept for replay",
-                    len(raw),
-                    raw[:80],
-                    state["name"] or None,
+                    "(%d bytes, JSON position %d); arguments stay empty, raw "
+                    "kept privately for execution/replay",
+                    len(raw.encode("utf-8")),
+                    exc.pos,
                 )
                 pass
         call = ToolCall(name=state["name"], arguments=arguments, raw_arguments=raw or None)
@@ -4032,6 +4070,37 @@ class AgentLoop:
         # `intent_is_injected` is what keeps this from stealing a real
         # argument: an MCP server that declares its own `i` never had ours
         # injected, so its value is left in `args` and forwarded.
+        # Refuse recognised sensitive memory values BEFORE a schema validator
+        # can quote an invalid value in its diagnostic. Keep the original call
+        # for this guard/executor; history/events alone receive redacted copies.
+        from local_operator.memory_privacy import retained_arguments
+
+        _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
+        if sensitive_memory:
+            from local_operator.memory import (
+                MEMORY_TOOL_CONTRACT_ERROR,
+                valid_memory_tool_arguments,
+            )
+
+            invalid_contract = call.name == "memory" and not valid_memory_tool_arguments(
+                call.arguments
+            )
+            return _PlannedCall(
+                call=call,
+                tool=tool,
+                failure=self._synthetic_result(
+                    call,
+                    (
+                        MEMORY_TOOL_CONTRACT_ERROR
+                        if invalid_contract
+                        else (
+                            "Sensitive value refused. Use lop secret; "
+                            "memory may hold its NAME only."
+                        )
+                    ),
+                    details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                ),
+            )
         args = dict(call.arguments)
         intent: str | None = None
         if INTENT_FIELD in args and intent_is_injected(tool.parameters):

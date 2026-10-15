@@ -477,6 +477,11 @@ def encode_message_payload(
       does NOT round-trip (a model emitting non-canonical or repaired JSON) is
       kept verbatim because that is exactly where byte fidelity matters.
     """
+    from local_operator.memory_privacy import retained_message
+
+    # Also cover direct journal producers/alternate provider payloads that did
+    # not pass through the loop's retained-copy seam. Never mutate execution.
+    message = retained_message(message)
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
     _stamp_audio_discriminants(message, payload)
     _externalize_attachments(payload, attachments)

@@ -143,6 +143,9 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # run exists the reader refuses it (``signal_receipt.covers_run``).
     "runtime-signal.json",
     "inbox.jsonl",
+    # Scoped portable memory is additional to net_memory's incremental ALL-scope
+    # sync. A move must carry it even when memory replication is disabled.
+    "memory-session.jsonl",
     # THE ASK QUEUE'S LOG (``asks/store.ASKS_LOG_NAME``). An ask that is still
     # open when the session is forked, exported or MOVED has to travel with it:
     # the fold is the only record that the question was ever put to the user, and

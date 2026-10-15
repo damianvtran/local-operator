@@ -1282,6 +1282,8 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("run", "<configuration-run>"),
     ("interactivity", "<interactivity>"),
     ("credentials", "<session-credentials>"),
+    ("memory_suggestions", "<memory_suggestions>"),
+    ("memory_hint", "<memory_hint"),
 )
 
 #: The order a block's sections are APPENDED in — the order ``assemble``
@@ -1314,6 +1316,8 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "run": "Configuration run",
     "interactivity": "Interactivity",
     "credentials": "Session credentials",
+    "memory_suggestions": "Memory suggestions (untrusted)",
+    "memory_hint": "Compaction memory",
     "session": "Session state",
 }
 

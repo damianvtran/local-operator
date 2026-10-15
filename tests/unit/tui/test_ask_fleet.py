@@ -1060,14 +1060,21 @@ async def test_a_snapshot_never_tears_down_a_fleet_list_or_card(enabled, isolate
     app = _app()
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
+        # Pilot ticks do not join admission. Priming with None would make the
+        # eventual legitimate session swap compete with the snapshot under test.
+        async with asyncio.timeout(30):  # Deadlock guard, not a startup-speed assertion.
+            for worker in list(app.workers):
+                if worker.group == "session":
+                    await worker.wait()
+        assert app._session is not None, "snapshot fixture requires an admitted session"
         # PRIME THE SWAP DETECTOR FIRST, so only the two teardown checks under
         # test can fire: a session SWAP legitimately collapses the surface (the
         # dock belongs to the conversation), and a fleet surface must be judged
         # against the branches the reviewer named.
         app._ask_session = app._session
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
-        listing = app.query_one(AskQueueList)
+        async with asyncio.timeout(30):
+            listing = await _fleet_list_ready(app, "b1")
         assert app._ask_scope == SCOPE_FLEET
         # The ordinary fleet-door case: nothing outstanding HERE, so the
         # snapshot carries no current-session rows at all.
@@ -1183,7 +1190,7 @@ async def test_a_second_fleet_gesture_is_dropped_and_the_first_engage_survives(
         assert app._ask_in_flight == set()
 
 
-async def _fleet_card_ready(app, pilot, ask_id, waiting):
+async def _fleet_list_ready(app, ask_id, waiting: asyncio.Event | None = None):
     # Pilot turns do not join the off-thread index read or the title lookup.
     # A user cannot pick a row before its list is mounted; a direct Picked
     # message must respect that same affordance. Join ONLY this finite worker,
@@ -1192,13 +1199,33 @@ async def _fleet_card_ready(app, pilot, ask_id, waiting):
     # A fast completed worker can already have left the manager; the mounted
     # row below is authoritative in that case, not the worker registry entry.
     assert len(workers) <= 1, "the fleet load is exclusive"
-    waiting.set()
+    if waiting is not None:
+        waiting.set()
     for worker in workers:
         await worker.wait()
     listing = app._ask_list
-    assert listing is not None and any(row.ask_id == ask_id for row in listing.rows)
+    assert listing is not None and any(
+        row.ask_id == ask_id for row in listing.rows
+    ), f"fleet ask fixture missing expected row: {ask_id}"
     await listing._mounted_event.wait()
     assert listing.is_mounted
+    assert app.query_one(AskQueueList) is listing, "published fleet list must remain attached"
+    return listing
+
+
+async def test_fleet_list_readiness_does_not_hide_a_missing_seed(enabled, isolated_index):
+    # Joining publication must not turn an empty/wrong index into a passing
+    # snapshot fixture: the expected row is still a hard precondition.
+    app = _app()
+    async with app.run_test(size=(130, 30)):
+        app.action_open_fleet_asks()
+        with pytest.raises(AssertionError, match="fleet ask fixture missing expected row: b1"):
+            async with asyncio.timeout(30):
+                await _fleet_list_ready(app, "b1")
+
+
+async def _fleet_card_ready(app, pilot, ask_id, waiting):
+    await _fleet_list_ready(app, ask_id, waiting)
     app.on_ask_queue_list_picked(AskQueueList.Picked(ask_id))
     assert app._ask_card is not None, "the row's card must mount"
     await app._ask_card._mounted_event.wait()
