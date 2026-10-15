@@ -396,6 +396,16 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "revoked": 300_000,
     "epoch_stale": 0,
     "grant_invalid": 300_000,
+    # A grant DERIVED from a signed approval (``reconcile``) was refused because the
+    # owner's actual login is not what the approval covers (or no longer is). Only a
+    # re-login as the approved account, or a new approval, on the OWNER can change
+    # it, so it is cached like ``grant_invalid`` rather than re-asked per command.
+    "scope_mismatch": 300_000,
+    "scope_unknown": 300_000,
+    "consent_withdrawn": 300_000,
+    # The owner could not READ what the decision needs (auth.db locked, approval store
+    # unreadable). Momentary by nature: honour the owner's retry hint, default short.
+    "consent_unverifiable": 0,
     "refresh_failed": 0,
     "quota_blocked": 0,
     "interactive_required": 300_000,

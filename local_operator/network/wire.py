@@ -114,11 +114,22 @@ LOCAL_PREFIX_LEN = 4  # uint32_be length prefix on every record
 #: Advertised together with its receiver and sender: an old peer negotiates
 #: neither and receives no lifecycle kinds; its finite-grant path is unchanged.
 CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
+#: The consent reconciler's placement PUSH (``credentials/reconcile.py``). A DISTINCT
+#: feature from the lifecycle one on purpose: ``credential-lifecycle-v1`` shipped in
+#: v0.71.3 with no handler for ``net_broker kind=placement origin=consent_reconcile``,
+#: so a peer that negotiated only the lifecycle string answers the push with a
+#: not-implemented refusal (brokerless) or merges it through the legacy, unvalidated
+#: pull path (broker present). The owner therefore sends the push only when BOTH ends
+#: advertised THIS string, and it is advertised only by builds that ship the handler
+#: (``reconcile.member_placement_push``). Never reuse a shipped capability string for
+#: a new frame kind.
+CREDENTIAL_PLACEMENT_PUSH_V1 = "credential-placement-push-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
     "credential-broker-v1",
     CREDENTIAL_LIFECYCLE_V1,
+    CREDENTIAL_PLACEMENT_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
