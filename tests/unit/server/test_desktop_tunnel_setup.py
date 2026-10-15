@@ -488,4 +488,9 @@ async def test_deadline_drains_before_504_and_retry(desktop, upstream, monkeypat
     assert response.status_code == 504 and response.json()["detail"]["code"] == "setup_deadline"
     assert app.state.tunnel_setup_task is None
     assert len(upstream.installs) == 1
+    # The tiny deadline exists only to force the first 504. The retry must prove the
+    # drained lock is reusable, so it gets a generous one: under 0.02 s a slow CI
+    # runner can push the retry itself past the deadline and answer 504 (flaked on
+    # CI run 38664322352) without any production defect.
+    monkeypatch.setattr(routes, "RUN_DEADLINE_S", 30)
     assert (await client.post(PATH, json={"action": "run", "credential_id": 17})).status_code == 200
