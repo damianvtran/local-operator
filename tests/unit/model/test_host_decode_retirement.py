@@ -850,3 +850,43 @@ async def test_await_window_covers_mixed_output_not_prefill_or_trailers(clock: F
     async for _ in stream._record_stream(_request(), scripted()):
         clock.advance(60)  # all consumer processing excluded
     assert stream._provider_host_rate[MODEL]["Mixed"] == pytest.approx(1000, rel=0.001)
+
+
+@pytest.mark.asyncio
+async def test_iterator_acquisition_failure_cleans_up_child_request(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C3: acquiring an injected iterator can fail before its first await. The
+    child counter and final bookkeeping must unwind just as for anext failures;
+    otherwise the parent believes a child model request is active forever."""
+    parent, _ = _stream()
+    child = parent.fork("s-acquisition-failure")
+    failure = RuntimeError("scripted iterator acquisition failure")
+    records: list[dict[str, Any]] = []
+
+    def record(*args: Any, **kwargs: Any) -> None:
+        records.append({"ok": args[3], **kwargs})
+
+    monkeypatch.setattr(child, "_record_usage", record)
+
+    class BrokenIterator:
+        def __aiter__(self) -> AsyncIterator[StreamEvent]:
+            assert parent._descendant_request_counter.count == 1
+            raise failure
+
+        async def __anext__(self) -> StreamEvent:
+            raise AssertionError("acquisition failure must precede iteration")
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            async for _ in child._record_stream(_request(), BrokenIterator()):
+                pytest.fail("broken iterator must not yield")
+        assert raised.value is failure
+        assert parent._descendant_request_counter.count == 0
+        assert not parent.child_model_requests_in_flight
+        assert len(records) == 1
+        assert records[0]["ok"] is False
+        assert records[0]["outcome"] == "RuntimeError"
+    finally:
+        await child.close()
+        await parent.close()

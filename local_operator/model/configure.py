@@ -6770,8 +6770,11 @@ class SessionStreamFn:
         provider_wait_s = 0.0
         provider_decode_s = 0.0
         provider_output_started = False
-        upstream = stream.__aiter__()
         try:
+            # Iterator acquisition is injectable and can itself raise (C3).
+            # Protect it too, so child-work accounting and final bookkeeping
+            # unwind before the exception propagates, just as for anext failures.
+            upstream = stream.__aiter__()
             while True:
                 wait_started = time.monotonic() if measure_host_speed else 0.0
                 try:
