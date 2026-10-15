@@ -46,6 +46,45 @@ every scope independently. A **Dangerously allow all websites** switch in
 Settings skips the prompt entirely; it requires a confirmed dialog and is
 off by default.
 
+## Reading a refused ownership recovery
+
+A resumed session re-registers its scope with each host through `owner_recover`,
+and the host refuses unless the scope it holds is stamped with the caller's
+current generation, its immediate predecessor, or a member of the replay chain
+the caller sends. A refusal used to say only "browser owner generation is
+stale", for two facts that need opposite handling: the stored scope belongs to a
+**different session**, or it is this session's own scope at a generation the
+caller never listed.
+
+The refusal now also carries a receipt of booleans and counts, rendered as
+`(peer receipt: ...)`:
+
+| Field | Meaning |
+| --- | --- |
+| `session_match` | the stored owner session is the requesting session; when `false` nothing else is reported |
+| `request_ancestry_count`, `request_previous_supplied` | how much ancestry the caller sent (its own input, echoed as numbers) |
+| `allocations_total`, `_live`, `_pending`, `unknown_reservations` | the scope's tabs, by state; counted, never named |
+
+`session_match=true` with the stored generation absent from what was sent means
+the ancestry was behind. It carries no proof, session, generation, allocation
+id, tab handle or URL: a refusal is shown to the model and logged, and a holder
+of the proof but not of the session must not be able to size a scope it does not
+own. The refusal mutates nothing.
+
+**This is a diagnosis, not a repair, and it is deliberately not an automatic
+one.** If the ancestry was already lost (a record written before replay chains
+carried every generation), no later release can reconstruct it: the only
+evidence of which generation the host stamped lives in the host, and guessing it
+would mean rotating the proof or loosening the fence, which strands tabs the
+host still holds or lets another session reach them. The session never
+retries, rotates a proof or abandons an existing tab on the strength of this
+receipt. A peer that predates it omits the field and keeps the old message,
+which stays an explicit ambiguous refusal and not a reason to update.
+
+The receipt exists only in an extension built from this source. An extension
+already installed keeps refusing bare until it is updated and reloaded, which is
+an operator action.
+
 ## Actions
 
 The non-cmux hosts answer the same 22 wire methods; cmux can serve a subset, and
