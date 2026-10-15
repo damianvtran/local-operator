@@ -126,7 +126,7 @@ class _OneShotServer:
             return
         connection.settimeout(3)
         try:
-            data = connection.recv(65536)
+            data = self._read_one_request(connection)
             self.received.append(data)
             if self.mode == "sleep":
                 # Say nothing until the CLIENT gives up (its read timeout
@@ -149,12 +149,93 @@ class _OneShotServer:
             connection.close()
             self._server.close()
 
+    @staticmethod
+    def _read_one_request(connection: socket.socket) -> bytes:
+        """Read ONE HTTP request: its headers, then its declared body.
+
+        A single ``recv`` is not a request. TCP may deliver only the request
+        HEADERS in the first segment and the body in a later one, so reading
+        once and then acting on the mode leaves unread bytes in the buffer --
+        the close below then resets the connection, and the ``sleep`` arm sees
+        an RST *before* its read deadline instead of the read timeout it exists
+        to produce (review round 5 C3; deterministic under a header/body split,
+        not merely a load artifact). Draining ``Content-Length`` first makes the
+        fixture behave the same however the kernel segments the request.
+
+        ``Content-Length`` is the only framing these tests send (``requests``
+        never uses chunked encoding for a JSON body of this size); an absent or
+        unparsable header simply ends the read, so a malformed probe cannot
+        hang the helper.
+        """
+
+        buffer = b""
+        while b"\r\n\r\n" not in buffer:
+            chunk = connection.recv(65536)
+            if not chunk:
+                return buffer
+            buffer += chunk
+        head, _, body = buffer.partition(b"\r\n\r\n")
+        declared = 0
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"content-length":
+                declared = int(value.strip() or b"0") if value.strip().isdigit() else 0
+        while len(body) < declared:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            body += chunk
+        return head + b"\r\n\r\n" + body
+
     def close(self) -> None:
         try:
             self._server.close()
         except OSError:
             pass
         self._thread.join(timeout=5)
+
+
+def test_the_fixture_drains_a_body_that_arrives_after_its_headers() -> None:
+    """C3: valid TCP framing may split one request across segments.
+
+    The helper's first ``recv`` can legitimately return only the request
+    HEADERS. If its mode behaviour then runs, it consumes the first body byte
+    and closes with unread bytes in the buffer, so the client gets an RST
+    instead of the mode's intended outcome -- and, for the ``sleep`` arm, an
+    RST *before* its read deadline. The fixture must drain the declared
+    ``Content-Length`` body first. Asserted from the SERVER side so the claim
+    does not depend on client timing.
+    """
+
+    server = _OneShotServer("sleep")
+    try:
+        body = b'{"command": ["x"], "shell": false, "timeout": 1}'
+        headers = (
+            b"POST /execute HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: keep-alive\r\n\r\n"
+        )
+        connection = socket.create_connection(("127.0.0.1", server.port))
+        connection.settimeout(3)
+        try:
+            connection.sendall(headers)
+            # A real client may send the body in a LATER segment; this is valid
+            # framing, not a fault. (A raw socket is used because ``requests``
+            # gives no seam to split one logical request this way.)
+            time.sleep(0.05)
+            connection.sendall(body)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if body in b"".join(server.received):
+                    break
+                time.sleep(0.02)
+        finally:
+            connection.close()
+        recorded = b"".join(server.received)
+        assert body in recorded, f"fixture did not drain the body: {len(recorded)} bytes"
+        assert b"POST /execute" in recorded
+    finally:
+        server.close()
 
 
 def test_a_refused_connection_is_not_sent_and_names_its_kind() -> None:
