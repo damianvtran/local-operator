@@ -121,7 +121,7 @@ def _session(tmp_path, requests):
 async def test_store_failure_never_aborts_the_provider_request(
     tmp_path, monkeypatch, caplog, failure
 ):
-    requests: list = []
+    requests: list[object] = []
     session, root, transcript = _session(tmp_path, requests)
     seed = MemoryStore(root, MemoryIdentity("tail-session"), transcript.directory, origin="d")
     seed.put("global", {"title": "Mercury deployment", "body": "Mercury deploy docs/m.md"})
@@ -199,7 +199,9 @@ async def test_real_tool_path_refuses_zero_width_ssn_without_a_database(tmp_path
     if path == "edit":
         args = {"path": "memory://global/abc", "old_text": "rev", "new_text": args["content"]}
     result = await execute_memory("c1", path, args, context)
-    assert result.is_error and "Sensitive value refused" in result.content[0].text
+    assert result.is_error and "Sensitive value refused" in str(
+        getattr(result.content[0], "text", "")
+    )
     assert not (root / "memory").exists()
 
 
@@ -259,8 +261,8 @@ async def test_single_slash_memory_path_is_refused_and_creates_no_file(tmp_path,
     from local_operator.tools.builtin import execute_write
 
     monkeypatch.chdir(tmp_path)
-    result = await execute_write("w", {"path": "memory:/x", "content": "{}"}, context=None)
+    result = await execute_write("w", {"path": "memory:/x", "content": "{}"}, None, None, None)
     assert result.is_error
-    assert "memory://" in result.content[0].text
+    assert "memory://" in str(getattr(result.content[0], "text", ""))
     assert not (tmp_path / "memory:").exists()
     assert not list(tmp_path.iterdir())

@@ -498,6 +498,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         2,
     ),
     (
+        "local_operator/memory.py::MemoryStore.connection",
+        "<path>.unlink",
+        # Removes the memory.db / -wal / -shm FILES of a store whose schema never
+        # completed on THIS call, under <config>/memory/ — a fixed-basename file set
+        # beside the database, never a directory and never anything under sessions/.
+        "Removes this call's own half-created memory.db* files under <config>/memory/",
+    ),
+    (
         "local_operator/network/store.py::_stage_private",
         "os.replace",
         "The package's one staged 0600 write of a network-store FILE under "
