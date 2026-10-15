@@ -8405,9 +8405,9 @@ def _scratchpad_target(
     file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
     silent write to the directory's own path.
 
-    ``size`` is the payload's length in bytes for the caller that has one
-    (``write``); it is optional because ``edit`` sees only its hunks and so is
-    judged on the name alone.
+    ``size`` is the payload's length in bytes when it is already known.
+    ``edit`` does its address/name preflight here, then checks the computed
+    payload under its file transaction before any mutation.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -9857,16 +9857,29 @@ async def execute_edit(
     # same load: file IO plus pure-Python matching and difflib over the whole
     # file. Keeping that work on the Textual loop merely moved the reported
     # freeze from the old one-hunk path into the new implementation.
-    outcome = await asyncio.to_thread(
-        _edit_file_result, path, hunks, params.anchor_line, params.path
-    )
+    is_scratchpad = _has_scratchpad_scheme(url)
+    try:
+        if is_scratchpad:
+            outcome = await asyncio.to_thread(
+                _edit_file_result,
+                path,
+                hunks,
+                params.anchor_line,
+                params.path,
+                scratch_root=_scratchpad_root(context),
+            )
+        else:
+            outcome = await asyncio.to_thread(
+                _edit_file_result, path, hunks, params.anchor_line, params.path
+            )
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, "edit", str(exc))
     if isinstance(outcome, str):
         return _error(tool_call_id, "edit", outcome)
     total_replacements, details = outcome
     # The URL is echoed for a scratchpad file so the result text reads as the
     # address the agent used, followed by where it landed
     # (see ``_scratchpad_address``).
-    is_scratchpad = _has_scratchpad_scheme(url)
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
@@ -9886,10 +9899,14 @@ def _edit_file_result(
     hunks: list[EditHunk],
     anchor_line: int | None,
     caller_path: str = "",
+    *,
+    scratch_root: Path | None = None,
 ) -> tuple[int, dict[str, Any]] | str:
     """Serialize one file transaction across parent/child AgentLoops."""
     with _file_transaction(path):
-        return _edit_file_result_locked(path, hunks, anchor_line, caller_path)
+        return _edit_file_result_locked(
+            path, hunks, anchor_line, caller_path, scratch_root=scratch_root
+        )
 
 
 def _edit_file_result_locked(
@@ -9897,6 +9914,8 @@ def _edit_file_result_locked(
     hunks: list[EditHunk],
     anchor_line: int | None,
     caller_path: str = "",
+    *,
+    scratch_root: Path | None = None,
 ) -> tuple[int, dict[str, Any]] | str:
     """The current multi-hunk edit engine, synchronous for ``to_thread``.
 
@@ -10067,6 +10086,13 @@ def _edit_file_result_locked(
         )
 
     if current != original:
+        if scratch_root is not None:
+            # Hunks do not reveal the final payload size: the early URL/name
+            # check cannot bound growth. Judge the actual UTF-8 result while
+            # this file snapshot is still locked, before truncating anything.
+            # The shared guard already excludes the replaced file, preserving
+            # overwrite-to-fit recovery without counting its old bytes twice.
+            check_scratchpad_write(path, scratch_root, caller_path, len(current.encode("utf-8")))
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
     details = _diff_details(str(path), original, current)
