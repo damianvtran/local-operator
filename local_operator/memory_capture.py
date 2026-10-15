@@ -43,13 +43,17 @@ MEMORY_DEFAULT_ENABLED = True
 _LOCATOR = re.compile(
     # Consume other URI schemes atomically too: ignoring guide:// must not
     # leave its //tail available to the path alternative. A window is <=4096.
-    r"(?<![\w:/])(?P<uri>[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s<>\"'`]{1,4096})"
+    # A label colon (URL:https://...) is punctuation, not a URI tail. Real
+    # scheme:// tokens are consumed by this alternative before their contents.
+    r"(?<![\w/])(?P<uri>[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s<>\"'`]{1,4096})"
     r"|(?<![\w.+-])[\w.+-]{1,64}@[\w.-]{1,255}\.[A-Za-z]{2,24}"
     # A slash inside a ratio, URI or another path is not a new absolute root.
     r"|(?<![\w:/~.-])(?:~?/|\.\.?/|(?:src|docs|tests|local_operator)/)[^\s<>\"'`]{1,400}"
     r"|\bsecret\s{1,8}[A-Z][A-Z0-9_]{2,63}\b|(?<!\w)#[\w-]{2,64}"
     r"|\b(?=[0-9a-f]{7,12}\b)[0-9a-f]*\d[0-9a-f]*\b"
-    r"|(?P<reference>\b(?:branch|thread)(?:\s{0,3}:\s{0,3}|\s{1,3})[\w./-]{3,128})"
+    # The finite bound is a rejection limit, not permission to publish a
+    # prefix of a longer branch/thread identifier into memory or associations.
+    r"|(?P<reference>\b(?:branch|thread)(?:\s{0,3}:\s{0,3}|\s{1,3})[\w./-]{3,128}(?![\w./-]))"
 )
 #: The regex never sees more than this many characters at once. Bounded quantifiers make
 #: each call linear; windowing makes the worst case independent of input size, and lets
