@@ -333,16 +333,35 @@ class HubSyncRunner:
     def _link_policies(self, links: Sequence[Link]) -> dict[str, Any]:
         """Per-link policy for the links that carry a confirmed identity.
 
-        Read FRESH from config so a TUI/CLI policy edit is seen next tick; explicit
+        Read FRESH off disk, not the manager's boot snapshot, so a TUI/CLI/daemon
+        policy edit is seen next tick; explicit
         per-link values win and a link with no stored policy falls back to its kind's
         creation default. Local work only.
         """
         from local_operator.hub_sync import policies as pol
 
-        try:
-            values = self._cm.get_config().values
-        except Exception:  # noqa: BLE001 - a bad read is treated as no explicit policy
-            return {}
+        # FRESH read, not the manager's boot snapshot: a long-lived
+        # ConfigManager holds the config it read at startup, so an explicit
+        # policy written by the CLI/TUI/another daemon would never reach this
+        # gate (observed on the real pass: subscribe=false persisted minutes
+        # before a natural tick, yet the link was still picked and applied).
+        # read_config_values is the same live seam HubSyncSettings.read_fresh
+        # uses; None means a torn read right now, so keep the manager's view
+        # rather than treating it as "everything unset".
+        values = None
+        config_dir = getattr(self._cm, "config_dir", None)
+        if config_dir is not None:
+            try:
+                from local_operator.config import read_config_values
+
+                values = read_config_values(config_dir)
+            except Exception:  # noqa: BLE001 - never lose the gate over a config read
+                values = None
+        if values is None:
+            try:
+                values = self._cm.get_config().values
+            except Exception:  # noqa: BLE001 - a bad read is treated as no explicit policy
+                return {}
         out: dict[str, Any] = {}
         for link in links:
             if not link.link_id:

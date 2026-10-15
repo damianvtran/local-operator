@@ -179,6 +179,63 @@ async def test_a_setting_written_by_another_process_is_read_on_the_next_tick(rig
 
 
 @pytest.mark.asyncio
+async def test_a_policy_written_by_another_process_is_read_on_the_next_tick(rig) -> None:
+    """F1: the per-link POLICY gate is live too, not the manager's boot snapshot.
+
+    The settings half has the test above; the policy half read the long-lived
+    manager's cached config until this regression. Observed on the real
+    acceptance pass: ``subscribe: false`` was persisted five minutes before the
+    next natural tick, and the link was still picked AND auto-applied (the
+    manager never saw the external write; the local text advanced).
+    """
+
+    runner, hub, agents, root, cm, _ = rig
+    row = _drift(agents, hub, root)
+    # A real linked row: the pull stamps hub provenance, and resolving the
+    # source confirms SOURCE+SCOPE and materialises the identity. Its link_id is
+    # what the tick's list_links and the check both carry; the policy below is
+    # stored under that same id, exactly as the CLI writes it.
+    ctx = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=cm,
+        client_for_tenant=lambda _t: hub.client(),
+        credential="ok",
+        agent_registry=agents,
+        resolver=None,
+    )
+    resolved = svc.resolve_source(
+        ctx,
+        kind="agent",
+        name=row.name,
+        hub_source=hub.base_url,
+        visibility="public",
+        tenant_id=None,
+    )
+    assert resolved.identity is not None
+    link_id = resolved.identity.link_id
+    await runner.tick(reason="startup")  # first-run grace: checks, applies nothing
+
+    # A second manager stands in for the CLI / TUI writing config.yml, through
+    # the same call shape the policy writer persists (set_config_value("hub", ...)
+    # with the whole map, under its own lock).
+    ConfigManager(root).set_config_value(
+        "hub", {"links": {link_id: {"subscribe": False, "auto_push": False}}}
+    )
+    report = await runner.tick(reason="timer")
+    assert report.checked == 0, f"a both-off link does no periodic work: {report}"
+    assert report.applied == 0, report
+    assert "Added upstream" not in agents.get_agent_system_prompt(row.id)
+
+    # The live flip back ON is honoured on the next tick, with no restart.
+    ConfigManager(root).set_config_value(
+        "hub", {"links": {link_id: {"subscribe": True, "auto_push": False}}}
+    )
+    report = await runner.tick(reason="timer")
+    assert report.applied == 1, report
+    assert "Added upstream" in agents.get_agent_system_prompt(row.id)
+
+
+@pytest.mark.asyncio
 async def test_route_work_and_the_timer_share_one_lock(rig) -> None:
     """``run_exclusive`` queues behind a running tick instead of racing it."""
 
