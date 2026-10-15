@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import pytest
 
@@ -204,7 +205,7 @@ def test_causal_conflict_retained_and_tombstone_order_independent(store, tmp_pat
     first = store.put("global", fact())
     with store.connection() as db:
         put = store._ops(db, first["id"])[0]
-    second = dict(
+    second: dict[str, Any] = dict(
         put,
         op_id="other-op",
         origin_device="device-b",
@@ -306,13 +307,15 @@ def test_actual_read_write_edit_routes(store):
 
     async def run():
         created = await execute_write(
-            "w", {"path": "memory://session", "content": json.dumps(fact())}, context=context
+            "w", {"path": "memory://session", "content": json.dumps(fact())}, None, None, context
         )
         assert not created.is_error, created
-        item = json.loads(created.content[0].text)
-        shown = await execute_read("r", {"path": "memory://session/" + item["id"]}, context=context)
+        item = json.loads(str(getattr(created.content[0], "text", "")))
+        shown = await execute_read(
+            "r", {"path": "memory://session/" + item["id"]}, None, None, context
+        )
         assert not shown.is_error, shown
-        assert fact()["body"] in shown.content[0].text
+        assert str(fact()["body"]) in str(getattr(shown.content[0], "text", ""))
         changed = await execute_edit(
             "e",
             {
@@ -320,7 +323,9 @@ def test_actual_read_write_edit_routes(store):
                 "old_text": item["version"],
                 "new_text": json.dumps(fact("Corrected through actual edit tool")),
             },
-            context=context,
+            None,
+            None,
+            context,
         )
         assert not changed.is_error, changed
         rejected = await execute_memory(
@@ -330,7 +335,7 @@ def test_actual_read_write_edit_routes(store):
             context,
         )
         assert rejected.is_error
-        assert "123-45" not in rejected.content[0].text
+        assert "123-45" not in str(getattr(rejected.content[0], "text", ""))
 
     asyncio.run(run())
 

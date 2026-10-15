@@ -152,6 +152,7 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
         outcome = await session.compact_now()
         assert outcome.ran
         marker = transcript.latest_entry("compaction")
+        assert marker is not None
         assert await asyncio.to_thread(entered.wait, 2)
         memory = MemoryStore(root, MemoryIdentity("idle-native", "", "main"), transcript.directory)
         assert watermark(memory, marker.id) is None
@@ -160,7 +161,8 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
         pending = list(session._background_tasks)
         if pending:
             await asyncio.wait_for(asyncio.gather(*pending), 3)
-        assert watermark(memory, marker.id)[0] == "ok"
+        assert (state := watermark(memory, marker.id)) is not None
+        assert state[0] == "ok"
         assert before == (len(requests), sum(event.type == "agent_start" for event in events))
         assert memory.search("idle")
         await session.prompt("Deliberate wake instrument control")
@@ -211,7 +213,8 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path):
     pending = list(reopened._background_tasks)
     await asyncio.wait_for(asyncio.gather(*pending), 3)
     memory = MemoryStore(root, MemoryIdentity("restart-session", "", "main"), transcript.directory)
-    assert watermark(memory, marker.id)[0] == "ok"
+    assert (state := watermark(memory, marker.id)) is not None
+    assert state[0] == "ok"
     assert memory.search("recovered")
     assert requests == []
     assert "memory_hint" in await capture.session_tail(reopened)
@@ -293,6 +296,7 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
             outcome = await session.compact_now()
             assert outcome.ran, (strategy, n)
             entry = transcript.latest_entry("compaction")
+            assert entry is not None
             markers.append(entry.id)
             # Control that the arms really differ: snapcompact's summary is the
             # deterministic archive (no model text); context-full is model-written.
@@ -367,6 +371,7 @@ async def test_cancelled_capture_is_retried_at_the_next_boundary_without_a_resta
             await session.prompt(f"Round {m} see docs/cancel.md " + "detail " * 35)
         assert (await session.compact_now()).ran
         marker = transcript.latest_entry("compaction")
+        assert marker is not None
         for task in list(session._background_tasks):
             try:
                 await asyncio.wait_for(task, 5)
