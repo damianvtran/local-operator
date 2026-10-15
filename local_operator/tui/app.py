@@ -20101,6 +20101,51 @@ class OperatorApp(App[None]):
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
+    def _cmd_memory(self, arg: str, notice: NoticeFn) -> None:
+        """Human local inspection uses the CLI's optimistic/confirmation runner.
+
+        Like /project list this renders a durable reading receipt. It does not
+        enqueue a model turn or wake an idle owner; correction uses a displayed
+        revision and forgetting requires the explicit --yes token.
+        """
+        from local_operator.memory import MemoryIdentity
+        from local_operator.memory_cli import run
+        from local_operator.paths import config_dir
+
+        session = self._session
+        builder = getattr(session, "_build_tool_context", None)
+        context = builder() if callable(builder) else None
+        identity = MemoryIdentity(
+            context.session_id if context else str(getattr(session, "session_id", "") or ""),
+            context.team_id if context else "",
+            context.agent_id if context else "",
+        )
+        root = (
+            Path(context.memory_config_dir)
+            if context and context.memory_config_dir
+            else config_dir()
+        )
+        directory = Path(context.session_dir) if context and context.session_dir else None
+
+        loading = NoticeBlock("Memory\nReading…", "info")
+        self._append_block(loading)
+
+        async def inspect_memory() -> None:
+            text, failed = await asyncio.to_thread(
+                run,
+                arg,
+                config=root,
+                identity=identity,
+                session_dir=directory,
+            )
+            from local_operator.memory_cli import render_human
+
+            loading.restate(
+                "Memory\n" + render_human(text, failed), "warning" if failed else "info"
+            )
+
+        self.run_worker(inspect_memory(), exclusive=False, exit_on_error=False)
+
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
         """``/project`` — the operator's own verbs over THIS machine's store.
 
@@ -39524,6 +39569,8 @@ class OperatorApp(App[None]):
             self._cmd_aida(arg, notice, attachments)
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
+        elif command == "/memory":
+            self._cmd_memory(arg, notice)
         elif command == "/project":
             # Every reserved verb runs (slice 3); `_cmd_project` owns the
             # branch so a registered command always has a TUI path.

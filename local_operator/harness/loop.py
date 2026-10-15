@@ -861,6 +861,12 @@ def _tool_start_event(
     ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
     move a counter that is already running.
     """
+    if tool_name in ("read", "write", "edit"):
+        from local_operator.memory_privacy import retained_arguments
+
+        args, _, masked = retained_arguments(tool_name, args)
+        if masked:
+            intent = "Inspecting scoped memory"
     return ToolExecutionStartEvent(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
@@ -1387,6 +1393,11 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     that check is not in play — but returning a copy unconditionally would leave
     a refused turn in history the moment one of them grew a call.
     """
+    # The executor still holds the original assistant/calls. Only the retained
+    # copy changes, following this function's existing secret-argument contract.
+    from local_operator.memory_privacy import retained_message
+
+    message = retained_message(message)
     if redact is None or not message.tool_calls:
         return message
     calls: list[ToolCall] = []
@@ -2054,7 +2065,9 @@ class AgentLoop:
                             # continued turn streams prose. Every other continuing
                             # path in this loop reaches a TurnEndEvent; this one
                             # must too.
-                            yield TurnEndEvent(message=assistant, tool_results=[])
+                            yield TurnEndEvent(
+                                message=_scrub_history_arguments(assistant, None), tool_results=[]
+                            )
                             # The notice states what HAS happened, not what is
                             # hoped for, and it is WRITTEN FOR BOTH FAMILIES the
                             # branch serves: our own connection dying, and a
@@ -2348,7 +2361,9 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                         )
-                        yield TurnEndEvent(message=assistant, tool_results=[])
+                        yield TurnEndEvent(
+                            message=_scrub_history_arguments(assistant, None), tool_results=[]
+                        )
                         yield AgentEndEvent(
                             messages=new_messages,
                             aborted=aborted,
@@ -2741,14 +2756,20 @@ class AgentLoop:
                         # request, and the reply to it, on a turn the user
                         # stopped: the stop would read as "it kept going, and
                         # then answered".
-                        yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                        yield TurnEndEvent(
+                            message=_scrub_history_arguments(assistant, None),
+                            tool_results=tool_results,
+                        )
                         yield AgentEndEvent(
                             messages=new_messages, aborted=True, generation=generation
                         )
                         self._discard_pending_custom(pending)
                         return
 
-                    yield TurnEndEvent(message=assistant, tool_results=tool_results)
+                    yield TurnEndEvent(
+                        message=_scrub_history_arguments(assistant, None),
+                        tool_results=tool_results,
+                    )
                     fingerprint = _error_batch_fingerprint(assistant.tool_calls, tool_results)
                     repeated_error_batches = (
                         repeated_error_batches + 1
@@ -3110,7 +3131,14 @@ class AgentLoop:
         attempted_selector: "ModelSpec | None" = None
 
         yield TurnStartEvent()
-        yield MessageStartEvent(message=assistant)
+        # The executing assistant is mutable. An already-published start must
+        # not gain raw memory arguments later by sharing that same object; the
+        # final event carries the guarded call copy once its scope is known.
+        yield MessageStartEvent(
+            message=assistant.model_copy(
+                update={"tool_calls": None, "provider_payload": None},
+            )
+        )
 
         try:
             # Resolve every live session setting at the LAST safe point after
@@ -3266,7 +3294,12 @@ class AgentLoop:
                     )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
-                    yield MessageUpdateEvent(message=assistant, delta=event.delta)
+                    yield MessageUpdateEvent(
+                        message=assistant.model_copy(
+                            update={"tool_calls": None, "provider_payload": None}
+                        ),
+                        delta=event.delta,
+                    )
                 elif isinstance(event, StreamReasoningDelta):
                     # The model is THINKING, and the user can see it from here.
                     #
@@ -3699,7 +3732,9 @@ class AgentLoop:
         except ImportError:
             pass
 
-        yield MessageEndEvent(message=assistant)
+        from local_operator.memory_privacy import retained_message
+
+        yield MessageEndEvent(message=retained_message(assistant))
         yield _ModelTurnResult(
             message=assistant,
             stop_reason=stop_reason,
@@ -4032,6 +4067,20 @@ class AgentLoop:
         # `intent_is_injected` is what keeps this from stealing a real
         # argument: an MCP server that declares its own `i` never had ours
         # injected, so its value is left in `args` and forwarded.
+        # Refuse recognised sensitive memory values BEFORE a schema validator
+        # can quote an invalid value in its diagnostic. Keep the original call
+        # for this guard/executor; history/events alone receive redacted copies.
+        from local_operator.memory_privacy import retained_arguments
+
+        _, _, sensitive_memory = retained_arguments(call.name, call.arguments, call.raw_arguments)
+        if sensitive_memory:
+            return _PlannedCall(
+                call=call, tool=tool,
+                failure=self._synthetic_result(
+                    call, "Sensitive value refused. Use lop secret; memory may hold its NAME only.",
+                    details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                ),
+            )
         args = dict(call.arguments)
         intent: str | None = None
         if INTENT_FIELD in args and intent_is_injected(tool.parameters):

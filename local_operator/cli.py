@@ -291,6 +291,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
+    # Human inspection shares the TUI runner, not the model tool schema.
+    from local_operator.memory_cli import configure_parser as configure_memory_parser
+
+    memory_parser = subparsers.add_parser("memory", help="Inspect and correct scoped memory")
+    configure_memory_parser(memory_parser)
     # Credential command
     credential_parser = subparsers.add_parser(
         "credential",
@@ -14771,6 +14776,10 @@ def main() -> int:
         # override. It is now created lazily by the paths that actually run a
         # task (session/exec/serve start), through paths.ensure_agent_home_dir.
 
+        if args.subcommand == "memory":
+            from local_operator.memory_cli import main as memory_main
+
+            return memory_main(args)
         if args.subcommand == "credential":
             if args.credential_command == "update":
                 return credential_update_command(args)
