@@ -220,9 +220,9 @@ async def test_host_denial_prevents_the_named_tool_from_writing(tmp_path):
 
 def test_scope_schema_defines_lifetimes_instead_of_bare_enum():
     docs = build_memory_tool().parameters["properties"]["scope"]["description"]
-    assert "session=this conversation" in docs
-    assert "global=future sessions" in docs
-    assert "team/agent=shared work/profile" in docs
+    assert "session=work state" in docs
+    assert "global=user facts/future sessions" in docs
+    assert "team/agent=role knowledge" in docs
 
 
 @pytest.mark.asyncio

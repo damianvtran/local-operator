@@ -36,6 +36,28 @@ from local_operator.supplements.denylist import is_sensitive
 SESSION_EXPORT_NAME = "memory-session.jsonl"
 SCOPES = ("global", "session", "team", "agent")
 DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
+# One protocol definition shared by publication, execution and pre-journal retention.
+# Valid JSON is insufficient: a rejected scalar/list/unknown key can itself contain
+# an opaque credential that no named text-field guard ever inspects (R6 residual).
+MEMORY_TOOL_OPS = ("store", "recall")
+MEMORY_TOOL_SCOPES = ("session", "team", "agent", "global")
+MEMORY_TOOL_REQUIRED = ("op", "scope", "text")
+
+
+def valid_memory_tool_arguments(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(MEMORY_TOOL_REQUIRED).issubset(value)
+        and not set(value) - {*MEMORY_TOOL_REQUIRED, "i"}
+        and isinstance(value["op"], str)
+        and value["op"] in MEMORY_TOOL_OPS
+        and isinstance(value["scope"], str)
+        and value["scope"] in MEMORY_TOOL_SCOPES
+        and isinstance(value["text"], str)
+        and ("i" not in value or isinstance(value["i"], str))
+    )
+
+
 ITEM_TOKENS = 256
 ITEM_BYTES = 8192
 RECALL_TOKENS = 1200

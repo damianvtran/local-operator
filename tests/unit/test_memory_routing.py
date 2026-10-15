@@ -7,6 +7,7 @@ not a duplicate matcher or a forced provider tool choice.
 
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.session_factory import (
     _KnowledgeHooks,
     _memory_recommendation,
@@ -56,3 +57,108 @@ async def test_no_memory_intent_stays_quiet(query):
     assert "guide://memory" not in await _select_knowledge_block(
         _KnowledgeHooks(), query, task_id="negative-user"
     )
+
+
+PERSONAL_SAVE_PROMPT = (
+    "Please remember a few things about me so you can help me later: my name is Elara Venn, "
+    "I live in Dunedin, New Zealand, and my email address is elara.venn@example.invalid."
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        PERSONAL_SAVE_PROMPT,
+        "Remember my email is user@example.invalid",
+        "Store where I live: a coastal town",
+        "Retain things about me for later",
+    ],
+)
+async def test_personal_first_save_routes_without_bank_or_classifier(query):
+    assert "guide://memory" in await _select_knowledge_block(
+        _KnowledgeHooks(), query, task_id="personal"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Remember the SQL memory profile implementation",
+        "Store my email parser code",
+        "Save the address validation schema",
+        "Remember my name field validation implementation",
+        "How do I profile RAM usage?",
+        "Fix the user profile implementation",
+    ],
+)
+async def test_technical_personal_word_neighbors_do_not_route(query):
+    assert "guide://memory" not in await _select_knowledge_block(
+        _KnowledgeHooks(), query, task_id="technical"
+    )
+
+
+@pytest.mark.asyncio
+async def test_personal_message_reaches_native_provider_recording_with_classification_off(
+    tmp_path,
+):
+    """No paid provider: record the actual factory-built Session request, not a hint helper.
+
+    Shipped recommendation delivery is allowed at the tail; the frozen system prefix
+    must remain byte-identical and no first-save bank can be needed to recommend it.
+    """
+    import argparse
+    import json
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from local_operator.session.runtime.publication import PublicationGate
+    from local_operator.session.session import Session
+    from local_operator.session_factory import create_session
+
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "config.yml").write_text(json.dumps({"values": {"classification": {"auto": False}}}))
+    requests = []
+    session = await create_session(
+        argparse.Namespace(
+            hosting="test",
+            model="test-model",
+            agent_name=None,
+            agent_id=None,
+            yolo=True,
+            train=False,
+        ),
+        ConfigManager(root),
+        AgentRegistry(root),
+        cwd=str(tmp_path),
+        world_root=tmp_path,
+        has_ui=False,
+        defer_mcp_wiring=True,
+        mcp_publication_gate=PublicationGate(),
+    )
+
+    def recording(request, signal):
+        requests.append(request.model_copy(deep=True))
+
+        async def events():
+            yield StreamTextDelta(delta="Recorded")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    assert isinstance(session, Session)
+    session._stream_fn = recording
+    try:
+        await session.prompt("Hello")
+        assert not (root / "memory").exists()
+        await session.prompt(PERSONAL_SAVE_PROMPT)
+        assert len(requests) == 2
+        assert "guide://memory" in requests[-1].model_dump_json()
+        assert requests[0].system_blocks == requests[1].system_blocks
+        assert not (
+            root / "memory"
+        ).exists(), "zero-provider first-save routing never creates a store"
+    finally:
+        await session.dispose()

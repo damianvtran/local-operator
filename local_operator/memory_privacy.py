@@ -56,9 +56,11 @@ def retained_arguments(
 ) -> tuple[Any, str | None, bool]:
     if not is_memory(name, arguments):
         return arguments, raw, False
-    from local_operator.memory import MemoryError, guard
+    from local_operator.memory import MemoryError, guard, valid_memory_tool_arguments
 
     try:
+        if name == "memory" and not valid_memory_tool_arguments(arguments):
+            raise MemoryError("Invalid memory argument shape is not retained.")
         guard_encoded(arguments)
         if raw is not None:
             # A streamed call may end inside a JSON escape/token, before a value
@@ -68,7 +70,9 @@ def retained_arguments(
             # alternate journal/event/provider-payload carrier (R6/Q9).
             if raw.strip():
                 try:
-                    json.loads(raw)
+                    decoded = json.loads(raw)
+                    if name == "memory" and not valid_memory_tool_arguments(decoded):
+                        raise MemoryError("Invalid raw memory argument shape is not retained.")
                 except (ValueError, TypeError):
                     raise MemoryError("Unparseable memory arguments are not retained.") from None
             guard_encoded(raw)
