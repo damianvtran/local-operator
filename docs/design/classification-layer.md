@@ -526,6 +526,37 @@ line of context, not a wrong action.
 Degradation: if the classifier is disabled, unavailable, timed out or returned nothing, the
 block is empty and the prompt is byte-identical to today's. This is asserted by a test.
 
+### Channel accounting (2026-10-14)
+
+The service now emits into the session's existing `classification` channel through
+`Session.record_channel_spend`, bound after session construction by
+`session_factory.attach_classification_spend`. Both public service methods use
+`_call_cascade` → `_metered_decide`: message recommendations, monitor checks,
+title-fit checks and the two supplements questions share this accounting point.
+No decision is routed through the chat SDK or recorded as an inference request.
+
+One channel record describes one **leg attempt**, not the whole cascade. Its
+`units`/`unit` count actual HTTP POST attempts (`calls`), including credential
+re-sends inside a leg. This avoids hiding fallback requests behind the winning
+vendor's receipt. The counter is task-local because the shared service can answer
+concurrent questions. Cache hits, disabled classification and credential-only
+resolution produce no records. A service without a bound session sink is a no-op.
+
+A successful `usage.cost` is recorded as reported micro-USD (explicit zero stays
+zero); absent cost is **unknown**, never zero. A refused request is `failed` under
+the channel ledger's existing unbilled-failure presumption. Timeout/cancellation
+and a response lost after sending are `cancelled` with an unknown amount, so their
+attempts remain countable and their possible charge is not presented as free.
+An unusable 200 is `ok` with an unknown amount because the vendor served it.
+Radient figures are `server_reported`; third-party figures are `provider_reported`.
+These rows persist/replay through the same journal fold as other channel spend,
+and the shared published object supplies TUI, desktop and phone usage surfaces.
+
+This is observation, **not budget admission**: it does not enforce a spend cap or
+recover historical classifications made before this emitter existed. Nor does a
+cancelled row assert that the vendor charged; it states that no charge is known.
+No new await or network hop is added to the turn's `waitMs` path.
+
 ## 8. Configuration keys
 
 All under `values.classification` (`Section` scoped to new sessions, since the service is built
