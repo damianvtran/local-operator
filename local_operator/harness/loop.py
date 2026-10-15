@@ -3756,7 +3756,7 @@ class AgentLoop:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
                     arguments = parsed
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 # Leave arguments empty; validation reports the bad JSON. The
                 # warning is the ONE record of where a replay-salvaged fragment
                 # was born: from here on ``_replayable_tool_arguments`` salvages
@@ -3766,13 +3766,15 @@ class AgentLoop:
                 # -- is invisible. Seen live: an audit could count 221 salvage
                 # lines for 8 calls and still not say when or why the fragments
                 # formed.
+                # This runs BEFORE retained-copy redaction. Never log a raw
+                # prefix or the provider-controlled name: either can carry a
+                # credential, even when the incomplete JSON cannot be decoded.
                 logger.warning(
                     "tool call assembled from streamed deltas does not parse "
-                    "(%d bytes, starts %r, name %r); arguments stay empty, raw "
-                    "kept for replay",
-                    len(raw),
-                    raw[:80],
-                    state["name"] or None,
+                    "(%d bytes, JSON position %d); arguments stay empty, raw "
+                    "kept privately for execution/replay",
+                    len(raw.encode("utf-8")),
+                    exc.pos,
                 )
                 pass
         call = ToolCall(name=state["name"], arguments=arguments, raw_arguments=raw or None)

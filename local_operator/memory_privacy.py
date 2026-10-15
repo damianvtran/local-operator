@@ -61,6 +61,16 @@ def retained_arguments(
     try:
         guard_encoded(arguments)
         if raw is not None:
+            # A streamed call may end inside a JSON escape/token, before a value
+            # can be inspected. Known memory calls fail CLOSED for retention;
+            # the private call still carries the exact original execution input.
+            # Decoding failure must not turn escaped IDs or opaque text into an
+            # alternate journal/event/provider-payload carrier (R6/Q9).
+            if raw.strip():
+                try:
+                    json.loads(raw)
+                except (ValueError, TypeError):
+                    raise MemoryError("Unparseable memory arguments are not retained.") from None
             guard_encoded(raw)
     except MemoryError:
         safe: dict[str, Any] = {"memory_arguments_redacted": True}

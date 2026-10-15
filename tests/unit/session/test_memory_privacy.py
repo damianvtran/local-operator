@@ -20,7 +20,8 @@ from local_operator.tools.builtin import build_write_tool
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["file", "memory", "bad-op", "missing-op", "bad-scope", "unknown-field"]
+    "mode",
+    ["file", "memory", "bad-op", "missing-op", "bad-scope", "missing-scope", "unknown-field"],
 )
 @pytest.mark.parametrize(
     "label,fragment",
@@ -52,6 +53,8 @@ async def test_real_session_refuses_without_journal_index_or_diagnostic_residue(
             del args["op"]
         elif mode == "bad-scope":
             args["scope"] = "another-owner"
+        elif mode == "missing-scope":
+            del args["scope"]
         elif mode == "unknown-field":
             args["unknown"] = fragment
     original = json.dumps(args)

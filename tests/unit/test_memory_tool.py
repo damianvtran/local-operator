@@ -249,3 +249,54 @@ async def test_explicit_global_store_is_recalled_by_a_fresh_identity_without_sco
         "h", {"op": "recall", "scope": "session", "text": "Private session note"}, context=second
     )
     assert not hidden.is_error and "Private session note" not in str(hidden.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cwd_kind", ["repo", "scratch", "neutral"])
+@pytest.mark.parametrize(
+    "locator", ["docs/.env", "deploy/kubeconfig-prod", "config/token.txt", "C:/.ssh/id_rsa"]
+)
+async def test_relative_sensitive_paths_refused_by_actual_store_and_capture_in_each_cwd(
+    tmp_path, monkeypatch, cwd_kind, locator
+):
+    from pathlib import Path
+
+    from local_operator.memory_capture import extract
+
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    cwd = (
+        root
+        if cwd_kind == "scratch"
+        else Path("/") if cwd_kind == "neutral" else Path(__file__).resolve().parents[2]
+    )
+    monkeypatch.chdir(cwd)
+    context = ToolContext(session_id="paths", memory_config_dir=str(root))
+    result = await execute_fact_memory(
+        "unsafe", {"op": "store", "scope": "global", "text": "Read " + locator}, context=context
+    )
+    assert result.is_error
+    assert not (root / "memory").exists(), "refusal precedes every DB/index/oplog write"
+    assert extract("Read " + locator) == [], "automatic capture uses the same path guard"
+    good = await execute_fact_memory(
+        "url",
+        {"op": "store", "scope": "global", "text": "Runbook https://example.invalid/runbook"},
+        context=context,
+    )
+    assert not good.is_error
+    assert any(
+        row["body"] == "https://example.invalid/runbook"
+        for row in extract("https://example.invalid/runbook")
+    )
+    # A URL carrying credential material still uses the credential-shape guard.
+    bad_url = await execute_fact_memory(
+        "credential-url",
+        {
+            "op": "store",
+            "scope": "global",
+            "text": "https://operator:synthetic-pass123@example.invalid/runbook",
+        },
+        context=context,
+    )
+    assert bad_url.is_error
