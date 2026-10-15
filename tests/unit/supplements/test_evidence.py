@@ -176,3 +176,44 @@ def test_labelled_summary_keeps_explicit_vocabulary_and_real_uppercase_acronyms(
         "links": "325",
         "matches": "3194",
     }
+
+
+@pytest.mark.parametrize(
+    "qualifier",
+    [
+        "between 10 and",
+        "up to",
+        "at least",
+        "at most",
+        "about",
+        "roughly",
+        "approximately",
+        "around",
+        "more than",
+        "less than",
+        "fewer than",
+        "greater than",
+        "nearly",
+        "almost",
+        "estimated",
+        "from 10 to",
+    ],
+)
+def test_summary_refuses_entire_qualified_count_bullet(qualifier):
+    # Even with four OTHER exact counts, a qualified count bullet must not be
+    # silently collapsed into the authoritative point-count table.
+    answer = (
+        "- Added 296 comments to 225 profiles, covering 325 links and 3194 matches.\n"
+        f"- Expected {qualifier} 20 comments."
+    )
+    assert ev._labelled_summary(answer) is None
+    assert not ev.extract([], answer).datasets
+
+
+def test_between_ranges_do_not_become_upper_endpoint_counts():
+    answer = (
+        "- Forecast: between 10 and 20 comments, between 30 and 40 profiles, "
+        "between 50 and 60 links, between 70 and 80 matches."
+    )
+    assert ev._labelled_summary(answer) is None
+    assert not ev.extract([], answer).datasets
