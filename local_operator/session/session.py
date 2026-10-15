@@ -75,6 +75,7 @@ from local_operator.compaction.cutpoint import (
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
     build_compaction_marker,
+    marker_details,
     render_compaction_marker,
     replayed_user_message,
     with_capture_elision_frontier,
@@ -18960,14 +18961,17 @@ class Session:
         knob do no elision work at all. A ruler failure is ``None`` too -- the
         band check's posture: it may never fail a pass.
         """
+        return self._wire_band_bytes(compaction_api, plan.settings)
+
+    def _wire_trigger_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """The resolved soft byte trigger, or ``None`` (disabled / unresolvable)."""
         resolve: Any = getattr(compaction_api, "resolve_wire_bytes_trigger", None)
-        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
-        if not callable(resolve) or band is None:
+        if not callable(resolve):
             return None
         try:
-            trigger = resolve(plan.settings)
+            trigger = resolve(settings)
         except Exception:  # noqa: BLE001 — a ruler failure must not fail the pass
-            logger.debug("wire trigger resolution failed; capture elision skipped", exc_info=True)
+            logger.debug("wire trigger resolution failed; wire band skipped", exc_info=True)
             return None
         # isinstance, not int(): a duck-typed resolver can hand back anything,
         # and the narrowing guard keeps a bad ruler value a clean ``None``
@@ -18976,7 +18980,135 @@ class Session:
         # silent coercion this package avoids).
         if not isinstance(trigger, int) or trigger <= 0:
             return None
+        return trigger
+
+    def _wire_band_bytes(self, compaction_api: Any, settings: Any) -> int | None:
+        """``WIRE_RECOVERY_BAND`` x the resolved wire trigger, or ``None``.
+
+        The ONE definition of "a pass created real byte headroom" for the two
+        places that must land inside it: capture elision (the kept rows) and
+        the byte-aware cut (:meth:`_advance_cut_for_wire_band`). Neither
+        restates the arithmetic, so they cannot drift from each other or from
+        the auto-continue gate's :func:`cleared_wire_headroom`.
+        """
+        band: Any = getattr(compaction_api, "WIRE_RECOVERY_BAND", None)
+        trigger = self._wire_trigger_bytes(compaction_api, settings)
+        if band is None or trigger is None:
+            return None
         return int(float(band) * trigger)
+
+    def _advance_cut_for_wire_band(
+        self,
+        compaction_api: Any,
+        settings: Any,
+        llm_history: list[Message],
+        cut: int,
+    ) -> int:
+        """Move a pass's cut later when the request is over the BYTE trigger,
+        so the pass lands inside the wire band instead of beside the trigger.
+
+        ``find_cut_point`` keeps ``keep_recent_tokens`` of history, and the
+        token ruler prices every image at a flat 1,200, so on a screenshot
+        history that window is ~16 frames (~15 MB) against a 16 MB trigger: the
+        pass landed with a fraction of a frame of headroom and the very next
+        tool group fired it again. Measured on a 295-request run, 62 passes (a
+        burst of six in a row) cost ~24% of the run, because each one rewrites
+        the prompt prefix (27.5% cache-read on the next request against ~80% in
+        steady state). See
+        :func:`~local_operator.compaction.cutpoint.advance_cut_to_wire_band` for
+        the walk and its protections; this method decides WHETHER it runs and
+        supplies the session-side ruler.
+
+        Keyed on the REQUEST being over the byte trigger, not on which arm
+        fired the pass: a pass with no byte pressure (every text-only session,
+        and any image history under ~16 MB) gets ``cut`` back untouched, which
+        is what keeps those sessions byte-identical to before this existed.
+
+        ``fixed`` is what the commit seats IN FRONT of the kept window: the
+        previous marker (its archive frames included) and the preserved user
+        turns it carries forward. The first pass of a session has no marker to
+        measure, so it is under-counted by one fresh archive (46-315 KB across
+        the three provider shapes, 0.3-2% of the trigger) -- inside the 20%
+        the band leaves, and a constant to cover it would be a guess dressed as
+        a measurement.
+
+        Capture elision runs on the kept rows at the commit
+        (:meth:`_capture_elision_budget`), so the ruler counts the bytes it will
+        reclaim as already gone. Without that, a session whose superseded
+        captures elision alone brings inside the band would have its cut
+        advanced anyway, summarizing text to make room that was already free.
+
+        Resolved by name off the module, like the other rulers here, so a
+        partial test double without the helper keeps the plain cut.
+        """
+        advance: Any = getattr(compaction_api, "advance_cut_to_wire_band", None)
+        band = self._wire_band_bytes(compaction_api, settings)
+        trigger = self._wire_trigger_bytes(compaction_api, settings)
+        if not callable(advance) or band is None or trigger is None:
+            return cut
+        wire_bytes = self._wire_bytes_of(compaction_api, llm_history)
+        if wire_bytes <= trigger:
+            return cut
+
+        preserved_key = getattr(compaction_api, "PRESERVED_USER_TURN_KEY", None)
+        fixed = self._wire_bytes_of(
+            compaction_api,
+            [
+                message
+                for message in llm_history[:cut]
+                if marker_details(message) is not None
+                or (
+                    preserved_key is not None
+                    and isinstance(message.provider_payload, dict)
+                    and message.provider_payload.get(preserved_key)
+                )
+            ],
+        )
+        # Suffix sums over the candidate region only: a cut never moves before
+        # ``cut``, and sizing the summarized prefix would be work for nothing.
+        sizes = [self._wire_bytes_of(compaction_api, [message]) for message in llm_history[cut:]]
+        suffix = [0] * (len(sizes) + 1)
+        for position in range(len(sizes) - 1, -1, -1):
+            suffix[position] = suffix[position + 1] + sizes[position]
+        has_captures = any(
+            getattr(block, "captured_frame", None) is not None
+            for message in llm_history[cut:]
+            for block in message.content
+        )
+
+        def kept_bytes(index: int) -> int:
+            plain = fixed + suffix[index - cut]
+            if not has_captures or plain <= band:
+                return plain
+            from local_operator.compaction.pruning import (
+                reclaim_captures_to_wire_budget,
+            )
+
+            # Same budget the commit hands elision (``_capture_elision_budget``
+            # is the band on the KEPT rows alone, ``fixed`` excluded), so the
+            # projection is exactly what the commit will do to this window.
+            projected, _elided = reclaim_captures_to_wire_budget(llm_history[index:], budget=band)
+            return fixed + self._wire_bytes_of(compaction_api, projected)
+
+        advanced = int(
+            advance(
+                llm_history,
+                cut,
+                kept_bytes=kept_bytes,
+                band_bytes=band,
+                replayable=lambda index: self._transcript.has_entry(llm_history[index].id),
+            )
+        )
+        if advanced != cut:
+            logger.info(
+                "compaction cut advanced %s -> %s to land inside the wire band "
+                "(request %s bytes, trigger %s)",
+                cut,
+                advanced,
+                f"{wire_bytes:,}",
+                f"{trigger:,}",
+            )
+        return advanced
 
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
@@ -19352,6 +19484,14 @@ class Session:
                 tokens_before=local_estimate,
                 tokens_after=local_estimate,
             )
+
+        # (2c) Byte-aware cut. The cut above is ruled in TOKENS; a screenshot
+        # history is over the BYTE trigger long before it is over any token
+        # line, so a byte-fired pass would land beside the trigger and re-fire
+        # on the next tool group. Moves the cut LATER only, and only while the
+        # request is over the byte trigger. Runs before the replayability guard
+        # below so the cut that guard judges is the cut the pass will use.
+        cut = self._advance_cut_for_wire_band(compaction_api, settings, llm_history, cut)
 
         # The kept window must start at an entry the transcript can replay:
         # first_kept_entry_id is persisted and matched on resume, and a cut
