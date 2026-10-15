@@ -1080,6 +1080,11 @@ export type MessageParams = {
   "wire.slash.unarchive": undefined;
   "wire.slash.update": undefined;
   "wire.slash.usage": undefined;
+  "wire.tunnel_setup.checking": undefined;
+  "wire.tunnel_setup.corrupt_intent": undefined;
+  "wire.tunnel_setup.deadline": undefined;
+  "wire.tunnel_setup.in_progress": undefined;
+  "wire.tunnel_setup.unavailable": undefined;
 };
 export type MessageKey = keyof MessageParams;
 export type WithParams = {

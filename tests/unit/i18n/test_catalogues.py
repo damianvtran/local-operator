@@ -60,6 +60,8 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
+        # The desktop phone-setup refusals (this PR's own namespace).
+        "wire.tunnel_setup",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
