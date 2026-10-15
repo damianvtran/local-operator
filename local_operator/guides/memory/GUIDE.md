@@ -1,6 +1,6 @@
 ---
 name: memory
-description: "Read guide://memory to save or recall goals, files, channels, threads, contacts and decisions across compaction or sessions via read/write/edit memory://."
+description: "Save or recall goals, files, channels, threads, contacts and decisions across compaction or sessions via read/write/edit memory://."
 ---
 
 # Bounded memory
