@@ -460,12 +460,13 @@ async def test_auto_false_opens_no_socket_and_records_nothing(manager) -> None:
 
 async def test_no_sink_bound_is_a_quiet_no_op(manager) -> None:
     wire = Wire(lambda req: httpx.Response(200, json=answer_body()))
-    subject, _ = build(manager, wire)
+    subject, rows = build(manager, wire)
     subject.bind_spend_sink(None)
 
     recommendation = await subject.recommend_resources(request())
 
     assert recommendation.skipped is None and len(wire.hosts) == 1
+    assert rows == [], "an unbound service must not emit a session record"
 
 
 async def test_a_raising_sink_cannot_fail_the_classification(manager) -> None:

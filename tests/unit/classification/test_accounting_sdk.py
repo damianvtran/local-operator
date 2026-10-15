@@ -353,6 +353,9 @@ async def test_auto_false_opens_no_decision_socket_and_records_no_row(
     async def spy(self: httpx.AsyncClient, url: Any, *args: Any, **kwargs: Any) -> Any:
         if "decisions" in str(url) or "systemone" in str(url):
             posted.append(str(url))
+            # Fail closed: a regression must never turn this no-network proof into
+            # a real paid decision request before the final assertion catches it.
+            raise AssertionError("disabled classification attempted a decision POST")
         return await real_post(self, url, *args, **kwargs)
 
     monkeypatch.setattr(httpx.AsyncClient, "post", spy)
