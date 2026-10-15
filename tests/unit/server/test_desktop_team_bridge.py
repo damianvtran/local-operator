@@ -37,7 +37,12 @@ from local_operator.team_bridge.client import (
     BridgeSignInRequired,
     StatusCheck,
 )
-from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+from local_operator.team_bridge.store import (
+    OwnerReceipt,
+    OwnerSnapshot,
+    Store,
+    state_db_path,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -92,6 +97,13 @@ class FakeClient:
             "sender_account_id": sender_account_id,
             "access": access,
         }
+        # A hook that runs INSIDE the wire call (review Q4): the only window in
+        # which local state can move after the standing check and before the page
+        # is re-validated. Without it, deleting the post-await ``_recheck`` left
+        # the whole suite green.
+        during = FakeClient.behavior.get("during_inbox")
+        if callable(during):
+            during()
         return self._answer("inbox")
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
@@ -210,8 +222,17 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["state"] == STATE_READY
     assert result["boundary"] == "app_start"
     assert result["from_cache"] is False
-    # The §5.6 reading the renderer binds to (computed once, backend-side).
+    # The §5.6 reading the renderer binds to (computed once, backend-side), and
+    # the read family's availability receipt NEXT TO it (spec M-11 / review R-4):
+    # a renderer must be able to read which read operations exist before it calls
+    # one, rather than probing for them.
     assert result["capability"] == 1
+    assert result["availability"] == {
+        "metadata_inbox": True,
+        "screened_detail": False,
+        "read_ack": False,
+        "local_events": False,
+    }
     assert result["surface_state"] == "B"
     assert result["tenant_id"] == "tnt_1"
     assert result["visibility"] == {
@@ -730,6 +751,11 @@ def _digest(root: Path) -> tuple[list[str], str]:
     WAL companions are excluded from the name list for the same reason — a reader
     may need them, and neither is this surface's write. An ack intent, a merged
     ref or a moved connector checkpoint WOULD show up here, in either half.
+
+    BOTH database suffixes are hashed (review R-1). The bridge store is
+    ``state.sqlite3``, not ``*.db`` — so the original ``rglob("*.db")`` matched
+    NOTHING and the "state unchanged" half of every cell compared an empty digest,
+    which is how a store this surface created went unseen.
     """
     names = sorted(
         str(path.relative_to(root))
@@ -737,7 +763,7 @@ def _digest(root: Path) -> tuple[list[str], str]:
         if path.is_file() and not path.name.endswith(("-wal", "-shm"))
     )
     digest = hashlib.sha256()
-    for db in sorted(root.rglob("*.db")):
+    for db in sorted({*root.rglob("*.db"), *root.rglob("*.sqlite3")}):
         connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
             tables = [
@@ -753,6 +779,44 @@ def _digest(root: Path) -> tuple[list[str], str]:
         finally:
             connection.close()
     return names, digest.hexdigest()
+
+
+def _seed_allow_receipt(root: Path, message_id: str) -> None:
+    """Write ONE native screening receipt row into the committed store.
+
+    Deliberately raw SQL: the receipt WRITER is the screening pipeline's own
+    (``Store.finish_screening``, fenced on an attempt row, a policy fingerprint
+    and the published epoch), and this cell's question is narrower — what a bare
+    receipt ROW may make a read surface claim (review R-3 / M-12a). The owner key
+    is read back out of ``enrollments`` rather than rebuilt here, so the seed
+    cannot drift from the store's own encoding. Same seeding style as
+    ``tests/unit/team_bridge/test_h5_envelope_negatives.py``.
+    """
+
+    with sqlite3.connect(state_db_path(root)) as conn:
+        row = conn.execute("SELECT owner_key FROM enrollments WHERE state = 'committed'").fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+            "template_sha256, prompt_version, model, verdict, categories, "
+            "envelope_digest, admission_revision, policy_epoch, creator_generation, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(row[0]),
+                message_id,
+                "a" * 64,
+                "b" * 64,
+                "prompt-v1",
+                "model-a",
+                "allow",
+                '["spam"]',
+                "c" * 64,
+                "adm-1",
+                1,
+                5,
+                0.0,
+            ),
+        )
 
 
 async def test_the_inbox_read_needs_the_desktop_bearer(api):
@@ -798,6 +862,10 @@ async def test_a_read_that_names_a_bad_id_is_refused_before_any_upstream_path(ap
         _query(after="x?y=1"),
         _query(state="screened"),
         _query(expected_account_id="acc_1/../acc_2"),
+        # A trailing newline (review R-5): ``$`` matches before it, so only a
+        # ``fullmatch`` validator refuses this value at the door.
+        _query(thread_id="bth_1\n"),
+        _query(expected_account_id="acc_1\n"),
     ):
         response = await client.get(INBOX, params=bad)
         assert response.status_code == 422, bad
@@ -908,6 +976,109 @@ async def test_the_inbox_read_reports_a_hold_as_a_coarse_code_and_never_its_text
     assert response.json()["result"]["counts"]["held"] == 1
 
 
+async def test_an_allow_receipt_does_not_make_a_row_allowed(api):
+    """M-12a / review R-3: a bare receipt is not admission, so the row stays unreviewed."""
+    client, root, _discipline = api
+    _enroll(root)
+    _seed_allow_receipt(root, "bmsg_1")
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item("bmsg_1"))
+
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 200
+    assert response.json()["result"]["items"][0]["screening"] == {
+        "state": "unreviewed",
+        "hold_code": None,
+        "retry_at": None,
+    }
+
+
+async def test_the_read_refuses_a_wire_that_cannot_name_the_committed_hub(api, monkeypatch):
+    """Q3: the destination guard is load-bearing — a mutated base_url must refuse.
+
+    QA round 1 measured that DELETING this guard left the whole suite green: the
+    only thing that exercised it was an import-order accident. Both refusals fire
+    BEFORE the wire is called.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    monkeypatch.setattr(FakeClient, "base_url", "https://evil.example")
+    mismatched = await client.get(INBOX, params=_query())
+    assert mismatched.status_code == 409
+    assert mismatched.json()["detail"]["code"] == "destination_mismatch"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+    assert "evil.example" not in mismatched.text
+
+    monkeypatch.setattr(FakeClient, "base_url", "")
+    silent = await client.get(INBOX, params=_query())
+    assert silent.status_code == 502
+    assert silent.json()["detail"]["code"] == "no_destination_evidence"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+
+
+async def test_a_read_refuses_when_the_owner_moves_while_the_wire_answers(api):
+    """Q4: the post-await ``_recheck`` is load-bearing (``owner_changed``).
+
+    The store moves INSIDE the wire call — after the standing check, before the
+    page is projected — which is the window the re-check exists for. Measured by
+    QA round 1: removing it left the whole suite green.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+    FakeClient.behavior["inbox"] = _page(_item())
+
+    def move_owner() -> None:
+        Store(root).commit_enrollment(
+            _owner(generation=6), OwnerReceipt("bridge_consent_v1", "ref-2")
+        )
+
+    FakeClient.behavior["during_inbox"] = move_owner
+    response = await client.get(INBOX, params=_query())
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "owner_changed"
+
+
+async def test_a_read_refuses_a_query_name_it_does_not_accept(api):
+    """Q5: an unknown query name is REFUSED, never silently dropped.
+
+    FastAPI drops unknown query names, so a caller's typo (``threadId``) would
+    otherwise read a WIDER page than the one they asked for — the model's
+    ``extra=forbid`` never sees the query string.
+    """
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+
+    response = await client.get(INBOX, params={**_query(), "threadId": "bth_1"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert "threadId" not in response.text
+    assert FakeClient.instances == []
+
+
+async def test_a_read_over_a_bound_field_refuses_without_echoing_the_value(api):
+    """R-6: every bound lives in the model, so no refusal echoes the input."""
+    client, root, _discipline = api
+    _enroll(root)
+    FakeClient.behavior["access"] = _access()
+
+    oversize = "A" * 600
+    for bad in (_query(after=oversize), _query(limit="SECRET-LIMIT"), _query(state="x" * 40)):
+        response = await client.get(INBOX, params=bad)
+        assert response.status_code == 422, bad
+        assert response.json()["detail"]["code"] == "invalid_request"
+        assert "SECRET" not in response.text
+        assert "AAAA" not in response.text
+    assert FakeClient.instances == []
+
+
 async def test_a_machine_with_the_local_switch_off_reads_retained_history_read_only(api):
     """Paused/disabled: the same participant may READ what already arrived."""
     client, root, _discipline = api
@@ -964,11 +1135,18 @@ async def test_the_read_refuses_a_machine_with_no_retained_namespace(api):
     FakeClient.behavior["access"] = _access()
     FakeClient.behavior["inbox"] = _page(_item())
 
+    before = _digest(root)
     response = await client.get(INBOX, params=_query())
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "history_context_unavailable"
     assert FakeClient.behavior.get("last_inbox_kwargs") is None
+    # AND IT MADE NOTHING (review R-1/M-9): the store is opened READ-ONLY, so
+    # "this machine holds nothing for you" must not leave a fresh,
+    # DDL-initialised ``team_bridge/state.sqlite3`` behind.
+    assert not (root / "team_bridge").exists(), "a refused read created the bridge store"
+    assert not list(root.rglob("state.sqlite3"))
+    assert _digest(root) == before
 
 
 async def test_the_read_refuses_a_tenant_this_machine_did_not_enroll_with(api):

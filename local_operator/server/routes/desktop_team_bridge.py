@@ -56,7 +56,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -145,6 +145,14 @@ class TeamBridgeAllowlistPut(_Strict):
 #: rejected VALUE never rides the response (S-RSA-7 — a validation error's own
 #: text can quote the caller's input back), and a caller bug is one condition,
 #: not one condition per field.
+#:
+#: AND IT IS THE ONLY ANSWER (review R-6). Every bound on the read query is
+#: enforced in ``TeamBridgeInboxQuery``, never by ``Query(...)``: FastAPI's own
+#: validation answers with a body that echoes the offending ``input``, so a bound
+#: declared on the parameter puts the caller's value straight back on the wire —
+#: the one thing this sentence exists to prevent. The handler therefore declares
+#: each query name as a plain optional string and lets the model do the parsing,
+#: the bounds and the closed sets.
 INVALID_READ_QUERY = "this read named a value the agent-messages read surface does not accept"
 
 
@@ -190,7 +198,12 @@ class TeamBridgeInboxQuery(_Strict):
             (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
         )
         for value, pattern, name in checks:
-            if value is not None and re.match(pattern, value) is None:
+            # ``fullmatch``, not ``match`` (review R-5): these patterns are
+            # anchored with ``^…$``, and ``$`` also matches BEFORE a trailing
+            # newline, so ``bth_1\n`` passed the grammar and reached the
+            # transport. A full match is what "outside the accepted grammar"
+            # means for a value interpolated into a path or a query string.
+            if value is not None and re.fullmatch(pattern, value) is None:
                 raise ValueError(f"{name} is outside the accepted grammar")
         if self.state is not None and self.state not in DELIVERY_STATES:
             raise ValueError("state is not one of the delivery states")
@@ -248,6 +261,10 @@ def _raise_sign_in(exc: Exception) -> NoReturn:
 #: ``_raise_bridge`` unchanged (this table is the LOCAL read path's vocabulary).
 _READ_REFUSALS: dict[str, tuple[int, str]] = {
     "bridge_signin_required": (401, "sign in to Radient and try again"),
+    "state_unreadable": (
+        409,
+        "this machine's agent-messages store could not be read; it needs repair",
+    ),
     "no_access": (401, "sign in to Radient and try again"),
     "not_signed_in": (401, "sign in to Radient and try again"),
     "account_mismatch": (
@@ -350,6 +367,11 @@ async def status(
         selected_tenant_id,
         surface_projection,
     )
+
+    # The read family's availability receipt lives with the read family, and the
+    # import stays inside the handler: the read module reaches the client stack,
+    # which must never ride ``lop serve``'s boot path (module docstring).
+    from local_operator.team_bridge.read_context import READ_AVAILABILITY
     from local_operator.team_bridge.settings import TeamBridgeSettings
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
@@ -382,6 +404,12 @@ async def status(
         # same number off ``GET /v1/capabilities``; it rides here so one
         # response can drive the whole surface decision).
         "capability": feature_flags()["team_bridge"],
+        # The slice's availability receipt (spec M-11 / §7), NEXT TO the capability
+        # so one answer drives the surface decision: the capability says which read
+        # shape a renderer is talking to, this says which read-family operations
+        # exist on this build. M0 ships the metadata inbox; each other flag turns
+        # true with the operation it names, never ahead of it.
+        "availability": dict(READ_AVAILABILITY),
         "state": check.state,
         "boundary": check.boundary,
         "from_cache": check.from_cache,
@@ -568,15 +596,36 @@ async def put_allowlist(
 # -- the READ slice: agent messages, METADATA ONLY (RFC §6.1 reads) -------------
 
 
+#: Every query name this read accepts. Anything else is REFUSED rather than
+#: dropped (review Q5): ``TeamBridgeInboxQuery``'s ``extra=forbid`` is about the
+#: model, and FastAPI DROPS unknown query names silently — which is how a caller's
+#: typo (``threadId``) quietly becomes a wider read than the one they asked for.
+READ_QUERY_PARAMS = frozenset(
+    {
+        "expected_account_id",
+        "tenant_id",
+        "after",
+        "limit",
+        "state",
+        "thread_id",
+        "sender_account_id",
+    }
+)
+
+
 @router.get("/v1/desktop/team-bridge/inbox", response_model=CRUDResponse[Any])
 async def get_inbox(
-    expected_account_id: str = Query(min_length=1, max_length=128),
-    tenant_id: str = Query(min_length=1, max_length=128),
-    after: str | None = Query(default=None, max_length=512),
-    limit: int = Query(default=50, ge=1, le=100),
-    state: str | None = Query(default=None, max_length=16),
-    thread_id: str | None = Query(default=None, max_length=80),
-    sender_account_id: str | None = Query(default=None, max_length=80),
+    request: Request,
+    # Plain optional STRINGS, deliberately (review R-6): every bound is enforced by
+    # ``TeamBridgeInboxQuery`` below, because a ``Query(...)`` bound would let
+    # FastAPI answer 422 with the caller's own value echoed back in the body.
+    expected_account_id: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
+    after: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+    sender_account_id: str | None = Query(default=None),
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """One page of this machine's agent messages: METADATA ONLY, zero writes.
@@ -589,11 +638,17 @@ async def get_inbox(
     not implemented, and a route that returned bytes without it would serve
     unreviewed third-party text to a renderer.
 
-    ZERO LOCAL WRITES, deliberately and structurally: the connector owns the
+    NO BRIDGE-STORE WRITES, deliberately and structurally: the connector owns the
     inbox checkpoint and the walk terminal, and a UI page that moved them would
     make the person's browsing change whether their agent gets woken
     (``pull.inbox``'s ``merge_page`` is exactly that write). Nothing here merges
-    refs either: the native tables are read for screening state only.
+    refs either, and the store is opened READ-ONLY — this route never creates,
+    migrates or touches ``team_bridge/state.sqlite3``, so a machine with nothing
+    enrolled answers without a database being made for it (review R-1/M-9).
+    (Reading the signed-in credential row can still create the SHARED ``auth.db``
+    side files, exactly as ``/status`` does; that store is not this surface's, and
+    the invariant here is the bridge store.) Unknown query names are refused, not
+    dropped — see :data:`READ_QUERY_PARAMS`.
 
     Two standing modes answer honestly through ``mode``/``read_only``: ENABLED
     machines read under receive standing, and a machine whose local switch is off
@@ -615,24 +670,38 @@ async def get_inbox(
         inbox_view,
         read_inbox_page,
         resolve_read_context,
+        wire_for,
     )
 
+    if set(request.query_params) - READ_QUERY_PARAMS:
+        _raise_read("invalid_request")
+
+    raw: dict[str, Any] = {
+        "expected_account_id": expected_account_id,
+        "tenant_id": tenant_id,
+        "after": after,
+        "limit": limit,
+        "state": state,
+        "thread_id": thread_id,
+        "sender_account_id": sender_account_id,
+    }
     try:
+        # Only the names the caller actually SENT: a None must not overwrite a
+        # model default (the model is where every bound and closed set lives).
         query = TeamBridgeInboxQuery(
-            expected_account_id=expected_account_id,
-            tenant_id=tenant_id,
-            after=after,
-            limit=limit,
-            state=state,
-            thread_id=thread_id,
-            sender_account_id=sender_account_id,
+            **{name: value for name, value in raw.items() if value is not None}
         )
     except ValidationError:
         _raise_read("invalid_request")
 
+    # ONE wire per request, handed to BOTH builders (review R-2): the standing
+    # resolution and the page must not construct their clients by two rules.
+    wire = wire_for(config_manager.config_dir)
     try:
         context = await resolve_read_context(
-            config_manager.config_dir, expected_account_id=query.expected_account_id
+            config_manager.config_dir,
+            expected_account_id=query.expected_account_id,
+            wire=wire,
         )
     except BridgeSignInRequired as exc:
         # Before the BridgeRefusal arm where the two overlap, deliberately.
@@ -653,6 +722,7 @@ async def get_inbox(
         result = await read_inbox_page(
             context,
             config_dir=config_manager.config_dir,
+            wire=wire,
             after=query.after,
             limit=query.limit,
             state=query.state,

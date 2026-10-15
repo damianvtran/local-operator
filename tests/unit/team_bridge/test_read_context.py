@@ -131,15 +131,26 @@ def test_the_id_and_cursor_grammars_reject_injection_shapes() -> None:
         CURSOR_PATTERN: ["MjU=", "b64+/_-="],
     }
     refused: dict[str, list[str]] = {
-        MESSAGE_ID_PATTERN: ["bmsg_1/../x", "bmsg_1?y=1", "../../etc", "bmsg_1#f", "msg_1"],
-        CURSOR_PATTERN: ["a b", "a?b=1", "a#b", "../x"],
+        MESSAGE_ID_PATTERN: [
+            "bmsg_1/../x",
+            "bmsg_1?y=1",
+            "../../etc",
+            "bmsg_1#f",
+            "msg_1",
+            # A TRAILING NEWLINE (review R-5): with a ``$`` anchor ``re.match``
+            # ACCEPTS it — ``$`` also matches before a final newline, so such a
+            # value reached the transport. ``fullmatch`` is the semantics the
+            # route's validator uses and the one this cell pins.
+            "bmsg_1\n",
+        ],
+        CURSOR_PATTERN: ["a b", "a?b=1", "a#b", "../x", "MjU=\n"],
     }
     for pattern, values in accepted.items():
         for value in values:
-            assert re.match(pattern, value), (pattern, value)
+            assert re.fullmatch(pattern, value), (pattern, value)
     for pattern, values in refused.items():
         for value in values:
-            assert re.match(pattern, value) is None, (pattern, value)
+            assert re.fullmatch(pattern, value) is None, (pattern, value)
 
 
 def test_the_view_carries_no_field_a_body_could_ride() -> None:

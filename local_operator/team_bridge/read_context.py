@@ -54,6 +54,7 @@ imports, and the route rides ``lop serve``'s boot path.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -62,7 +63,7 @@ from urllib.parse import urlsplit
 from local_operator.team_bridge import pull
 from local_operator.team_bridge.pull import PullRefused
 from local_operator.team_bridge.screening import HOLD_CODES
-from local_operator.team_bridge.store import Store
+from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import (
     InboxPage,
     OwnerSnapshot,
@@ -74,6 +75,19 @@ from local_operator.team_bridge.types import (
 #: renderer can tell WHICH read shape it is talking to. It is not a gate here:
 #: the advertised capability key is ``team_bridge_read`` in the features map.
 READ_CAPABILITY = 1
+
+#: The slice's availability receipt (spec M-11 / §7): which read-family operations
+#: EXIST on this build, stated so a renderer decides what to draw instead of
+#: probing operations that are not there. M0 ships the metadata inbox only; the
+#: other flags turn true only when their operations exist and pass their own
+#: gates. It rides the team-bridge STATUS answer next to ``capability``, so one
+#: response can drive the whole surface decision.
+READ_AVAILABILITY: Mapping[str, bool] = {
+    "metadata_inbox": True,
+    "screened_detail": False,
+    "read_ack": False,
+    "local_events": False,
+}
 
 READ_MODE_RECEIVE = "receive"
 READ_MODE_HISTORY = "history"
@@ -88,9 +102,19 @@ READ_MODE_HISTORY = "history"
 #: owner the store no longer holds is the stale answer the fence exists to stop.
 HISTORY_REASONS = ("bridge_off",)
 
-#: The screening states a row may report. ``unreviewed`` is the honest default:
-#: absence of a receipt is not an admission, and it is not a hold either.
-SCREENING_STATES = ("unreviewed", "allowed", "held", "blocked")
+#: The screening states a row may report. CLOSED, and deliberately THREE: M0
+#: reports what this machine RECORDED, never what it concluded.
+#:
+#: ``allowed`` is NOT one of them (review R-3 / M-12a). "Allowed" is an admission
+#: claim, and admission needs the validated-envelope + currency + confirmed-intent
+#: predicate this slice does not implement; a raw ``screening_receipts`` row is
+#: bound to none of those, so deriving ``allowed`` from its verdict would be this
+#: surface asserting a permission it cannot back. A receipt — whatever its
+#: verdict — therefore leaves the row ``unreviewed``. ``blocked`` stays in the
+#: vocabulary because M1's ack/receipt-bound path owns it: nothing in this slice
+#: produces it, and a bare receipt ``reject`` is not the authoritative record
+#: that would.
+SCREENING_STATES = ("unreviewed", "held", "blocked")
 
 #: What a hold code outside :data:`~local_operator.team_bridge.screening.HOLD_CODES`
 #: is reported as. Connector-written hold rows carry free-form values
@@ -173,6 +197,40 @@ class ReadInbox:
     counts: Mapping[str, int] = field(default_factory=dict)
 
 
+def _read_state(call: Callable[[], Any]) -> Any:
+    """Run a READ-ONLY store accessor, mapping a damaged store to a refusal (R-7).
+
+    The read-only accessors raise ``StoreRefused`` (a ``RuntimeError``) for a file
+    they cannot read. This path's vocabulary is CLOSED, so the mapping belongs
+    here ONCE rather than at each call site: without it a damaged
+    ``state.sqlite3`` would leave the route as an untyped 500, and the code is
+    the machine-readable half of the refusal.
+    """
+
+    try:
+        return call()
+    except StoreRefused as failure:
+        raise ReadRefused(failure.code) from failure
+
+
+def wire_for(config_dir: Path) -> Any:
+    """The wire client for ONE read request, resolved at CALL time.
+
+    WHY NOT ``pull._client_for`` (review R-2). That helper hands back the class
+    object ``pull`` bound when it was first imported, while
+    :func:`resolve_read_context` builds its client from ``client.TeamBridgeClient``
+    at call time. ONE request therefore built TWO clients by two rules, and they
+    could disagree — measured as ``destination_mismatch`` for any run where
+    ``pull`` was imported before the fixtures patched the client module. Both
+    builders now go through this one function, so a request has one construction
+    rule; the route builds the wire once and hands the same object to both.
+    """
+
+    from local_operator.team_bridge import client as tb_client
+
+    return tb_client.TeamBridgeClient(config_dir)
+
+
 def _origin(url: str) -> str:
     parsed = urlsplit(str(url or ""))
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
@@ -211,10 +269,10 @@ def _receive_fence(store: Store, owner: OwnerSnapshot, access: Any) -> str:
 
     if not _bridge_enabled(store.config_dir):
         return "bridge_off"
-    live = store.active_owner()
+    live = _read_state(store.active_owner_readonly)
     if live is None or live != owner:
         return "owner_changed"
-    if store.owner_consent_receipt(owner) is None:
+    if _read_state(lambda: store.owner_consent_receipt_readonly(owner)) is None:
         return "consent_revoked"
     if int(getattr(access, "credential_id", -1)) != int(owner.credential_id):
         return "credential_changed"
@@ -231,14 +289,16 @@ def _recheck(context: ReadContext, store: Store) -> None:
     fence exists to refuse.
     """
 
-    live = store.active_owner()
+    live = _read_state(store.active_owner_readonly)
     if live is None or live != context.owner:
         raise ReadRefused("owner_changed")
-    if store.owner_consent_receipt(context.owner) is None:
+    if _read_state(lambda: store.owner_consent_receipt_readonly(context.owner)) is None:
         raise ReadRefused("consent_revoked")
 
 
-async def resolve_read_context(config_dir: Path, *, expected_account_id: str) -> ReadContext:
+async def resolve_read_context(
+    config_dir: Path, *, expected_account_id: str, wire: Any = None
+) -> ReadContext:
     """Resolve the read's namespace and standing, or refuse with a typed code.
 
     The captured account is the DECLARED one or nothing: the desktop plane's
@@ -246,18 +306,20 @@ async def resolve_read_context(config_dir: Path, *, expected_account_id: str) ->
     committed owner is then read from the store and must be the row the captured
     credential belongs to — a read may not be answered for an account that
     happens to be signed in when the request was captured for another.
+
+    The store is read READ-ONLY (review R-1/M-9): resolving whether a namespace
+    exists must not create one. ``wire`` is the request's single client when the
+    caller already built it (:func:`wire_for`), else this call builds one.
     """
 
-    from local_operator.team_bridge.client import TeamBridgeClient
-
-    client = TeamBridgeClient(config_dir)
+    client = wire if wire is not None else wire_for(config_dir)
     access = await client.current_access()  # raises the sign-in / refusal states
     if str(getattr(access, "account_id", "")) != str(expected_account_id):
         raise ReadRefused("account_mismatch")
     if str(getattr(access, "kind", "")) != "oauth":
         raise ReadRefused("not_signed_in")
     store = Store(config_dir)
-    owner = store.active_owner()
+    owner = _read_state(store.active_owner_readonly)
     if owner is None:
         raise ReadRefused("history_context_unavailable")
     if int(getattr(access, "credential_id", -1)) != int(owner.credential_id):
@@ -279,13 +341,14 @@ async def read_inbox_page(
     context: ReadContext,
     *,
     config_dir: Path,
+    wire: Any = None,
     after: str | None = None,
     limit: int = DEFAULT_PAGE,
     state: str | None = None,
     thread_id: str | None = None,
     sender_account_id: str | None = None,
 ) -> ReadInbox:
-    """ONE validated inbox page, projected to metadata. ZERO local writes.
+    """ONE validated inbox page, projected to metadata. NO BRIDGE-STORE WRITES.
 
     The whole page must bind to THIS owner before anything is returned: a page
     that carries another tenant's or another endpoint's item is refused whole
@@ -299,18 +362,19 @@ async def read_inbox_page(
     if limit < 1 or limit > MAX_PAGE:
         raise ReadRefused("bad_limit")
     store = Store(config_dir)
-    # The SHARED construction (and its cast), not a second one: ``pull._client_for``
-    # is what the connector's own read path builds its wire with, and the
-    # protocol it casts to is the shape the destination guard below checks.
-    wire = pull._client_for(config_dir, None)  # noqa: SLF001 — the shared wire build
+    # ONE wire per request, by the SAME rule the context resolved under (review
+    # R-2): the caller's when the route already built one, else the call-time
+    # factory here. The destination guard below still checks the CONCRETE object
+    # it is handed, whichever construction produced it.
+    client = wire if wire is not None else wire_for(config_dir)
     try:
         # The CONCRETE destination must still be the committed hub, checked
         # before any request: a client pointed at another origin is a different
         # trust boundary, not a read.
-        pull._guard_destination(context.owner, wire)  # noqa: SLF001 — the shared guard
+        pull._guard_destination(context.owner, client)  # noqa: SLF001 — the shared guard
     except PullRefused as failure:
         raise ReadRefused(failure.code) from failure
-    result = await wire.inbox(
+    result = await client.inbox(
         tenant_id=context.owner.tenant_id,
         after=after,
         limit=limit,
@@ -350,24 +414,20 @@ async def read_inbox_page(
 def _screening_state(store: Store, owner: OwnerSnapshot, message_id: str) -> Mapping[str, Any]:
     """This machine's screening state for ONE message — code only, never prose.
 
-    A receipt is read for its VERDICT and nothing else: it is not content
-    admission (that needs the validated-envelope + currency + confirmed-ack
-    predicate this slice does not implement, and no surface here returns a body).
-    A hold row's code is passed through only when it is one of
-    :data:`~local_operator.team_bridge.screening.HOLD_CODES`; connector-written
-    rows carry free-form values that can quote provider text, so anything else is
-    reported as ``unknown_hold``. The screener's private reason is never read.
+    A RECEIPT IS NOT CONSULTED AT ALL (review R-3 / M-12a). Its verdict would
+    have to be read as an admission (``allow``) or a block (``reject``), and a raw
+    ``screening_receipts`` row is bound to neither the fetched bytes nor the
+    envelope nor a currency check — so a surface that rendered it would be
+    asserting content standing this slice cannot back. Whatever the receipt says,
+    the row is ``unreviewed``; ``held`` comes from the native hold row, which is
+    what this machine actually RECORDED. A hold row's code is passed through only
+    when it is one of :data:`~local_operator.team_bridge.screening.HOLD_CODES`;
+    connector-written rows carry free-form values that can quote provider text, so
+    anything else is reported as ``unknown_hold``. The screener's private reason
+    is never read. The whole read is READ-ONLY (review R-1).
     """
 
-    receipt = store.receipt_for_message(owner, message_id)
-    verdict = str((receipt or {}).get("verdict") or "")
-    if verdict in ("allow", "reject"):
-        return {
-            "state": "allowed" if verdict == "allow" else "blocked",
-            "hold_code": None,
-            "retry_at": None,
-        }
-    hold = store.screening_hold(owner, message_id)
+    hold = _read_state(lambda: store.screening_hold_readonly(owner, message_id))
     if hold is not None:
         code = str(hold.get("hold_code") or "")
         retry = hold.get("retry_at")
@@ -460,6 +520,7 @@ def inbox_view(result: ReadInbox) -> Mapping[str, Any]:
 
 __all__ = [
     "ACCOUNT_ID_PATTERN",
+    "READ_AVAILABILITY",
     "CURSOR_PATTERN",
     "DEFAULT_PAGE",
     "DELIVERY_STATES",
@@ -481,4 +542,5 @@ __all__ = [
     "inbox_view",
     "read_inbox_page",
     "resolve_read_context",
+    "wire_for",
 ]
