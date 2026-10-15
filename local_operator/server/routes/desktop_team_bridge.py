@@ -1,12 +1,15 @@
 """Desktop routes for agent messages (Team Bridge harness lane, H1).
 
-The UI lane's four HTTP surfaces over :mod:`local_operator.team_bridge`:
+The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
 - ``GET  /v1/desktop/team-bridge/allowlist`` — own policy entries + honest defaults.
 - ``PUT  /v1/desktop/team-bridge/allowlist`` — the bounded replace-set.
+- ``GET  /v1/desktop/team-bridge/inbox``     — one page of agent messages, METADATA
+  ONLY (the READ slice): ids, delivery/screening state and coarse codes, no body,
+  and zero local writes — the connector's own cursors are not this surface's.
 
 WHAT THESE ROUTES ARE NOT. They never flip a launch flag, never retry against a
 second deployment, and never touch a credential: every call goes through
@@ -49,10 +52,11 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -136,6 +140,84 @@ class TeamBridgeAllowlistPut(_Strict):
     expected_account_id: str = Field(min_length=1, max_length=128)
 
 
+#: What a query that names something this surface does not accept is told. ONE
+#: fixed sentence for every grammar/closed-set violation on the read query: the
+#: rejected VALUE never rides the response (S-RSA-7 — a validation error's own
+#: text can quote the caller's input back), and a caller bug is one condition,
+#: not one condition per field.
+#:
+#: AND IT IS THE ONLY ANSWER (review R-6). Every bound on the read query is
+#: enforced in ``TeamBridgeInboxQuery``, never by ``Query(...)``: FastAPI's own
+#: validation answers with a body that echoes the offending ``input``, so a bound
+#: declared on the parameter puts the caller's value straight back on the wire —
+#: the one thing this sentence exists to prevent. The handler therefore declares
+#: each query name as a plain optional string and lets the model do the parsing,
+#: the bounds and the closed sets.
+INVALID_READ_QUERY = "this read named a value the agent-messages read surface does not accept"
+
+#: What a read that cannot open this machine's store is told (review R-7). It
+#: says what happened to THIS READ and diagnoses nothing: a perfectly healthy
+#: store lands here when the process cannot create its WAL side file (a
+#: read-only config directory), so "it needs repair" was wrong for a benign case
+#: (review M2-3). Fail-closed is the same either way — the read is refused, never
+#: repaired and never worked around.
+STATE_UNREADABLE = "this machine's agent-messages store cannot be read right now"
+
+
+class TeamBridgeInboxQuery(_Strict):
+    """The inbox read query (§6.1), STRICT and grammar-checked before any I/O.
+
+    ``expected_account_id`` is the captured-account receipt the sibling writes
+    carry, and it is the account this read is FOR: a renderer that captured the
+    inbox for A must not be answered with B's page after a sign-in switch. The
+    ids and cursor are validated by GRAMMAR here, before any upstream path is
+    built: the transport interpolates ids into ``/messaging/messages/{id}`` and
+    folds them into query strings, and a ``..``, ``?`` or ``#`` in one rewrites
+    the request (review S-RSA-5). Reject, never coerce.
+
+    ``state`` is the upstream DELIVERY state, a CLOSED set (§6.1). The cursor is
+    opaque: it carries a position and nothing else (the server rebuilds the
+    authorization filter), so this model bounds its shape and never decodes it.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    after: str | None = Field(default=None, max_length=512)
+    limit: int = Field(default=50, ge=1, le=100)
+    state: str | None = Field(default=None, max_length=16)
+    thread_id: str | None = Field(default=None, max_length=80)
+    sender_account_id: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeInboxQuery":
+        from local_operator.team_bridge.read_context import (
+            ACCOUNT_ID_PATTERN,
+            CURSOR_PATTERN,
+            DELIVERY_STATES,
+            TENANT_ID_PATTERN,
+            THREAD_ID_PATTERN,
+        )
+
+        checks = (
+            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
+            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
+            (self.after, CURSOR_PATTERN, "after"),
+            (self.thread_id, THREAD_ID_PATTERN, "thread_id"),
+            (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
+        )
+        for value, pattern, name in checks:
+            # ``fullmatch``, not ``match`` (review R-5): these patterns are
+            # anchored with ``^…$``, and ``$`` also matches BEFORE a trailing
+            # newline, so ``bth_1\n`` passed the grammar and reached the
+            # transport. A full match is what "outside the accepted grammar"
+            # means for a value interpolated into a path or a query string.
+            if value is not None and re.fullmatch(pattern, value) is None:
+                raise ValueError(f"{name} is outside the accepted grammar")
+        if self.state is not None and self.state not in DELIVERY_STATES:
+            raise ValueError("state is not one of the delivery states")
+        return self
+
+
 def _iso(seconds: float | None) -> str | None:
     if seconds is None:
         return None
@@ -178,6 +260,97 @@ def _raise_sign_in(exc: Exception) -> NoReturn:
     )
 
 
+#: The READ slice's closed refusal table (review S-RSA-7): code → (status, FIXED
+#: sentence). The read path's sources (``PullRefused``, ``StoreRefused``,
+#: ``TeamBridgeTypeError``, the screening pipeline's hold vocabulary) can carry
+#: server- or provider-supplied text, so the response never quotes them: the code
+#: is the machine-readable half, the sentence here the human one, and neither is
+#: ``str(exception)``. §6.5 codes that the UPSTREAM sends keep riding
+#: ``_raise_bridge`` unchanged (this table is the LOCAL read path's vocabulary).
+_READ_REFUSALS: dict[str, tuple[int, str]] = {
+    "bridge_signin_required": (401, "sign in to Radient and try again"),
+    "state_unreadable": (409, STATE_UNREADABLE),
+    "no_access": (401, "sign in to Radient and try again"),
+    "not_signed_in": (401, "sign in to Radient and try again"),
+    "account_mismatch": (
+        409,
+        "this read was captured for a different account; sign in as that account and try again",
+    ),
+    "invalid_tenant": (
+        422,
+        "this machine is enrolled for a different organization than the one this read named",
+    ),
+    "history_context_unavailable": (
+        409,
+        "this machine has no retained agent messages for the signed-in account",
+    ),
+    "not_enrolled": (
+        409,
+        "this machine has no committed agent-messages owner for the signed-in account",
+    ),
+    "not_oauth": (
+        409,
+        "agent messages need the Radient OAuth sign-in, not an application key",
+    ),
+    "owner_mismatch": (
+        409,
+        "the signed-in account is not the account this machine enrolled for agent messages",
+    ),
+    "owner_changed": (
+        409,
+        "the local agent-messages owner changed while this read was in flight; try again",
+    ),
+    "credential_changed": (
+        409,
+        "the sign-in behind this read changed while it was in flight; refresh and try again",
+    ),
+    "consent_revoked": (
+        409,
+        "this machine no longer has its agent-messages consent record; enable the feature again",
+    ),
+    "stale_generation": (
+        409,
+        "the local agent-messages owner was re-enrolled; refresh and try again",
+    ),
+    "no_destination_evidence": (
+        502,
+        "the agent-messages hub this machine would read could not be verified",
+    ),
+    "destination_mismatch": (
+        409,
+        "the configured agent-messages hub is not the one this machine enrolled with",
+    ),
+    "bad_limit": (422, "limit must be between 1 and 100"),
+    "malformed_page": (
+        502,
+        "the agent-messages hub answered in a shape this build cannot read",
+    ),
+    "wrong_tenant": (
+        409,
+        "the answer carried a message from another organization's namespace",
+    ),
+    "wrong_recipient": (
+        409,
+        "the answer carried a message addressed to another endpoint",
+    ),
+    "invalid_request": (422, INVALID_READ_QUERY),
+}
+
+
+def _raise_read(code: str) -> NoReturn:
+    """One read-path refusal, by its CLOSED table entry.
+
+    An unlisted code is a 502 with a generic sentence rather than a leak: the
+    vocabulary is closed, so a code that is not in the table is a bug here, and
+    guessing a status for it is how the table stops being one.
+    """
+
+    status, message = _READ_REFUSALS.get(
+        code, (502, "the agent messages read could not be completed")
+    )
+    raise HTTPException(status, {"code": code, "message": message})
+
+
 @router.get("/v1/desktop/team-bridge/status", response_model=CRUDResponse[Any])
 async def status(
     boundary: str = Query(default="surface_open"),
@@ -199,6 +372,11 @@ async def status(
         selected_tenant_id,
         surface_projection,
     )
+
+    # The read family's availability receipt lives with the read family, and the
+    # import stays inside the handler: the read module reaches the client stack,
+    # which must never ride ``lop serve``'s boot path (module docstring).
+    from local_operator.team_bridge.read_context import READ_AVAILABILITY
     from local_operator.team_bridge.settings import TeamBridgeSettings
 
     check = await get_status_discipline(config_manager.config_dir).check(boundary)
@@ -231,6 +409,12 @@ async def status(
         # same number off ``GET /v1/capabilities``; it rides here so one
         # response can drive the whole surface decision).
         "capability": feature_flags()["team_bridge"],
+        # The slice's availability receipt (spec M-11 / §7), NEXT TO the capability
+        # so one answer drives the surface decision: the capability says which read
+        # shape a renderer is talking to, this says which read-family operations
+        # exist on this build. M0 ships the metadata inbox; each other flag turns
+        # true with the operation it names, never ahead of it.
+        "availability": dict(READ_AVAILABILITY),
         "state": check.state,
         "boundary": check.boundary,
         "from_cache": check.from_cache,
@@ -412,3 +596,148 @@ async def put_allowlist(
     except ValueError as exc:
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
     return reply({"allowlist": payload.get("allowlist"), "view": allowlist_view(payload)})
+
+
+# -- the READ slice: agent messages, METADATA ONLY (RFC §6.1 reads) -------------
+
+
+#: Every query name this read accepts. Anything else is REFUSED rather than
+#: dropped (review Q5): ``TeamBridgeInboxQuery``'s ``extra=forbid`` is about the
+#: model, and FastAPI DROPS unknown query names silently — which is how a caller's
+#: typo (``threadId``) quietly becomes a wider read than the one they asked for.
+READ_QUERY_PARAMS = frozenset(
+    {
+        "expected_account_id",
+        "tenant_id",
+        "after",
+        "limit",
+        "state",
+        "thread_id",
+        "sender_account_id",
+    }
+)
+
+
+@router.get("/v1/desktop/team-bridge/inbox", response_model=CRUDResponse[Any])
+async def get_inbox(
+    request: Request,
+    # Plain optional STRINGS, deliberately (review R-6): every bound is enforced by
+    # ``TeamBridgeInboxQuery`` below, because a ``Query(...)`` bound would let
+    # FastAPI answer 422 with the caller's own value echoed back in the body.
+    expected_account_id: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
+    after: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    thread_id: str | None = Query(default=None),
+    sender_account_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of this machine's agent messages: METADATA ONLY, zero writes.
+
+    READ means what the person can see, never what the machine may receive: the
+    answer is ids, delivery state, hashes and this machine's coarse screening
+    state. A message BODY is not in it — returning one needs the shared content
+    predicate (owner standing, a validated envelope, a native receipt bound to
+    the fetched bytes, its currency rules and a confirmed read intent), which is
+    not implemented, and a route that returned bytes without it would serve
+    unreviewed third-party text to a renderer.
+
+    NO BRIDGE-STORE WRITES, deliberately and structurally: the connector owns the
+    inbox checkpoint and the walk terminal, and a UI page that moved them would
+    make the person's browsing change whether their agent gets woken
+    (``pull.inbox``'s ``merge_page`` is exactly that write). Nothing here merges
+    refs either, and the store is opened READ-ONLY — this route never creates,
+    migrates or touches ``team_bridge/state.sqlite3``, so a machine with nothing
+    enrolled answers without a database being made for it (review R-1/M-9).
+    (Reading the signed-in credential row can still create the SHARED ``auth.db``
+    side files, exactly as ``/status`` does; that store is not this surface's, and
+    the invariant here is the bridge store.) Unknown query names are refused, not
+    dropped — see :data:`READ_QUERY_PARAMS`.
+
+    Two standing modes answer honestly through ``mode``/``read_only``: ENABLED
+    machines read under receive standing, and a machine whose local switch is off
+    reads retained history for the same authenticated participant — reads only,
+    never a receive, and a machine with no retained namespace for the signed-in
+    account is refused rather than guessed at.
+
+    It does not screen, ACK, wake, claim, or decide, and it never advertises a
+    decision surface: the read capability key is its own
+    (``team_bridge_read``), so a renderer that cannot see it says "update the
+    backend" instead of probing operations that do not exist here.
+    """
+
+    from pydantic import ValidationError
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        inbox_view,
+        read_inbox_page,
+        resolve_read_context,
+        wire_for,
+    )
+
+    if set(request.query_params) - READ_QUERY_PARAMS:
+        _raise_read("invalid_request")
+
+    raw: dict[str, Any] = {
+        "expected_account_id": expected_account_id,
+        "tenant_id": tenant_id,
+        "after": after,
+        "limit": limit,
+        "state": state,
+        "thread_id": thread_id,
+        "sender_account_id": sender_account_id,
+    }
+    try:
+        # Only the names the caller actually SENT: a None must not overwrite a
+        # model default (the model is where every bound and closed set lives).
+        query = TeamBridgeInboxQuery(
+            **{name: value for name, value in raw.items() if value is not None}
+        )
+    except ValidationError:
+        _raise_read("invalid_request")
+
+    # ONE wire per request, handed to BOTH builders (review R-2): the standing
+    # resolution and the page must not construct their clients by two rules.
+    wire = wire_for(config_manager.config_dir)
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir,
+            expected_account_id=query.expected_account_id,
+            wire=wire,
+        )
+    except BridgeSignInRequired as exc:
+        # Before the BridgeRefusal arm where the two overlap, deliberately.
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+
+    if query.tenant_id != context.tenant_id:
+        # The named organization IS the scope: the endpoint a page resolves
+        # through is the membership the caller names, so answering for a tenant
+        # this machine did not enroll with would be a cross-tenant read dressed
+        # as a filter. The upstream refuses the same shape (`invalid_tenant`).
+        _raise_read("invalid_tenant")
+
+    try:
+        result = await read_inbox_page(
+            context,
+            config_dir=config_manager.config_dir,
+            wire=wire,
+            after=query.after,
+            limit=query.limit,
+            state=query.state,
+            thread_id=query.thread_id,
+            sender_account_id=query.sender_account_id,
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+    return reply(inbox_view(result))
