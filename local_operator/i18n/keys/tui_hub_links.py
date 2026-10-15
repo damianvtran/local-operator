@@ -225,6 +225,10 @@ def state_published(*, source: str) -> Msg:
     return Msg("tui.hub_links.state.published", {"source": source})
 
 
+def state_unavailable() -> Msg:
+    return Msg("tui.hub_links.state.unavailable", {})
+
+
 def state_unsubscribed(*, source: str) -> Msg:
     return Msg("tui.hub_links.state.unsubscribed", {"source": source})
 

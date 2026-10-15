@@ -214,6 +214,10 @@ class HubLinksPanel(Static):
         """Open the panel and mark a fetch in flight (kept rows, not a skeleton)."""
 
         self._loading = True
+        # A reopen starts a NEW lifecycle: the dismiss already cancelled the
+        # group, so no write+reread SURVIVES into this panel state (R1 life-
+        # cycle rule) — clearing the marker here, like close, can never reopen
+        # stale intent; the fresh fetch settles on its own installed snapshot.
         self._refreshing = False
         self._error = ""
         self._notice = ""
@@ -305,15 +309,16 @@ class HubLinksPanel(Static):
         on the surface they are looking at rather than a transcript notice
         behind the overlay. ``severity`` picks the warning ink when appropriate.
 
-        It also SETTLES an in-flight policy write (U3): every notice the app
-        paints arrives after its write worker finished (a refusal, a CAS
-        refusal, or the U1 save-failure line), so the ``Saving…`` marker must
-        clear with it.
+        It does NOT settle an in-flight policy write (R1/U7): the app paints a
+        CAS-refusal notice BEFORE the re-read that installs the moved revision,
+        so clearing ``_refreshing`` here would re-arm `s`/`a` against the STALE
+        revision — the same false-conflict race as U3, one state later. Only an
+        installed snapshot (``show_links``), the terminal ``show_save_failed``,
+        or the panel's lifecycle (``close``/``start_fetch``) settle it.
         """
 
         self._notice = message
         self._notice_severity = severity
-        self._refreshing = False
         self._repaint()
 
     def show_save_failed(self, policy: str, link_id: str | None, local_id: str) -> None:
@@ -341,6 +346,10 @@ class HubLinksPanel(Static):
             else _t(_k.policy_subscribe_label())
         )
         item = (row.name if row is not None else local_id) or local_id
+        # R1/U7: this is one of the two TERMINAL settle points of the
+        # write+reread lifetime (the other is an installed snapshot). Settle
+        # BEFORE painting, so the notice helper itself never touches the flag.
+        self._refreshing = False
         self.show_notice(_t(_k.policy_save_failed(policy=label, source=item)), "warning")
 
     def close(self) -> None:
@@ -356,6 +365,12 @@ class HubLinksPanel(Static):
     @property
     def is_open(self) -> bool:
         return bool(self.display)
+
+    @property
+    def is_refreshing(self) -> bool:
+        """Whether a policy write+reread is in flight (R2: the app's guard)."""
+
+        return self._refreshing
 
     @property
     def selected_row(self) -> core.LinkRow | None:
@@ -439,6 +454,15 @@ class HubLinksPanel(Static):
             self._repaint()
 
     def action_refresh(self) -> None:
+        # R2: DEFERRED while OUR policy write+reread is unsettled. A refresh
+        # would start a second exclusive worker in the same `hub-links` group
+        # and CANCEL the pending worker's re-read — while its write keeps
+        # running in a thread — so the moved revision would never install and
+        # the next write would CAS against it again. The pending worker
+        # installs the fresh snapshot itself, which is what a refresh would
+        # have shown.
+        if self._refreshing:
+            return
         self.post_message(self.RefreshRequested())
 
     def action_move(self, delta: int) -> None:
@@ -680,12 +704,21 @@ class HubLinksPanel(Static):
         if lo > 0 and self._is_header(body[lo - 1]) and used + counts[lo - 1] <= budget:
             lo -= 1
             used += counts[lo]
+        # D8: never OPEN the window on a bare separator (the D6 chrome). A
+        # window that opens on a blank reads as an orphan gap, and the sticky
+        # search below would attach the preceding section title to a SEPARATOR
+        # rather than to a row — the orphan header the narrow frames showed
+        # (`Agents` above a blank, its own row scrolled out). The selection is
+        # a link row, so this can never drop the selection itself.
+        while lo < selected and self._is_blank(body[lo]):
+            used -= counts[lo]
+            lo += 1
         # D35 STICKY HEADER: if the window still opens mid-section, remember the
         # section header to paint AS the first line (it is not in the range, so
         # the caller counts its line against the budget and drops the last entry
         # to pay for it).
         sticky: int | None = None
-        if lo > 0 and not self._is_header(body[lo]):
+        if lo > 0 and not self._is_header(body[lo]) and not self._is_blank(body[lo]):
             for i in range(lo - 1, -1, -1):
                 if self._is_header(body[i]):
                     sticky = i

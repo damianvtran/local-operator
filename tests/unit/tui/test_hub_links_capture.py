@@ -845,6 +845,84 @@ async def test_more_rows_indicator_reports_the_window() -> None:
         shutil.rmtree(case_root, ignore_errors=True)
 
 
+async def test_no_orphan_section_header_when_the_window_is_cramped() -> None:
+    """D8/U9: a cramped window never paints a section title without its row.
+
+    At 60x20 the round-2 frames showed `Agents` above a blank line while
+    `coder` sat below the window — the sticky step attached the preceding
+    header to a SEPARATOR (a D6 addition) rather than to a row. The planner
+    must open on real content: every painted section title carries at least
+    one row of its own section in the same window, and the window never opens
+    on a bare separator.
+    """
+
+    import shutil
+    import tempfile
+
+    from local_operator.tui.settings import settings_reload
+
+    case_root = Path(tempfile.mkdtemp(prefix="hub-links-cramped-", dir=OUT))
+    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(case_root)
+    try:
+        settings_reload()
+        _seed_links(
+            case_root,
+            [
+                dict(
+                    kind="agent",
+                    local_id="a1",
+                    name="coder",
+                    visibility="public",
+                    tenant=None,
+                    subscribe=True,
+                    auto_push=False,
+                    state="up-to-date",
+                    error=None,
+                ),
+                dict(
+                    kind="team",
+                    local_id="t1",
+                    name="crew",
+                    visibility="org",
+                    tenant="acme",
+                    subscribe=False,
+                    auto_push=True,
+                    state="up-to-date",
+                    error=None,
+                ),
+                dict(
+                    kind="skill",
+                    local_id="s1",
+                    name="deploy",
+                    visibility="public",
+                    tenant=None,
+                    subscribe=True,
+                    auto_push=False,
+                    state="up-to-date",
+                    error=None,
+                ),
+            ],
+        )
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            app.action_hub_links()
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("down")  # engage; the selection moves to the team row
+            await pilot.pause()
+            painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            for header, first_row in (
+                ("Agents", "coder"),
+                ("Teams", "crew"),
+                ("Skills", "deploy"),
+            ):
+                if header in painted:
+                    assert first_row in painted, (header, painted)
+    finally:
+        shutil.rmtree(case_root, ignore_errors=True)
+
+
 async def test_capture_round4_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The frames round-4 design review asked for (D21/D22).
 

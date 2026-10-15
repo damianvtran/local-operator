@@ -46278,8 +46278,16 @@ class OperatorApp(App[None]):
         try:
             snapshot = await asyncio.to_thread(self._hub_links_snapshot_sync)
         except Exception as error:  # noqa: BLE001 - surfaced IN the panel
+            # U8: the log keeps the raw exception; the card shows catalogue
+            # copy. The old f-string painted the parser's own words into the
+            # overlay (e.g. "config.yml: mapping values are not allowed
+            # here") — machinery, not a sentence, and not translatable.
+            logger.warning("hub links inventory read failed: %s", error)
             if panel.is_open:
-                panel.show_error(f"hub links unavailable: {error}")
+                from local_operator.i18n.keys import tui_hub_links as _k
+                from local_operator.i18n.text import tr
+
+                panel.show_error(tr("tui.hub_links")(_k.state_unavailable()))
             return
         if panel.is_open:
             panel.show_links(snapshot)
@@ -46335,6 +46343,16 @@ class OperatorApp(App[None]):
         self, message: "HubLinksPanel.RefreshRequested"
     ) -> None:
         message.stop()
+        panel = self._hub_links_panel()
+        if panel is not None and panel.is_refreshing:
+            # R2: DEFER (not queue) a refresh while OUR policy write+reread is
+            # unsettled — a second exclusive worker in this group would cancel
+            # the pending worker's re-read while its `to_thread` write keeps
+            # running, so the moved revision would never install before the
+            # next write CASes against it. The guard lives HERE as well as in
+            # `action_refresh` so a programmatic post cannot bypass it; the
+            # pending worker installs the fresh snapshot itself.
+            return
         # A refresh is a state change too; the door follows it (round-2 D12).
         self.refresh_hub_total()
         self.run_worker(

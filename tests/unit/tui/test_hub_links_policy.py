@@ -1364,3 +1364,216 @@ async def test_the_consent_block_carries_no_cli_machinery(
         assert "lop hub link set" not in painted, painted
         assert "link id" not in painted, painted
         assert "<id>" not in painted, painted
+
+
+# ---------------------------------------------------------------------------
+# Round-2 reviews on #2410 (R1/R2 MAJOR, U7): the write+reread lifetime must
+# stay OWNED until an installed snapshot (or the terminal save-failed line)
+# settles it — a painted refusal does not. `r` must not cancel it either.
+
+
+@pytest.mark.asyncio
+async def test_a_cas_refusal_keeps_the_actions_blocked_until_the_reread_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1/U7: a refusal notice does NOT settle the write+reread lifetime.
+
+    A stale revision makes the write refuse; the notice paints BEFORE the
+    re-read that installs the moved revision. Through that window `s`/`a`
+    must stay inert and post ZERO new intents — pre-fix the notice cleared
+    `_refreshing`, a second `s` posted a write with the stale revision, and
+    the new same-group exclusive worker cancelled the re-read (the U3 race,
+    one state later). After the re-read installs, the SAME key writes against
+    the fresh revision.
+    """
+
+    import threading
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True, attest_revision_cas=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    intents: list[object] = []
+    real_handler = app.on_hub_links_panel_policy_toggle_requested
+
+    def counting(message: Any) -> None:
+        intents.append(message)
+        real_handler(message)
+
+    app.on_hub_links_panel_policy_toggle_requested = counting  # type: ignore[method-assign]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        # Gate the RE-READ only, and only AFTER the open settled: the re-read
+        # must block so the refusal window stays observable (the initial fetch
+        # above already used the real snapshot).
+        release = threading.Event()
+        real_snapshot = app._hub_links_snapshot_sync
+
+        def gated_snapshot() -> Any:
+            release.wait(10)
+            return real_snapshot()
+
+        app._hub_links_snapshot_sync = gated_snapshot  # type: ignore[method-assign]
+        # A concurrent edit moved the revision: the write will be REFUSED.
+        panel._rows = [
+            dataclasses.replace(row, policy_revision="stale-revision") for row in panel._rows
+        ]
+        await pilot.press("s")
+        for _ in range(40):
+            await pilot.pause()
+            if panel._notice:
+                break
+        assert panel._notice, "the CAS refusal must be on the card"
+        assert "changed" in panel._notice.lower(), panel._notice
+        # R1/U7 premise: the refusal painted while the re-read is still blocked.
+        assert panel._refreshing, "a refusal must not settle the write+reread lifetime"
+        assert panel._policy_actions_allowed() is False
+        intents.clear()  # the first intent belongs to the press above
+        await pilot.press("s")
+        await pilot.press("a")
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        assert intents == [], "no new intent may post while the re-read is pending"
+        release.set()
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the installed re-read settles the lifetime"
+        # The installed revision is live: the same key now writes, no stale CAS.
+        await pilot.press("s")
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is False, "the post-settle flip must land on the moved revision"
+
+
+@pytest.mark.asyncio
+async def test_refresh_defers_while_the_write_is_pending_and_the_fresh_revision_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: `r` cannot cancel a pending policy worker's re-read.
+
+    While OUR write+reread is unsettled, both the panel action AND a
+    programmatic `RefreshRequested` must be deferred — a refresh would start a
+    second exclusive worker in the same group and cancel the re-read, while
+    the write keeps running in its thread. The pending worker installs the
+    fresh snapshot itself and the NEXT flip accepts the served revision.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    gate = threading.Event()
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(10)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        started: list[str] = []
+        real_fetch = app._fetch_hub_links_worker
+
+        async def counting_fetch() -> None:
+            started.append("fetch")
+            await real_fetch()
+
+        app._fetch_hub_links_worker = counting_fetch  # type: ignore[method-assign]
+        await pilot.press("s")
+        await pilot.pause()
+        assert panel._refreshing, "premise: the write is in flight"
+        await pilot.press("r")  # the panel action: deferred
+        await pilot.pause()
+        app.post_message(HubLinksPanel.RefreshRequested())  # the handler must hold too
+        await pilot.pause()
+        await pilot.pause()
+        assert started == [], "no refresh worker may start while the write+reread is pending"
+        assert panel._refreshing, "the pending worker is untouched"
+        gate.set()
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+        assert not panel._refreshing, "the pending worker must settle via its own re-read"
+        await pilot.press("s")  # the served revision accepts the next flip
+        for _ in range(40):
+            await pilot.pause()
+            if not panel._refreshing:
+                break
+    values = _policy_values(tmp_path, identity.link_id)
+    assert values["subscribe"] is True, "two clean flips: False on the gated write, True after"
+
+
+@pytest.mark.asyncio
+async def test_reopening_during_a_pending_write_does_not_resurrect_a_stale_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1 lifecycle: close+reopen mid-write settles on a FRESH fetch.
+
+    The dismiss cancels the group and drops the armed state, so a reopen must
+    not inherit `Saving…` or an armed intent; the orphaned thread write lands
+    on its own and the next read shows it. Nothing stale survives.
+    """
+
+    import threading
+
+    from local_operator.hub_sync import policies as policies_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    identity = _seed_link(tmp_path, subscribe=True)
+    gate = threading.Event()
+    real_update = policies_mod.update_policy
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(10)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(policies_mod, "update_policy", gated)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _open_panel(app, pilot)
+        panel = _mounted_panel(app)
+        await pilot.press("s")
+        await pilot.pause()
+        assert panel._refreshing, "premise: the write is in flight"
+        await pilot.press("escape")  # dismiss: the group is cancelled
+        await pilot.pause()
+        await pilot.pause()
+        app.action_hub_links()  # reopen starts a NEW lifecycle
+        for _ in range(10):
+            await pilot.pause()
+            if not _mounted_panel(app)._refreshing and _mounted_panel(app)._rows:
+                break
+        panel = _mounted_panel(app)
+        assert not panel._refreshing, "the reopen must not inherit the stale Saving… state"
+        assert panel._consent_link_id is None, "no stale intent survives a reopen"
+        # The reopen starts UNENGAGED (typed-ahead protection): one navigation
+        # key engages it, as the user would before pressing `r`.
+        await pilot.press("down")
+        await pilot.pause()
+        gate.set()  # the orphaned thread write lands now
+        for _ in range(40):
+            await pilot.pause()
+            if _policy_values(tmp_path, identity.link_id).get("subscribe") is False:
+                break
+        await pilot.press("r")  # the next read shows the landed write
+        for _ in range(40):
+            await pilot.pause()
+            if panel._rows and panel._rows[0].subscribe is False:
+                break
+        assert (
+            panel._rows and panel._rows[0].subscribe is False
+        ), "the reopened panel must settle on the landed state"
