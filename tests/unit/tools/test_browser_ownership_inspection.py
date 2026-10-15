@@ -15,7 +15,7 @@ import pytest
 
 from local_operator.browser_bridge import resources
 from local_operator.browser_bridge.backend import BridgeClient
-from local_operator.harness.types import BrowserSurface, ToolContext
+from local_operator.harness.types import BrowserSurface, ToolContext, ToolResult
 from local_operator.tools import builtin
 
 
@@ -35,7 +35,7 @@ def peer(monkeypatch: pytest.MonkeyPatch):
     }
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
         def do_POST(self) -> None:
@@ -99,10 +99,16 @@ def setup_resource(tmp_path: Path) -> tuple[resources.BrowserResource, ToolConte
 
 
 def call(ctx: ToolContext) -> dict[str, Any]:
-    result = asyncio.run(
-        builtin.execute_browser("synthetic-call", {"action": "inspect_ownership"}, context=ctx)
-    )
-    assert result.details == json.loads(result.content[0].text)
+    async def execute() -> ToolResult:
+        # The guarded entry point promises an Awaitable, not specifically the
+        # Coroutine required by asyncio.run; await it through the real contract.
+        return await builtin.execute_browser(
+            "synthetic-call", {"action": "inspect_ownership"}, None, None, ctx
+        )
+
+    result = asyncio.run(execute())
+    assert result.details is not None
+    assert result.details == json.loads(result.text)
     return result.details
 
 
@@ -149,6 +155,7 @@ def test_actual_tool_http_path_preserves_disk_and_memory(
         resource.host,
         resource.ownership,
     ) == attrs
+    assert isinstance(ctx.browser, BrowserSurface)
     assert ctx.browser.surface_id == ""
     assert not ctx.browser.extension_update_notified
 
@@ -250,7 +257,7 @@ def test_parallel_calls_preserve_local_storage(tmp_path: Path, peer: dict[str, A
     async def parallel() -> None:
         replies = await asyncio.gather(
             *(
-                builtin.execute_browser(str(i), {"action": "inspect_ownership"}, context=ctx)
+                builtin.execute_browser(str(i), {"action": "inspect_ownership"}, None, None, ctx)
                 for i in range(8)
             )
         )
