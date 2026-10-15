@@ -25,13 +25,23 @@ import pytest
 import pytest_asyncio
 
 from local_operator.network import approvals, onboard, store
-from local_operator.network.types import capabilities_for_role
+from local_operator.network.types import (
+    MemberRecord,
+    NetworkRecord,
+    capabilities_for_role,
+)
 from tests.unit.network.test_approvals_store import _make_key
 from tests.unit.server.test_desktop_mesh_onboard import live as live_http
 from tests.unit.server.test_desktop_mesh_onboard import root as isolated_root
 
 live = live_http
 root = isolated_root
+
+
+def required_member(record: NetworkRecord, device_id: str) -> MemberRecord:
+    member = record.member(device_id)
+    assert member is not None, "expected actual membership readback, not an absent row"
+    return member
 
 
 class Node:
@@ -60,6 +70,8 @@ class Node:
             text=True,
             start_new_session=True,
         )
+        assert self.process.stdin is not None and self.process.stdout is not None
+        self.stdin, self.stdout = self.process.stdin, self.process.stdout
         self.lock = threading.Lock()
         try:
             self.ready = self.read(15)
@@ -69,38 +81,91 @@ class Node:
 
     def read(self, timeout):
         with selectors.DefaultSelector() as poll:
-            poll.register(self.process.stdout, selectors.EVENT_READ)
+            poll.register(self.stdout, selectors.EVENT_READ)
             assert poll.select(timeout), "node pipe exceeded its safety bound"
-        line = self.process.stdout.readline()
-        assert line, "node process exited before response; inspect its isolated stderr log"
+        line = self.stdout.readline()
+        assert line, self.startup_diagnostic()
         return json.loads(line)
+
+    def startup_diagnostic(self) -> str:
+        """Only bounded known-safe import diagnostics, never arbitrary stderr.
+
+        A dead child used to discard its only discriminating evidence. CI had
+        eight identical EOF failures while local PYTHONPATH masked the cause.
+        Other exception arguments/paths may contain secret data: name them but
+        do not echo them, even though this fixture uses synthetic credentials.
+        """
+        import re
+
+        try:
+            with (self.root / "node-stderr.log").open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 8192))
+                tail = stream.read(8192).decode(errors="replace")
+        except OSError:
+            tail = ""
+        safe = []
+        for line in tail.splitlines():
+            if re.fullmatch(
+                r"(?:ModuleNotFoundError|ImportError): No module named '[A-Za-z0-9_.]+'", line
+            ):
+                safe.append(line)
+            elif re.match(r"^[A-Za-z][A-Za-z0-9_]*(?:Error|Exception):", line):
+                safe.append(line.partition(":")[0] + " (details withheld)")
+        return (
+            "node exited before response; rc="
+            + str(self.process.poll())
+            + "; "
+            + ("; ".join(safe)[-512:] or "startup stderr withheld/unavailable")
+        )
 
     def cli(self, argv, timeout):
         with self.lock:
-            self.process.stdin.write(json.dumps({"argv": argv, "timeout": timeout}) + "\n")
-            self.process.stdin.flush()
+            self.stdin.write(json.dumps({"argv": argv, "timeout": timeout}) + "\n")
+            self.stdin.flush()
             return self.read(timeout + 5)
 
     def audit(self):
         with self.lock:
-            self.process.stdin.write('{"audit":true}\n')
-            self.process.stdin.flush()
+            self.stdin.write('{"audit":true}\n')
+            self.stdin.flush()
             return self.read(10)
 
     def close(self):
         try:
             if self.process.poll() is None:
-                self.process.stdin.write('{"stop":true}\n')
-                self.process.stdin.flush()
+                self.stdin.write('{"stop":true}\n')
+                self.stdin.flush()
                 try:
                     self.process.wait(10)
                 except subprocess.TimeoutExpired:
                     os.killpg(self.process.pid, signal.SIGTERM)
                     self.process.wait(5)
         finally:
-            for pipe in (self.process.stdin, self.process.stdout):
+            for pipe in (self.stdin, self.stdout):
                 pipe.close()
             self.error.close()
+
+
+def test_startup_diagnostic_is_bounded_and_omits_untrusted_arguments(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    node = Node.__new__(Node)
+    node.root = tmp_path
+    monkeypatch.setattr(node, "process", SimpleNamespace(poll=lambda: 1), raising=False)
+    secret = "SYNTHETIC_SECRET_SENTINEL"
+    (tmp_path / "node-stderr.log").write_text(
+        "x" * 9000
+        + "\nModuleNotFoundError: No module named 'tests'\n"
+        + "RuntimeError: "
+        + secret
+        + " /private/local/path\n"
+    )
+    diagnostic = node.startup_diagnostic()
+    assert "No module named 'tests'" in diagnostic
+    assert "RuntimeError (details withheld)" in diagnostic
+    assert secret not in diagnostic and "/private/local/path" not in diagnostic
+    assert len(diagnostic) < 600
 
 
 class SshBoundary:
@@ -175,7 +240,9 @@ class SshBoundary:
             self.after_join.set()
             assert self.release_join.wait(20), "test did not release post-admission barrier"
             self.lose_join_response = False
-            return result(1, stderr="fixture lost the successful join response")
+            return onboard.CommandResult(
+                tuple(argv), 1, stderr="fixture lost the successful join response"
+            )
         return onboard.CommandResult(
             tuple(argv), actual["rc"], stdout=actual["stdout"], stderr=actual["stderr"]
         )
@@ -223,7 +290,9 @@ async def rig(live, monkeypatch):
             node_a.cli, ["network", "init", "fixture-selected", "--no-start", "--json"], 30
         )
         assert created["rc"] == 0
-        selected = onboard._json_from(created["stdout"])["network_id"]
+        parsed = onboard._json_from(created["stdout"])
+        assert isinstance(parsed, dict)
+        selected = parsed["network_id"]
         assert selected != node_a.ready["network_id"] and len(store.list_networks(root)) == 2
         key = root / "fixture-ssh-key"
         key.write_text("synthetic SSH boundary fixture, not a real credential")
@@ -311,8 +380,8 @@ async def test_signed_card_existing_runner_reaches_two_process_members(rig):
     right = store.load(body["network_id"], node_b.root)
     assert left.epoch == right.epoch
     for record in (left, right):
-        assert record.member(node_a.ready["device_id"]).active
-        assert record.member(node_b.ready["device_id"]).active
+        assert required_member(record, node_a.ready["device_id"]).active
+        assert required_member(record, node_b.ready["device_id"]).active
     assert right.self_role == "drive"
     assert not store.load(node_a.ready["network_id"], root).member(node_b.ready["device_id"])
     # Real effective grant readback: exact card scopes, never admin convenience.
@@ -322,12 +391,15 @@ async def test_signed_card_existing_runner_reaches_two_process_members(rig):
     # The invited node receives only its signed drive role. The signed grants
     # are directional: this operator device receives them ON that node, in
     # addition to its already-existing inviter role, not vice versa.
-    for member in (left.member(node_b.ready["device_id"]), right.member(node_b.ready["device_id"])):
+    for member in (
+        required_member(left, node_b.ready["device_id"]),
+        required_member(right, node_b.ready["device_id"]),
+    ):
         assert member.role == signed["role"] == "drive"
         assert set(member.capabilities) == set(capabilities_for_role(signed["role"]))
         assert "admin" not in member.capabilities and "broker_credential" not in member.capabilities
-    peer = right.member(node_a.ready["device_id"])
-    baseline = left.member(node_a.ready["device_id"])
+    peer = required_member(right, node_a.ready["device_id"])
+    baseline = required_member(left, node_a.ready["device_id"])
     assert peer.role == baseline.role
     assert set(peer.capabilities) == set(capabilities_for_role(baseline.role)) | scopes
     assert "credential_inheritance" not in signed and "credential_finite_share" not in signed
@@ -451,8 +523,10 @@ async def test_lost_join_response_same_card_retry_and_single_target_writer(rig):
     failed = await terminal(client, aid)
     assert failed["state"] == "failed"
     # Actual admission already happened on both processes, despite the lost ack.
-    assert store.load(body["network_id"], node_b.root).member(node_a.ready["device_id"]).active
-    assert store.load(body["network_id"], root).member(node_b.ready["device_id"]).active
+    assert required_member(
+        store.load(body["network_id"], node_b.root), node_a.ready["device_id"]
+    ).active
+    assert required_member(store.load(body["network_id"], root), node_b.ready["device_id"]).active
     before = store.load(body["network_id"], node_b.root)
     authority_before = {m.device_id: (m.role, set(m.capabilities)) for m in before.active_members()}
     assert (await client.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 202
@@ -463,7 +537,7 @@ async def test_lost_join_response_same_card_retry_and_single_target_writer(rig):
     assert (await client.post(f"/v1/desktop/approvals/{aid}/run")).status_code == 409
     right = store.load(body["network_id"], node_b.root)
     assert len(right.active_members()) == 2
-    caps = right.member(node_a.ready["device_id"]).capabilities
+    caps = required_member(right, node_a.ready["device_id"]).capabilities
     assert {
         m.device_id: (m.role, set(m.capabilities)) for m in right.active_members()
     } == authority_before
