@@ -40,8 +40,11 @@ DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # Valid JSON is insufficient: a rejected scalar/list/unknown key can itself contain
 # an opaque credential that no named text-field guard ever inspects (R6 residual).
 MEMORY_TOOL_OPS = ("store", "recall")
-MEMORY_TOOL_SCOPES = ("session", "team", "agent", "global")
-MEMORY_TOOL_REQUIRED = ("op", "scope", "text")
+MEMORY_TOOL_REQUIRED = ("op", "text")
+MEMORY_TOOL_CONTRACT_ERROR = (
+    "Invalid memory contract. Use op=store|recall and text only for durable personal/global "
+    "memory; scoped work uses read/write/edit memory://. No scope argument is accepted."
+)
 
 
 def valid_memory_tool_arguments(value: Any) -> bool:
@@ -51,8 +54,6 @@ def valid_memory_tool_arguments(value: Any) -> bool:
         and not set(value) - {*MEMORY_TOOL_REQUIRED, "i"}
         and isinstance(value["op"], str)
         and value["op"] in MEMORY_TOOL_OPS
-        and isinstance(value["scope"], str)
-        and value["scope"] in MEMORY_TOOL_SCOPES
         and isinstance(value["text"], str)
         and ("i" not in value or isinstance(value["i"], str))
     )
