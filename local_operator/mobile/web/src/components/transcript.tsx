@@ -21,7 +21,8 @@ import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory } from "../api";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
-import { hubReceiptLabel, isHubReceipt, quietGroupLabel, quietGroupsOf, type QuietGroup } from "../lib/quiet-groups";
+import { hubReceiptLabel, isHubReceipt, quietGroupLabel, type QuietGroup } from "../lib/quiet-groups";
+import { contextualQuietGroupsOf } from "../lib/peer-cycles";
 import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
@@ -374,6 +375,7 @@ export function Transcript({
 	topInset = 0,
 	supplements,
 	projectionPid = 0,
+	peerCycles = false,
 	tailContent,
 	emptyContent,
 }: {
@@ -392,6 +394,8 @@ export function Transcript({
 	/** The projection's own process identity, for the reader rule's `job_live`
 	 *  (`lib/supplement.ts`, `beatLive`): 0 is a disk rebuild. */
 	projectionPid?: number;
+	/** Explicit owner-channel negotiation; never inferred from an entry. */
+	peerCycles?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -499,7 +503,7 @@ export function Transcript({
 	   open tail grows in place under its stable key. The definition lives once
 	   in `lib/quiet-groups` and is pinned across clients by the shared parity
 	   fixture. */
-	const groups = quietGroupsOf(visible);
+	const groups = contextualQuietGroupsOf(visible, pid, peerCycles);
 	const groupsByFirstId = new Map(groups.map((group) => [group.rowIds[0], group]));
 	const groupedIds = new Set(groups.flatMap((group) => group.rowIds));
 	const entriesById = new Map(visible.map((entry) => [entry.id, entry]));

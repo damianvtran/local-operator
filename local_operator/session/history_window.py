@@ -15,7 +15,7 @@ import json
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal, Sequence
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from local_operator.harness.rows import (
     ask_gate_diverted_call_ids,
@@ -58,6 +58,8 @@ DISPLAY_HISTORY_AUDIT_CAPABILITY = "display-history-audit-v1"
 #: hazard the audit comment above names). The runtime emits the field (with its
 #: data) only to a viewer that negotiated this string.
 DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY = "display-history-entry-times-v1"
+# Separate negotiation: older DisplayHistoryWindow DTOs forbid unknown keys.
+DISPLAY_HISTORY_PEER_CYCLE_CAPABILITY = "display-history-peer-cycle-records-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
 
@@ -136,6 +138,16 @@ class DisplayHistoryWindow(BaseModel):
     #: existed serializes the byte-shape it always did; for an OLDER VIEWER the
     #: strip helper alongside the audit one is the belt to that braces.
     entry_times: dict[str, float] = Field(default_factory=dict)
+    # Specialized renderer metadata is not an AgentMessage/provider payload.
+    # Absence stays absent on direct/legacy pages, not a new default null key.
+    peer_cycle_display_records: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_peer_cycles(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.peer_cycle_display_records is None:
+            payload.pop("peer_cycle_display_records", None)
+        return payload
 
     @model_validator(mode="before")
     @classmethod
@@ -323,14 +335,22 @@ def strip_input_metadata(payload: dict[str, Any], *, input_capable: bool) -> dic
     return payload
 
 
+def strip_peer_cycle_fields(payload: dict[str, Any], *, peer_cycle_capable: bool) -> dict[str, Any]:
+    """Strip the optional field on ALL three old-client history wire routes."""
+    if not peer_cycle_capable:
+        payload.pop("peer_cycle_display_records", None)
+    return payload
+
+
 def wire_payload(
-    window: DisplayHistoryWindow, *, audit_capable: bool, entry_times_capable: bool = False
+    window: DisplayHistoryWindow, *, audit_capable: bool, entry_times_capable: bool = False,
+    peer_cycle_capable: bool = False,
 ) -> dict[str, Any]:
     """Serialize a page for one viewer, honouring what that viewer negotiated."""
-    return strip_entry_time_fields(
+    return strip_peer_cycle_fields(strip_entry_time_fields(
         strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable),
         entry_times_capable=entry_times_capable,
-    )
+    ), peer_cycle_capable=peer_cycle_capable)
 
 
 def _sign(payload: dict[str, Any], key: bytes) -> str:
@@ -453,6 +473,8 @@ def display_window(
     # response must own those children even on a cold or non-admitted request.
     # Copy only the selected page, never the whole canonical history.
     page = page.model_copy(deep=True)
+    from local_operator.harness.peer_cycle_display import attach_page_records
+    page = attach_page_records(page, transcript, max_wire_bytes=max_wire_bytes)
     if page.status != "reset":
         cache.put(key, page)
     return page

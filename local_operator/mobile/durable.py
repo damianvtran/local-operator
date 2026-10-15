@@ -402,6 +402,10 @@ class DurableFoldCache:
                 # exposes via ``latest_custom``. Track them here so a cached
                 # session never re-parses for them.
                 custom_type = entry.payload.get("custom_type")
+                # Bookkeeping paints no row, but its independently validated
+                # display proof can change an already-loaded idle disclosure.
+                if custom_type == "frontend_peer_cycle_display_v1":
+                    rebuild_render = True
                 if custom_type in _TRACKED_CUSTOM_TYPES:
                     state.latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
                 if custom_type == SUPPLEMENT_CUSTOM_TYPE:
@@ -409,7 +413,7 @@ class DurableFoldCache:
                     if isinstance(details, dict):
                         _track_supplement(state.supplements, details)
         if rebuild_render:
-            state.render = _fold(state.history)
+            state.render = _fold(state.history, state.directory)
         state.entry_count += len(new_entries)
         state.offset += consumed
         state.fingerprint = fingerprint
@@ -532,7 +536,7 @@ class DurableFoldCache:
         state.injection_ids = _journal_injection_ids(entries)
         state.history, state.keep_start_id = _replay(entries, at_bof=at_bof)
         state.scan_from_bof = at_bof
-        state.render = _fold(state.history)
+        state.render = _fold(state.history, state.directory)
         state.prunes = {
             str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
             for entry in entries
@@ -750,10 +754,18 @@ def _apply_prune_to(message: Message, notice: str) -> None:
     message.provider_payload = {**(message.provider_payload or {}), "pruned": True}
 
 
-def _fold(history: list[AgentMessage]) -> list[Any]:
+def _fold(history: list[AgentMessage], directory: Path | None = None) -> list[Any]:
     from local_operator.mobile.projection import fold_messages_to_entries
-
-    return fold_messages_to_entries(history)
+    if directory is None:
+        return fold_messages_to_entries(history)
+    from local_operator.harness.peer_cycle_display import discover_records
+    from local_operator.session.transcript import Transcript
+    # The existing cache supplies the selected raw window. Only deterministic
+    # record IDs for its bounded roots use the existing index; no journal scan.
+    transcript = Transcript(directory)
+    records = discover_records(transcript, history[-4096:], directory.name)
+    return fold_messages_to_entries(history, session_id=directory.name,
+        peer_cycle_display_records=records, proof_transcript=transcript)
 
 
 #: Journal entries read per backward step of the archive walk. The reader's own
@@ -1086,7 +1098,7 @@ def journal_rows_older_than(
         messages = _page_messages(older, prunes)
         if messages:
             messages += _pairing_messages(newer, messages, prunes)
-            rows = _fold(messages) + rows
+            rows = _fold(messages, directory) + rows
         if not recovered and candidate != before_id:
             # THE CALLER'S ID WAS ONE OF A MESSAGE'S CALL ROWS, so the page it is
             # asking for is not simply "everything older than that message".
@@ -1110,7 +1122,7 @@ def journal_rows_older_than(
             # serving it back would put a repeat in every page.
             anchor_messages = _page_messages([page.entries[anchor]], prunes)
             anchor_messages += _pairing_messages(newer, anchor_messages, prunes)
-            above = _fold(anchor_messages)
+            above = _fold(anchor_messages, directory)
             stop = next((i for i, row in enumerate(above) if str(row.id) == before_id), None)
             # ONLY when the caller's id really is one of that message's rows. If
             # it names nothing in the group — a cursor from a transcript that was
