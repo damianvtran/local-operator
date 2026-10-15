@@ -65,6 +65,7 @@ from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
+from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.messages import Msg as _Msg
@@ -117,6 +118,14 @@ except Exception:  # pragma: no cover - a wheel without the catalogue is broken
 # namespace so carried locales retain their existing source hashes/eligibility.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.aida_cadence"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# The OpenRouter host-speed row is a small English-only addition, merged for the
+# same reason as ``wire.aida_cadence``: it must not move the already-audited
+# ``wire.settings`` source hash the translated locales are pinned to.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -1946,6 +1955,23 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.providers_openrouter_preferred_max_latency_help())),
         minimum=0.0,
         maximum=600.0,
+    ),
+    # Like ``provider_affinity`` above, a HARNESS switch rather than a wire key:
+    # ``_openrouter_provider_preferences`` deliberately does not read it, so it
+    # can never make the shipped config start emitting a ``provider`` object. It
+    # is read by ``SessionStreamFn._score_host_decode_rate`` and applies to the
+    # affinity pin only -- with affinity off (or any of order/only/ignore/sort
+    # set) there is no pin to release and the check never runs.
+    Setting(
+        key="providers.openrouter.retire_below_tps",
+        path=("providers", "openrouter", "retire_below_tps"),
+        section="openrouter",
+        label=_t(_hs.retire_below_tps_label()),
+        kind=Kind.FLOAT,
+        default=25.0,
+        help=_t(_hs.retire_below_tps_help()),
+        minimum=0.0,
+        maximum=100_000.0,
     ),
     # -- failover -----------------------------------------------------------
     Setting(

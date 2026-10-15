@@ -561,6 +561,8 @@
  "wire.settings.providers_openrouter_require_parameters.choice.unset.label": "default",
  "wire.settings.providers_openrouter_require_parameters.help": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
  "wire.settings.providers_openrouter_require_parameters.label": "require parameters",
+ "wire.settings.providers_openrouter_retire_below_tps.help": "Stop pinning a host that decodes below this many output tokens/sec on three long replies in a row, and move to another host once one is serving. 0 turns the check off. The next request may start on a cold prompt cache.",
+ "wire.settings.providers_openrouter_retire_below_tps.label": "retire slow host (tok/s)",
  "wire.settings.providers_openrouter_sort.choice.latency.description": "lowest response latency first",
  "wire.settings.providers_openrouter_sort.choice.latency.label": "latency",
  "wire.settings.providers_openrouter_sort.choice.price.description": "cheapest host first",

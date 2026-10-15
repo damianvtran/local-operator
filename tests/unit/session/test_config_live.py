@@ -45,6 +45,7 @@ from local_operator.model.configure import (
     _openai_api_mode,
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
+    _openrouter_retire_below_tps,
 )
 from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
@@ -546,6 +547,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
             "preferred_max_latency"
         ),
+    ),
+    # The harness-side decode-rate floor: probed through the resolver that
+    # `SessionStreamFn._score_host_decode_rate` reads it with, over the session's
+    # LIVE routing mapping. 40.0 differs from the 25.0 default, so the probe
+    # observes a CHANGE reaching the running session.
+    "providers.openrouter.retire_below_tps": (
+        40.0,
+        lambda s, w: _openrouter_retire_below_tps(s.routing_settings),
     ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on

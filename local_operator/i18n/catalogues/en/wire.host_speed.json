@@ -1,0 +1,4 @@
+{
+  "wire.host_speed.retire_below_tps.label": "retire slow host (tok/s)",
+  "wire.host_speed.retire_below_tps.help": "Stop pinning a host that decodes below this many output tokens/sec on three long replies in a row, and move to another host once one is serving. 0 turns the check off. The next request may start on a cold prompt cache."
+}

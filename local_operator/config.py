@@ -569,6 +569,12 @@ DEFAULT_CONFIG = Config(
                     "max_price": "",
                     "preferred_min_throughput": 0.0,
                     "preferred_max_latency": 0.0,
+                    # HARNESS-side, like `provider_affinity`: the decode rate
+                    # (output tokens/sec) under which a host that keeps serving
+                    # the conversation is dropped from the cache pin. 0 = off.
+                    # Mirrors `OPENROUTER_RETIRE_BELOW_TPS` in model/configure.py
+                    # (the reasoning for 25 lives there).
+                    "retire_below_tps": 25.0,
                 },
             },
             # One ordered cascade for every text-model call. Entries may be
