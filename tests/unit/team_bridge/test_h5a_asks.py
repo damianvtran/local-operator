@@ -66,9 +66,7 @@ def test_a_carriage_with_no_validated_name_degrades_to_the_generic_line() -> Non
     question = bridge_request_question(
         message_id="bmsg_abc", sender="", excerpt="please approve before 1700"
     )
-    assert question["question"] == (
-        f"{GENERIC_ASK_SENDER}: please approve before 1700"
-    )
+    assert question["question"] == (f"{GENERIC_ASK_SENDER}: please approve before 1700")
     assert "acc_" not in question["question"]
 
 
