@@ -1071,6 +1071,9 @@ class SessionProjection:
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable
     transcript: list[TranscriptEntry] = field(default_factory=list)
+    # Optional DISPLAY capability, never inferred from raw entry details. Old
+    # owners omit it; only the updated owner source binding sets version 1.
+    peer_cycles: int | None = None
     #: Todos grouped into phases (``builtin`` stores them phased). A single
     #: implicit ``"Todos"`` phase carries a flat list and renders headerless.
     todos: list[TodoPhase] = field(default_factory=list)
@@ -1160,6 +1163,8 @@ class SessionProjection:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        if self.peer_cycles is None:
+            data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None
         if self.asks is not None:
             data["asks"] = [row.to_json() for row in self.asks]

@@ -3349,7 +3349,15 @@ class ServingSessionHandle(SessionHandle):
                 # the pipeline to settle before it does anything (memo §2.1).
                 self._maybe_supplement(event)
 
-        unsubscribe = self._session.subscribe(handler)
+        from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
+        unsubscribe_peer_source = bind_owner_peer_cycles(
+            self._fold, self._session, self._notify, self._loop)
+        unsubscribe_events = self._session.subscribe(handler)
+
+        def unsubscribe() -> None:
+            unsubscribe_peer_source()
+            unsubscribe_events()
+
         try:
             self._fold.fold_history(self._session.history())
         except Exception:  # noqa: BLE001 — history is a convenience, not a gate
@@ -4701,7 +4709,11 @@ class ServingSessionHandle(SessionHandle):
         if receives_message_id(self._session):
             peer_kwargs["message_id"] = message_id
         result = await self._session.receive_peer_message(text, **peer_kwargs)
-        self._fold.note_peer_message(text, sender=sender or {})
+        # Updated folds receive the actual delivery event with its canonical
+        # message ID. Never create an unrelated optimistic alias which cannot
+        # join the source proof. Old owners retain the prior echo behavior.
+        if self._projection.peer_cycles != 1:
+            self._fold.note_peer_message(text, sender=sender or {}, message_id=message_id)
         self._notify()
         return AckDetail(
             str(result),

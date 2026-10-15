@@ -3449,6 +3449,9 @@ class FrontendSessionState(BaseModel):
     # Bounded transient seed for a frontend that joins mid-turn. Existing
     # frontends consume raw events; only the atomic snapshot needs this fold.
     live_events: list[dict[str, Any]] = Field(default_factory=list)
+    # Additive display proof, never tool/model state. Absent on the unchanged
+    # direct/raw-only path; checkpoints retain bounded archive refs, not bodies.
+    peer_cycle_display: dict[str, Any] | None = None
     jobs: list[JobState] = Field(default_factory=list)
     todos: list[TodoPhaseState] = Field(default_factory=list)
     wakes: list[WakeState] = Field(default_factory=list)
@@ -3540,6 +3543,8 @@ class FrontendSessionState(BaseModel):
         # absent whenever there is no row list to carry, while ``asks_open``
         # rides whenever the queue is live — ``0`` included — so the pair's
         # presence is the capability read a renderer keys its ask paint on.
+        if mutable.peer_cycle_display is None:
+            payload.pop("peer_cycle_display", None)
         if mutable.asks is None:
             payload.pop("asks", None)
         if mutable.asks_open is None:
@@ -5911,6 +5916,8 @@ class FrontendStateStore:
         # The ONE assignment outside ``_install``: nothing else can see this
         # store yet, so there is no race to take the lock against.
         self._state = _freeze_state_jobs(state.model_copy(deep=True))
+        self._peer_display_fold: Any = None
+        self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
         #: Guards the ONE O(1) critical section that makes registration and
         #: publication a single step across threads: a publish assigns ``_state``
@@ -7891,6 +7898,7 @@ class FrontendStateStore:
         now = time.time()
         state = self._state
         changes: dict[str, Any] = {}
+        self._observe_peer_cycle_display(session, event)
         self._fold_live_event(event)
         changes.update(self._fold_live_tool_starts(event))
         changes.update(self._fold_activity_phase(event, now))
@@ -8141,6 +8149,55 @@ class FrontendStateStore:
         # needs installing against a reader.
         self._install(self._state.model_copy(update={"live_events": live}))
 
+    def _refuse_peer_cycle_display(self, error: Exception, stage: str, event_type: str = "") -> None:
+        # Display evidence is optional; its failure must not abort the agent or
+        # hide a real final. Report a structured body-free refusal, retire the
+        # candidate, and preserve previously sealed facts. Never log payloads or
+        # a validation exception's potentially secret-bearing repr.
+        self._peer_display_fold = None
+        self._peer_display_pending = []
+        logger.warning("peer display proof refused at %s (%s)", stage, type(error).__name__,
+                       extra={"peer_display_refusal": {"stage": stage, "event_type": event_type,
+                                                      "error_type": type(error).__name__}})
+
+    def _observe_peer_cycle_display(self, session: Any, event: AgentEvent[Any]) -> None:
+        from local_operator.harness.peer_cycle_display import DisplayCycleAccumulator
+        state = self._state
+        try:
+            if (self._peer_display_fold is None or self._peer_display_fold.session_id != state.session_id
+                    or self._peer_display_fold.epoch != state.epoch):
+                self._peer_display_fold = DisplayCycleAccumulator(
+                    state.session_id, state.epoch, getattr(session, "_redact_tool_result_text", None))
+                self._peer_display_pending = []
+            record = self._peer_display_fold.observe(event)
+            if record is not None:
+                self._peer_display_pending.append(record)
+        except Exception as error:
+            self._refuse_peer_cycle_display(error, "observe", event.type)
+
+    async def persist_peer_cycle_display(self, transcript: Any) -> None:
+        """Publish proof after an acknowledged specialized append, not at idle.
+
+        The enclosing raw result may persist later through its normal path.
+        Cold readers independently require those actual parents/outcomes; an
+        orphan display record is not proof of crash durability.
+        """
+        from local_operator.harness.peer_cycle_display import HOT_RECORDS, persist_record
+        pending, self._peer_display_pending = self._peer_display_pending, []
+        for record in pending:
+            try:
+                if not await persist_record(transcript, record):
+                    logger.warning("peer display archive collision/unavailable: %s", record["id"],
+                                   extra={"peer_display_refusal": {"stage": "archive", "reason": "collision_or_unavailable"}})
+                    continue
+                previous = self._state.peer_cycle_display or {}
+                records = [item for item in previous.get("records", []) if item.get("id") != record["id"]]
+                records = [*records, record][-HOT_RECORDS:]
+                self.mutate(peer_cycle_display={"refs": [item["id"] for item in records], "records": records})
+            except Exception as error:
+                self._refuse_peer_cycle_display(error, "archive")
+                break
+
     async def checkpoint(self, transcript: Any, *, preserve_mtime: bool = False) -> None:
         """Append the durable turn-end (or closing) status row.
 
@@ -8171,6 +8228,8 @@ class FrontendStateStore:
         durable = state.model_copy(
             update={
                 "live_events": [],
+                "peer_cycle_display": ({"refs": list((state.peer_cycle_display or {}).get("refs", []))}
+                                       if state.peer_cycle_display is not None else None),
                 # The live-batch anchor is transient by construction, exactly
                 # like the seed above: it describes calls executing RIGHT NOW
                 # in this process, and there is nothing for a later reader to

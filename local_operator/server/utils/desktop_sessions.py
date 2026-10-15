@@ -3715,6 +3715,7 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
         }
+        answer = self._with_peer_cycle_records(answer, [page])
         return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
     async def _open_frame_history(
@@ -3827,6 +3828,7 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
+            answer = self._with_peer_cycle_records(answer, [page])
             return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
 
         collected: list[dict[str, Any]] = []
@@ -3979,6 +3981,7 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
+        answer = self._with_peer_cycle_records(answer, order_pages)
         return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
 
     @staticmethod
@@ -4326,6 +4329,44 @@ class DesktopSessionBridge:
                 "event", {"type": JOURNAL_ORDER_EVENT, "reconcile": True, "peer_source": True}
             )
 
+    def _with_peer_cycle_records(self, answer: dict[str, Any], pages: list[Any]) -> dict[str, Any]:
+        """Join display-only proof for this selected page, never model context.
+
+        Decode existing JournalRows with the journal's own decoder, then use
+        deterministic root IDs and its bounded raw index. No full-history walk,
+        body inference, second source index or payload copied into checkpoints.
+        """
+        from local_operator.harness.peer_cycle_display import discover_records
+        from local_operator.session.transcript import Transcript, _entry_to_message
+        selected = {row.get("id") for row in answer.get("entries", ())}
+        messages = []
+        seen: set[str] = set()
+        for page in pages:
+            for row in page.entries:
+                if row.id in selected and row.id not in seen:
+                    seen.add(row.id)
+                    message = _entry_to_message(row)
+                    if message is not None:
+                        messages.append(message)
+        if not messages:
+            return answer
+        baseline = len(json.dumps(answer, ensure_ascii=False).encode())
+        budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
+        records = discover_records(Transcript(self.root / "sessions" / self.session_id),
+                                   messages, self.session_id, max_bytes=budget)
+        if records is None:
+            return answer
+        candidate = {**answer, "peer_cycle_display_records": records}
+        if len(json.dumps(candidate, ensure_ascii=False).encode()) > OPEN_FRAME_MAX_BYTES:
+            # Keep EVERY original row. If even the remaining-ID list cannot
+            # fit, expose an explicit refusal/count, never a partial certificate.
+            pending = set(records.get("remaining", ())) | set(records.get("unavailable", ()))
+            pending.update(record["id"] for record in records.get("records", ()))
+            records = {"records": [], "remaining": [], "unavailable": [],
+                       "state": "page_cap", "remaining_count": len(pending), "bytes": 0}
+            candidate = {**answer, "peer_cycle_display_records": records}
+        return candidate
+
     def _frame_answer(self, result: Any) -> dict[str, Any]:
         """The frame's page as the wire states it, in the existing envelope."""
         return {
@@ -4579,6 +4620,8 @@ class DesktopSessionBridge:
         # from the join has no provable entry time (it was subtracted from the
         # owner's display replay, or it arrived live after the page).
         true_entry_times = remote.history_entry_times()
+        peer_cycle_source = getattr(remote, "history_peer_cycle_display_records", None)
+        peer_cycle_records = peer_cycle_source() if callable(peer_cycle_source) else None
         entries: list[dict[str, Any]] = []
         for row in page:
             row_id = str(getattr(row, "id", "") or "")
@@ -4613,6 +4656,8 @@ class DesktopSessionBridge:
             "cursor_missing": False,
             "has_newer": None,
         }
+        if peer_cycle_records is not None:
+            answer["peer_cycle_display_records"] = peer_cycle_records
         if open_frame:
             # THE LIVE WINDOW IS NOT THE FRAME'S BUILDER (see this method's own
             # ``open_frame`` paragraph): the facts are the owner's build over

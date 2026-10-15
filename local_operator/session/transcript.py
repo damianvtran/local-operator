@@ -208,6 +208,9 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
+        # Each finite display proof has its own deterministic key. Unlike the
+        # hot checkpoint this archive must survive compaction of later turns.
+        "frontend_peer_cycle_display_v1",
         # A turn supplement lands AFTER the turn settled (memo §2.4 "Activity clock"):
         # re-ranking a session as freshly worked because a callout arrived would reorder
         # the sidebar for nothing. The writer passes ``preserve_mtime=True``.
@@ -2063,7 +2066,8 @@ class Transcript:
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
-        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
+        self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False,
+        entry_id: str | None = None,
     ) -> TranscriptEntry:
         """Append a host bookkeeping entry (wake schedules, checkpoints, …).
 
@@ -2076,6 +2080,7 @@ class Transcript:
         return await self._append(
             ENTRY_CUSTOM,
             {"custom_type": custom_type, "details": details},
+            entry_id=entry_id,
             preserve_mtime=preserve_mtime,
         )
 

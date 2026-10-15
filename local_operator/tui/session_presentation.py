@@ -188,6 +188,8 @@ class CompactionMarkerBlock(NoticeBlock):
     deliberate sharing of ``·`` between ``info`` and ``note`` intact.
     """
 
+    # Positive producer-class marker; refused/unknown notices never inherit it.
+    INTERNAL_WORK_COMPACTION = True
     SPACING_AIRY = True
 
 
@@ -580,6 +582,7 @@ class ReplayState:
     #: the live path owns that call's one visible row — and the empty default
     #: is the COLD-resume answer: no live turn, nothing to skip.
     _projection_live_call_ids: set[str] = field(default_factory=set)
+    _projection_peer_display_roles: dict[str, str] = field(default_factory=dict)
     #: The CALL OBJECTS the projection skipped because their call id is live,
     #: in transcript order. Read by the projection's owner after the fold to
     #: paint the one visible row for a still-running call that no live path
@@ -603,6 +606,7 @@ class ReplayTarget(Protocol):
     _projection_message_id: str
     _projection_part: int
     _projection_live_call_ids: set[str]
+    _projection_peer_display_roles: dict[str, str]
     _projection_skipped_live: list[Any]
 
     def _transcript_view(self) -> TranscriptView: ...
@@ -647,6 +651,7 @@ class PreparedReplay(ReplayState):
     _resume_tail_notice: NoticeBlock | None = None
     view: TranscriptView = field(default_factory=TranscriptView)
     blocks: list[TranscriptBlock] = field(default_factory=list)
+    _projection_work: Any = None
 
     def _transcript_view(self) -> TranscriptView:
         return self.view
@@ -662,6 +667,18 @@ class PreparedReplay(ReplayState):
             block.navigation_anchor_id = self._projection_message_id
             block.navigation_anchor_part = self._projection_part
         self._projection_part += 1
+        from local_operator.tui.internal_work_membership import WorkProjector
+        from local_operator.tui.widgets.transcript import QuietGroupBlock, work_record_of_block
+        if self._projection_work is None:
+            self._projection_work = WorkProjector()
+        if self.blocks and not isinstance(self.blocks[-1], QuietGroupBlock):
+            # A ToolCard is appended before restore; re-read its now-typed outcome
+            # before advancing, without caching or walking the whole transcript.
+            self._projection_work.step(work_record_of_block(self.blocks[-1]))
+        from local_operator.tui.widgets.transcript import sync_work_dormancy
+        block.work_view_identity = self.view.work_identity
+        block.internal_work_membership = self._projection_work.step(work_record_of_block(block))
+        sync_work_dormancy(block, block.internal_work_membership)
         self.blocks.append(block)
 
     def _append_image_blocks(
@@ -753,6 +770,8 @@ class PreparedReplay(ReplayState):
         anchor_id: str = "",
         live_call_ids: set[str] | None = None,
         fold_width: int = 0,
+        display_records: dict[str, Any] | None = None,
+        proof_transcript: Any = None,
     ) -> None:
         """Project ``history`` into ``self.blocks`` for an offscreen view.
 
@@ -788,7 +807,8 @@ class PreparedReplay(ReplayState):
             else None
         )
         end = min(len(history), anchor + bound) if anchor is not None else None
-        project_settled_rows(self, history, bound=bound, end=end, fold_width=fold_width)
+        project_settled_rows(self, history, bound=bound, end=end, fold_width=fold_width,
+                             display_records=display_records, proof_transcript=proof_transcript)
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
@@ -1012,6 +1032,9 @@ def project_settled_rows(
     end: int | None = None,
     start: int | None = None,
     fold_width: int = 0,
+    display_records: dict[str, Any] | None = None,
+    proof_history: list[Any] | None = None,
+    proof_transcript: Any = None,
 ) -> bool:
     """Mount settled transcript rows through the ONE role-aware renderer.
 
@@ -1160,7 +1183,47 @@ def project_settled_rows(
     # rendered tail. Empty for every unbounded caller.
     results: dict[str, Any] = dict(self._resume_results)
     settled_results: set[str] = set()
+    from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
+    from local_operator.tui.closed_peer_cycles import PeerCycleReplay
+    cycle_view = self._transcript_view()
+    cycle_view.bind_work_source(getattr(getattr(self, "_session", None), "session_id", cycle_view.work_session_id))
+    cycle_projection = PeerCycleReplay(cycle_view.work_identity)
+    cycle_certificates = cycle_view._quiet_groups._peer_cycle_certificates
+    from local_operator.harness.peer_cycle_display import validate_record, validate_indexed_record
+    from local_operator.tui.closed_peer_cycles import PeerCycleCertificate
+    display_validated = []
+    display_children: dict[str, list[dict[str, Any]]] = {}
+    display_roles: dict[str, str] = {}
+    # Metadata remains separate from raw AgentMessages. Validation sees only
+    # the existing loaded raw window, not a synthesized nested tool history.
+    proof_bytes_left = 512 * 1024
+    for candidate in (display_records or {}).get("records", ()):
+        if proof_transcript is not None and proof_bytes_left > 0:
+            record, consumed = validate_indexed_record(
+                proof_transcript, candidate, str(cycle_view.work_session_id or ""), max_bytes=proof_bytes_left)
+            proof_bytes_left -= consumed
+        elif proof_transcript is not None:
+            record = None
+        else:
+            record = validate_record(candidate,
+                (proof_history if proof_history is not None else history)[-4096:],
+                str(cycle_view.work_session_id or ""))
+        if record is None or any(key in display_roles for key in record["member_ids"]):
+            continue
+        display_validated.append(record)
+        certificate = PeerCycleCertificate(*cycle_view.work_identity, record["quiet_call_id"],
+            tuple(record["member_ids"]), owner_kind="peer_cycle_display")
+        remember_peer_cycle_certificate(cycle_certificates, certificate)
+        display_roles.update((member["source_id"], member["role"]) for member in record["members"])
+        for child in record["child_rows"]:
+            display_children.setdefault(child["root_id"], []).append(child)
+    self._projection_peer_display_roles = display_roles
+    # Feed the EXISTING raw-message index pass before S1 filters quiet calls.
+    # Only finite ID certificates survive paging, never another body/history.
     for message in history:
+        closed_cycle = cycle_projection.step(message)
+        if closed_cycle is not None:
+            remember_peer_cycle_certificate(cycle_certificates, closed_cycle)
         if getattr(message, "role", None) != "tool":
             continue
         call_id = getattr(message, "tool_call_id", None)
@@ -1276,6 +1339,11 @@ def project_settled_rows(
     }
     with batch:
         for message in history:
+            # A mounted replay consumes the actual quiet result at its original
+            # ordered seat. Collected pages carry metadata to the list planner.
+            replay_close = cycle_certificates.get(getattr(message, "tool_call_id", None))
+            if replay_close is not None and self._block_sink is None and getattr(message, "role", None) == "tool":
+                cycle_view._quiet_groups.consume_replayed_peer_cycle(replay_close, message)
             self._projection_message_id = str(getattr(message, "id", ""))
             self._projection_part = 0
             # A wake delivery is a CustomMessage, so it has no ``role``
@@ -1361,13 +1429,16 @@ def project_settled_rows(
                     # the mount is gated — nothing is painted and `appended`
                     # stays as it was, because nothing was appended.
                     if not hide_cross_session:
-                        self._append_block(
-                            PeerMessageBlock(
-                                str(details.get("body", "")),
-                                details.get("sender") or {},
-                                fold_width=fold_width,
-                            )
+                        block = PeerMessageBlock(
+                            str(details.get("body", "")), details.get("sender") or {},
+                            fold_width=fold_width,
                         )
+                        source_id = f"{getattr(message, 'id', '')}:0"
+                        certificate = next((close for close in cycle_certificates.values()
+                                            if close.first_peer_source_id == source_id), None)
+                        if certificate is not None:
+                            block.peer_cycle_certificate = certificate
+                        self._append_block(block)
                         appended = True
                 continue
             # A gate that timed out unattended is the most expensive event
@@ -1592,19 +1663,49 @@ def project_settled_rows(
             # drops a custom message with no role (the same trap the incident and
             # MCP branches were added for).
             #
-            # ONLY THE HELD ROW IS PAINTED, deliberately, and the difference is
-            # real rather than a shortcut: a DELIVERED row was acknowledged by the
-            # turn it opened, and that turn's own answer is already in this frame
-            # — so painting it too would add a duplicate of the assistant's reply
-            # on every ordinary child delivery, which is not what this change is
-            # for. A held row has no such answer, and the notice line distinguishes
-            # it from one that has (U6).
+            # Preserve the actual delivered report, not a duplicate assistant
+            # answer. Outside positively owned user work it retains the shipped
+            # omission policy; held/error attention is never subject to that gate.
             if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE:
-                held = held_delivery_notice(getattr(message, "details", None) or {})
-                if held is not None:
-                    text, severity = held
-                    self._append_block(NoticeBlock(text, kind=severity, fold_width=fold_width))
-                    appended = True
+                from local_operator.tui.internal_work_membership import WorkRecord
+                details = getattr(message, "details", None) or {}
+                details = details if isinstance(details, dict) else {}
+                held = held_delivery_notice(details)
+                context = getattr(self, "_projection_work", None)
+                source_blocks = getattr(self, "blocks", ())
+                last_source = source_blocks[-1] if source_blocks else None
+                if context is None:
+                    tracker = getattr(self._transcript_view(), "_quiet_groups", None)
+                    context = getattr(tracker, "_work_projector", None)
+                    last_source = getattr(tracker, "_last_work_block", None)
+                if context is not None and last_source is not None:
+                    from local_operator.tui.widgets.transcript import work_record_of_block
+                    context.step(work_record_of_block(last_source))
+                from local_operator.tui.internal_work_membership import WorkProjector
+                from local_operator.tui.widgets.transcript import sync_work_dormancy
+                message_id = str(getattr(message, "id", ""))
+                if message_id and message_id in self._resume_mounted_ids:
+                    continue
+                status, job_id = details.get("status"), details.get("job_id")
+                text, severity = held if held is not None else (str(details.get("text") or ""), "error" if status == "failed" else "note")
+                block = NoticeBlock(text, kind=severity, fold_width=fold_width)
+                block.internal_work_source = WorkRecord(
+                    message_id, "custom", custom_type="job_result", producer="job_result",
+                    job_id=job_id if isinstance(job_id, str) else None,
+                    status=status if isinstance(status, str) else None,
+                    held=held is not None, level="error" if status == "failed" else "info",
+                )
+                block.internal_work_payload = dict(details)
+                block.owned_delivery_only = held is None
+                # Dormancy is the SAME policy projection, not a second list of
+                # producer guesses. Keep even an empty report's actual payload.
+                member = (context or WorkProjector()).step(block.internal_work_source)
+                block.internal_work_membership = member
+                sync_work_dormancy(block, member)
+                self._append_block(block, ends_empty_state=not block.work_dormant)
+                if message_id:
+                    self._resume_mounted_ids.add(message_id)
+                appended = appended or not block.work_dormant
                 continue
             role = getattr(message, "role", None)
             if role == "tool":
@@ -1935,6 +2036,15 @@ def project_settled_rows(
                     bang_pending and tool_calls[0] is call and getattr(call, "name", "") == "bash"
                 )
                 self._replay_tool_call(call, results, user_run=user_run, fold_width=fold_width)
+                # Only the missing sanitized child DISPLAY row is overlaid at
+                # its proven root seat. No nested Message enters replay/model
+                # history, and every raw eval/peer body stays its original row.
+                from types import SimpleNamespace
+                from local_operator.harness.types import ToolResult
+                for child in display_children.get(getattr(call, "id", ""), ()):
+                    child_call = SimpleNamespace(id=child["tool_call_id"], name="send", arguments=child["arguments"])
+                    child_result = ToolResult.model_validate(child["result"])
+                    self._replay_tool_call(child_call, {child_call.id: child_result}, fold_width=fold_width)
                 appended = True
             # A refused, failed or interrupted turn needs a notice the prose
             # alone does not carry — a refusal fires even when the model
@@ -1964,6 +2074,10 @@ def project_settled_rows(
     # Every message this pass rendered, by stable id — the dedupe key a
     # later backward page is filtered through.
     self._projection_message_id = ""
+    self._projection_peer_display_roles = {}
+    if self._block_sink is None:
+        for record in display_validated:
+            cycle_view._quiet_groups.apply_display_record(record)
     self._resume_mounted_ids.update(
         str(getattr(message, "id", "")) for message in history if getattr(message, "id", None)
     )
@@ -2087,6 +2201,8 @@ def replay_tool_call(
     # that follows rebuilds through the fold ladder — so this is the moment
     # the card can be told the width its rows should be authored at.
     card.set_fold_hint(fold_width)
+    if getattr(self, "_projection_peer_display_roles", {}).get(f"tool:{call_id}:0") == "carrier":
+        card.peer_display_carrier_owner = self._transcript_view().work_identity
     self._append_block(card)
     if result is None:
         # No result recorded: the session ended between the call and its
@@ -2100,6 +2216,13 @@ def replay_tool_call(
     payload = getattr(result, "provider_payload", None) or {}
     is_dict = isinstance(payload, dict)
     details = payload.get("details") if is_dict else None
+    from local_operator.harness.types import ToolResult
+    if isinstance(result, ToolResult):
+        # A verified missing child is already a sanitized display ToolResult,
+        # not an invented durable Message/provider_payload.
+        details = result.details
+        payload = {"details": details, "duration_s": result.duration_s}
+        is_dict = True
     # Validated, never trusted: the key is absent on every row written before
     # durations were persisted, and a transcript is an on-disk file another
     # process may have written. `parse_duration` degrades anything that is not
@@ -2202,6 +2325,7 @@ def replay_tool_call(
             result_text=result_text,
             details=details,
             duration_s=duration_s,
+            result=result,
         )
     # Same rule as `on_tool_ended`: a result carrying image blocks shows
     # them under the settled card, so a resumed session's screenshots are

@@ -1218,7 +1218,12 @@ def _send_card(app, call_id: str, message: str) -> ToolCard:
     """The visible `send` row a quiet turn paints when it replies."""
     card = ToolCard(call_id, "send", {"target": "peer-a", "message": message})
     app._append_block(card)
-    card.mark_done("delivered")
+    # A painted success is not execution evidence. Supply the same typed end
+    # this fixture represents; the acceptance test's members/assertions stay
+    # unchanged, while manual state-only cards intentionally remain UNKNOWN.
+    from local_operator.harness.types import ToolResult
+    result = ToolResult(tool_call_id=call_id, tool_name="send")
+    card.mark_done("delivered", result=result)
     return card
 
 
@@ -1545,6 +1550,103 @@ class TestQuietGroupFold:
             bars = _quiet_bars(app)
             assert [b.group.count for b in bars] == [2, 2]
             assert bars[0] is first and bars[0].group == frozen, "closed facts moved"
+
+    @pytest.mark.asyncio
+    async def test_one_completed_peer_exchange_quiet_close_folds_at_idle_without_user_opener(self) -> None:
+        """One received note plus its successful send is the original idle case.
+
+        Two incoming receipts already satisfy the default quiet-group threshold;
+        that fixture cannot establish this single-exchange acceptance. Do not add
+        a USER/answer or another receipt to lend this case unrelated authority.
+        The send is the existing completed-card fixture, not real IPC delivery;
+        the quiet start/end use the actual app message handlers.
+        """
+        import json
+        import os
+        from pathlib import Path
+
+        from local_operator.harness.types import (
+            QUIET_TURN_KEY,
+            TextContent,
+            ToolExecutionEndEvent,
+            ToolExecutionStartEvent,
+            ToolResult,
+        )
+        from local_operator.tui.events import ToolEnded, ToolStarted
+        from local_operator.tui.widgets.transcript import work_record_of_block
+        from tests.unit.tui.test_owned_work_context import _capture_mounted_frame
+
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        body = "One synthetic peer request, acknowledged without another user turn."
+        ack = "Acknowledged the single synthetic request."
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            assert app._session is session
+            await _deliver(pilot, app, session, body, "single-peer")
+            send = _send_card(app, "single-send", ack)
+            await pilot.pause()
+            view = app.query_one(TranscriptView)
+            peers = _peer_blocks(app)
+            assert len(peers) == 1
+            peer = peers[0]
+            expected_ids = [work_record_of_block(peer).source_id, work_record_of_block(send).source_id]
+
+            def capture(phase: str) -> None:
+                # Export before assertions too: a missing bar must leave evidence
+                # of the real styled app, not only an assertion's widget repr.
+                _capture_mounted_frame(app, view, phase)
+                directory = os.environ.get("OWNED_WORK_EVIDENCE_DIR")
+                if directory:
+                    path = Path(directory) / f"{phase}.json"
+                    facts = json.loads(path.read_text())
+                    # Keep the discriminating path independent of optional
+                    # expansion/payload APIs: first prove whether a bar exists.
+                    facts["exchange"] = {
+                        "bar_count": len(_quiet_bars(app)),
+                        "visible_block_types": [type(block).__name__ for block in view.blocks() if block.display],
+                        "delivered_message_ids": sorted(app._live_peer_receipts),
+                        "original_source_ids": expected_ids,
+                    }
+                    path.write_text(json.dumps(facts, indent=2))
+
+            capture("single-before-quiet-close")
+            assert not any(isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks())
+            assert "single-peer" in app._live_peer_receipts
+            assert send.state == "success"
+            assert not app._welcome_visible and app._welcome.region.height == 0
+            app.post_message(ToolStarted(ToolExecutionStartEvent(
+                tool_call_id="single-quiet", tool_name="no_reply", args={},
+            )))
+            app.post_message(ToolEnded(ToolExecutionEndEvent(
+                tool_call_id="single-quiet", tool_name="no_reply",
+                result=ToolResult(
+                    tool_call_id="single-quiet", tool_name="no_reply",
+                    content=[TextContent(text="Quiet.")], details={QUIET_TURN_KEY: True},
+                ),
+            )))
+            await pilot.pause()
+            capture("single-quiet-close-immediate")
+            for _ in range(10):
+                await pilot.pause()
+            capture("single-settled-idle")
+            bars = _quiet_bars(app)
+            assert len(bars) == 1, "one completed peer exchange must condense at idle without another receipt or USER"
+            bar = bars[0]
+            assert (bar.group.count, bar.group.actions) == (1, 1)
+            assert not bar._expanded
+            assert [work_record_of_block(member).source_id for member in bar._members] == expected_ids
+            assert [type(member).__name__ for member in bar._members] == ["PeerMessageBlock", "ToolCard"]
+            assert not peer.display and not send.display
+            assert not any(card.tool_name == "no_reply" for card in app.query(ToolCard))
+            assert [block for block in view.blocks() if block.display][-1] is bar
+            bar.toggle_expanded()
+            await pilot.pause()
+            capture("single-expanded")
+            assert bar._expanded and peer.display and send.display
+            assert peer.text() == body and send.retained_payloads()[0]["message"] == ack
+            assert send.tool_call_id == "single-send"
+            assert not any(isinstance(block, (UserBlock, AssistantBlock)) for block in view.blocks())
 
     @pytest.mark.asyncio
     async def test_the_idle_shape_folds_to_one_bar_with_nothing_after_it(self) -> None:

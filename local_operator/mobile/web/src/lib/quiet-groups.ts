@@ -201,7 +201,7 @@ const PATH_SEPARATOR = /[\\/]/;
  * different states. Total over partial senders: every missing field falls to
  * the ladder's next rung rather than throwing.
  */
-function quietSenderLabel(sender: PeerSender): string {
+export function quietSenderLabel(sender: PeerSender): string {
 	const name = sender.conversation_name ?? "";
 	if (name) return `"${name}"`;
 	const cwd = (sender.cwd ?? "").replace(TRAILING_SEPARATORS, "");

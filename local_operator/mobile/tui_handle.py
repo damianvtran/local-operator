@@ -436,7 +436,15 @@ class TuiSessionHandle(SessionHandle):
             if self._on_projection is not None:
                 self._on_projection()
 
-        unsubscribe = session.subscribe(handler)
+        from local_operator.mobile.peer_cycles import bind_owner_peer_cycles
+        unsubscribe_peer_source = bind_owner_peer_cycles(
+            self._fold, session, on_projection, getattr(self._app, "_loop", None))
+        unsubscribe_events = session.subscribe(handler)
+
+        def unsubscribe() -> None:
+            unsubscribe_peer_source()
+            unsubscribe_events()
+
         comms = getattr(session, "_subagent_comms", None)
         subscribe_details = getattr(comms, "subscribe_detail_changes", None)
         if callable(subscribe_details):
@@ -700,7 +708,10 @@ class TuiSessionHandle(SessionHandle):
         # Optimistic phone echo, matching steer(): put the card on the
         # projection now so an attached phone paints it without waiting for the
         # next projection repaint.
-        self._fold.note_peer_message(text, sender=sender)
+        # An updated owner also emits the typed delivery with this exact ID.
+        # No body/sender alias matching, and no duplicate optimistic source row.
+        if self._projection.peer_cycles != 1:
+            self._fold.note_peer_message(text, sender=sender, message_id=message_id)
         if self._on_projection is not None:
             self._on_projection()
         return AckDetail(

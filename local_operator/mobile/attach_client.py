@@ -1240,6 +1240,10 @@ class AttachClient:
             # page model (it forbids extras).
             if "display-history-entry-times-v1" in record.capabilities:
                 auth["display_history_entry_times"] = True
+            # This Python transport now accepts the optional strict page field;
+            # old owners never receive an unsupported negotiation flag.
+            if "display-history-peer-cycle-records-v1" in record.capabilities:
+                auth["display_history_peer_cycle_records"] = True
         if self._operator_nonce:
             auth["operator_nonce"] = self._operator_nonce
         if self._supplements_supported:
