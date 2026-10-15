@@ -60,7 +60,8 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -951,7 +952,7 @@ class _CompactionPlan:
     advisor_hint: Any | None = None
     # Ephemeral task carrier, not durable state. Speculation may return data but
     # never persist it; only append_compaction's committed marker authorizes that.
-    memory_capture: list[asyncio.Task[Any]] = field(default_factory=list, compare=False)
+    memory_capture: list[asyncio.Task[Any]] = dataclass_field(default_factory=list, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

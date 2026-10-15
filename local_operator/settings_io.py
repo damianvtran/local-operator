@@ -376,7 +376,6 @@ class Section:
 # retired keys are last.
 
 SECTIONS: tuple[Section, ...] = (
-    Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
     # Defaults are sampled at conversation birth. The watcher still announces
     # edits, but only an explicit local /model action may select for an owner.
     Section(
@@ -875,6 +874,8 @@ SECTIONS: tuple[Section, ...] = (
         Scope.NEW_LAUNCH,
         _t(_ws.retired_description()),
     ),
+    # Preserve the established Model landing row and short-terminal editor target.
+    Section("memory", _t(_mm.title()), Scope.LIVE, _t(_mm.description())),
 )
 
 
