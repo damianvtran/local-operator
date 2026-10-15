@@ -170,10 +170,20 @@ async def test_find_returns_ranked_hits_oldest_first(harness: _Harness) -> None:
 async def test_find_soft_hit_carries_empty_ranges(harness: _Harness) -> None:
     session_id = await harness.create_session()
     await _seed(harness.root, session_id, [Message.user("the classifier needs work")])
-    response = await _find(harness, session_id, q="classifer")
-    assert response.status_code == 200, response.text
-    hits = response.json()["result"]["hits"]
-    assert [(hit["tier"], hit["ranges"]) for hit in hits] == [("soft", [])]
+    # A flushed journal and HTTP 200 do not mean the cold index is ready.
+    # Follow only building -> ready; never retry a terminal but wrong answer.
+    async with asyncio.timeout(30):
+        while True:
+            response = await _find(harness, session_id, q="classifer")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            if result["state"] != "building":
+                break
+            assert result["partial"] is True, result
+    assert result["state"] == "ready", result
+    assert result["partial"] is False
+    hits = result["hits"]
+    assert [(hit["tier"], hit["ranges"]) for hit in hits] == [("soft", [])], result
 
 
 @pytest.mark.asyncio
