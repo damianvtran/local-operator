@@ -225,6 +225,50 @@ class BrowserCleanupResult:
     detail: str = ""
 
 
+#: The only keys of a peer's `owner_recover` refusal receipt that are ever rendered,
+#: each with the type it must have. A whitelist, not a pass-through: the receipt is
+#: produced by another process (an extension, possibly an old or hostile one) and ends
+#: up in an error the model reads and a log keeps, so free text, identifiers or a URL
+#: must never ride along. Booleans and small counts carry everything the diagnosis
+#: needs (does the stored owner session match, and is the stored generation absent
+#: from the ancestry the caller sent).
+_REFUSAL_RECEIPT_KEYS: dict[str, type] = {
+    "session_match": bool,
+    "request_ancestry_count": int,
+    "request_previous_supplied": bool,
+    "allocations_total": int,
+    "allocations_live": int,
+    "allocations_pending": int,
+    "unknown_reservations": int,
+}
+_REFUSAL_RECEIPT_MAX_COUNT = 1_000_000
+
+
+def _refusal_receipt(value: Any) -> str:
+    """The peer's refusal receipt as a short suffix, or "" when there is none.
+
+    "" for a missing or malformed receipt is deliberate: an older peer omits it, and
+    that must read exactly as before -- an explicit ambiguous refusal -- never as a
+    reason to retry, rotate the proof or upgrade the extension. The receipt only
+    explains a refusal; it never changes which recovery branch runs.
+    """
+    if not isinstance(value, dict):
+        return ""
+    parts: list[str] = []
+    for key, kind in _REFUSAL_RECEIPT_KEYS.items():
+        item = value.get(key)
+        if kind is bool and isinstance(item, bool):
+            parts.append(f"{key}={'true' if item else 'false'}")
+        elif (
+            kind is int
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= _REFUSAL_RECEIPT_MAX_COUNT
+        ):
+            parts.append(f"{key}={item}")
+    return f" (peer receipt: {', '.join(parts)})" if parts else ""
+
+
 class BrowserResource:
     def __init__(self, directory: Path, session_id: str, *, host: str = "") -> None:
         self.directory = directory
@@ -1029,14 +1073,15 @@ class BrowserResource:
                 # predates the key omits it, which reads as unknown and keeps the
                 # prior bare-refusal behaviour (the failure still stands).
                 refusal = str(exc.data.get("refusal") or "")
+                receipt = _refusal_receipt(exc.data.get("diagnostic"))
                 if refusal == "stale":
                     raise BrowserOwnershipError(
                         "browser owner generation is stale; resume this session's scope "
-                        "before browsing"
+                        "before browsing" + receipt
                     ) from exc
                 if refusal == "foreign":
                     raise BrowserOwnershipError(
-                        "this browser scope belongs to a different owner; no action taken"
+                        "this browser scope belongs to a different owner; no action taken" + receipt
                     ) from exc
                 raise
             if exc.code is ErrorCode.INTERNAL and (
