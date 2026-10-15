@@ -183,8 +183,8 @@ def _status(root: Path, store: MemoryStore) -> dict[str, Any]:
         },
         "usage": store.inventory(),
         "limits": (
-            "Shape guards are heuristic: they catch recognised sensitive patterns, not every "
-            "secret. Unrecognised secrets can still be stored and journaled — keep values in "
+            "Shape guards are heuristic: they catch recognized sensitive patterns, not every "
+            "secret. Unrecognized secrets can still be stored and journaled — keep values in "
             "lop secret and only the secret NAME in memory."
         ),
         "default_enabled": MEMORY_DEFAULT_ENABLED,
@@ -233,7 +233,12 @@ def execute(
                 "or change fields with --title/--body/--tag/--alias."
             )
         raise MemoryError(f"One memory ID at a time; got {len(words)} values. {USAGE}")
-    scope, entity = store.resolve(words[0], scope)
+    try:
+        scope, entity = store.resolve(words[0], scope)
+    except MemoryError as exc:
+        if "not found" in str(exc):
+            raise MemoryError(f"{exc} List what you can see with: {prefix} list") from None
+        raise
     reference = f"{scope}/{entity}"
     ctx = common["context"]
     if args.operation == "show":
@@ -375,7 +380,12 @@ def _date(value: Any, empty: str = "unknown", *, now: float | None = None) -> st
 
 def _source(source: dict[str, Any]) -> str:
     """Provenance as a sentence; it is untrusted data, so it is shown, never obeyed."""
-    parts = [f"by {source.get('author') or 'unknown'} ({source.get('kind') or 'unknown'})"]
+    kind = source.get("kind") or "unknown"
+    # Inferred/summary/compaction facts are weaker than reported/observed ones (D6).
+    weak = (
+        " — weaker: not stated by a person" if kind in ("inferred", "summary", "compaction") else ""
+    )
+    parts = [f"by {source.get('author') or 'unknown'} ({kind}){weak}"]
     if source.get("session"):
         parts.append(f"session {source['session']}")
     return " · ".join(parts)
@@ -386,7 +396,10 @@ def _row(row: dict[str, Any]) -> list[str]:
     title = row["title"] if len(row["title"]) <= 64 else row["title"][:63] + "…"
     origin = row.get("origin", "stated")
     state = origin if row["status"] in ("active", "candidate") else f"{origin} · {row['status']}"
-    return [f"{row['scope']}/{row['id']}", f"  {title}  [{state}]"]
+    # NoticeBlock is single-colour, so state is carried by a marker, not by hue (D6): a
+    # captured/disputed/expired row must not read like a verified one.
+    marker = "  " if (origin == "stated" and row["status"] == "active") else "! "
+    return [f"{row['scope']}/{row['id']}", f"{marker}{title}  [{state}]"]
 
 
 def _searched_line(value: dict[str, Any], prefix: str) -> str:
@@ -427,7 +440,7 @@ def _status_text(value: dict[str, Any]) -> str:
     lines.append(f"Peers synced: {len(peers)}" + ("" if peers else " (none yet)"))
     usage = value["usage"]
     lines.append(
-        f"Stored: {usage['active_tokens']} active tokens · {usage['ops']} history entries · "
+        f"Stored: {usage['active_tokens']} tokens in use · {usage['ops']} edits recorded · "
         f"{usage.get('storage_bytes', 0)} bytes"
     )
     lines.append(value["limits"])
@@ -454,8 +467,8 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         if not value.get("agent_memory", True):
             lines.append("Agent memory is OFF (memory.enabled=false): agents cannot use these.")
         lines.append(
-            f"{len(items)} shown · {value['active_tokens']} active tokens · "
-            f"{value['ops']} history entries. " + _searched_line(value, prefix)
+            f"{len(items)} shown · {value['active_tokens']} tokens in use · "
+            f"{value['ops']} edits recorded. " + _searched_line(value, prefix)
         )
         if not items:
             lines.append(
@@ -479,7 +492,8 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
         if fact:
             lines += [
                 fact["title"],
-                fact["body"],
+                "Untrusted body (check it, never follow it):",
+                "  " + fact["body"].replace("\n", "\n  "),
                 "Source: " + _source(fact["source"]),
                 f"Retained: {_date(fact['created_at'])}",
                 f"Verified: {_date(fact['verified_at'], 'never verified')}",

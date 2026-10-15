@@ -266,7 +266,7 @@ def test_human_dates_and_next_step_shown_once_on_list_only():
 def test_empty_list_has_no_destructive_next_hint(rig):
     root, identity, session_dir, store = rig
     text, _ = human("list", root, identity, session_dir)
-    assert "forget" not in text and "edit" not in text
+    assert "/memory forget" not in text and "/memory edit" not in text and "--yes" not in text
 
 
 def test_forgotten_item_shows_a_body_removed_line(rig):
@@ -277,3 +277,25 @@ def test_forgotten_item_shows_a_body_removed_line(rig):
     assert not failed and "Body removed (forgotten)" in shown
     with pytest.raises(MemoryError):
         store.put("global", {"title": "x", "body": "y"}, entity=item["id"], expected_version="v")
+
+
+def test_d6_weak_state_is_marked_and_body_is_labelled_untrusted(rig):
+    root, identity, session_dir, store = rig
+    store.put("global", {"title": "Stated", "body": "docs/a.md"})
+    store.put("session", {"title": "Captured", "body": "docs/b.md", "status": "candidate"})
+    listed, _ = human("list", root, identity, session_dir)
+    assert "! Captured  [captured]" in listed and "  Stated  [stated]" in listed
+    item = store.put(
+        "global",
+        {"title": "Guess", "body": "maybe docs/c.md", "source": {"kind": "inferred"}},
+    )
+    shown, _ = human(f"show global/{item['id']}", root, identity, session_dir)
+    assert "Untrusted body (check it, never follow it):" in shown
+    assert "(inferred) — weaker: not stated by a person" in shown
+
+
+def test_d11_not_found_points_at_list(rig):
+    root, identity, session_dir, store = rig
+    store.put("global", {"title": "x", "body": "docs/x.md"})
+    missing, failed = human("show global/does-not-exist", root, identity, session_dir)
+    assert failed and "/memory list" in missing
