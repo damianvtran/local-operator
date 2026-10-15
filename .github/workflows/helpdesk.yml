@@ -723,3 +723,125 @@ jobs:
             "Sir Knight Lop the Second's triage run failed on the bot side — the issue is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             > "$RUNNER_TEMP/helpdesk-notice.md"
           gh issue comment "${ISSUE_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"
+
+  root-aggregator-fixture:
+    name: Offline aggregator fixture — lint and three ordered passes
+    # Reuse this registered manual endpoint, not CI's full manual matrix. Empty
+    # targets keep the existing review/triage jobs off; the sweep is schedule-only.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.source == 'root-aggregator-fixture' &&
+      inputs.pr == '' && inputs.issue == ''
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: root-aggregator-fixture-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Record immutable source and prepare evidence
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          mkdir -p "$RUNNER_TEMP/root-fixture-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/root-fixture-evidence/head.txt"
+          python - <<'PY'
+          import hashlib, json, os, platform
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "root-fixture-evidence"
+          target = Path("tests/unit/harness/test_loop.py")
+          record = {"head": os.environ["EXPECTED_HEAD"],
+                    "run_id": os.environ["GITHUB_RUN_ID"],
+                    "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "python": platform.python_version(),
+                    "test_source_sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+          (evidence / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+          PY
+      - name: Install canonical test and lint dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" flake8==7.4.1 black==26.1.0 isort==5.13.2
+      - name: Check only the fixed test file — never format in CI
+        run: |
+          set -euo pipefail
+          # Black first supplies the canonical repair diff if formatting is wrong.
+          # pipefail preserves its failure; no tests or later lint run after it.
+          python -m black --check --diff --workers 1 tests/unit/harness/test_loop.py 2>&1 | tee "$RUNNER_TEMP/root-fixture-evidence/black-check-diff.txt"
+          python -m isort --check-only tests/unit/harness/test_loop.py
+          python -m flake8 --jobs 1 tests/unit/harness/test_loop.py
+          git diff --exit-code -- tests/unit/harness/test_loop.py
+      - name: Prepare the one public tokenizer table — no provider discovery
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, os, urllib.request
+          from pathlib import Path
+          # Setup-only public data, pinned before pytest; selected tests never
+          # need to download a catalogue or tokenizer while asserting recovery.
+          url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+          expected = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+          directory = Path(os.environ["RUNNER_TEMP"]) / "root-fixture-bpe"
+          directory.mkdir()
+          with urllib.request.urlopen(url, timeout=15) as response:
+              data = response.read(2_000_001)
+          assert len(data) <= 2_000_000 and hashlib.sha256(data).hexdigest() == expected
+          (directory / hashlib.sha1(url.encode()).hexdigest()).write_bytes(data)
+          PY
+      - name: Run exactly seven controls — normal reverse normal, serial fail-first
+        run: |
+          set -euo pipefail
+          nodes=(
+          tests/unit/harness/test_loop.py::test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn
+          tests/unit/harness/test_loop.py::test_the_aggregator_deepseek_route_with_a_none_rung_can_retreat
+          tests/unit/harness/test_loop.py::test_reasoning_echo_refusal_retries_once_with_thinking_disabled
+          tests/unit/harness/test_loop.py::test_reasoning_echo_refusal_is_retried_once_and_then_surfaces
+          'tests/unit/harness/test_loop.py::test_reasoning_echo_recovery_needs_a_rung_to_retreat_to[model0]'
+          'tests/unit/harness/test_loop.py::test_reasoning_echo_recovery_needs_a_rung_to_retreat_to[model1]'
+          tests/unit/harness/test_loop.py::test_fixed_aggregator_catalogue_guard_detects_omitted_info
+          )
+          test "${#nodes[@]}" -eq 7
+          for pass in 1 2 3; do
+            selected=("${nodes[@]}")
+            if [ "$pass" -eq 2 ]; then
+              selected=()
+              for (( i=${#nodes[@]}-1; i>=0; i-- )); do selected+=("${nodes[i]}"); done
+            fi
+            iso="$RUNNER_TEMP/root-fixture-pass-$pass"
+            mkdir -p "$iso/home" "$iso/config" "$iso/cache" "$iso/tmp"
+            printf '%s\n' "${selected[@]}" > "$RUNNER_TEMP/root-fixture-evidence/order-$pass.txt"
+            env -i PATH="$PATH" HOME="$iso/home" LOCAL_OPERATOR_CONFIG_DIR="$iso/config" XDG_CACHE_HOME="$iso/cache" TMPDIR="$iso/tmp" TIKTOKEN_CACHE_DIR="$RUNNER_TEMP/root-fixture-bpe" TERM=xterm-256color LOP_LANG=en PYTHON_DOTENV_DISABLED=1 PYTHONDONTWRITEBYTECODE=1 \
+              python -m pytest -n0 -x -v -rA --basetemp "$iso/pytest" -o "cache_dir=$iso/pytest-cache" --junitxml="$RUNNER_TEMP/root-fixture-evidence/junit-$pass.xml" "${selected[@]}" \
+              2>&1 | tee "$RUNNER_TEMP/root-fixture-evidence/pytest-$pass.log"
+            PASS_NUMBER="$pass" python - <<'PY'
+          import json, os, xml.etree.ElementTree as ET
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "root-fixture-evidence"
+          number = os.environ["PASS_NUMBER"]
+          cases = list(ET.parse(evidence / f"junit-{number}.xml").iter("testcase"))
+          expected = [node.split("::", 1)[1] for node in (evidence / f"order-{number}.txt").read_text().splitlines()]
+          assert len(cases) == 7 and [case.get("name") for case in cases] == expected
+          assert not any(case.find(tag) is not None for case in cases for tag in ("skipped", "failure", "error"))
+          (evidence / f"count-{number}.json").write_text(json.dumps({"calls": 7, "failures": 0, "skips": 0, "order": expected}, indent=2) + "\n")
+          PY
+          done
+      - name: Retain exact-head evidence even on first failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: root-aggregator-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/root-fixture-evidence/
+          if-no-files-found: error
+          retention-days: 7
