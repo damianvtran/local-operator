@@ -22,6 +22,16 @@ rendering is not a contract.
 
 ## When the user asks to set it up
 
+For a reachable SSH target, use the existing **signed remote onboarding** path
+below: `lop network approvals request` proposes a `device_onboard` record, the
+human approves the existing presence-gated card, and `lop network approvals run`
+executes the idempotent install/join/anchor/grant/verify steps. Resume that same
+record after interruption; do not replace it with an unsigned shell bootstrap
+or silently add grants. For a device the human has locally, use the `join` flow
+below with its **typed six-digit code comparison**; the signed runner never
+bypasses that trust boundary. Phone/tunnel setup is separate—use `guide://mobile`
+and `lop tunnel setup --json`, not mesh admission.
+
 1. `lop network status --json` first — it answers "is there a relay, is there an
    identity, which networks" without changing anything. Expect `installed`,
    `relay_running`, `identity_present`, `networks`.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import (
     cli_exec_help,
+    mobile_setup,
     relay_login,
     relay_shell,
     tui_analytics,
@@ -39,6 +40,7 @@ from . import (
 
 __all__ = [
     "cli_exec_help",
+    "mobile_setup",
     "relay_login",
     "relay_shell",
     "tui_analytics",
