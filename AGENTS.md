@@ -2908,6 +2908,30 @@ The commit to retrieve each from:
 | everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
 | `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
+### Detached runner memory budgets
+
+`memory_mb` on the bash tool covers its own PG, not a child that runs
+`start_new_session=True`. `scripts/run_bounded.py` now guards its OWN child PG
+with the canonical memory guard and inherits the resolved nonsecret
+`LOCAL_OPERATOR_RESOLVED_MEMORY_MB` from updated Toolbash. Before that update,
+outer-tool limits were not proof a detached test/build child was capped.
+
+**Isolation drops inheritance.** For `env -i ... run_bounded.py`, expand the
+resolved ceiling before clearing env and pass `--memory-mb "$MEMORY_MB"`
+explicitly. Outside updated Toolbash set MEMORY_MB to the actual granted
+ceiling, not an assumed unlimited/default value. Positive inherited budgets
+cannot be widened/disabled by that flag. No inherited value/flag uses canonical
+auto policy; an unavailable default refuses before spawn. Explicit zero is a
+disclosed disable only without an inherited positive ceiling. Units are MiB;
+memory breach137 is distinct from timeout124. Check the stderr provenance.
+
+The bound is sampled/live-wrapper/owned-PG only: no aggregate ancestor or
+arbitrary descendant-setsid protection. Outer SIGKILL can still orphan a child;
+startup reaping is not immediate cleanup. Report requested outer limits, measured
+SELF peaks, actual owned-PG enforcement, and exact cleanup as DIFFERENT facts.
+Untracked helper artifacts need owner adoption, not an imagined core deployment.
+Details: `docs/design/process-memory-guard.md`, cooperative detached runners.
+
 ## Timing, flakes, and how to assert that something is fast
 
 A test that spends a fixed budget waiting for asynchronous work, then asserts

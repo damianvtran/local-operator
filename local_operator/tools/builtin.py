@@ -4061,6 +4061,10 @@ async def execute_bash(
         temp = confinement.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
+    # Resolve BEFORE spawning: a cooperative runner can start a separate PG
+    # before this coroutine next runs, escaping our group-only accounting.
+    # Pass the SAME resolved ceiling to that runner and our own Guard below.
+    memory_budget = _configured_memory_budget(params.memory_mb)
     env = shell_env.child_environment(
         # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
         # the model's own command must not read ambient credentials out of its
@@ -4068,6 +4072,12 @@ async def execute_bash(
         shell_env.policy_for_confinement(None if confinement is None else confinement.root),
         injections=injections,
     )
+
+    # Resource metadata is reserved, not a credential grant: caller extras or
+    # shell policy exclusion must not silently drop/widen the resolved ceiling.
+    # A command can still deliberately use env -i; this is cooperative PG
+    # accounting, not arbitrary-descendant or adversarial containment.
+    env[memory_guard.RESOLVED_MEMORY_MB_ENV] = str(memory_budget.ceiling_mb)
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
@@ -4195,7 +4205,6 @@ async def execute_bash(
     # host) is the pre-guard behaviour. The guard can only ever read and kill
     # THIS pgid: it never discovers a group of its own, so it cannot touch the
     # runtime or a sibling session (F5).
-    memory_budget = _configured_memory_budget(params.memory_mb)
     guard: memory_guard.Guard | None = None
     if spawned_pgid is not None and memory_budget.source != "disabled":
         guard = memory_guard.Guard(spawned_pgid, memory_budget)
