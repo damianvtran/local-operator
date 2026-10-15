@@ -234,7 +234,7 @@
   "tests/unit/network/test_authorizer.py": 1.0,
   "tests/unit/network/test_cli.py": 1.0,
   "tests/unit/network/test_control_reply_bound.py": 1.046,
-  "tests/unit/network/test_credential_inherit.py": 11.779,
+  "tests/unit/network/test_credential_inherit.py": 6.135,
   "tests/unit/network/test_credential_inherit_link.py": 21.612,
   "tests/unit/network/test_credentials_lifecycle.py": 2.101,
   "tests/unit/network/test_credentials_lifecycle_owner.py": 1.991,

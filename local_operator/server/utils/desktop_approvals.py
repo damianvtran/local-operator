@@ -66,12 +66,13 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
         # REFUSED BEFORE THE SIGNER RUNS. The desktop card cannot yet state what a credential
         # permission signs (it would read the request's operator-key anchor as an
         # "install anchor" scope and show a blind Approve), and the signature is the
-        # authority-increasing act. The terminal path prints the full disclosure first.
+        # authority-increasing act. The command-line path prints the full disclosure first.
         # Deny stays available: it is the safe direction and needs no description.
         raise MeshRefusal(
             "inherit_terminal_approval_required",
-            "This credential permission can only be approved from a terminal on this machine "
-            "for now, where its account, recipient and duration are shown before you sign: "
+            "This credential permission can only be approved from the command line on this "
+            "machine for now, where its account, recipient and duration are shown before you "
+            "sign: "
             f"lop network approvals approve {approval_id}. Nothing was approved.",
         )
     decided_at = time.time()

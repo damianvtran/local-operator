@@ -25,9 +25,12 @@ precondition (`reconcile.transport_gap`, one owner for the broker-row words).
 * **Sticky withdrawal wins.** A recipient with a withdrawal (`credential revoke`) or a retained
   finite-recovery fence for that provider cannot be re-granted here; a second standing
   permission that would REPLACE the first is refused rather than silently narrowed.
-* **No self-approval.** The request is filed by the CLI; only `approvals approve` (the
-  presence-gated operator key) signs. The desktop route refuses to sign it until the app can
-  state what is signed, and names the terminal command; deny is unaffected.
+* **No self-approval, as strong as the key.** The request is filed by the CLI; only
+  `approvals approve` signs. With a presence-gated operator key (Secure Enclave / Touch ID)
+  that needs the human's gesture; with a `file-only` key any process running as the same user
+  can sign, so an agent on that machine could approve its own request (`lop operator status`
+  names the level). The Touch ID path is not exercised here. The desktop route refuses to sign
+  it until the app can state what is signed, and names the command; deny is unaffected.
 * **One-shot apply.** `begin_run -> provision_from_run -> mark_connected`; the card ends
   `connected`, not a `connecting` that folds to `expired` after an hour. A failed apply is
   `failed` (retry-eligible), not a stuck run.
@@ -37,7 +40,7 @@ precondition (`reconcile.transport_gap`, one owner for the broker-row words).
 Software-signer, isolated roots. **Touch ID / a live second host is not exercised and is not
 claimed.** Real-path cells: `tests/unit/network/test_credential_inherit.py` (CLI entrypoints
 request -> approve -> apply -> status; 40 cells including every negative) and
-`tests/unit/network/test_credential_inherit_link.py` (two real relays + rotating IdP: the
+`tests/unit/network/test_credential_inherit_link.py` (3 cells; two real relays + rotating IdP: the
 authored permission, then a same-account re-login, heals a RUNNING session on the 15 s
 cadence with one IdP POST and no `credential share`/pull/restart; a new account costs zero
 IdP POSTs and reads `notready:scope_mismatch`).
