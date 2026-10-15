@@ -11,6 +11,7 @@ call count of the subject's own helpers.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -799,3 +800,124 @@ async def test_a_too_large_local_rendering_never_leaks_a_staged_grant(api) -> No
     assert pol.read_policy(values, identity).public_egress_grant is None
     assert list(prov.iter_baselines(root)) == []
     assert nothing_installed(root, alias64)
+
+
+async def test_a_storage_enospc_pre_commit_never_leaks_a_staged_grant(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+
+    real_stage = ManagedSkillStorage._stage
+    calls: list[int] = []
+
+    def failing_stage(self, *args, **kwargs):
+        if not calls:
+            calls.append(1)
+            raise OSError(errno.ENOSPC, "synthetic precommit filesystem full")
+        return real_stage(self, *args, **kwargs)
+
+    monkeypatch.setattr(ManagedSkillStorage, "_stage", failing_stage)
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert response.status_code == 507, response.text
+    assert response.json()["detail"]["code"] == "store_out_of_space"
+
+    # Q1c: the staged entry and grant are cleaned up on the unhandled exit.
+    # The staged write itself materializes config defaults, so the contract is
+    # asserted on the ATTEMPTED LINK (not whole-file bytes): no stored policy,
+    # no grant, no baseline, no content, and the request id stays usable.
+    values = read_config_values(root) or {}
+    assert pol.stored_link_policy(values, identity.link_id) is None
+    assert pol.read_policy(values, identity).public_egress_grant is None
+    assert list(prov.iter_baselines(root)) == []
+    assert nothing_installed(root)
+
+    # A healthy retry installs cleanly from the same state.
+    monkeypatch.setattr(ManagedSkillStorage, "_stage", real_stage)
+    retry = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert retry.status_code == 200, retry.text
+
+
+async def test_an_unexpected_pre_commit_failure_never_leaks_a_staged_grant(
+    api, monkeypatch
+) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+
+    real_stage = ManagedSkillStorage._stage
+    calls: list[int] = []
+
+    def failing_stage(self, *args, **kwargs):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("synthetic unexpected pre-commit failure")
+        return real_stage(self, *args, **kwargs)
+
+    monkeypatch.setattr(ManagedSkillStorage, "_stage", failing_stage)
+    response = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert response.status_code >= 500, response.text
+    # An UNEXPECTED exception type must not orphan the staged entry either: the
+    # guard is the exit, not the class.
+    values = read_config_values(root) or {}
+    assert pol.stored_link_policy(values, identity.link_id) is None
+    assert pol.read_policy(values, identity).public_egress_grant is None
+    assert list(prov.iter_baselines(root)) == []
+    assert nothing_installed(root)
+
+
+async def test_a_content_committed_failure_keeps_the_staged_grant(api, monkeypatch) -> None:
+    client, root, holder = api
+    holder["anon"] = SkillClient(BASE, envelope(manifest()))
+    attest_skill_capability(root)
+
+    from local_operator.hub_sync import skill_storage
+
+    real = skill_storage.write_baseline
+    calls: list[int] = []
+
+    def failing_once(config_dir, record):
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("simulated finalize crash")
+        return real(config_dir, record)
+
+    monkeypatch.setattr(skill_storage, "write_baseline", failing_once)
+    first = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert first.status_code != 200, first.text
+    local_id = skill_link_local_id(source=BASE, visibility="public", tenant_id=None, hub_id=HUB_ID)
+    identity = LinkIdentity("skill", local_id, BASE, "public", None, HUB_ID)
+    values = read_config_values(root) or {}
+    # The content LANDED; the staged grant must survive for the recovering
+    # journal -- rolling it back here would silently strip the recovered
+    # install of the policy the user asked for.
+    stored = pol.stored_link_policy(values, identity.link_id)
+    assert stored is not None and stored.auto_push is True
+    assert pol.read_policy(values, identity).public_egress_grant is not None
+    assert prov.read_baseline(root, "skill", local_id) is None
+
+    monkeypatch.setattr(skill_storage, "write_baseline", real)
+    retry = await client.post(
+        "/v1/desktop/hub/skills/pull",
+        json=pull_body(auto_push=True, confirm_public_egress=True),
+    )
+    assert retry.status_code == 200, retry.text
+    record = prov.read_baseline(root, "skill", local_id)
+    assert record is not None and record.lineage == "clean"
+    kept = pol.stored_link_policy(read_config_values(root) or {}, identity.link_id)
+    assert kept is not None and kept.auto_push is True

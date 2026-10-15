@@ -2235,21 +2235,41 @@ def install_skill(
         #     finalizes baseline + materialized policy in the SAME transaction,
         #     so "baseline moved, bytes did not" stays impossible.
 
-        def _revert_staged() -> None:
-            # Best-effort by design: the refusal that brought us here is the
-            # response, and the revert itself refuses to touch a NEWER revision
-            # (CAS). A revert that cannot run (config unreadable) must not mask
-            # the original refusal; the orphan it leaves is then cleared by the
-            # next attempt's orphan handling above.
+        def _settle_staged_after_failure() -> None:
+            # ONE uniform cleanup for EVERY non-success exit between staging and
+            # the committed transaction (Q1c) -- a storage refusal, an
+            # OSError(ENOSPC) from the staging writes, an unexpected crash, an
+            # operator interrupt -- so no exception TYPE has to be enumerated
+            # for the staged policy/grant to be cleaned up. Best-effort by
+            # design: the original failure is the response, and the removal
+            # refuses to touch a NEWER revision (CAS); a cleanup that cannot
+            # run leaves an orphan the next attempt's orphan handling clears.
+            #
+            # The DESTINATION fingerprint, not the exception and not the
+            # journal phase, is the arbiter: the journal stays 'prepared'
+            # through the whole rename sequence, so a phase test cannot tell a
+            # staging fault (nothing landed; recovery restores/aborts, and the
+            # staged entry is an orphan for a link that never installed) from a
+            # crash after the new tree landed (recovery finalizes; the staged
+            # grant MUST survive or the recovered install would silently lose
+            # it). Recovery finalizes exactly when the destination already
+            # matches the rendered document, so that is the test.
             if staged_revision is None:
+                return
+            try:
+                landed = storage._fingerprint_path(storage.path(alias)) == local_write.fingerprint
+            except Exception:  # noqa: BLE001 - an unreadable destination is not proof of commit
+                landed = False
+            if landed:
                 return
             try:
                 pol.revert_policy_if_unchanged(
                     ctx.config_manager, identity, expected_revision=staged_revision
                 )
-            except Exception:  # noqa: BLE001 - never mask the original refusal
+            except Exception:  # noqa: BLE001 - never mask the original failure
                 pass
 
+        installed = False
         try:
             transaction = storage.apply(
                 identity,
@@ -2261,17 +2281,25 @@ def install_skill(
                 automatic=False,
                 basis="initial-install",
             )
+            installed = True
         except LinkError:
-            _revert_staged()
+            # The refusal itself is the response; the guard below decides
+            # whether the staged entry survives (committed content) or is
+            # cleared.
             raise
         except (TransactionError, SkillValidationError) as error:
             # The storage's own validation refusals (an occupied alias, a name
             # that does not match its recorded alias) carry their code;
             # normalize them to the ONE refusal type the route maps.
-            _revert_staged()
             raise LinkError(
                 getattr(error, "code", "") or "local-concurrent-edit", str(error)
             ) from None
+        finally:
+            # THE POST-STAGE FAILURE GUARD (Q1c): every exit that did not
+            # return a committed transaction passes through one cleanup -- no
+            # per-type catch can miss a future storage fault.
+            if not installed:
+                _settle_staged_after_failure()
 
         # 8. The response the desktop contract expects: the directional report
         #    the UI reads (applied + link_id + direction) and the ordinary
