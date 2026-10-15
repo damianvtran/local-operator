@@ -1015,10 +1015,11 @@ _DRAIN_NOTICES: dict[str, str] = {
 #: already (see the round-1 MINOR-3 note above), so the sentence and its key are gone
 #: rather than kept for a wire addition that has not happened.
 #:
-#: WHAT THE ABANDONED STATE IS TOLD, TODAY. The record and the incident row carry it,
-#: where every other fleet surface already reads it: `lop sessions` prints the phrase
-#: (true — the commitment survives) beside `update failed` in its own column, and the
-#: incident row names the bound the runtime actually spent. The viewer's row is the
+#: WHAT THE ABANDONED STATE IS TOLD, TODAY. `lop sessions` prints the phrase — true,
+#: because the commitment survives — and that phrase plus the build still running is
+#: now the WHOLE of the account (operator ask, 2026-10-15: the drain abandon publishes
+#: no failure, so there is no `update failed` column beside it and no incident row
+#: naming a bound for a runtime nothing failed on). The viewer's row is the
 #: IMPERFECT half and is recorded as such: a viewer attached at the latch keeps the
 #: drain sentence after the abandon, and **nothing takes that row down** — it is painted
 #: once, through `_notice_for`, which appends a block to the transcript, and the only
