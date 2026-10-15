@@ -541,3 +541,85 @@ async def test_concurrent_distinct_questions_do_not_share_post_counts(manager) -
     assert [row.units for row in rows] == [1, 1]
     assert len({row.record_id for row in rows}) == 2
     await subject.aclose()
+
+
+@pytest.mark.parametrize(
+    "cost", [True, False, float("nan"), float("inf"), -float("inf"), -0.01, 1e308, 10**400]
+)
+async def test_malformed_or_unstorable_cost_keeps_answer_and_records_unknown(manager, cost) -> None:
+    """The vendor served a valid answer: its bad receipt must not replace that answer."""
+    import json
+
+    wire = Wire(lambda req: httpx.Response(200, content=json.dumps(answer_body(cost=cost))))
+    subject, rows = build(manager, wire)
+    result = await subject.recommend_resources(request())
+    assert result.skipped is None and result.vendor == "radient"
+    (row,) = rows
+    assert (row.status, row.amount_micro, row.billing_basis, row.cost_source) == (
+        "ok",
+        None,
+        "not_tracked",
+        "none",
+    )
+    assert row.units == 1
+    await subject.aclose()
+
+
+@pytest.mark.parametrize("outcome", ["answer", "error", "cancel"])
+@pytest.mark.parametrize("bound", [True, False])
+async def test_record_factory_fault_never_changes_vendor_outcome(
+    manager, monkeypatch, outcome, bound
+) -> None:
+    """Success object and original exception identity survive the ENTIRE bookkeeping seam."""
+    from local_operator.classification import accounting
+    from local_operator.classification.types import (
+        DecisionRequest,
+        DecisionResponse,
+        DecisionVendorError,
+    )
+
+    answer = DecisionResponse(vendor="radient", model="mock", answers={}, cost_usd=0.000027)
+    original = (
+        asyncio.CancelledError()
+        if outcome == "cancel"
+        else DecisionVendorError("original", kind="server")
+    )
+
+    class Vendor:
+        name = "radient"
+        model_id = "mock"
+
+        async def credential(self, config_dir):
+            from pydantic import SecretStr
+
+            return SecretStr("synthetic")
+
+        async def decide(self, request, *, timeout_s):
+            accounting.note_post()
+            if outcome != "answer":
+                raise original
+            return answer
+
+    subject = ClassificationService(config_dir=manager, settings={"classification": {"auto": True}})
+    rows = []
+    if bound:
+        subject.bind_spend_sink(rows.append)
+    built = []
+
+    def broken(*args, **kwargs):
+        built.append(True)
+        raise RuntimeError("record construction failed")
+
+    for name in ("answered_record", "failed_record", "interrupted_record"):
+        monkeypatch.setattr(accounting, name, broken)
+    if outcome == "answer":
+        assert (
+            await subject._metered_decide(Vendor(), DecisionRequest(state="x", questions=()), 1)
+            is answer
+        )
+    else:
+        with pytest.raises(type(original)) as caught:
+            await subject._metered_decide(Vendor(), DecisionRequest(state="x", questions=()), 1)
+        assert caught.value is original
+    assert rows == []
+    assert len(built) == int(bound), "an unbound service must not invoke a record factory"

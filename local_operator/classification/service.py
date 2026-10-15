@@ -108,7 +108,7 @@ import logging
 import random
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -787,13 +787,18 @@ class ClassificationService:
         cancellation from dropping its row: ``CancelledError`` is not an ``Exception``
         and would skip a plain ``except Exception``.
         """
+        # A bare service has no session ledger; do not even construct rows. Apart
+        # from avoiding work, this prevents bookkeeping faults from changing a
+        # standalone caller's result when there is nowhere to send the record.
+        if self._spend_sink is None:
+            return await vendor.decide(request, timeout_s=timeout_s)
         meter, token = accounting.begin_attempt()
         try:
             response = await vendor.decide(request, timeout_s=timeout_s)
         except asyncio.CancelledError:
             if meter.posts:
                 self._emit(
-                    accounting.interrupted_record(
+                    lambda: accounting.interrupted_record(
                         vendor.name, accounting.model_of(vendor), posts=meter.posts
                     )
                 )
@@ -801,21 +806,21 @@ class ClassificationService:
         except Exception as exc:
             if meter.posts:
                 self._emit(
-                    accounting.failed_record(
-                        vendor.name, accounting.model_of(vendor), exc, posts=meter.posts
+                    lambda error=exc: accounting.failed_record(
+                        vendor.name, accounting.model_of(vendor), error, posts=meter.posts
                     )
                 )
             raise
         else:
             if meter.posts:
-                self._emit(accounting.answered_record(response, posts=meter.posts))
+                self._emit(lambda: accounting.answered_record(response, posts=meter.posts))
             return response
         finally:
             accounting.end_attempt(token)
 
-    def _emit(self, record: Any) -> None:
-        """Hand one record to the bound sink; see :func:`accounting.emit`."""
-        accounting.emit(self._spend_sink, record)
+    def _emit(self, build: Callable[[], Any]) -> None:
+        """Build and hand over one row within the same fail-soft boundary."""
+        accounting.emit(self._spend_sink, build)
 
     async def provider_available(self) -> bool:
         """Whether any leg has a usable credential, without calling anything.

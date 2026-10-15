@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -850,9 +851,26 @@ def _parse_response(
         # a configured price row — has no row to read for a decision model in
         # this repo, and inventing a number would put a fabricated figure in the
         # PR's cost arithmetic.
-        cost_usd=float(raw_cost) if isinstance(raw_cost, (int, float)) else None,
+        cost_usd=_reported_cost(raw_cost),
         latency_s=latency_s,
     )
+
+
+def _reported_cost(value: Any) -> float | None:
+    """A decision charge, not a general credit/refund entry: malformed means unknown.
+
+    Booleans are numbers in Python but not monetary receipts. Non-finite/negative
+    values cannot describe this route's per-request charge; an enormous integer can
+    also overflow coercion. None of these may turn a valid answer into an error or
+    claim a fabricated charge. The channel emitter separately checks storage range.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return amount if math.isfinite(amount) and amount >= 0 else None
 
 
 def _count(value: Any) -> int | None:

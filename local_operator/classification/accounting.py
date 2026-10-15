@@ -86,6 +86,7 @@ from local_operator.classification.types import (
     DecisionSchemaError,
     DecisionVendorError,
 )
+from local_operator.clients.radient_cost import micro_from_amount
 from local_operator.session.channel_spend import (
     BASIS_BILLED,
     COST_SOURCE_NONE,
@@ -97,7 +98,6 @@ from local_operator.session.channel_spend import (
     ChannelSpendRecord,
     new_record_id,
     now_ms,
-    usd_to_micro,
 )
 
 logger = logging.getLogger(__name__)
@@ -192,7 +192,12 @@ def answered_record(response: DecisionResponse, *, posts: int) -> ChannelSpendRe
     amount — never ``0`` — so the session total is a lower bound rather than a
     claim. ``billed`` because ``usage.cost`` is what THIS request was charged.
     """
-    amount = usd_to_micro(response.cost_usd)
+    # Channel rows persist in SQLite's signed INTEGER column. Decimal conversion
+    # avoids float multiplication overflow, but an integer beyond the storage range
+    # is still not a usable receipt. Keep it unknown, never truncate or invent zero.
+    amount = micro_from_amount(response.cost_usd)
+    if amount is not None and not 0 <= amount <= (1 << 63) - 1:
+        amount = None
     return ChannelSpendRecord(
         record_id=new_record_id(CLASSIFICATION_CHANNEL),
         ts_ms=now_ms(),
@@ -263,20 +268,22 @@ def interrupted_record(vendor: str, model: str, *, posts: int) -> ChannelSpendRe
     )
 
 
-def emit(sink: SpendSink | None, record: ChannelSpendRecord) -> None:
+def emit(sink: SpendSink | None, build: Callable[[], ChannelSpendRecord]) -> None:
     """Hand ONE record to the bound sink, best-effort.
 
     ``None`` is "no session bound yet" (the service was built, nothing ingests) and
     skips quietly. Never raises: ``Session.record_channel_spend`` already swallows its
     own faults, but the sink is an injectable callable and a lost spend row must not
     be able to fail a classification, let alone the turn that asked for it. The call
-    is a synchronous in-memory fold on the event loop — no I/O of its own — which is
-    why it adds nothing to the ``waitMs`` budget the turn spends on this layer.
+    adds no await of its own; its synchronous bookkeeping still consumes CPU. The
+    sink owns persistence/publication. An unbound sink does not evaluate ``build``.
     """
     if sink is None:
         return
     try:
-        sink(record)
+        # Construction belongs inside this guard too: a corrupt receipt or a record
+        # factory fault must not replace a vendor answer, original error or cancel.
+        sink(build())
     except Exception:  # noqa: BLE001 — a lost spend row is not a failed classification
         logger.debug("classification: channel-spend emission failed", exc_info=True)
 
