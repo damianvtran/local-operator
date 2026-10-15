@@ -480,6 +480,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # `network/`. The ONE session-shaped path in the package is the stamp, and it
     # gets its own block below.
     (
+        "local_operator/memory.py::MemoryStore._export",
+        "os.replace",
+        # Replaces ONE FILE: `<session dir>/memory-session.jsonl`, with the snapshot
+        # staged beside it in the same directory. It never removes or renames a
+        # directory, and the target is a fixed basename inside a session directory
+        # the store was handed; `_session_directory` additionally refuses any path
+        # that does not resolve under <config>/sessions/.
+        "Atomic replace of the single portable memory-session.jsonl file",
+    ),
+    (
+        "local_operator/memory.py::MemoryStore._export",
+        "<path>.unlink",
+        # Removes only this call's own `.memory-session.*.tmp` sidecar (a
+        # NamedTemporaryFile in the same directory), after the replace or on failure.
+        "Removes this call's own staged .tmp sidecar, never a directory",
+        2,
+    ),
+    (
         "local_operator/network/store.py::_stage_private",
         "os.replace",
         "The package's one staged 0600 write of a network-store FILE under "

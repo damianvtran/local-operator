@@ -3131,14 +3131,7 @@ class AgentLoop:
         attempted_selector: "ModelSpec | None" = None
 
         yield TurnStartEvent()
-        # The executing assistant is mutable. An already-published start must
-        # not gain raw memory arguments later by sharing that same object; the
-        # final event carries the guarded call copy once its scope is known.
-        yield MessageStartEvent(
-            message=assistant.model_copy(
-                update={"tool_calls": None, "provider_payload": None},
-            )
-        )
+        yield MessageStartEvent(message=assistant)
 
         try:
             # Resolve every live session setting at the LAST safe point after
@@ -3294,12 +3287,7 @@ class AgentLoop:
                     )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
-                    yield MessageUpdateEvent(
-                        message=assistant.model_copy(
-                            update={"tool_calls": None, "provider_payload": None}
-                        ),
-                        delta=event.delta,
-                    )
+                    yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamReasoningDelta):
                     # The model is THINKING, and the user can see it from here.
                     #
@@ -3734,9 +3722,22 @@ class AgentLoop:
 
         from local_operator.memory_privacy import retained_message
 
-        yield MessageEndEvent(message=retained_message(assistant))
+        # The object published at MessageStartEvent is this same ``assistant``, and every
+        # subscriber holds it by reference, so anything assigned onto it is readable by
+        # them later. For a memory call carrying a recognised sensitive value, publish the
+        # REDACTED shape on that shared object and give the executor a private raw copy: the
+        # memory guard must still see the original to refuse it honestly. Ordinary turns
+        # take the identity branch and are untouched (message identity is a pinned contract).
+        executing = assistant
+        retained = retained_message(assistant)
+        if retained is not assistant:
+            executing = assistant.model_copy()
+            assistant.tool_calls = retained.tool_calls
+            assistant.content = retained.content
+            assistant.provider_payload = retained.provider_payload
+        yield MessageEndEvent(message=assistant)
         yield _ModelTurnResult(
-            message=assistant,
+            message=executing,
             stop_reason=stop_reason,
             error=error,
             connectivity_loss=connectivity_loss,
